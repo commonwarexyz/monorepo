@@ -266,8 +266,7 @@ where
     /// marshal acknowledgement. Blocks applied through normal processing are
     /// reported after [`DatabaseSet::finalize`] succeeds. Blocks already
     /// reflected by startup reconciliation or completed state sync are reported
-    /// without reapplying them. The genesis block is never reported: it is an
-    /// axiom rather than an applied block.
+    /// without reapplying them.
     ///
     /// During peer state sync, finalized blocks observed before sync completes
     /// are used to update the sync target and are not reported here.

@@ -637,11 +637,11 @@ mod tests {
         });
     }
 
-    /// The genesis block is an axiom: a fresh boot receives it back from
-    /// marshal and must acknowledge it without invoking the application's
-    /// finalized hook.
+    /// A fresh boot receives the genesis block back from marshal and reports
+    /// it to the application like any other finalized block before releasing
+    /// its acknowledgement.
     #[test]
-    fn startup_never_notifies_genesis() {
+    fn startup_notifies_genesis() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (marshal, _handler) = start_processed_marshal(&context, "genesis-silent", 0).await;
 
@@ -681,8 +681,8 @@ mod tests {
                 },
             }
             assert!(
-                !notified.load(Ordering::SeqCst),
-                "genesis must not be reported to the application",
+                notified.load(Ordering::SeqCst),
+                "genesis must be reported to the application",
             );
             handle.abort();
             let _ = handle.await;

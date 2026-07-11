@@ -140,15 +140,10 @@ where
                         // Blocks at or below the processed height are already
                         // reflected in the databases (startup converged on
                         // them) and are acknowledged without being applied.
-                        // The genesis block is an axiom rather than an
-                        // applied block, so it is never notified.
-                        let height = block.height();
-                        if height <= self.processor.processed_height() {
-                            if !height.is_zero() {
-                                self.processor
-                                    .notify_finalized(self.context.as_present(), &block)
-                                    .await;
-                            }
+                        if block.height() <= self.processor.processed_height() {
+                            self.processor
+                                .notify_finalized(self.context.as_present(), &block)
+                                .await;
                             acknowledgement.acknowledge();
                             return None;
                         }
