@@ -708,7 +708,6 @@ macro_rules! impl_database_set {
                 )+)
             }
 
-
             async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
                 join!($(
                     async {
