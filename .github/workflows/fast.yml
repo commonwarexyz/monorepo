@@ -256,7 +256,7 @@ jobs:
       run: just udeps
 
   Cooldown:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -276,7 +276,6 @@ jobs:
     - name: Check dependency cooldown
       env:
         COOLDOWN_BASE_REF: ${{ github.event.pull_request.base.ref }}
-        COOLDOWN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: just cooldown
 
   Lock:

@@ -2,13 +2,13 @@
 set -euo pipefail
 
 base_ref="${COOLDOWN_BASE_REF:-main}"
-head_sha="${COOLDOWN_HEAD_SHA:-HEAD}"
 
-git fetch --no-tags origin "refs/heads/${base_ref}:refs/remotes/origin/${base_ref}"
+git fetch --no-tags origin "+refs/heads/${base_ref}:refs/remotes/origin/${base_ref}" ||
+  echo "Failed to fetch origin/${base_ref}; using the local ref." >&2
 base_rev="refs/remotes/origin/${base_ref}"
-merge_base="$(git merge-base "${base_rev}" "${head_sha}")"
+merge_base="$(git merge-base "${base_rev}" HEAD)"
 
-if git diff --quiet "${merge_base}" "${head_sha}" -- Cargo.lock; then
+if git diff --quiet "${merge_base}" -- Cargo.lock; then
   echo "Cargo.lock did not change; skipping cargo-cooldown."
   exit 0
 fi
@@ -27,9 +27,10 @@ trap cleanup EXIT
 
 git show "${merge_base}:Cargo.lock" > "${tmpdir}/base.Cargo.lock"
 # Versions already present at the merge base are allowed regardless of publish age.
+# The generated exemptions match crate and version only (cargo-cooldown ignores source).
 awk '
   function exempt() {
-    if (source ~ /^registry\+/) {
+    if (source ~ /^(registry|sparse)\+/) {
       print ""
       print "[[allow.exact]]"
       print "crate = \"" name "\""
@@ -37,7 +38,7 @@ awk '
     }
   }
 
-  /^\[\[package\]\]$/ {
+  /^\[\[/ {
     exempt()
     name = version = source = ""
     next
@@ -51,6 +52,8 @@ awk '
 cargo cooldown metadata --all-features --format-version 1 --no-deps > /dev/null
 
 if ! cmp --silent Cargo.lock "${tmpdir}/pr.Cargo.lock"; then
-  echo "Cargo.lock contains dependencies that do not pass cooldown." >&2
+  echo "cargo-cooldown rewrote these Cargo.lock entries:" >&2
+  diff "${tmpdir}/pr.Cargo.lock" Cargo.lock >&2 || true
+  echo "Wait for the dependencies above to satisfy cooldown, or regenerate Cargo.lock if it is out of sync with the manifests." >&2
   exit 1
 fi
