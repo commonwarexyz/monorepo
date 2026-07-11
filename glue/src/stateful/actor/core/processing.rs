@@ -137,9 +137,6 @@ where
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     let prune = async {
-                        // Blocks at or below the processed height are already
-                        // reflected in the databases (startup converged on
-                        // them) and are acknowledged without being applied.
                         if block.height() <= self.processor.processed_height() {
                             self.processor
                                 .notify_finalized(self.context.as_present(), &block)

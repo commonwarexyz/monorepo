@@ -17,8 +17,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// the configured anchor. A [Start::Floor] above durable progress behaves
 /// like a [`set_floor`](crate::marshal::core::Mailbox::set_floor) call:
 /// marshal anchors on the floor block, records its predecessor as processed,
-/// and prunes below the anchor. The application layer is responsible for
-/// bringing its databases to the floor.
+/// and prunes below the anchor.
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
     Genesis(B),
