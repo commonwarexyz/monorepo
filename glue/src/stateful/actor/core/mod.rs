@@ -8,8 +8,8 @@ use crate::stateful::{
     actor::{
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
-        processor::{FinalizeStatus, Processor},
-        syncer::{self, StateSyncMetadata, SyncPlan},
+        processor::Processor,
+        syncer::{self, StateSyncMetadata, SyncPlan, SyncResult},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
     Application,
@@ -19,7 +19,6 @@ use commonware_consensus::{
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
-        Identifier,
     },
     simplex::types::Finalization,
 };
@@ -44,8 +43,7 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 pub struct PruneConfig {
     /// Marshal's ack window. Must match the marshal config used to construct the marshal
     /// mailbox: pruning retains at least the last `max_pending_acks + 1` finalized blocks so
-    /// that any state a restart may need to rewind to, and any finalized blocks it may need
-    /// to replay to reach the marshal floor, are never pruned.
+    /// that any state a restart may need to rewind to is never pruned.
     pub max_pending_acks: NonZeroUsize,
 
     /// Prune databases and marshal every `maintenance_interval` finalized blocks.
@@ -253,17 +251,10 @@ where
         let _ = join!(syncer.start(), syncing.start());
     }
 
-    /// Starts the application by initializing the database set at marshal's current floor.
-    ///
-    /// If the databases recover behind the marshal floor (an unclean shutdown
-    /// or a marshal startup floor above them), startup replays retained
-    /// finalized blocks over them before processing begins.
+    /// Starts the application by initializing the database set at marshal's
+    /// current floor, rewinding any databases that recovered ahead of it.
     async fn start_from_marshal(mut self) {
-        let syncer::StartupResult {
-            databases,
-            anchor,
-            floor,
-        } = syncer::init_databases_from_marshal::<E, A, S, V>(
+        let SyncResult { databases, anchor } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
             &self.marshal,
             self.db_config,
@@ -279,7 +270,7 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let mut processor = Processor::new(
+        let processor = Processor::new(
             self.application,
             databases,
             anchor,
@@ -287,31 +278,10 @@ where
             self.prune_config,
         );
 
-        // If the databases recovered behind the marshal floor, replay the
-        // retained finalized blocks up to it before processing begins. Replay
-        // is crash-safe because each replayed block is durably finalized.
-        // After an interrupted multi-database finalize, the next startup
-        // rewinds to the newest common anchor before resuming.
-        let context = self.context.as_present();
-        let mut height = anchor.height;
-        while height < floor {
-            height = height.next();
-            let block = self
-                .marshal
-                .get_block(Identifier::Height(height))
-                .await
-                .expect("blocks in the verified replay window must be retained");
-            let (status, _prune) = processor.finalize(context, V::into_inner(block)).await;
-            assert!(
-                matches!(status, FinalizeStatus::Persisted { .. }),
-                "replayed block must persist"
-            );
-        }
-
-        // Once the databases are aligned with the floor, record completion so
-        // future boots skip peer state sync and recover from the later of this
-        // floor and marshal's durable processed height.
-        self.sync_metadata.set_complete(floor).await;
+        // Record completion at the floor so future boots skip peer state sync
+        // and recover from the later of this floor and marshal's durable
+        // processed height.
+        self.sync_metadata.set_complete(anchor.height).await;
 
         Processing {
             context: self.context,
@@ -551,8 +521,11 @@ mod tests {
         (marshal, handler)
     }
 
+    /// Databases consistent with marshal's floor start directly in normal
+    /// processing and record the floor as the completed sync height, so
+    /// future boots never select peer state sync.
     #[test]
-    fn startup_replays_retained_blocks_and_marks_sync_complete() {
+    fn startup_marks_sync_complete_at_marshal_floor() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (marshal, _handler) = start_processed_marshal(&context, "startup-replay", 5).await;
 
@@ -562,7 +535,7 @@ mod tests {
                 context.child("stateful"),
                 Config {
                     application: TestApp,
-                    db_config: 0,
+                    db_config: 5,
                     input_provider: (),
                     marshal,
                     mailbox_size: NZUsize!(8),
@@ -579,7 +552,7 @@ mod tests {
                     assert_eq!(databases.read().await.target(), 5);
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("stateful did not finish startup replay");
+                    panic!("stateful did not finish startup");
                 },
             }
             handle.abort();
@@ -595,14 +568,20 @@ mod tests {
         });
     }
 
+    /// A crash between one database's durable finalize and the rest of the
+    /// set leaves the finished member ahead of marshal's floor (the
+    /// acknowledgement only follows once every member is durable). Startup
+    /// must rewind the ahead member back to the floor.
     #[test]
-    fn startup_rewinds_torn_database_set_to_common_replay_anchor() {
+    fn startup_rewinds_torn_database_set_to_floor() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (marshal, _handler) =
-                start_processed_marshal(&context, "startup-torn-replay", 5).await;
+                start_processed_marshal(&context, "startup-torn-replay", 4).await;
 
             // Simulate a crash after the first database durably finalized
-            // block 5 but before the second advanced from block 4.
+            // block 5 but before the second advanced from block 4: the set
+            // acknowledgement for block 5 never fired, so marshal's floor
+            // stays at 4.
             let plan = SyncPlan::init(&context, "startup-torn-replay-stateful").await;
             let (stateful, mailbox) = Stateful::init(
                 context.child("stateful"),
@@ -622,8 +601,8 @@ mod tests {
 
             select! {
                 databases = mailbox.subscribe_databases() => {
-                    assert_eq!(databases.0.read().await.target(), 5);
-                    assert_eq!(databases.1.read().await.target(), 5);
+                    assert_eq!(databases.0.read().await.target(), 4);
+                    assert_eq!(databases.1.read().await.target(), 4);
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("stateful did not recover torn database set");
@@ -634,12 +613,12 @@ mod tests {
         });
     }
 
-    /// Databases behind a marshal floor whose replay window has been pruned
-    /// cannot be recovered: startup must panic instead of running peer state
-    /// sync.
+    /// Databases behind a marshal floor are unreachable without storage
+    /// corruption or a floor above databases that never synced: startup must
+    /// panic instead of running peer state sync.
     #[test]
-    #[should_panic(expected = "must be retained")]
-    fn startup_panics_when_replay_window_pruned() {
+    #[should_panic(expected = "cannot be behind marshal floor")]
+    fn startup_panics_when_databases_behind_floor() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");
             let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-pruned", 1);
@@ -676,7 +655,7 @@ mod tests {
             // The actor panics while recovering, which propagates through the
             // deterministic runtime.
             let _ = stateful.start().await;
-            unreachable!("startup must panic when the replay window is pruned");
+            unreachable!("startup must panic when the databases are behind the floor");
         });
     }
 

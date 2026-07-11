@@ -20,7 +20,6 @@ use commonware_storage::{
 };
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use rand_core::Rng;
-use tracing::warn;
 
 mod actor;
 pub(crate) use actor::{Config, Syncer};
@@ -354,27 +353,6 @@ where
     }
 }
 
-/// The result of initializing state from marshal on startup.
-pub(crate) struct StartupResult<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    /// The initialized database set.
-    pub databases: A::Databases,
-
-    /// The anchor the database set converged on.
-    pub anchor: Anchor<BlockDigest<A, E>>,
-
-    /// Marshal's startup floor, at or above the anchor. Retained finalized
-    /// blocks in `(anchor.height, floor]` must be replayed before processing
-    /// begins (the walk that selected the anchor verified they are
-    /// retained). Once that replay completes, finalized blocks redelivered
-    /// at or below the floor are already reflected in the databases and
-    /// should be acknowledged without applying them again.
-    pub floor: Height,
-}
-
 /// Initializes databases at marshal's current startup floor.
 ///
 /// This initialization route is used when startup should recover from marshal
@@ -382,21 +360,18 @@ where
 /// processed height, this falls back to marshal's genesis block so fresh boots
 /// and post-sync restarts share the same path.
 ///
-/// If the databases are found to be inconsistent with the marshal floor, this
-/// function will attempt to repair by rewinding the databases which are ahead.
-/// Databases that are instead behind the floor cannot be repaired by rewind:
-/// the finalized blocks between their committed state and the floor must be
-/// replayed over them ([StartupResult::floor]). A missing replay block is
-/// unreachable without storage corruption or a marshal floor above databases
-/// that never synced, so this function panics on it instead of falling back
-/// to peer state sync. If the databases are entirely inconsistent, this
-/// function will panic.
+/// Databases ahead of the floor are repaired by rewinding back to it. Blocks
+/// are acknowledged only after they are durably finalized, so databases
+/// behind the floor are unreachable without storage corruption or a marshal
+/// floor above databases that never synced, and this function panics on
+/// them instead of falling back to peer state sync. If the databases are
+/// entirely inconsistent, this function will panic.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     sync_height: Option<Height>,
-) -> StartupResult<E, A>
+) -> SyncResult<E, A>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
@@ -429,62 +404,21 @@ where
     let databases = A::Databases::init(context.child("db_set"), db_config).await;
     let floor_targets = A::sync_targets(&floor_block);
 
-    // In the case that the committed targets do not match the marshal floor, we may
-    // have suffered a crash that left the set in an inconsistent state. Databases
-    // ahead of the floor are repaired by rewinding back to it. Databases behind the
-    // floor cannot be repaired by rewind: the gap between their committed state and
-    // the floor must be replayed over them instead.
+    // In the case that the committed targets do not match the marshal floor,
+    // we may have suffered a crash that left the set in an inconsistent
+    // state. Blocks are acknowledged only after they are durably finalized
+    // and marshal prunes at least an ack window behind its processed height,
+    // so crash recovery only finds databases at or ahead of the floor, which
+    // rewind repairs. Databases behind the floor would require replaying
+    // state the node no longer guarantees to retain, and are unreachable
+    // without storage corruption or a marshal floor above databases that
+    // never synced.
     let committed_targets = databases.committed_targets().await;
     if committed_targets != floor_targets {
-        if A::Databases::behind_sync_targets(&committed_targets, &floor_targets) {
-            // Walk down from the floor looking for the newest block none of
-            // the databases are behind. This is an exact match for a single
-            // database, and a rewindable common anchor for a database set
-            // left partially committed by a crash. Crash recovery always
-            // finds the gap retained: marshal prunes at least an ack window
-            // behind its processed height, and that height only advances
-            // after the databases durably finalize. A pruned gap block is
-            // therefore unreachable without storage corruption or a marshal
-            // floor above databases that never synced, so panic instead of
-            // falling back to peer state sync.
-            let mut child = floor_block;
-            let (anchor_block, anchor_targets) = loop {
-                let parent_height = child
-                    .height()
-                    .previous()
-                    .expect("databases cannot be behind the genesis block");
-                let Some(block) = marshal.get_block(Identifier::Height(parent_height)).await else {
-                    unreachable!(
-                        "replay block {parent_height} needed to reach marshal floor \
-                         {floor_height} must be retained"
-                    );
-                };
-                let parent = V::into_inner(block);
-                let targets = A::sync_targets(&parent);
-                if !A::Databases::behind_sync_targets(&committed_targets, &targets) {
-                    break (parent, targets);
-                }
-                child = parent;
-            };
-            if committed_targets != anchor_targets {
-                databases.rewind_to_targets(anchor_targets.clone()).await;
-                assert!(
-                    databases.committed_targets().await == anchor_targets,
-                    "databases must agree on replay anchor {} after rewind",
-                    anchor_block.height()
-                );
-            }
-            warn!(
-                floor = %floor_height,
-                anchor = %anchor_block.height(),
-                "databases behind marshal floor, replaying retained blocks to catch up"
-            );
-            return StartupResult {
-                databases,
-                anchor: Anchor::from(&anchor_block),
-                floor: floor_height,
-            };
-        }
+        assert!(
+            !A::Databases::behind_sync_targets(&committed_targets, &floor_targets),
+            "databases cannot be behind marshal floor {floor_height}"
+        );
         databases.rewind_to_targets(floor_targets.clone()).await;
         let rewound_targets = databases.committed_targets().await;
         assert!(
@@ -493,10 +427,9 @@ where
         );
     }
 
-    StartupResult {
+    SyncResult {
         databases,
         anchor: Anchor::from(&floor_block),
-        floor: floor_height,
     }
 }
 
@@ -751,12 +684,12 @@ pub(crate) mod tests {
     /// A marshal startup floor above durable progress (see
     /// [`marshal::Start::Floor`]) anchors marshal on the floor block, records
     /// the anchor's predecessor as processed, and prunes below the anchor.
-    /// Databases behind that anchor cannot be repaired locally and marshal
-    /// never requests the pruned blocks from peers, so startup must panic
-    /// instead of falling back to peer state sync.
+    /// Databases behind that anchor are unreachable without storage
+    /// corruption or a floor above databases that never synced, so startup
+    /// must panic instead of falling back to peer state sync.
     #[test]
-    #[should_panic(expected = "must be retained")]
-    fn startup_floor_jump_panics_when_replay_window_pruned() {
+    #[should_panic(expected = "cannot be behind marshal floor")]
+    fn startup_floor_jump_panics_when_databases_behind_floor() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");
             let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-floor-jump", 1);
@@ -789,11 +722,13 @@ pub(crate) mod tests {
         });
     }
 
-    /// Databases that recover behind the marshal floor with every block in
-    /// the gap still retained are caught up by replaying those blocks
-    /// locally.
+    /// Databases behind the marshal floor are fatal even when every block
+    /// in the gap is still retained: that state is unreachable without
+    /// storage corruption, so startup must panic instead of attempting
+    /// repair.
     #[test]
-    fn databases_behind_retained_floor_replay_locally() {
+    #[should_panic(expected = "cannot be behind marshal floor")]
+    fn startup_panics_when_databases_behind_retained_floor() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");
             let fixture = scheme_mocks::fixture(&mut signing_context, b"behind-retained", 1);
@@ -823,19 +758,46 @@ pub(crate) mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            let result = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
+            let _ = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
                 &context, &marshal, 0, None,
             )
             .await;
-            assert_eq!(
-                result.floor,
-                Height::new(5),
-                "replay must extend through the marshal floor",
-            );
+        });
+    }
+
+    /// A marshal startup floor above durable progress prunes the anchor's
+    /// predecessor, so the recorded processed height has no block. Startup
+    /// must recognize the retained anchor above it as the true floor and
+    /// start databases that already sit at that anchor without rewind or
+    /// panic.
+    #[test]
+    fn startup_floor_jump_starts_databases_at_anchor() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"floor-jump-anchored", 1);
+            let provider = ConstantProvider::new(fixture.schemes[0].clone());
+
+            let anchor_block = TestBlock::new(6, 6);
+            let finalization = make_finalization(&fixture, &anchor_block);
+            let (marshal, _handler) = start_marshal(
+                &context,
+                "floor-jump-anchored",
+                marshal::Start::Floor(finalization.clone()),
+                provider,
+                vec![anchor_block.clone()],
+                vec![(anchor_block.clone(), finalization.clone())],
+                AckingReporter::new(Height::zero()),
+            )
+            .await;
+
+            let result = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
+                &context, &marshal, 6, None,
+            )
+            .await;
             assert_eq!(
                 result.anchor.height,
-                Height::zero(),
-                "the replay anchor must sit at the databases' committed height",
+                Height::new(6),
+                "databases at the floor anchor must start there",
             );
         });
     }

@@ -222,8 +222,8 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Return true when the `current` committed sync target is behind `target`.
     ///
     /// Reaching a behind target would require applying operations the database
-    /// does not have, so rewind repair cannot succeed and the caller must
-    /// recover via replay instead.
+    /// does not have, so rewind repair cannot succeed and the caller treats
+    /// the state as fatal.
     fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool;
 
     /// Rewind committed state to `target`.
@@ -297,7 +297,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Return true when any target in `current` is behind its counterpart in
     /// `targets` (see [`ManagedDb::behind_sync_target`]). A behind set cannot
-    /// be repaired by rewind: recovery must replay the gap instead.
+    /// be repaired by rewind and is treated as fatal.
     fn behind_sync_targets(current: &Self::SyncTargets, targets: &Self::SyncTargets) -> bool;
 
     /// Rewind the set to the provided per-database targets.
