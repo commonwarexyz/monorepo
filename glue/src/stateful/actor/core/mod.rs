@@ -263,6 +263,12 @@ where
     /// If the databases recover behind the marshal floor (an unclean shutdown
     /// or a marshal startup floor above them), startup replays finalized
     /// blocks over them before processing begins.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a replay block has been pruned
+    /// (see [syncer::ReplayBlockPruned]): the databases cannot be recovered
+    /// without operator intervention.
     async fn start_from_marshal(mut self) {
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
@@ -274,7 +280,8 @@ where
             self.db_config.clone(),
             self.sync_metadata.sync_height(),
         )
-        .await;
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs. The
@@ -635,10 +642,11 @@ mod tests {
     }
 
     /// Databases behind a marshal floor whose replay window has been pruned
-    /// must wait for the missing blocks instead of running peer state sync
-    /// or recording a completed sync height.
+    /// cannot be recovered: startup must panic instead of running peer state
+    /// sync.
     #[test]
-    fn startup_waits_when_replay_window_pruned() {
+    #[should_panic(expected = "cannot recover")]
+    fn startup_panics_when_replay_window_pruned() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");
             let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-pruned", 1);
@@ -656,9 +664,8 @@ mod tests {
             )
             .await;
 
-            let partition_prefix = "startup-pruned-stateful";
-            let plan = SyncPlan::init(&context, partition_prefix).await;
-            let (stateful, mailbox) = Stateful::init(
+            let plan = SyncPlan::init(&context, "startup-pruned-stateful").await;
+            let (stateful, _mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
                     application: TestApp,
@@ -672,25 +679,11 @@ mod tests {
                     prune_config: None,
                 },
             );
-            let handle = stateful.start();
 
-            select! {
-                _ = mailbox.subscribe_databases() => {
-                    panic!("startup must wait for pruned replay blocks instead of completing");
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {},
-            }
-            handle.abort();
-            let _ = handle.await;
-            drop(mailbox);
-
-            let plan =
-                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
-            assert_eq!(
-                plan.sync_height(),
-                None,
-                "a stalled startup must not record sync completion"
-            );
+            // The actor panics while recovering, which propagates through the
+            // deterministic runtime.
+            let _ = stateful.start().await;
+            unreachable!("startup must panic when the replay window is pruned");
         });
     }
 

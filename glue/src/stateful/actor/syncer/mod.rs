@@ -354,6 +354,22 @@ where
     }
 }
 
+/// A block needed to replay the databases up to the marshal floor was pruned.
+///
+/// Marshal never requests blocks at or below its floor from peers, so startup
+/// cannot recover the databases and an operator must intervene (for example
+/// by state syncing a fresh database set).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "cannot recover: replay block {height} needed to reach marshal floor {floor} was pruned \
+     and blocks below the floor are never fetched from peers \
+     (state sync a fresh database set to recover)"
+)]
+pub(crate) struct ReplayBlockPruned {
+    height: Height,
+    floor: Height,
+}
+
 /// The result of initializing state from marshal on startup.
 pub(crate) struct StartupResult<E, A>
 where
@@ -387,16 +403,16 @@ where
 /// Databases that are instead behind the floor cannot be repaired by rewind:
 /// the finalized blocks between their committed state and the floor are
 /// returned for replay ([StartupResult::replay]). If a replay block is no
-/// longer retained, this function hangs instead of falling back to peer state
-/// sync. Marshal never requests blocks at or below its floor from peers, so
-/// recovery requires an operator to intervene. If the databases are entirely
-/// inconsistent, this function will panic.
+/// longer retained, this function returns [ReplayBlockPruned] instead of
+/// falling back to peer state sync. That state is unrecoverable (see
+/// [ReplayBlockPruned]), so the caller is expected to panic on it. If the
+/// databases are entirely inconsistent, this function will panic.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     sync_height: Option<Height>,
-) -> StartupResult<E, A>
+) -> Result<StartupResult<E, A>, ReplayBlockPruned>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
@@ -453,10 +469,9 @@ where
             // after the databases durably finalize. A pruned gap block
             // therefore means the databases regressed outside the process
             // (for example a restored backup) or marshal was anchored at a
-            // floor the databases never reached. Marshal never requests
-            // blocks at or below its floor from peers, so hang instead of
-            // falling back to peer state sync until an operator intervenes
-            // (for example by state syncing a fresh database set).
+            // floor the databases never reached. Return an error instead of
+            // falling back to peer state sync: the state is unrecoverable, so
+            // the caller panics and an operator must intervene.
             let mut replay = vec![floor_block];
             let (anchor_block, anchor_targets) = loop {
                 let parent_height = replay
@@ -468,14 +483,10 @@ where
                 let parent = match marshal.get_block(Identifier::Height(parent_height)).await {
                     Some(block) => V::into_inner(block),
                     None => {
-                        warn!(
-                            height = %parent_height,
-                            floor = %floor_height,
-                            "cannot recover: a replay block was pruned and blocks below the \
-                             marshal floor are never fetched from peers, recover by state \
-                             syncing from a fresh database set"
-                        );
-                        std::future::pending().await
+                        return Err(ReplayBlockPruned {
+                            height: parent_height,
+                            floor: floor_height,
+                        })
                     }
                 };
                 let targets = A::sync_targets(&parent);
@@ -498,14 +509,14 @@ where
                 anchor = %anchor_block.height(),
                 "databases behind marshal floor, replaying finalized blocks to catch up"
             );
-            return StartupResult {
+            return Ok(StartupResult {
                 sync: SyncResult {
                     databases,
                     anchor: Anchor::from(&anchor_block),
                 },
                 skip_finalized_until,
                 replay,
-            };
+            });
         }
         databases.rewind_to_targets(floor_targets.clone()).await;
         let rewound_targets = databases.committed_targets().await;
@@ -515,14 +526,14 @@ where
         );
     }
 
-    StartupResult {
+    Ok(StartupResult {
         sync: SyncResult {
             databases,
             anchor: Anchor::from(&floor_block),
         },
         skip_finalized_until,
         replay: Vec::new(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -551,7 +562,6 @@ pub(crate) mod tests {
         sha256::Digest as Sha256Digest,
         Digestible as _,
     };
-    use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_resolver::{Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
@@ -777,11 +787,11 @@ pub(crate) mod tests {
     /// A marshal startup floor above durable progress (see
     /// [`marshal::Start::Floor`]) anchors marshal on the floor block, records
     /// the anchor's predecessor as processed, and prunes below the anchor.
-    /// Databases behind that anchor cannot be repaired locally and peers may
-    /// never serve the pruned blocks, so startup must wait instead of falling
+    /// Databases behind that anchor cannot be repaired locally and peers
+    /// never serve the pruned blocks, so startup must fail instead of falling
     /// back to peer state sync.
     #[test]
-    fn startup_floor_jump_waits_for_pruned_replay_blocks() {
+    fn startup_floor_jump_fails_when_replay_window_pruned() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");
             let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-floor-jump", 1);
@@ -807,14 +817,15 @@ pub(crate) mod tests {
                 "startup floor must record the anchor's predecessor as processed",
             );
 
-            select! {
-                _ = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
-                    &context, &marshal, 0, None,
-                ) => {
-                    panic!("startup must wait for pruned replay blocks");
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {},
-            }
+            let result = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
+                &context, &marshal, 0, None,
+            )
+            .await;
+            let Err(err) = result else {
+                panic!("startup must fail when the replay window is pruned");
+            };
+            assert_eq!(err.height, Height::new(5));
+            assert_eq!(err.floor, Height::new(6));
         });
     }
 
@@ -852,10 +863,13 @@ pub(crate) mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            let result = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
+            let Ok(result) = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
                 &context, &marshal, 0, None,
             )
-            .await;
+            .await
+            else {
+                panic!("a retained replay window must recover locally");
+            };
             let replayed: Vec<_> = result
                 .replay
                 .iter()

@@ -50,8 +50,9 @@
 //!   marshal's processed anchor and the stored state sync height, rewinding if
 //!   needed. Databases that instead recover behind that floor are caught up
 //!   by replaying finalized blocks. If a replay block is no longer available,
-//!   startup waits for it instead of running peer state sync again. Peers may
-//!   never provide that block, so recovery can require manual intervention. If
+//!   startup panics instead of running peer state sync again: peers never
+//!   serve blocks below the marshal floor, so an operator must recover the
+//!   node (for example by state syncing a fresh database set). If
 //!   marshal is behind that stored height, the actor acknowledges old
 //!   finalized blocks without applying them again until marshal catches up. The
 //!   actor then starts directly in normal processing mode while marshal continues
