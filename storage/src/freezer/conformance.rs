@@ -43,15 +43,18 @@ impl StorageWorkload for FreezerWorkload {
             super::Freezer::<_, FixedBytes<64>, i32>::init(context.child("freezer"), config, None)
                 .await?;
 
+        // Insert random key-value pairs to trigger resizes
         for i in 0..64 {
             let mut key = [0u8; 64];
             context.fill(&mut key);
             freezer.put(FixedBytes::new(key), i).await?;
 
+            // Sync periodically to trigger resize chunks
             if i % 8 == 0 {
                 freezer.sync().await?;
             }
         }
+        // Close to complete any pending resize
         freezer.close().await?;
         Ok(())
     }
