@@ -544,8 +544,8 @@ where
         )
     }
 
-    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
-        *target.range.end() > self.bounds().end
+    fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool {
+        *target.range.end() > *current.range.end()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -642,8 +642,8 @@ where
         )
     }
 
-    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
-        *target.range.end() > self.bounds().end
+    fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool {
+        *target.range.end() > *current.range.end()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -817,8 +817,8 @@ where
         )
     }
 
-    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
-        *target.range.end() > self.bounds().end
+    fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool {
+        *target.range.end() > *current.range.end()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -920,8 +920,8 @@ where
         )
     }
 
-    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
-        *target.range.end() > self.bounds().end
+    fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool {
+        *target.range.end() > *current.range.end()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -1577,9 +1577,8 @@ mod tests {
                 <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
             };
             assert_eq!(target_after_rewind, target_after_first);
-            let guard = db.read().await;
             assert!(<OrderedFixedDb as ManagedDb<_>>::behind_sync_target(
-                &*guard,
+                &target_after_rewind,
                 &target_after_second,
             ));
         });

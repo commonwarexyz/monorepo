@@ -360,15 +360,18 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// The initialized database set and the anchor it converged on.
-    pub sync: SyncResult<E, A>,
+    /// The initialized database set.
+    pub databases: A::Databases,
+
+    /// The anchor the database set converged on.
+    pub anchor: Anchor<BlockDigest<A, E>>,
 
     /// Marshal's startup floor, at or above the anchor. Retained finalized
-    /// blocks in `(sync.anchor.height, floor]` must be replayed before
-    /// processing begins (the walk that selected the anchor verified they
-    /// are retained). Once that replay completes, finalized blocks
-    /// redelivered at or below the floor are already reflected in the
-    /// databases and should be acknowledged without applying them again.
+    /// blocks in `(anchor.height, floor]` must be replayed before processing
+    /// begins (the walk that selected the anchor verified they are
+    /// retained). Once that replay completes, finalized blocks redelivered
+    /// at or below the floor are already reflected in the databases and
+    /// should be acknowledged without applying them again.
     pub floor: Height,
 }
 
@@ -433,7 +436,7 @@ where
     // the floor must be replayed over them instead.
     let committed_targets = databases.committed_targets().await;
     if committed_targets != floor_targets {
-        if databases.behind_sync_targets(&floor_targets).await {
+        if A::Databases::behind_sync_targets(&committed_targets, &floor_targets) {
             // Walk down from the floor looking for the newest block none of
             // the databases are behind. This is an exact match for a single
             // database, and a rewindable common anchor for a database set
@@ -458,7 +461,7 @@ where
                 };
                 let parent = V::into_inner(block);
                 let targets = A::sync_targets(&parent);
-                if !databases.behind_sync_targets(&targets).await {
+                if !A::Databases::behind_sync_targets(&committed_targets, &targets) {
                     break (parent, targets);
                 }
                 child = parent;
@@ -477,10 +480,8 @@ where
                 "databases behind marshal floor, replaying retained blocks to catch up"
             );
             return StartupResult {
-                sync: SyncResult {
-                    databases,
-                    anchor: Anchor::from(&anchor_block),
-                },
+                databases,
+                anchor: Anchor::from(&anchor_block),
                 floor: floor_height,
             };
         }
@@ -493,10 +494,8 @@ where
     }
 
     StartupResult {
-        sync: SyncResult {
-            databases,
-            anchor: Anchor::from(&floor_block),
-        },
+        databases,
+        anchor: Anchor::from(&floor_block),
         floor: floor_height,
     }
 }
@@ -834,7 +833,7 @@ pub(crate) mod tests {
                 "replay must extend through the marshal floor",
             );
             assert_eq!(
-                result.sync.anchor.height,
+                result.anchor.height,
                 Height::zero(),
                 "the replay anchor must sit at the databases' committed height",
             );

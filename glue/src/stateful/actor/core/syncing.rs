@@ -315,7 +315,6 @@ where
             input_provider: self.input_provider,
             marshal: self.marshal,
             processor,
-            skip_finalized_until: synced_height,
         }
         .start()
         .await

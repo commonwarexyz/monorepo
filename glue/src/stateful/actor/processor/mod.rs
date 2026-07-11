@@ -228,6 +228,11 @@ where
         }
     }
 
+    /// Returns the height of the last block reflected in the databases.
+    pub(super) const fn processed_height(&self) -> Height {
+        self.last_processed.height
+    }
+
     /// Returns a reference to the database set.
     pub(super) const fn databases(&self) -> &A::Databases {
         &self.databases

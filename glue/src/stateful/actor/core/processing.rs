@@ -11,7 +11,6 @@ use commonware_consensus::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
     },
-    types::Height,
     Heightable,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -54,10 +53,6 @@ where
 
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
-
-    /// Finalized marshal blocks at or below this height are already reflected
-    /// in the databases and should be acknowledged only.
-    pub(super) skip_finalized_until: Height,
 }
 
 impl<E, A, S, V> Processing<E, A, S, V>
@@ -142,10 +137,18 @@ where
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     let prune = async {
-                        if block.height() <= self.skip_finalized_until {
-                            self.processor
-                                .notify_finalized(self.context.as_present(), &block)
-                                .await;
+                        // Blocks at or below the processed height are already
+                        // reflected in the databases (startup converged on
+                        // them) and are acknowledged without being applied.
+                        // The genesis block is an axiom rather than an
+                        // applied block, so it is never notified.
+                        let height = block.height();
+                        if height <= self.processor.processed_height() {
+                            if !height.is_zero() {
+                                self.processor
+                                    .notify_finalized(self.context.as_present(), &block)
+                                    .await;
+                            }
                             acknowledgement.acknowledge();
                             return None;
                         }

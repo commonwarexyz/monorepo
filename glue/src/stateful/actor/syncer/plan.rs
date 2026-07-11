@@ -7,6 +7,12 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_storage::Context;
 
+/// The floor to state sync from (if any) and the durable metadata handle.
+type PlanParts<E, S, V> = (
+    Option<Finalization<S, <V as Variant>::Commitment>>,
+    StateSyncMetadata<E, <V as Variant>::Commitment>,
+);
+
 /// Startup plan that determines whether one-time peer state sync may still run.
 ///
 /// Construction is two-phase so the caller can avoid fetching a finalized
@@ -129,9 +135,20 @@ where
         self.may_state_sync() && (requested || self.requires_state_sync_floor())
     }
 
-    /// Consumes this plan and returns its durable state-sync metadata handle.
-    pub(crate) fn into_sync_metadata(self) -> StateSyncMetadata<E, V::Commitment> {
-        self.sync_metadata
+    /// Consumes this plan, returning the floor to state sync from (if any)
+    /// and the durable state-sync metadata handle.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an interrupted state sync stored a floor but no new floor
+    /// was attached. Partially synced databases must be reopened through the
+    /// state-sync path, so startup cannot proceed without a fresh floor.
+    pub(crate) fn into_parts(self) -> PlanParts<E, S, V> {
+        assert!(
+            self.floor.is_some() || !self.requires_state_sync_floor(),
+            "interrupted state sync must resume from a newly selected floor"
+        );
+        (self.floor, self.sync_metadata)
     }
 }
 

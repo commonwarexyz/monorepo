@@ -9,7 +9,7 @@ use crate::stateful::{
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
         processor::{FinalizeStatus, Processor},
-        syncer::{self, StateSyncMetadata, SyncPlan, SyncResult},
+        syncer::{self, StateSyncMetadata, SyncPlan},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
     Application,
@@ -186,12 +186,7 @@ where
             prune_config.assert_valid();
         }
 
-        let startup_floor = config.plan.floor().cloned();
-        assert!(
-            startup_floor.is_some() || !config.plan.requires_state_sync_floor(),
-            "interrupted state sync must resume from a newly selected floor"
-        );
-        let sync_metadata = config.plan.into_sync_metadata();
+        let (startup_floor, sync_metadata) = config.plan.into_parts();
 
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -265,7 +260,8 @@ where
     /// finalized blocks over them before processing begins.
     async fn start_from_marshal(mut self) {
         let syncer::StartupResult {
-            sync: SyncResult { databases, anchor },
+            databases,
+            anchor,
             floor,
         } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
@@ -323,7 +319,6 @@ where
             input_provider: self.input_provider,
             marshal: self.marshal,
             processor,
-            skip_finalized_until: floor,
         }
         .start()
         .await
