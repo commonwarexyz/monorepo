@@ -138,6 +138,31 @@
 //! Forwarding is best-effort: a dropped bundle simply falls back to shard
 //! gossip. Use [`NoForwarding`] to disable the path entirely.
 //!
+//! # Send Priorities
+//!
+//! The p2p layer multiplexes every channel over a single connection per peer
+//! with two send lanes (the `priority` flag on [`commonware_p2p::Sender`]);
+//! consensus votes and certificates ride the high lane. The engine splits its
+//! sends by whether they gate a recipient's notarize vote, so bulk shard
+//! payloads never queue ahead of vote-sized consensus messages:
+//!
+//! - High priority (vote-gating): the leader's per-participant assigned-shard
+//!   deliveries, including the forward bundle's head (the route recipient's
+//!   own assigned shard). A participant's notarize vote waits on verifying
+//!   the leader-sent shard at its own index, so these are latency-critical.
+//! - Low priority (reconstruction-only): each participant's own-shard
+//!   rebroadcast to all peers (the bulk of shard traffic), the forward
+//!   bundle's extras (foreign-index shards after the head), and the leader's
+//!   shard sent to non-participants (who cast no votes). These only feed
+//!   block reconstruction, which is quorum-based and tolerant of the small
+//!   added delay; low-lane bandwidth is only ceded while vote-sized messages
+//!   drain, so reconstruction throughput is unaffected.
+//!
+//! The receive path is order-independent (per-commitment state, per-index
+//! duplicate/equivocation checks on shard data), so a low-lane shard arriving
+//! after a high-lane shard sent later is indistinguishable from ordinary
+//! network reordering.
+//!
 //! # Peer Validation and Blocking Rules
 //!
 //! The engine enforces strict validation to prevent Byzantine attacks:
@@ -1029,6 +1054,12 @@ where
     ///   (it gates the recipient's notarize vote), followed by the first
     ///   `minimum_shards - 1` indices in ascending order, skipping the
     ///   recipient's own.
+    ///
+    /// Sends that gate a recipient's notarize vote (each participant's
+    /// assigned shard, including the forward bundle's head) are high
+    /// priority; sends that only feed reconstruction (bundle extras and
+    /// non-participant deliveries) are low priority. See the module docs
+    /// ("Send Priorities").
     fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -1091,8 +1122,14 @@ where
                 .take(bundle_budget - 1);
             for index in std::iter::once(*recipient_index).chain(extras) {
                 let shard = block.shard(index).expect("bundle shard must exist");
-                let sent = sender.send(Recipients::One(recipient.clone()), shard, true);
-                if index != *recipient_index && !sent.is_empty() {
+                // Only the bundle head (the recipient's own assigned shard)
+                // gates the recipient's notarize vote, so only it rides the
+                // high-priority lane alongside consensus votes. The extras
+                // merely feed reconstruction and must not queue ahead of
+                // vote-sized messages on the shared connection.
+                let vote_gating = index == *recipient_index;
+                let sent = sender.send(Recipients::One(recipient.clone()), shard, vote_gating);
+                if !vote_gating && !sent.is_empty() {
                     self.metrics.shards_forwarded_total.inc();
                 }
             }
@@ -1120,10 +1157,14 @@ where
                 );
                 return;
             };
+            // Each participant's assigned shard gates that participant's
+            // notarize vote, so it rides the high-priority lane.
             let _ = sender.send(Recipients::One(peer.clone()), shard, true);
         }
 
-        // Send the leader's shard to peers in aggregate membership who are not participants.
+        // Send the leader's shard to peers in aggregate membership who are not
+        // participants. Non-participants cast no votes, so this delivery only
+        // feeds their reconstruction and rides the low-priority lane.
         let non_participants: Vec<P> = self
             .aggregate_peers
             .iter()
@@ -1131,7 +1172,7 @@ where
             .cloned()
             .collect();
         if !non_participants.is_empty() {
-            let _ = sender.send(Recipients::Some(non_participants), leader_shard, true);
+            let _ = sender.send(Recipients::Some(non_participants), leader_shard, false);
         }
 
         // Cache the block so we don't have to reconstruct it again.
@@ -1145,13 +1186,20 @@ where
     }
 
     /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
+    ///
+    /// Rebroadcasts only feed peer reconstruction — a gossiped shard at our
+    /// index can never satisfy another participant's assigned-shard check
+    /// (that requires a leader-sent shard at the recipient's own index) — so
+    /// this bulk fan-out rides the low-priority lane. This keeps vote-sized
+    /// consensus messages, which share the connection's high-priority lane,
+    /// from queuing behind shard payloads.
     fn broadcast_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         shard: Shard<C, H>,
     ) {
         let commitment = shard.commitment();
-        let peers = sender.send(Recipients::All, shard, true);
+        let peers = sender.send(Recipients::All, shard, false);
         debug!(
             ?commitment,
             peers = peers.len(),
@@ -1967,15 +2015,16 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Committable, Digest, Sha256, Signer,
     };
+    use commonware_actor::{Feedback, Unreliable};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{self, Control, Link, Oracle},
-        Manager as _, TrackedPeers,
+        CheckedSender, LimitedSender, Manager as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Quota, Runner, Supervisor as _};
+    use commonware_runtime::{deterministic, IoBufs, Quota, Runner, Supervisor as _};
     use commonware_utils::{
-        channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
+        channel::oneshot::error::TryRecvError, ordered::Set, sync::Mutex, NZUsize, Participant,
     };
     use std::{
         future::Future,
@@ -1985,7 +2034,7 @@ mod tests {
             atomic::{AtomicIsize, Ordering},
             Arc,
         },
-        time::Duration,
+        time::{Duration, SystemTime},
     };
 
     #[derive(Clone, Debug)]
@@ -2113,6 +2162,54 @@ mod tests {
         Sequential,
         NoForwarding,
     >;
+
+    /// A send observed by [`RecordingSender`]: recipients, encoded payload,
+    /// and the priority flag it was sent with.
+    type SendRecord = (Recipients<P>, IoBufs, bool);
+
+    /// A [`Sender`] wrapper that records every send's recipients, payload,
+    /// and priority flag before delegating to the simulated network sender.
+    #[derive(Clone)]
+    struct RecordingSender {
+        inner: NetworkSender,
+        log: Arc<Mutex<Vec<SendRecord>>>,
+    }
+
+    struct RecordingCheckedSender<'a> {
+        inner: <NetworkSender as LimitedSender>::Checked<'a>,
+        recipients: Recipients<P>,
+        log: Arc<Mutex<Vec<SendRecord>>>,
+    }
+
+    impl CheckedSender for RecordingCheckedSender<'_> {
+        type PublicKey = P;
+
+        fn recipients(&self) -> Vec<P> {
+            self.inner.recipients()
+        }
+
+        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+            let message: IoBufs = message.into();
+            self.log
+                .lock()
+                .push((self.recipients, message.clone(), priority));
+            self.inner.send(message, priority)
+        }
+    }
+
+    impl LimitedSender for RecordingSender {
+        type PublicKey = P;
+        type Checked<'a> = RecordingCheckedSender<'a>;
+
+        fn check(&mut self, recipients: Recipients<P>) -> Result<Self::Checked<'_>, SystemTime> {
+            let checked = self.inner.check(recipients.clone())?;
+            Ok(RecordingCheckedSender {
+                inner: checked,
+                recipients,
+                log: Arc::clone(&self.log),
+            })
+        }
+    }
 
     async fn assert_blocked(oracle: &O, blocker: &P, blocked: &P) {
         let blocked_peers = oracle.blocked().await.unwrap();
@@ -2678,6 +2775,13 @@ mod tests {
                     .expect("shard should decode");
                 received.push(shard.index());
             }
+            // The bundle head rides the high-priority lane and the extras
+            // ride the low-priority lane, yet arrival order still matches
+            // send order: the simulated network processes high-priority
+            // sends before low-priority ones within a batch (the head is
+            // both first-sent and high priority, so this cannot invert it),
+            // the extras stay FIFO among themselves on the low lane, and
+            // per-link delivery preserves transmitter enqueue order.
             assert_eq!(received, vec![1, 0, 2, 3]);
 
             // The fan-out skips the recipient: no duplicate of its assigned
@@ -2703,6 +2807,219 @@ mod tests {
                     .expect("shard should decode");
                 assert_eq!(usize::from(shard.index()), index);
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_send_priority_classification() {
+        // Only sends that gate a recipient's notarize vote ride the
+        // high-priority lane (shared with consensus votes): the forward
+        // bundle's head and the per-participant assigned-shard fan-out.
+        // Reconstruction-only sends — the bundle's extras, the delivery of
+        // the leader's shard to non-participants, and each validator's
+        // own-shard rebroadcast — ride the low-priority lane so bulk shard
+        // traffic cannot queue ahead of votes. Engines run for the leader
+        // and one fan-out participant, each wrapped in a sender that
+        // records the priority flag of every send.
+        let num_peers = 10usize;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut private_keys = (0..num_peers)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            private_keys.sort_by_key(|s| s.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let np_key = PrivateKey::from_seed(10_000).public_key();
+
+            let (network, oracle) =
+                simulated::Network::<deterministic::Context, P>::new_with_split_peers(
+                    context.child("network"),
+                    simulated::Config {
+                        max_size: MAX_SHARD_SIZE as u32,
+                        disconnect_on_block: true,
+                        tracked_peer_sets: NZUsize!(1),
+                    },
+                    peer_keys.clone(),
+                    vec![np_key.clone()],
+                )
+                .await;
+            network.start();
+
+            let all_keys: Vec<P> = peer_keys.iter().cloned().chain([np_key.clone()]).collect();
+            let mut registrations = BTreeMap::new();
+            for key in all_keys.iter() {
+                let control = oracle.control(key.clone());
+                let (sender, receiver) = control
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .expect("registration should succeed");
+                registrations.insert(key.clone(), (control, sender, receiver));
+            }
+            for p1 in all_keys.iter() {
+                for p2 in all_keys.iter() {
+                    if p2 == p1 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(p1.clone(), p2.clone(), DEFAULT_LINK)
+                        .await
+                        .expect("link should be added");
+                }
+            }
+
+            let leader = peer_keys[0].clone();
+            let recipient = peer_keys[1].clone();
+            let gossiper = peer_keys[2].clone();
+
+            // Start the leader's engine with a recording sender.
+            let (control, sender, receiver) = registrations
+                .remove(&leader)
+                .expect("leader should be registered");
+            let leader_log = Arc::new(Mutex::new(Vec::new()));
+            let leader_sender = RecordingSender {
+                inner: sender,
+                log: Arc::clone(&leader_log),
+            };
+            let scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[0].clone(),
+            )
+            .expect("signer scheme should be created");
+            let config = Config {
+                scheme_provider: MultiEpochProvider::single(scheme),
+                blocker: control,
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: NZUsize!(1024),
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: NZUsize!(1024),
+                peer_provider: oracle.manager(),
+                forward_router: static_router(leader.clone(), recipient.clone()),
+            };
+            let (engine, leader_mailbox) = ShardEngine::<C, _>::new(context.child("leader"), config);
+            engine.start((leader_sender, receiver));
+
+            // Start an engine for participant 2 (a plain fan-out receiver)
+            // with a recording sender, to observe the rebroadcast of its
+            // verified assigned shard.
+            let (control, sender, receiver) = registrations
+                .remove(&gossiper)
+                .expect("gossiper should be registered");
+            let gossiper_log = Arc::new(Mutex::new(Vec::new()));
+            let gossiper_sender = RecordingSender {
+                inner: sender,
+                log: Arc::clone(&gossiper_log),
+            };
+            let scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[2].clone(),
+            )
+            .expect("signer scheme should be created");
+            let config = Config {
+                scheme_provider: MultiEpochProvider::single(scheme),
+                blocker: control,
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: NZUsize!(1024),
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: NZUsize!(1024),
+                peer_provider: oracle.manager(),
+                forward_router: static_router(leader.clone(), recipient.clone()),
+            };
+            let (engine, gossiper_mailbox) =
+                ShardEngine::<C, _>::new(context.child("gossiper"), config);
+            engine.start((gossiper_sender, receiver));
+
+            // Let peer-set updates land: the non-participant delivery
+            // depends on the leader knowing the aggregate membership.
+            context.sleep(Duration::from_millis(10)).await;
+
+            let coding_config = coding_config_for_participants(num_peers as u16);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+            let round = Round::new(Epoch::zero(), View::new(1));
+
+            // The gossiper must know the leader to eagerly verify (and then
+            // rebroadcast) its assigned shard on arrival.
+            gossiper_mailbox.discovered(commitment, leader.clone(), round);
+            leader_mailbox.proposed(round, coded_block.clone());
+            context.sleep(DEFAULT_LINK.latency * 4).await;
+
+            let shard_codec_cfg = CodecConfig {
+                maximum_shard_size: MAX_SHARD_SIZE,
+            };
+            let decode_index = |bufs: &IoBufs| {
+                Shard::<C, H>::decode_cfg(bufs.clone(), &shard_codec_cfg)
+                    .expect("recorded shard should decode")
+                    .index()
+            };
+
+            // The leader emits, in order: the bundle (head + extras) to the
+            // route recipient, the assigned-shard fan-out to the remaining
+            // participants, and the leader-shard delivery to the
+            // non-participant.
+            let minimum_shards = usize::from(coding_config.minimum_shards.get());
+            let leader_sends = leader_log.lock().clone();
+            assert_eq!(leader_sends.len(), minimum_shards + (num_peers - 2) + 1);
+
+            // Bundle head: the recipient's own assigned shard gates its
+            // notarize vote, so it is high priority.
+            let (recipients, bufs, priority) = &leader_sends[0];
+            assert!(matches!(recipients, Recipients::One(r) if r == &recipient));
+            assert_eq!(decode_index(bufs), 1);
+            assert!(*priority, "vote-gating bundle head must be high priority");
+
+            // Bundle extras only feed reconstruction: low priority.
+            let mut extra_indices = Vec::new();
+            for (recipients, bufs, priority) in &leader_sends[1..minimum_shards] {
+                assert!(matches!(recipients, Recipients::One(r) if r == &recipient));
+                assert!(!*priority, "bundle extras must be low priority");
+                extra_indices.push(decode_index(bufs));
+            }
+            assert_eq!(extra_indices, vec![0, 2, 3]);
+
+            // Assigned-shard fan-out gates each recipient's vote: high
+            // priority. The recipients are every participant except the
+            // leader and the route recipient, in ascending index order.
+            let fanout = &leader_sends[minimum_shards..minimum_shards + (num_peers - 2)];
+            for (offset, (recipients, bufs, priority)) in fanout.iter().enumerate() {
+                let participant_index = offset + 2;
+                assert!(
+                    matches!(recipients, Recipients::One(r) if r == &peer_keys[participant_index])
+                );
+                assert_eq!(usize::from(decode_index(bufs)), participant_index);
+                assert!(*priority, "vote-gating assigned shards must be high priority");
+            }
+
+            // Non-participants cast no votes; the leader-shard delivery to
+            // them only feeds reconstruction: low priority.
+            let (recipients, bufs, priority) = leader_sends.last().unwrap();
+            assert!(
+                matches!(recipients, Recipients::Some(keys) if keys.len() == 1 && keys[0] == np_key)
+            );
+            assert_eq!(decode_index(bufs), 0);
+            assert!(!*priority, "non-participant delivery must be low priority");
+
+            // The gossiper rebroadcasts its verified assigned shard to all
+            // peers; the rebroadcast only feeds reconstruction (it can never
+            // satisfy another participant's assigned-shard check): low
+            // priority.
+            let gossiper_sends = gossiper_log.lock().clone();
+            assert_eq!(gossiper_sends.len(), 1);
+            let (recipients, bufs, priority) = &gossiper_sends[0];
+            assert!(matches!(recipients, Recipients::All));
+            assert_eq!(decode_index(bufs), 2);
+            assert!(!*priority, "own-shard rebroadcast must be low priority");
         });
     }
 
