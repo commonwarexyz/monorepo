@@ -6339,6 +6339,296 @@ mod tests {
         });
     }
 
+    /// A finalized-store wrapper that delays durability by `pace` of
+    /// deterministic time to model a slow fsync: `sync` blocks the caller for
+    /// the pace, while `start_sync` returns immediately with a handle that
+    /// completes after the pace (like an archive with a non-blocking sync
+    /// path, e.g. [`prunable::Archive`]).
+    struct PacedStore<T> {
+        inner: T,
+        context: deterministic::Context,
+        pace: Duration,
+    }
+
+    impl<T: crate::marshal::store::Blocks> crate::marshal::store::Blocks for PacedStore<T> {
+        type Block = T::Block;
+        type Error = T::Error;
+
+        async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
+            self.inner.put(block).await
+        }
+
+        async fn sync(&mut self) -> Result<(), Self::Error> {
+            self.context.sleep(self.pace).await;
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&mut self) -> Result<commonware_runtime::Handle<()>, Self::Error> {
+            let inner = self.inner.start_sync().await?;
+            let sleep = self.context.sleep(self.pace);
+            Ok(commonware_runtime::Handle::from_future(async move {
+                sleep.await;
+                inner.await
+            }))
+        }
+
+        async fn get(
+            &self,
+            id: commonware_storage::archive::Identifier<'_, <Self::Block as Digestible>::Digest>,
+        ) -> Result<Option<Self::Block>, Self::Error> {
+            self.inner.get(id).await
+        }
+
+        async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+            self.inner.prune(min).await
+        }
+
+        fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+            self.inner.missing_items(start, max)
+        }
+
+        fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+            self.inner.next_gap(value)
+        }
+
+        fn last_index(&self) -> Option<Height> {
+            self.inner.last_index()
+        }
+    }
+
+    impl<T: crate::marshal::store::Certificates> crate::marshal::store::Certificates for PacedStore<T> {
+        type BlockDigest = T::BlockDigest;
+        type Commitment = T::Commitment;
+        type Scheme = T::Scheme;
+        type Error = T::Error;
+
+        async fn put(
+            &mut self,
+            height: Height,
+            digest: Self::BlockDigest,
+            finalization: Finalization<Self::Scheme, Self::Commitment>,
+        ) -> Result<(), Self::Error> {
+            self.inner.put(height, digest, finalization).await
+        }
+
+        async fn sync(&mut self) -> Result<(), Self::Error> {
+            self.context.sleep(self.pace).await;
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&mut self) -> Result<commonware_runtime::Handle<()>, Self::Error> {
+            let inner = self.inner.start_sync().await?;
+            let sleep = self.context.sleep(self.pace);
+            Ok(commonware_runtime::Handle::from_future(async move {
+                sleep.await;
+                inner.await
+            }))
+        }
+
+        async fn get(
+            &self,
+            id: commonware_storage::archive::Identifier<'_, Self::BlockDigest>,
+        ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+            self.inner.get(id).await
+        }
+
+        async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+            self.inner.prune(min).await
+        }
+
+        fn last_index(&self) -> Option<Height> {
+            self.inner.last_index()
+        }
+
+        fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+            self.inner.ranges_from(from)
+        }
+    }
+
+    /// Initialize paced prunable finalized stores for direct actor tests.
+    #[allow(clippy::type_complexity)]
+    async fn paced_finalized_stores(
+        context: &deterministic::Context,
+        partition_prefix: &str,
+        pace: Duration,
+    ) -> (
+        PacedStore<prunable::Archive<EightCap, deterministic::Context, D, Finalization<S, D>>>,
+        PacedStore<prunable::Archive<EightCap, deterministic::Context, D, B>>,
+    ) {
+        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            prunable::Config {
+                translator: EightCap,
+                key_partition: format!("{partition_prefix}-fbh-key"),
+                key_page_cache: page_cache.clone(),
+                value_partition: format!("{partition_prefix}-fbh-value"),
+                compression: None,
+                codec_config: S::certificate_codec_config_unbounded(),
+                items_per_section: NZU64!(10),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            },
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = prunable::Archive::init(
+            context.child("finalized_blocks"),
+            prunable::Config {
+                translator: EightCap,
+                key_partition: format!("{partition_prefix}-fb-key"),
+                key_page_cache: page_cache,
+                value_partition: format!("{partition_prefix}-fb-value"),
+                compression: None,
+                codec_config: (),
+                items_per_section: NZU64!(10),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            },
+        )
+        .await
+        .expect("failed to initialize finalized blocks archive");
+        (
+            PacedStore {
+                inner: finalizations_by_height,
+                context: context.child("finalizations_pacer"),
+                pace,
+            },
+            PacedStore {
+                inner: finalized_blocks,
+                context: context.child("blocks_pacer"),
+                pace,
+            },
+        )
+    }
+
+    /// A slow finalized-archive fsync must not block the marshal mailbox.
+    ///
+    /// Processing a finalization requires making the finalized archives
+    /// durable before the block is dispatched to the application, but the
+    /// fsync itself must not serialize unrelated mailbox traffic: a proposer's
+    /// `get_verified` (a pure prunable-cache read) issued while the sync is in
+    /// flight must be answered immediately.
+    ///
+    /// Paces both finalized stores so sync completion takes 100ms of
+    /// deterministic time, processes a finalization, issues `get_verified` 1ms
+    /// later, and asserts that (1) the read is served while the sync is still
+    /// in flight and (2) the finalized block reaches the application only
+    /// after the paced sync completes (the durability barrier).
+    #[test_traced("WARN")]
+    fn test_standard_finalization_sync_does_not_block_mailbox() {
+        const PACE: Duration = Duration::from_millis(100);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention_timeout: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(1),
+                block_codec_config: (),
+                partition_prefix: "paced-finalized-sync".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "paced-finalized-sync", PACE).await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+
+            // Wait for the genesis block to flow through dispatch so the ack
+            // pipeline is idle before the measurement starts.
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "genesis dispatched",
+                || application.blocks().contains_key(&Height::zero()),
+            )
+            .await;
+
+            // Store a verified block for round 1 in the (unpaced) prunable cache.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(round, block.clone()).await);
+
+            // Report the finalization: the actor buffers the block into the
+            // finalized archives and starts the paced 100ms sync.
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            let finalized_at = context.current();
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            // Issue a get_verified 1ms later: it must not queue behind the fsync.
+            context.sleep(Duration::from_millis(1)).await;
+            let requested_at = context.current();
+            let verified = mailbox.get_verified(round).await;
+            let elapsed = context
+                .current()
+                .duration_since(requested_at)
+                .expect("time went backwards");
+            assert_eq!(
+                verified.expect("verified block missing").digest(),
+                block.digest()
+            );
+            tracing::info!(?elapsed, "get_verified answered");
+            assert!(
+                elapsed < Duration::from_millis(5),
+                "get_verified queued behind the finalized-archive sync: took {elapsed:?}"
+            );
+
+            // Durability barrier: the finalized block must not reach the
+            // application until the paced sync completes.
+            assert!(
+                !application.blocks().contains_key(&Height::new(1)),
+                "block dispatched before the finalized archives were durable"
+            );
+            context.sleep(Duration::from_millis(90)).await;
+            assert!(
+                !application.blocks().contains_key(&Height::new(1)),
+                "block dispatched before the finalized archives were durable"
+            );
+            wait_until(
+                &context,
+                Duration::from_millis(50),
+                "finalized block dispatched",
+                || application.blocks().contains_key(&Height::new(1)),
+            )
+            .await;
+            let dispatched = context
+                .current()
+                .duration_since(finalized_at)
+                .expect("time went backwards");
+            tracing::info!(?dispatched, "finalized block dispatched");
+            assert!(
+                dispatched >= PACE,
+                "block dispatched before the paced sync completed: {dispatched:?}"
+            );
+        });
+    }
+
     /// Parse the `processed_height` gauge value from a prometheus-encoded
     /// metrics dump produced by `Metrics::encode`. Looks for any line of the
     /// form `<prefix>processed_height <value>` or
