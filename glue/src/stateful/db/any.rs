@@ -209,6 +209,26 @@ where
     }
 }
 
+/// Cloning shares the same underlying merkleized batch and database handle.
+impl<F, E, C, I, H, U, S> Clone for AnyMerkleized<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            db: self.db.clone(),
+        }
+    }
+}
+
 /// Read-expansion operations for the `any` staged batch.
 impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
 where

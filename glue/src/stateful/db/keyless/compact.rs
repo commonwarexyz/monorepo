@@ -130,6 +130,26 @@ where
     }
 }
 
+/// Cloning shares the same underlying merkleized batch and database handle.
+impl<F, E, V, H, S, C> Clone for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, V>: EncodeShared,
+    Operation<F, V>: CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            db: self.db.clone(),
+        }
+    }
+}
+
 impl<F, E, V, H, S, C> UnmerkleizedTrait for KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
 where
     F: Family,

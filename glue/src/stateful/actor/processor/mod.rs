@@ -14,9 +14,15 @@
 //!   forward via [`Application::apply`], inserting each intermediate result
 //!   into the pending map.
 //!
-//! - Finalization: apply the winning fork's merkleized batches to the
-//!   committed databases, then prune all pending entries at or below the
-//!   finalized round.
+//! - Finalization: stage the winning fork's merkleized batches as a
+//!   [`Commit`], prune all pending entries at or below the finalized round
+//!   (except entries still awaiting a durable commit), and advance the
+//!   processed anchor. The durable commit itself (database write lock +
+//!   sync) is applied by the caller — on a committer task during normal
+//!   processing so it never blocks propose/verify — and the winner's pending
+//!   entry is retained until [`Processor::commit_complete`] so concurrent
+//!   propose/verify keep forking the retained overlay instead of racing the
+//!   in-flight commit.
 //!
 //! All propose/verify paths are cancellation-aware: if the caller drops the
 //! response channel, in-progress work stops at the next await point via
@@ -87,8 +93,31 @@ pub(super) enum FinalizeStatus {
     /// The finalized digest was already processed.
     Duplicate,
 
-    /// The finalized state was persisted and in-memory forks were pruned.
-    Persisted { height: Height },
+    /// The finalized state was staged for durable commit and in-memory forks
+    /// were pruned.
+    Staged { height: Height },
+}
+
+/// Durable-commit work for one finalized block, staged by
+/// [`Processor::finalize`].
+///
+/// The batch is a clone of the retained pending entry: the entry stays in the
+/// pending map so concurrent propose/verify fork the retained overlay instead
+/// of racing the in-flight commit, and is dropped via
+/// [`Processor::commit_complete`] once the durable commit finishes.
+pub(super) struct Commit<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    /// The finalized block being committed.
+    pub(super) block: Arc<A::Block>,
+
+    /// The block's merkleized batches to apply durably.
+    pub(super) batch: PendingBatches<A, E>,
+
+    /// Deferred prune work to run after the commit is durable, if scheduled.
+    pub(super) prune: DeferredPrune<PendingSyncTargets<A, E>>,
 }
 
 /// Marshal and database prune targets selected from finalized history.
@@ -200,6 +229,12 @@ where
     app: A,
     databases: A::Databases,
     pending: PendingMap<A, E>,
+    /// Digests staged for commit whose durable commit has not yet completed.
+    ///
+    /// Their pending entries are retained (even across finalization pruning)
+    /// so concurrent propose/verify can fork them; [`Processor::commit_complete`]
+    /// drops them once durable.
+    committing: HashSet<PendingDigest<A, E>>,
     last_processed: Anchor<PendingDigest<A, E>>,
     metrics: StatefulMetrics,
     pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
@@ -223,6 +258,7 @@ where
             app,
             databases,
             pending: BTreeMap::new(),
+            committing: HashSet::new(),
             last_processed,
             metrics,
             pruning: prune_config.map(Pruning::new),
@@ -237,6 +273,16 @@ where
     /// Returns a mutable reference to the database set.
     pub(super) const fn databases_mut(&mut self) -> &mut A::Databases {
         &mut self.databases
+    }
+
+    /// Returns a clone of the inner application handle.
+    pub(super) fn application(&self) -> A {
+        self.app.clone()
+    }
+
+    /// Returns a reference to the actor metrics.
+    pub(super) const fn metrics(&self) -> &StatefulMetrics {
+        &self.metrics
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -669,7 +715,7 @@ where
                 response,
                 self.app.apply(
                     (context.child("rebuild_pending_apply"), consensus_context),
-                    &block,
+                    block.as_ref(),
                     batches,
                 ),
             )
@@ -678,7 +724,10 @@ where
                 return Err(PrepareBatchesError::Cancelled);
             };
 
-            if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
+            if !A::Databases::matches_sync_targets(
+                &merkleized,
+                &A::sync_targets(block.as_ref()),
+            ) {
                 warn!(
                     ?target_digest,
                     block = ?digest,
@@ -696,12 +745,22 @@ where
         Ok(())
     }
 
-    /// Persist finalized state and prune dead in-memory forks.
+    /// Stage finalized state for durable commit and prune dead in-memory forks.
+    ///
+    /// The fast path runs entirely in memory: it locates (or replays) the
+    /// winning fork's merkleized batches, prunes incompatible pending state,
+    /// and advances the processed anchor. The returned [`Commit`] carries
+    /// everything needed to apply the batch durably; callers either enqueue it
+    /// on the committer (normal processing) or apply it inline via
+    /// [`Processor::commit`]. The winner's pending entry is retained until
+    /// [`Processor::commit_complete`] so concurrent propose/verify keep
+    /// forking the retained overlay instead of observing a partially committed
+    /// database.
     pub(super) async fn finalize(
         &mut self,
         context: &E,
-        block: &A::Block,
-    ) -> (FinalizeStatus, DeferredPrune<PendingSyncTargets<A, E>>) {
+        block: Arc<A::Block>,
+    ) -> (FinalizeStatus, Option<Commit<E, A>>) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -718,25 +777,34 @@ where
             return (FinalizeStatus::Duplicate, None);
         }
 
-        let timer = self.metrics.finalize_duration.timer(context);
         let block_context = block.context();
         let round = block_context.round();
-        let sync_targets = A::sync_targets(block);
+        let sync_targets = A::sync_targets(block.as_ref());
 
         // Marshal finalization is ordered. A pending miss means we can replay
-        // this block on top of finalized state.
+        // this block on top of its parent's state (the retained pending entry
+        // if the parent's commit is still in flight, committed state
+        // otherwise).
         //
         // Safety contract: replayed `Application::apply` output must match the
         // block commitments previously enforced by `Application::verify`.
-        let batch = match self.pending.remove(&digest) {
-            Some(entry) => entry.merkleized,
+        let batch = match self.pending.get(&digest) {
+            Some(entry) => entry.merkleized.clone(),
             None => {
-                let batches = self.databases.new_batches().await;
+                // Fork the parent's retained overlay when its commit is still
+                // in flight; otherwise replay on committed state (which waits
+                // out any in-flight commit via the database locks). A replay
+                // from the wrong base is caught by the commitment check below.
+                let parent = block.parent();
+                let batches = match self.fork_batches(&parent).await {
+                    Ok(batches) => batches,
+                    Err(_) => self.databases.new_batches().await,
+                };
                 let batch = self
                     .app
                     .apply(
                         (context.child("finalize_replay"), block_context),
-                        block,
+                        block.as_ref(),
                         batches,
                     )
                     .await;
@@ -744,12 +812,17 @@ where
                     A::Databases::matches_sync_targets(&batch, &sync_targets),
                     "finalize replay state root must match block commitments",
                 );
+                // Retain the replayed state so concurrent propose/verify can
+                // fork it while the commit is in flight.
+                self.cache_pending(digest, parent, round, batch.clone());
                 batch
             }
         };
 
-        self.databases.finalize(batch).await;
-        self.notify_finalized(context, block).await;
+        assert!(
+            self.committing.insert(digest),
+            "finalized digest already staged for commit",
+        );
         let prune = self
             .pruning
             .as_mut()
@@ -760,9 +833,49 @@ where
             round,
             digest,
         };
-        timer.observe(context);
 
-        (FinalizeStatus::Persisted { height }, prune)
+        (
+            FinalizeStatus::Staged { height },
+            Some(Commit {
+                block,
+                batch,
+                prune,
+            }),
+        )
+    }
+
+    /// Apply a staged [`Commit`] inline and drop its retained pending entry,
+    /// returning any deferred prune work.
+    ///
+    /// Normal processing applies commits on the committer task instead; this
+    /// inline path serves callers without a committer (state sync handoff).
+    pub(super) async fn commit(
+        &mut self,
+        context: &E,
+        commit: Commit<E, A>,
+    ) -> DeferredPrune<PendingSyncTargets<A, E>> {
+        let Commit {
+            block,
+            batch,
+            prune,
+        } = commit;
+        let timer = self.metrics.finalize_duration.timer(context);
+        self.databases.finalize(batch).await;
+        self.notify_finalized(context, block.as_ref()).await;
+        timer.observe(context);
+        self.commit_complete(&block.digest());
+        prune
+    }
+
+    /// Drop the pending entry retained for `digest` once its durable commit
+    /// has completed.
+    pub(super) fn commit_complete(&mut self, digest: &PendingDigest<A, E>) {
+        assert!(
+            self.committing.remove(digest),
+            "commit completion for a digest that was not staged",
+        );
+        self.pending.remove(digest);
+        let _ = self.metrics.pending_blocks.try_set(self.pending.len());
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -780,8 +893,10 @@ where
     /// Remove pending state that is not compatible with the finalized winner.
     ///
     /// A pending block is kept only when:
-    /// - it is a descendant of `finalized_digest`, and
-    /// - it was created after `finalized_round`.
+    /// - it is a descendant of `finalized_digest` created after
+    ///   `finalized_round`, or
+    /// - it is staged for a durable commit that has not yet completed (the
+    ///   winner itself and any ancestors still in the commit pipeline).
     fn prune_pending_after_finalize(
         &mut self,
         finalized_digest: &<A::Block as Digestible>::Digest,
@@ -813,8 +928,10 @@ where
         }
 
         let before = self.pending.len();
+        let committing = &self.committing;
         self.pending.retain(|candidate_digest, entry| {
-            entry.round > finalized_round && compatible.contains(candidate_digest)
+            committing.contains(candidate_digest)
+                || (entry.round > finalized_round && compatible.contains(candidate_digest))
         });
         let pruned = before - self.pending.len();
         self.metrics.pruned_forks.inc_by(pruned as u64);
@@ -1489,11 +1606,10 @@ mod tests {
             false
         }
 
+        /// Stage a finalized block and apply its durable commit inline,
+        /// mirroring the committer's stage-then-commit sequence.
         async fn finalize(&mut self, block: Block) -> FinalizeStatus {
-            self.processor
-                .finalize(self.context_cell.as_present(), &block)
-                .await
-                .0
+            self.finalize_with_prune(block).await.0
         }
 
         async fn finalize_with_prune(
@@ -1509,9 +1625,18 @@ mod tests {
                 >,
             >,
         ){
-            self.processor
-                .finalize(self.context_cell.as_present(), &block)
-                .await
+            let (status, commit) = self
+                .processor
+                .finalize(self.context_cell.as_present(), Arc::new(block))
+                .await;
+            let mut prune = None;
+            if let Some(commit) = commit {
+                prune = self
+                    .processor
+                    .commit(self.context_cell.as_present(), commit)
+                    .await;
+            }
+            (status, prune)
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
@@ -1741,7 +1866,7 @@ mod tests {
             let (status, prune) = harness.finalize_with_prune(block1).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1)
                 }
             );
@@ -1767,7 +1892,7 @@ mod tests {
             let status = harness.finalize(winner.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(2)
                 },
                 "finalization should persist winner state",
@@ -1801,7 +1926,7 @@ mod tests {
             let status = harness.finalize(winner.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(2)
                 },
                 "finalization should persist winner state",
@@ -1821,6 +1946,85 @@ mod tests {
     }
 
     #[test]
+    fn execution_finalization_retains_pending_entry_until_commit_completes() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            let (status, commit1) = harness
+                .processor
+                .finalize(
+                    harness.context_cell.as_present(),
+                    Arc::new(block1.clone()),
+                )
+                .await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Staged {
+                    height: Height::new(1)
+                }
+            );
+            let commit1 = commit1.expect("staging must produce commit work");
+            assert!(
+                harness.processor.pending.contains_key(&block1.digest()),
+                "staged entry must be retained until its commit completes",
+            );
+            assert!(
+                harness
+                    .processor
+                    .fork_batches(&block1.digest())
+                    .await
+                    .is_ok(),
+                "the retained overlay must remain forkable during the commit",
+            );
+
+            // Build and stage a child while the parent commit is in flight.
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let (status, commit2) = harness
+                .processor
+                .finalize(
+                    harness.context_cell.as_present(),
+                    Arc::new(block2.clone()),
+                )
+                .await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Staged {
+                    height: Height::new(2)
+                }
+            );
+            let commit2 = commit2.expect("staging must produce commit work");
+            assert!(
+                harness.processor.pending.contains_key(&block1.digest()),
+                "committing ancestors must survive finalization pruning",
+            );
+            assert!(harness.processor.pending.contains_key(&block2.digest()));
+            assert_eq!(harness.processor.last_processed.digest, block2.digest());
+
+            // Commit in finalization order; each completion drops its entry.
+            harness
+                .processor
+                .commit(harness.context_cell.as_present(), commit1)
+                .await;
+            assert!(
+                !harness.processor.pending.contains_key(&block1.digest()),
+                "completed commit must drop its retained entry",
+            );
+            assert!(harness.processor.pending.contains_key(&block2.digest()));
+            harness
+                .processor
+                .commit(harness.context_cell.as_present(), commit2)
+                .await;
+            assert!(!harness.processor.pending.contains_key(&block2.digest()));
+
+            assert_eq!(harness.height_value(Height::new(1)).await, Some(1));
+            assert_eq!(harness.height_value(Height::new(2)).await, Some(2));
+            assert_eq!(harness.counter_value().await, Some(2));
+        });
+    }
+
+    #[test]
     fn execution_rebuild_pending_restores_missing_chain() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context).await;
@@ -1829,7 +2033,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1)
                 }
             );
@@ -1869,7 +2073,7 @@ mod tests {
                 let status = harness.finalize(block.clone()).await;
                 assert_eq!(
                     status,
-                    FinalizeStatus::Persisted {
+                    FinalizeStatus::Staged {
                         height: Height::new(view),
                     }
                 );
@@ -1908,7 +2112,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1)
                 }
             );
@@ -1945,7 +2149,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1)
                 }
             );
@@ -2007,7 +2211,7 @@ mod tests {
             let status = harness.finalize(canonical).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1),
                 }
             );
@@ -2032,7 +2236,7 @@ mod tests {
             let status = harness.finalize(canonical).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1),
                 }
             );
@@ -2051,7 +2255,7 @@ mod tests {
             let status = harness.finalize(block1).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1)
                 }
             );
@@ -2078,14 +2282,14 @@ mod tests {
             let status = harness.finalize(block1).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1)
                 }
             );
             let status = harness.finalize(block2).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(2)
                 }
             );
@@ -2108,7 +2312,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1)
                 }
             );
@@ -2160,7 +2364,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1)
                 }
             );
@@ -2195,7 +2399,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Staged {
                     height: Height::new(1)
                 }
             );

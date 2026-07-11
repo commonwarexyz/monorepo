@@ -267,13 +267,17 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let (status, prune) = processor
-                        .finalize(self.context.as_present(), block.as_ref())
-                        .await;
-                    if let Some(prune) = prune {
-                        prune.run(processor.databases_mut(), &self.marshal).await;
+                    let (status, commit) =
+                        processor.finalize(self.context.as_present(), block).await;
+                    if let Some(commit) = commit {
+                        // No committer is running yet: apply the staged commit
+                        // inline before acknowledging.
+                        let prune = processor.commit(self.context.as_present(), commit).await;
+                        if let Some(prune) = prune {
+                            prune.run(processor.databases_mut(), &self.marshal).await;
+                        }
                     }
-                    if let FinalizeStatus::Persisted { height } = status {
+                    if let FinalizeStatus::Staged { height } = status {
                         debug!(
                             height = height.get(),
                             "persisted finalized database batch during sync handoff"
