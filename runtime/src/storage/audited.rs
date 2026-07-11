@@ -1,16 +1,5 @@
 use crate::{deterministic::Auditor, Error, Handle, IoBufs, IoBufsMut};
-use sha2::digest::Update;
 use std::sync::Arc;
-
-fn update_field(hasher: &mut sha2::Sha256, value: &[u8]) {
-    hasher.update(&(value.len() as u64).to_be_bytes());
-    hasher.update(value);
-}
-
-fn update_bufs(hasher: &mut sha2::Sha256, bufs: &IoBufs) {
-    hasher.update(&(bufs.len() as u64).to_be_bytes());
-    bufs.for_each_chunk(|chunk| hasher.update(chunk));
-}
 
 #[derive(Clone)]
 pub struct Storage<S: crate::Storage> {
@@ -39,10 +28,10 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         versions: std::ops::RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
         self.auditor.event(b"open", |hasher| {
-            update_field(hasher, partition.as_bytes());
-            update_field(hasher, name);
-            update_field(hasher, &versions.start().to_be_bytes());
-            update_field(hasher, &versions.end().to_be_bytes());
+            hasher.update(partition.as_bytes());
+            hasher.update(name);
+            hasher.update(versions.start().to_be_bytes());
+            hasher.update(versions.end().to_be_bytes());
         });
         self.inner
             .open_versioned(partition, name, versions)
@@ -63,13 +52,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.auditor.event(b"remove", |hasher| {
-            update_field(hasher, partition.as_bytes());
+            hasher.update(partition.as_bytes());
             match name {
                 Some(name) => {
-                    hasher.update(&[1]);
-                    update_field(hasher, name);
+                    hasher.update([1]);
+                    hasher.update(name);
                 }
-                None => hasher.update(&[0]),
+                None => hasher.update([0]),
             }
         });
         self.inner.remove(partition, name).await
@@ -77,7 +66,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.auditor.event(b"scan", |hasher| {
-            update_field(hasher, partition.as_bytes());
+            hasher.update(partition.as_bytes());
         });
         self.inner.scan(partition).await
     }
@@ -94,10 +83,10 @@ pub struct Blob<B: crate::Blob> {
 impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
         self.auditor.event(b"read_at", |hasher| {
-            update_field(hasher, self.partition.as_bytes());
-            update_field(hasher, &self.name);
-            update_field(hasher, &offset.to_be_bytes());
-            update_field(hasher, &len.to_be_bytes());
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(offset.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
         self.inner.read_at(offset, len).await
     }
@@ -110,10 +99,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     ) -> Result<IoBufsMut, Error> {
         let bufs = bufs.into();
         self.auditor.event(b"read_at_buf", |hasher| {
-            update_field(hasher, self.partition.as_bytes());
-            update_field(hasher, &self.name);
-            update_field(hasher, &offset.to_be_bytes());
-            update_field(hasher, &len.to_be_bytes());
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(offset.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
         self.inner.read_at_buf(offset, len, bufs).await
     }
@@ -121,10 +110,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
         self.auditor.event(b"write_at", |hasher| {
-            update_field(hasher, self.partition.as_bytes());
-            update_field(hasher, &self.name);
-            update_field(hasher, &offset.to_be_bytes());
-            update_bufs(hasher, &bufs);
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(offset.to_be_bytes());
+            hasher.update_bufs(&bufs);
         });
         self.inner.write_at(offset, bufs).await
     }
@@ -136,35 +125,35 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         self.auditor.event(b"write_at_sync", |hasher| {
-            update_field(hasher, self.partition.as_bytes());
-            update_field(hasher, &self.name);
-            update_field(hasher, &offset.to_be_bytes());
-            update_bufs(hasher, &bufs);
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(offset.to_be_bytes());
+            hasher.update_bufs(&bufs);
         });
         self.inner.write_at_sync(offset, bufs).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.auditor.event(b"resize", |hasher| {
-            update_field(hasher, self.partition.as_bytes());
-            update_field(hasher, &self.name);
-            update_field(hasher, &len.to_be_bytes());
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(len.to_be_bytes());
         });
         self.inner.resize(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
         self.auditor.event(b"sync", |hasher| {
-            update_field(hasher, self.partition.as_bytes());
-            update_field(hasher, &self.name);
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
         });
         self.inner.sync().await
     }
 
     async fn start_sync(&self) -> Handle<()> {
         self.auditor.event(b"start_sync", |hasher| {
-            update_field(hasher, self.partition.as_bytes());
-            update_field(hasher, &self.name);
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
         });
         self.inner.start_sync().await
     }

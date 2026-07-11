@@ -1,9 +1,8 @@
 use super::Header;
-use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut};
+use crate::{deterministic::AuditHasher, Buf, BufferPool, Handle, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
 /// In-memory storage implementation for the commonware runtime.
@@ -23,29 +22,25 @@ impl Storage {
 }
 
 impl Storage {
-    /// Compute a [Sha256] digest of all blob contents.
+    /// Compute a SHA-256 digest of all blob contents.
     pub fn audit(&self) -> [u8; 32] {
         let partitions = self.partitions.lock();
-        let mut hasher = Sha256::new();
+        let mut hasher = AuditHasher::new();
         hasher.update(b"commonware-runtime-storage-audit-v1");
 
         for (partition_name, blobs) in partitions.iter() {
             for (blob_name, content) in blobs.iter() {
-                update_audit_field(&mut hasher, b"partition", partition_name.as_bytes());
-                update_audit_field(&mut hasher, b"blob", blob_name);
-                update_audit_field(&mut hasher, b"content", content);
+                hasher.update(b"partition");
+                hasher.update(partition_name.as_bytes());
+                hasher.update(b"blob");
+                hasher.update(blob_name);
+                hasher.update(b"content");
+                hasher.update(content);
             }
         }
 
-        hasher.finalize().into()
+        hasher.finalize()
     }
-}
-
-fn update_audit_field(hasher: &mut Sha256, tag: &[u8], value: &[u8]) {
-    hasher.update((tag.len() as u64).to_be_bytes());
-    hasher.update(tag);
-    hasher.update((value.len() as u64).to_be_bytes());
-    hasher.update(value);
 }
 
 impl crate::Storage for Storage {
