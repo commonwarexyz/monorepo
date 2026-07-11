@@ -460,13 +460,13 @@ where
                     .height()
                     .previous()
                     .expect("databases cannot be behind the genesis block");
-                let parent = match marshal.get_block(Identifier::Height(parent_height)).await {
-                    Some(block) => V::into_inner(block),
-                    None => unreachable!(
+                let Some(block) = marshal.get_block(Identifier::Height(parent_height)).await else {
+                    unreachable!(
                         "replay block {parent_height} needed to reach marshal floor \
                          {floor_height} must be retained"
-                    ),
+                    );
                 };
+                let parent = V::into_inner(block);
                 let targets = A::sync_targets(&parent);
                 if !databases.behind_sync_targets(&targets).await {
                     break (parent, targets);
