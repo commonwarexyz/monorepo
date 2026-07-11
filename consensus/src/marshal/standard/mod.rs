@@ -3968,10 +3968,9 @@ mod tests {
     /// processed height advances to just below it, without waiting for the
     /// application to acknowledge the skipped blocks. This is the intended
     /// `Start::Floor` contract (the application layer is responsible for
-    /// bringing its databases to the floor by rewinding, replaying, or state
-    /// syncing as needed), so this test pins the jump semantics: a caller
-    /// that passes a floor on a routine restart must be prepared for the
-    /// application-side consequences.
+    /// bringing its databases to the floor), so this test pins the jump
+    /// semantics: a caller that passes a floor on a routine restart must be
+    /// prepared for the application-side consequences.
     #[test_traced("WARN")]
     fn test_standard_start_floor_above_processed_height_jumps_to_floor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
