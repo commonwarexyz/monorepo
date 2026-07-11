@@ -544,10 +544,6 @@ where
         )
     }
 
-    fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool {
-        *target.range.end() > *current.range.end()
-    }
-
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
@@ -640,10 +636,6 @@ where
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool {
-        *target.range.end() > *current.range.end()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -817,10 +809,6 @@ where
         )
     }
 
-    fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool {
-        *target.range.end() > *current.range.end()
-    }
-
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
@@ -918,10 +906,6 @@ where
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool {
-        *target.range.end() > *current.range.end()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -1577,10 +1561,16 @@ mod tests {
                 <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
             };
             assert_eq!(target_after_rewind, target_after_first);
-            assert!(<OrderedFixedDb as ManagedDb<_>>::behind_sync_target(
-                &target_after_rewind,
-                &target_after_second,
-            ));
+
+            // A target above the committed state cannot be rewound to:
+            // startup relies on this failing instead of misapplying state.
+            let mut guard = db.write().await;
+            let result = <OrderedFixedDb as ManagedDb<_>>::rewind_to_target(
+                &mut *guard,
+                target_after_second,
+            )
+            .await;
+            assert!(result.is_err(), "rewinding forward must fail");
         });
     }
 

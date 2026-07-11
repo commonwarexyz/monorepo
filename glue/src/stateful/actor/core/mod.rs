@@ -738,7 +738,7 @@ mod tests {
     /// corruption or a floor above them: startup must panic instead of
     /// running peer state sync.
     #[test]
-    #[should_panic(expected = "cannot be behind marshal floor")]
+    #[should_panic(expected = "cannot rewind forward")]
     fn startup_panics_when_databases_behind_floor() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");

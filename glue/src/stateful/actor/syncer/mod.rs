@@ -364,9 +364,9 @@ where
 /// Outside of state sync (which resumes through the state-sync path when
 /// interrupted), blocks are acknowledged only after they are durably
 /// finalized, so databases behind the floor are unreachable without storage
-/// corruption or a marshal floor above them, and this function panics on
-/// them instead of falling back to peer state sync. If the databases are
-/// entirely inconsistent, this function will panic.
+/// corruption or a marshal floor above them. Rewind cannot move forward, so
+/// this function panics on them instead of falling back to peer state sync.
+/// If the databases are entirely inconsistent, this function will panic.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
@@ -410,16 +410,11 @@ where
     // state. Outside of state sync, blocks are acknowledged only after they
     // are durably finalized and marshal prunes at least an ack window behind
     // its processed height, so crash recovery only finds databases at or
-    // ahead of the floor, which rewind repairs. Databases behind the floor
-    // would require replaying state the node no longer guarantees to retain,
-    // and are unreachable without storage corruption or a marshal floor
-    // above them.
+    // ahead of the floor, which rewind repairs. A database behind the floor
+    // (storage corruption or a marshal floor above it) cannot rewind forward
+    // and fails fatally inside rewind.
     let committed_targets = databases.committed_targets().await;
     if committed_targets != floor_targets {
-        assert!(
-            !A::Databases::behind_sync_targets(&committed_targets, &floor_targets),
-            "databases cannot be behind marshal floor {floor_height}"
-        );
         databases.rewind_to_targets(floor_targets.clone()).await;
         let rewound_targets = databases.committed_targets().await;
         assert!(
@@ -689,7 +684,7 @@ pub(crate) mod tests {
     /// corruption or a floor above them, so startup must panic instead of
     /// falling back to peer state sync.
     #[test]
-    #[should_panic(expected = "cannot be behind marshal floor")]
+    #[should_panic(expected = "cannot rewind forward")]
     fn startup_floor_jump_panics_when_databases_behind_floor() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");
@@ -728,7 +723,7 @@ pub(crate) mod tests {
     /// storage corruption, so startup must panic instead of attempting
     /// repair.
     #[test]
-    #[should_panic(expected = "cannot be behind marshal floor")]
+    #[should_panic(expected = "cannot rewind forward")]
     fn startup_panics_when_databases_behind_retained_floor() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");

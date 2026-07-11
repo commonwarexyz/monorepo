@@ -92,11 +92,12 @@ impl<E: Send> ManagedDb<E> for TestDb {
         self.target
     }
 
-    fn behind_sync_target(current: &Self::SyncTarget, target: &Self::SyncTarget) -> bool {
-        *target > *current
-    }
-
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Self::Error> {
+        assert!(
+            target <= self.target,
+            "cannot rewind forward: target {target} above committed {}",
+            self.target
+        );
         self.target = target;
         Ok(())
     }
