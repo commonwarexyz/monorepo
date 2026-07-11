@@ -149,11 +149,9 @@ where
     /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
 
-    /// Finalized floor to state sync from, when the startup plan selected one.
-    startup_floor: Option<Finalization<S, V::Commitment>>,
-
-    /// Durable state sync metadata extracted from the startup plan.
-    sync_metadata: StateSyncMetadata<E, V::Commitment>,
+    /// Startup plan carrying the state sync floor decision and the durable
+    /// metadata handle, consumed when the actor starts.
+    plan: Option<SyncPlan<E, S, V>>,
 
     /// Resolver(s) for state sync fetches and post-bootstrap serving.
     resolvers: R,
@@ -184,8 +182,6 @@ where
             prune_config.assert_valid();
         }
 
-        let (startup_floor, sync_metadata) = config.plan.into_parts();
-
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {
@@ -195,8 +191,7 @@ where
                 input_provider: config.input_provider,
                 marshal: config.marshal,
                 db_config: config.db_config,
-                startup_floor,
-                sync_metadata,
+                plan: Some(config.plan),
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
                 prune_config: config.prune_config,
@@ -210,17 +205,26 @@ where
     }
 
     async fn run(mut self) {
-        match self.startup_floor.take() {
-            Some(floor) => self.start_state_sync(floor).await,
-            None => self.start_from_marshal().await,
+        let (floor, sync_metadata) = self
+            .plan
+            .take()
+            .expect("startup plan is consumed exactly once")
+            .into_parts();
+        match floor {
+            Some(floor) => self.start_state_sync(floor, sync_metadata).await,
+            None => self.start_from_marshal(sync_metadata).await,
         }
     }
 
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
-    async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
+    async fn start_state_sync(
+        self,
+        floor: Finalization<S, V::Commitment>,
+        sync_metadata: StateSyncMetadata<E, V::Commitment>,
+    ) {
         let metrics = StatefulMetrics::new(self.context.as_present());
-        let sync_metadata = Arc::new(AsyncMutex::new(self.sync_metadata));
+        let sync_metadata = Arc::new(AsyncMutex::new(sync_metadata));
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
@@ -253,12 +257,12 @@ where
 
     /// Starts the application by initializing the database set at marshal's
     /// current floor, rewinding any databases that recovered ahead of it.
-    async fn start_from_marshal(mut self) {
+    async fn start_from_marshal(self, mut sync_metadata: StateSyncMetadata<E, V::Commitment>) {
         let SyncResult { databases, anchor } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
             &self.marshal,
             self.db_config,
-            self.sync_metadata.sync_height(),
+            sync_metadata.sync_height(),
         )
         .await;
 
@@ -281,7 +285,7 @@ where
         // Record completion at the floor so future boots skip peer state sync
         // and recover from the later of this floor and marshal's durable
         // processed height.
-        self.sync_metadata.set_complete(anchor.height).await;
+        sync_metadata.set_complete(anchor.height).await;
 
         Processing {
             context: self.context,
