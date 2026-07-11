@@ -45,7 +45,7 @@
 //! The actor supports two sync paths:
 //!
 //! - **Marshal sync** (no floor attached): [`Stateful::start`] prepares the
-//!   databases before the actor is spawned. New nodes initialize from
+//!   databases before processing begins. New nodes initialize from
 //!   genesis. Restarted nodes reconcile the database set against the later of
 //!   marshal's processed anchor and the stored state sync height, rewinding if
 //!   needed. Outside of state sync, blocks are acknowledged only after they

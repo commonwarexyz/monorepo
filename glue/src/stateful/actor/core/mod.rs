@@ -600,9 +600,10 @@ mod tests {
     #[test]
     fn startup_marks_sync_complete_at_marshal_floor() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (marshal, _handler) = start_processed_marshal(&context, "startup-replay", 5).await;
+            let (marshal, _handler) =
+                start_processed_marshal(&context, "startup-complete", 5).await;
 
-            let partition_prefix = "startup-replay-stateful";
+            let partition_prefix = "startup-complete-stateful";
             let plan = SyncPlan::init(&context, partition_prefix).await;
             let (stateful, mailbox) = Stateful::init(
                 context.child("stateful"),
@@ -700,14 +701,13 @@ mod tests {
     #[test]
     fn startup_rewinds_torn_database_set_to_floor() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (marshal, _handler) =
-                start_processed_marshal(&context, "startup-torn-replay", 4).await;
+            let (marshal, _handler) = start_processed_marshal(&context, "startup-torn", 4).await;
 
             // Simulate a crash after the first database durably finalized
             // block 5 but before the second advanced from block 4: the set
             // acknowledgement for block 5 never fired, so marshal's floor
             // stays at 4.
-            let plan = SyncPlan::init(&context, "startup-torn-replay-stateful").await;
+            let plan = SyncPlan::init(&context, "startup-torn-stateful").await;
             let (stateful, mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
