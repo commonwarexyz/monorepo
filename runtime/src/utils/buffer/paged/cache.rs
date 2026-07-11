@@ -440,6 +440,7 @@ impl CacheRef {
     /// Drop all cached pages while retaining the backing page buffers for reuse.
     ///
     /// Call only when no reads are in flight for this cache.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn clear(&self) {
         self.cache.write().clear();
     }
@@ -539,6 +540,7 @@ impl Cache {
     }
 
     /// Drop all cached pages while retaining backing page buffers for reuse.
+    #[cfg(any(test, feature = "test-utils"))]
     fn clear(&mut self) {
         self.cache.retain(|_, _| false);
         self.page_fetches.clear();
