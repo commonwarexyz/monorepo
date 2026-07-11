@@ -120,10 +120,13 @@
 //! round. A recipient retains a bounded number of forwarded blocks (one per
 //! claimed round), still encoded, and only decodes a candidate once consensus
 //! has independently discovered the same round and leader for the claimed
-//! commitment and a local subscriber is waiting for that commitment. Validation
-//! mirrors the marshal block-fetch path: the block is decoded against the
-//! expected [`Commitment`] and re-encoded to authenticate the coding root,
-//! and a sender whose block fails validation is blocked. Forwarding is
+//! commitment. Validation mirrors the marshal block-fetch path: the block is
+//! decoded against the expected [`Commitment`] and re-encoded to authenticate
+//! the coding root, and a sender whose block fails validation is blocked.
+//! Denial-of-service exposure is bounded: only the route's leader may address
+//! the recipient, at most one candidate is retained per claimed round (and at
+//! most [`Config::max_pending_forwards`] rounds in total, evicting the oldest
+//! first), and candidates are validated one at a time. Forwarding is
 //! best-effort: a dropped or evicted candidate simply falls back to shard
 //! reconstruction.
 //!
@@ -240,8 +243,8 @@ where
     }
 }
 
-/// A route-authorized forwarded block retained in encoded form until local
-/// demand authorizes decoding.
+/// A route-authorized forwarded block retained in encoded form until
+/// consensus state authorizes decoding.
 struct PendingForward<P: PublicKey> {
     /// The authenticated sender, verified against the round's [`ForwardRoute`].
     peer: P,
@@ -349,8 +352,8 @@ where
     /// disable forwarding entirely.
     pub forward_router: R,
 
-    /// Maximum number of forwarded blocks retained while awaiting local
-    /// demand.
+    /// Maximum number of forwarded blocks retained while awaiting matching
+    /// consensus state.
     ///
     /// Retention is keyed by claimed round and each candidate is bounded by
     /// the network's maximum message size, so a Byzantine leader can occupy
@@ -460,7 +463,7 @@ where
     /// Router for proactive full-block forwarding.
     forward_router: R,
 
-    /// Forwarded blocks retained until local demand authorizes decoding,
+    /// Forwarded blocks retained until consensus state authorizes decoding,
     /// keyed by their claimed round.
     ///
     /// Asynchrony can leave several rounds in flight at once (view skew,
@@ -603,9 +606,9 @@ where
 
                 match message {
                     MailboxMessage::Proposed { block, round } => {
-                        // Forward after shard dissemination: the recipient's
-                        // vote is gated on its assigned shard, which shares a
-                        // network queue with the much larger full block.
+                        // Disseminate shards before forwarding: every vote is
+                        // gated on an assigned shard, so shards are the
+                        // latency-critical payload.
                         let forward = block.clone();
                         self.broadcast_shards(&mut sender, round, block);
                         self.forward_proposal(&mut sender, round, &forward);
@@ -651,7 +654,6 @@ where
                             BlockSubscriptionKey::Commitment(commitment),
                             response,
                         );
-                        self.try_decode_forwards(&mut forward_decodes);
                     }
                     MailboxMessage::SubscribeByDigest { digest, response } => {
                         self.handle_block_subscription(
@@ -704,10 +706,13 @@ where
             return;
         }
         let forwarded = ForwardedBlock::new(round, block);
+        // Send at low priority: the whole-block frame can be multiple MB and
+        // must not head-of-line block votes, certificates, or shards sharing
+        // the connection's high-priority queue.
         let sent = sender.send(
             Recipients::One(route.recipient),
             Message::Forwarded(forwarded),
-            true,
+            false,
         );
         if !sent.is_empty() {
             self.metrics.blocks_forwarded_total.inc();
@@ -718,8 +723,8 @@ where
     ///
     /// Only the round's route-authorized leader may address this node, and
     /// candidates are retained in encoded form. Decoding is deferred to
-    /// [`Self::try_decode_forwards`], which requires independent local
-    /// demand.
+    /// [`Self::try_decode_forwards`], which requires independently
+    /// discovered consensus state.
     fn handle_forwarded_block(
         &mut self,
         peer: P,
@@ -788,9 +793,8 @@ where
         self.try_decode_forwards(decodes);
     }
 
-    /// Decodes a retained forwarded block once every independent expectation
-    /// holds: an open local subscription for the commitment and consensus
-    /// state whose round and leader match the candidate.
+    /// Decodes a retained forwarded block once consensus state whose round
+    /// and leader match the candidate exists for the claimed commitment.
     ///
     /// Requiring consensus-discovered state means a claimed header is never
     /// its own authority, and a decode failure is attributable to the sender.
@@ -807,13 +811,10 @@ where
             .rev()
             .find_map(|(round, pending)| {
                 let commitment = pending.block.commitment();
-                let subscribed = self
-                    .block_subscriptions
-                    .contains_key(&BlockSubscriptionKey::Commitment(commitment));
                 let expected = self.state.get(&commitment).is_some_and(|state| {
                     state.round() == *round && state.leader() == Some(&pending.peer)
                 });
-                (subscribed && expected).then_some(*round)
+                expected.then_some(*round)
             });
         let Some(round) = claimable else {
             return;
@@ -1503,7 +1504,8 @@ where
             return;
         };
 
-        // Forwarded blocks for pruned rounds can no longer be requested.
+        // Forwarded blocks for pruned rounds can no longer match live
+        // consensus state, so they can never be decoded.
         self.pending_forwards
             .retain(|pending_round, _| *pending_round > round);
 
@@ -2166,6 +2168,24 @@ mod tests {
         assert!(is_blocked, "expected {blocker} to have blocked {blocked}");
     }
 
+    /// Sums every sample of the named counter across all engines in the
+    /// runtime's encoded metrics. Sample names carry each engine's context
+    /// prefix, so they are matched by substring.
+    fn sum_counter(metrics: &str, name: &str) -> u64 {
+        metrics
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| {
+                let (sample, value) = line.rsplit_once(' ')?;
+                let sample_name = sample.split_once('{').map_or(sample, |(metric, _)| metric);
+                sample_name
+                    .contains(name)
+                    .then(|| value.parse::<u64>().ok())?
+            })
+            .sum()
+    }
+
     /// A participant in the test network with its engine mailbox and blocker.
     struct Peer<S: CodingScheme = C> {
         /// The peer's public key.
@@ -2490,8 +2510,8 @@ mod tests {
                         .await;
 
                     // Receiving a full block is only a prefetch. It must remain
-                    // encoded and invisible until consensus supplies the exact
-                    // commitment and a local caller requests it.
+                    // encoded and invisible until consensus independently
+                    // supplies the exact commitment, round, and leader.
                     assert!(peers[1].mailbox.get(commitment).await.is_none());
                     peers[1]
                         .mailbox
@@ -2532,6 +2552,68 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_forwarded_full_block_decoded_on_discovery_without_subscription() {
+        let fixture = Fixture::<C> {
+            num_peers: 4,
+            ..Default::default()
+        };
+        let (leader, recipient) = route_keys(fixture.num_peers);
+        let router = static_router(leader.clone(), recipient);
+
+        fixture.start_with_router(
+            router,
+            move |config, context, _, mut peers, _, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let recipient_key = peers[1].public_key.clone();
+
+                // Retain the candidate before any subscriber exists: deferred
+                // verification (which opens block subscriptions) typically
+                // starts after the forward has already arrived, so decoding
+                // must not wait for one.
+                let forwarded =
+                    Message::<C, H>::Forwarded(ForwardedBlock::new(round, &coded_block));
+                peers[0]
+                    .sender
+                    .send(Recipients::One(recipient_key), forwarded.encode(), true);
+                context.sleep(config.link.latency * 2).await;
+
+                // The candidate stays encoded and invisible until consensus
+                // discovers the commitment.
+                assert!(peers[1].mailbox.get(commitment).await.is_none());
+                assert_eq!(
+                    sum_counter(&context.encode(), "forwarded_blocks_accepted_total"),
+                    0
+                );
+
+                // Discovery alone authorizes the decode.
+                peers[1]
+                    .mailbox
+                    .discovered(commitment, leader.clone(), round);
+
+                let mut cached = None;
+                for _ in 0..50 {
+                    if let Some(block) = peers[1].mailbox.get(commitment).await {
+                        cached = Some(block);
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(100)).await;
+                }
+                let cached = cached.expect("forwarded block was not cached after discovery");
+                assert_eq!(cached.commitment(), commitment);
+                assert_eq!(cached.inner(), coded_block.inner());
+                assert!(cached.shard(0).is_none());
+                assert_eq!(
+                    sum_counter(&context.encode(), "forwarded_blocks_accepted_total"),
+                    1
+                );
+            },
+        );
+    }
+
+    #[test_traced]
     fn test_forwarded_full_block_requires_route_leader() {
         let fixture = Fixture::<C> {
             num_peers: 4,
@@ -2549,16 +2631,9 @@ mod tests {
                 let round = Round::new(Epoch::zero(), View::new(1));
                 let recipient_key = peers[1].public_key.clone();
 
-                peers[1]
-                    .mailbox
-                    .discovered(commitment, leader.clone(), round);
-                let mut block = peers[1].mailbox.subscribe(commitment);
-                let mut assigned = peers[1]
-                    .mailbox
-                    .subscribe_assigned_shard_verified(commitment);
-
                 // A non-leader cannot occupy the speculative slot even with a
-                // correctly encoded block and an otherwise valid route.
+                // correctly encoded block and an otherwise valid route. The
+                // violation is attributable before any consensus state exists.
                 let unauthorized =
                     Message::<C, H>::Forwarded(ForwardedBlock::new(round, &coded_block));
                 peers[2].sender.send(
@@ -2568,8 +2643,17 @@ mod tests {
                 );
                 context.sleep(config.link.latency * 2).await;
                 assert_blocked(&oracle, &peers[1].public_key, &peers[2].public_key).await;
-                assert!(matches!(block.try_recv(), Err(TryRecvError::Empty)));
+                assert!(peers[1].mailbox.get(commitment).await.is_none());
 
+                // The route leader's forward is accepted once consensus
+                // discovers the commitment.
+                peers[1]
+                    .mailbox
+                    .discovered(commitment, leader.clone(), round);
+                let block = peers[1].mailbox.subscribe(commitment);
+                let mut assigned = peers[1]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
                 let authorized =
                     Message::<C, H>::Forwarded(ForwardedBlock::new(round, &coded_block));
                 peers[0]
@@ -2720,11 +2804,11 @@ mod tests {
                 let round = Round::new(Epoch::zero(), View::new(1));
                 let recipient_key = peers[1].public_key.clone();
 
-                // Register demand so the candidate is decoded on arrival.
+                // Discovered state alone authorizes decoding the candidate on
+                // arrival; no local subscriber is needed.
                 peers[1]
                     .mailbox
                     .discovered(commitment, leader.clone(), round);
-                let mut subscription = peers[1].mailbox.subscribe(commitment);
 
                 // Corrupt the block body while leaving the claimed header
                 // intact, so the candidate passes route authorization but
@@ -2741,7 +2825,11 @@ mod tests {
                     .sleep(config.link.latency * 2 + Duration::from_millis(100))
                     .await;
                 assert_blocked(&oracle, &peers[1].public_key, &peers[0].public_key).await;
-                assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+                assert!(peers[1].mailbox.get(commitment).await.is_none());
+                assert_eq!(
+                    sum_counter(&context.encode(), "forwarded_blocks_accepted_total"),
+                    0
+                );
             },
         );
     }

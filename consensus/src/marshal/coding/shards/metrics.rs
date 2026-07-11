@@ -32,7 +32,7 @@ pub struct ShardMetrics<P: PublicKey> {
     pub blocks_forwarded_total: Counter,
     /// Total number of route-authorized forwarded blocks received.
     pub forwarded_blocks_received_total: Counter,
-    /// Total number of forwarded blocks evicted before being requested.
+    /// Total number of forwarded blocks evicted before being decoded.
     pub forwarded_blocks_evicted_total: Counter,
     /// Total number of forwarded blocks validated and cached.
     pub forwarded_blocks_accepted_total: Counter,
@@ -74,7 +74,7 @@ impl<P: PublicKey> ShardMetrics<P> {
         );
         let forwarded_blocks_evicted_total = context.counter(
             "forwarded_blocks_evicted_total",
-            "Total number of forwarded blocks evicted before being requested",
+            "Total number of forwarded blocks evicted before being decoded",
         );
         let forwarded_blocks_accepted_total = context.counter(
             "forwarded_blocks_accepted_total",
