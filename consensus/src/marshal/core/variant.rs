@@ -17,7 +17,7 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, marker::PhantomData};
+use std::{future::Future, marker::PhantomData, sync::Arc};
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
@@ -25,18 +25,16 @@ pub trait Variant: Clone + Send + Sync + 'static {
     ///
     /// Must be convertible to `StoredBlock` via `Into` for archival.
     type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
-        + Into<Self::StoredBlock>
-        + Clone;
+        + Into<Self::StoredBlock>;
 
     /// The application block type.
-    type ApplicationBlock: Block + Clone;
+    type ApplicationBlock: Block;
 
     /// The type of block stored in the archive.
     ///
     /// Must be convertible back to the working block type via `Into`.
     type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
         + Into<Self::Block>
-        + Clone
         + Codec<Cfg = <Self::ApplicationBlock as Read>::Cfg>;
 
     /// The [`Digest`] type used by consensus.
@@ -86,6 +84,9 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// `ApplicationBlock` (e.g., `CodedBlock<B, C, H> -> B`).
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock;
 
+    /// Converts a shared working block to a shared application block.
+    fn into_inner_shared(block: Arc<Self::Block>) -> Arc<Self::ApplicationBlock>;
+
     /// Reconstructs a working block from an application block and trusted payload.
     fn from_application_block(
         block: Self::ApplicationBlock,
@@ -116,7 +117,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn find_by_digest(
         &self,
         digest: <V::Block as Digestible>::Digest,
-    ) -> impl Future<Output = Option<V::Block>> + Send;
+    ) -> impl Future<Output = Option<Arc<V::Block>>> + Send;
 
     /// Attempt to find a block by its commitment.
     ///
@@ -129,7 +130,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn find_by_commitment(
         &self,
         commitment: V::Commitment,
-    ) -> impl Future<Output = Option<V::Block>> + Send;
+    ) -> impl Future<Output = Option<Arc<V::Block>>> + Send;
 
     /// Subscribe to a block's availability by its digest.
     ///
@@ -141,7 +142,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn subscribe_by_digest(
         &self,
         digest: <V::Block as Digestible>::Digest,
-    ) -> Option<oneshot::Receiver<V::Block>>;
+    ) -> Option<oneshot::Receiver<Arc<V::Block>>>;
 
     /// Subscribe to a block's availability by its commitment.
     ///
@@ -156,7 +157,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn subscribe_by_commitment(
         &self,
         commitment: V::Commitment,
-    ) -> Option<oneshot::Receiver<V::Block>>;
+    ) -> Option<oneshot::Receiver<Arc<V::Block>>>;
 
     /// Notify the buffer that a block has been finalized.
     ///
@@ -195,22 +196,25 @@ where
 {
     type PublicKey = P;
 
-    async fn find_by_digest(&self, _: <V::Block as Digestible>::Digest) -> Option<V::Block> {
+    async fn find_by_digest(&self, _: <V::Block as Digestible>::Digest) -> Option<Arc<V::Block>> {
         None
     }
 
-    async fn find_by_commitment(&self, _: V::Commitment) -> Option<V::Block> {
+    async fn find_by_commitment(&self, _: V::Commitment) -> Option<Arc<V::Block>> {
         None
     }
 
     fn subscribe_by_digest(
         &self,
         _: <V::Block as Digestible>::Digest,
-    ) -> Option<oneshot::Receiver<V::Block>> {
+    ) -> Option<oneshot::Receiver<Arc<V::Block>>> {
         None
     }
 
-    fn subscribe_by_commitment(&self, _: V::Commitment) -> Option<oneshot::Receiver<V::Block>> {
+    fn subscribe_by_commitment(
+        &self,
+        _: V::Commitment,
+    ) -> Option<oneshot::Receiver<Arc<V::Block>>> {
         None
     }
 

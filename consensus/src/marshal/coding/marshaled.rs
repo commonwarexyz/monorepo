@@ -317,7 +317,7 @@ where
         &mut self,
         consensus_context: Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
         commitment: Commitment,
-        prefetched_block: Option<CodedBlock<B, C, H>>,
+        prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let marshal = self.marshal.clone();
@@ -387,7 +387,7 @@ where
                 // candidate availability/recovery, not a validity decision. This
                 // task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
-                let store = stage.store(&marshal, round, block.clone());
+                let store = stage.store(&marshal, round, Arc::clone(&block));
                 let verify = async {
                     // Await the parent fetch we started above.
                     let parent = select! {
@@ -409,8 +409,8 @@ where
 
                     if let Err(err) = validate_block::<H, _, _>(
                         &epocher,
-                        &block,
-                        &parent,
+                        block.as_ref(),
+                        parent.as_ref(),
                         &consensus_context,
                         commitment,
                         parent_commitment,
@@ -432,7 +432,7 @@ where
 
                     let ancestry_stream = marshal.ancestor_stream(
                         Arc::new(runtime_context.child("ancestor_stream")),
-                        [block.clone(), parent],
+                        [block.inner_shared(), parent.inner_shared()],
                         ancestor_fetch_duration,
                     );
                     let validity_request = application
@@ -811,7 +811,7 @@ where
 
                 let ancestor_stream = marshal.ancestor_stream(
                     Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent],
+                    [parent.inner_shared()],
                     ancestor_fetch_duration,
                 );
                 let build_request = application

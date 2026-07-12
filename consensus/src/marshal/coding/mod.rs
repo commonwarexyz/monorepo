@@ -130,8 +130,8 @@ mod tests {
     /// A coding buffer that records subscriptions and never resolves them.
     #[derive(Clone, Default)]
     struct RecordingCodingBuffer {
-        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
-        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
+        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
+        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         sends: Arc<Mutex<Vec<CodingSendRecord>>>,
     }
 
@@ -148,15 +148,18 @@ mod tests {
     impl core::Buffer<TestCodingVariant> for RecordingCodingBuffer {
         type PublicKey = K;
 
-        async fn find_by_digest(&self, _digest: D) -> Option<TestCodedBlock> {
+        async fn find_by_digest(&self, _digest: D) -> Option<Arc<TestCodedBlock>> {
             None
         }
 
-        async fn find_by_commitment(&self, _commitment: Commitment) -> Option<TestCodedBlock> {
+        async fn find_by_commitment(&self, _commitment: Commitment) -> Option<Arc<TestCodedBlock>> {
             None
         }
 
-        fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<TestCodedBlock>> {
+        fn subscribe_by_digest(
+            &self,
+            _digest: D,
+        ) -> Option<oneshot::Receiver<Arc<TestCodedBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.digest_subscriptions.lock().push(sender);
             Some(receiver)
@@ -165,7 +168,7 @@ mod tests {
         fn subscribe_by_commitment(
             &self,
             _commitment: Commitment,
-        ) -> Option<oneshot::Receiver<TestCodedBlock>> {
+        ) -> Option<oneshot::Receiver<Arc<TestCodedBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)

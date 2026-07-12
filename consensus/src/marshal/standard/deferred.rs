@@ -239,8 +239,8 @@ where
     async fn deferred_verify(
         &mut self,
         context: <Self as Automaton>::Context,
-        block: B,
-        parent_request: oneshot::Receiver<B>,
+        block: Arc<B>,
+        parent_request: oneshot::Receiver<Arc<B>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let marshal = self.marshal.clone();
@@ -267,12 +267,12 @@ where
                 // candidate availability/recovery, not a validity decision. This
                 // task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
-                let store = stage.store(&marshal, round, block.clone());
+                let store = stage.store(&marshal, round, Arc::clone(&block));
                 let verify = async {
                     // Validate the parent we already started fetching.
                     let parent = match await_and_validate_parent(
                         context.parent.1,
-                        &block,
+                        block.as_ref(),
                         parent_request,
                         &mut tx,
                     )
@@ -285,7 +285,7 @@ where
                     run_app_verify(
                         runtime_context,
                         context,
-                        &block,
+                        Arc::clone(&block),
                         parent,
                         &mut application,
                         &marshal,

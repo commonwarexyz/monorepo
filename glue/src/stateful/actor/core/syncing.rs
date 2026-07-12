@@ -196,12 +196,12 @@ where
     /// Processes a finalized block during state sync.
     async fn process_finalized(
         &mut self,
-        block: A::Block,
+        block: Arc<A::Block>,
         acknowledgement: Exact,
-    ) -> Option<FinalizedHandoff<A::Block>> {
+    ) -> Option<FinalizedHandoff<Arc<A::Block>>> {
         if self.artifact.is_none() {
-            let anchor = Anchor::from(&block);
-            let targets = A::sync_targets(&block);
+            let anchor = Anchor::from(block.as_ref());
+            let targets = A::sync_targets(block.as_ref());
 
             // Do not acknowledge marshal until the live sync session has recorded this
             // block's tip update. If we ack after merely enqueueing it, sync can still
@@ -239,7 +239,7 @@ where
 
     /// Transitions to [`Processing`] state once the database set has converged
     /// on the state sync [`Anchor`].
-    async fn transition(mut self, handoff: Option<FinalizedHandoff<A::Block>>) {
+    async fn transition(mut self, handoff: Option<FinalizedHandoff<Arc<A::Block>>>) {
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;
 
@@ -262,13 +262,14 @@ where
             match handoff {
                 FinalizedHandoff::Reflected(block, acknowledgement) => {
                     processor
-                        .notify_finalized(self.context.as_present(), &block)
+                        .notify_finalized(self.context.as_present(), block.as_ref())
                         .await;
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let (status, prune) =
-                        processor.finalize(self.context.as_present(), block).await;
+                    let (status, prune) = processor
+                        .finalize(self.context.as_present(), block.as_ref())
+                        .await;
                     if let Some(prune) = prune {
                         prune.run(processor.databases_mut(), &self.marshal).await;
                     }
@@ -475,7 +476,7 @@ mod tests {
 
             let action = harness
                 .syncing
-                .process_finalized(TestBlock::new(7, 9), acknowledgement)
+                .process_finalized(Arc::new(TestBlock::new(7, 9)), acknowledgement)
                 .await;
 
             assert!(poll!(&mut waiter).is_pending());
@@ -493,7 +494,7 @@ mod tests {
 
             let action = harness
                 .syncing
-                .process_finalized(TestBlock::new(8, 10), acknowledgement)
+                .process_finalized(Arc::new(TestBlock::new(8, 10)), acknowledgement)
                 .await;
 
             assert!(waiter.now_or_never().is_none());
@@ -514,7 +515,7 @@ mod tests {
             let (acknowledgement, _waiter) = Exact::handle();
             let _ = harness
                 .syncing
-                .process_finalized(TestBlock::new(7, 10), acknowledgement)
+                .process_finalized(Arc::new(TestBlock::new(7, 10)), acknowledgement)
                 .await;
         });
     }
@@ -527,7 +528,7 @@ mod tests {
             let (acknowledgement, _waiter) = Exact::handle();
             let _ = harness
                 .syncing
-                .process_finalized(TestBlock::new(9, 10), acknowledgement)
+                .process_finalized(Arc::new(TestBlock::new(9, 10)), acknowledgement)
                 .await;
         });
     }
@@ -541,7 +542,7 @@ mod tests {
             let (acknowledgement, mut waiter) = Exact::handle();
 
             let transition = harness.syncing.transition(Some(FinalizedHandoff::Apply(
-                TestBlock::new(8, 10),
+                Arc::new(TestBlock::new(8, 10)),
                 acknowledgement,
             )));
             pin_mut!(transition);

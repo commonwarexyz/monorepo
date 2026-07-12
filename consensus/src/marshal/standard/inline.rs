@@ -509,13 +509,13 @@ where
                 // verdict (a notarization implies f+1 honest validators already
                 // verified), and the store still completes through the join, so
                 // the fallback rides the verified write instead of re-persisting.
-                let store = marshal.verified(round, block.clone());
+                let store = marshal.verified(round, Arc::clone(&block));
                 let verify_then_vote = async {
                     // Non-reproposal path: validate the parent we already started
                     // fetching.
                     let parent = match await_and_validate_parent(
                         context.parent.1,
-                        &block,
+                        block.as_ref(),
                         parent_request,
                         &mut tx,
                     )
@@ -531,7 +531,7 @@ where
                     let valid = run_app_verify(
                         runtime_context,
                         context,
-                        &block,
+                        Arc::clone(&block),
                         parent,
                         &mut application,
                         &marshal,

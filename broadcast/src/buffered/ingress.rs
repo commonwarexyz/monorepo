@@ -7,7 +7,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 /// Message types that can be sent to the `Mailbox`
 pub(crate) enum Message<P: PublicKey, M: Digestible> {
@@ -24,13 +24,13 @@ pub(crate) enum Message<P: PublicKey, M: Digestible> {
     /// by dropping the responder.
     Subscribe {
         digest: M::Digest,
-        responder: oneshot::Sender<M>,
+        responder: oneshot::Sender<Arc<M>>,
     },
 
     /// Get a message by digest.
     Get {
         digest: M::Digest,
-        responder: oneshot::Sender<Option<M>>,
+        responder: oneshot::Sender<Option<Arc<M>>>,
     },
 }
 
@@ -104,7 +104,7 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
     /// by dropping the responder.
     ///
     /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
-    pub fn subscribe(&self, digest: M::Digest) -> oneshot::Receiver<M> {
+    pub fn subscribe(&self, digest: M::Digest) -> oneshot::Receiver<Arc<M>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self
             .sender
@@ -119,7 +119,7 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
     /// by dropping the responder.
     ///
     /// If the engine has shut down, this is a no-op.
-    pub fn subscribe_prepared(&self, digest: M::Digest, responder: oneshot::Sender<M>) {
+    pub fn subscribe_prepared(&self, digest: M::Digest, responder: oneshot::Sender<Arc<M>>) {
         let _ = self
             .sender
             .enqueue(Message::Subscribe { digest, responder });
@@ -128,7 +128,7 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
     /// Get a message by digest.
     ///
     /// If the engine has shut down, returns `None`.
-    pub async fn get(&self, digest: M::Digest) -> Option<M> {
+    pub async fn get(&self, digest: M::Digest) -> Option<Arc<M>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Get { digest, responder });
         receiver.await.unwrap_or_default()

@@ -16,13 +16,16 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 use tracing::{debug, error, trace, warn};
 
 /// A responder waiting for a message.
 struct Waiter<M> {
     /// The responder to send the message to.
-    responder: oneshot::Sender<M>,
+    responder: oneshot::Sender<Arc<M>>,
 }
 
 /// Result of buffering an incoming or locally sent digest (inserted, duplicate, or ineligible).
@@ -82,7 +85,7 @@ where
     // Cache
     ////////////////////////////////////////
     /// All cached messages by digest.
-    items: BTreeMap<M::Digest, M>,
+    items: BTreeMap<M::Digest, Arc<M>>,
 
     /// A LRU cache of the latest received digests from each peer.
     ///
@@ -250,7 +253,7 @@ where
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    fn handle_subscribe(&mut self, digest: M::Digest, responder: oneshot::Sender<M>) {
+    fn handle_subscribe(&mut self, digest: M::Digest, responder: oneshot::Sender<Arc<M>>) {
         // Check if the message is already in the cache
         if let Some(item) = self.items.get(&digest).cloned() {
             self.respond_subscribe(responder, item);
@@ -265,7 +268,7 @@ where
     }
 
     /// Handles a `get` request from the application.
-    fn handle_get(&mut self, digest: M::Digest, responder: oneshot::Sender<Option<M>>) {
+    fn handle_get(&mut self, digest: M::Digest, responder: oneshot::Sender<Option<Arc<M>>>) {
         let item = self.items.get(&digest).cloned();
         self.respond_get(responder, item);
     }
@@ -297,13 +300,25 @@ where
     /// Waiters are notified even when a sender is not eligible to keep a
     /// buffered cache entry resident.
     fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> InsertMessageResult {
-        // Send the message to the waiters, if any
         if let Some(waiters) = self.waiters.remove(&digest) {
+            let msg = Arc::new(msg);
             for waiter in waiters {
-                self.respond_subscribe(waiter.responder, msg.clone());
+                self.respond_subscribe(waiter.responder, Arc::clone(&msg));
             }
+            return self.insert_cache_entry(peer, digest, || Arc::clone(&msg));
         }
 
+        self.insert_cache_entry(peer, digest, || Arc::new(msg))
+    }
+
+    /// Records a peer's reference to a message, constructing the shared value
+    /// only when this is the first reference retained by the cache.
+    fn insert_cache_entry(
+        &mut self,
+        peer: P,
+        digest: M::Digest,
+        msg: impl FnOnce() -> Arc<M>,
+    ) -> InsertMessageResult {
         // Only peers listed in `latest.primary` may buffer
         if self.latest_primary_peers.position(&peer).is_none() {
             return InsertMessageResult::Ineligible;
@@ -333,8 +348,9 @@ where
             .entry(digest)
             .and_modify(|c| *c = c.checked_add(1).unwrap())
             .or_insert(1);
-        if *count == 1 {
-            let existing = self.items.insert(digest, msg);
+        let first = *count == 1;
+        if first {
+            let existing = self.items.insert(digest, msg());
             assert!(existing.is_none());
         }
 
@@ -385,7 +401,7 @@ where
 
     /// Respond to a waiter with a message.
     /// Increments the appropriate metric based on the result.
-    fn respond_subscribe(&mut self, responder: oneshot::Sender<M>, msg: M) {
+    fn respond_subscribe(&mut self, responder: oneshot::Sender<Arc<M>>, msg: Arc<M>) {
         self.metrics.subscribe.inc(if responder.send_lossy(msg) {
             Status::Success
         } else {
@@ -395,7 +411,7 @@ where
 
     /// Respond to a get request.
     /// Increments the appropriate metric based on the result.
-    fn respond_get(&mut self, responder: oneshot::Sender<Option<M>>, msg: Option<M>) {
+    fn respond_get(&mut self, responder: oneshot::Sender<Option<Arc<M>>>, msg: Option<Arc<M>>) {
         let found = msg.is_some();
         self.metrics.get.inc(if responder.send_lossy(msg) {
             if found {

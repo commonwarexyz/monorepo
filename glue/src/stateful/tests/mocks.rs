@@ -186,7 +186,7 @@ impl Application<deterministic::Context> for TestApp {
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         _input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -196,7 +196,7 @@ impl Application<deterministic::Context> for TestApp {
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         None

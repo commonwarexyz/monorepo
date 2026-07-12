@@ -342,12 +342,12 @@ where
             .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
             .await
             .expect("marshal must yield floor block");
-        V::into_inner(block)
+        V::into_inner_shared(block)
     };
 
     ResolvedFloor {
-        anchor: Anchor::from(&floor),
-        targets: A::sync_targets(&floor),
+        anchor: Anchor::from(floor.as_ref()),
+        targets: A::sync_targets(floor.as_ref()),
         marker: FloorMarker::new(floor.height(), finalization.proposal.payload),
     }
 }

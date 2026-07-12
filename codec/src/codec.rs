@@ -2,10 +2,10 @@
 
 use crate::error::Error;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 #[cfg(feature = "std")]
-use std::vec::Vec;
+use std::{sync::Arc, vec::Vec};
 
 /// Trait for types with a known, fixed encoded size.
 ///
@@ -166,6 +166,30 @@ pub trait Write {
         for item in values {
             item.write_bufs(buf);
         }
+    }
+}
+
+impl<T: EncodeSize + ?Sized> EncodeSize for Arc<T> {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        self.as_ref().encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.as_ref().encode_inline_size()
+    }
+}
+
+impl<T: Write + ?Sized> Write for Arc<T> {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        self.as_ref().write(buf);
+    }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.as_ref().write_bufs(buf);
     }
 }
 

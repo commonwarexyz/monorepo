@@ -3205,8 +3205,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingBuffer {
         blocks: Arc<Mutex<Vec<B>>>,
-        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<B>>>>,
-        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<B>>>>,
+        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
+        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
         sends: Arc<Mutex<Vec<BufferSend>>>,
     }
 
@@ -3231,29 +3231,31 @@ mod tests {
     impl crate::marshal::core::Buffer<Standard<B>> for RecordingBuffer {
         type PublicKey = PublicKey;
 
-        async fn find_by_digest(&self, digest: D) -> Option<B> {
+        async fn find_by_digest(&self, digest: D) -> Option<Arc<B>> {
             self.blocks
                 .lock()
                 .iter()
                 .find(|block| block.digest() == digest)
                 .cloned()
+                .map(Arc::new)
         }
 
-        async fn find_by_commitment(&self, commitment: D) -> Option<B> {
+        async fn find_by_commitment(&self, commitment: D) -> Option<Arc<B>> {
             self.blocks
                 .lock()
                 .iter()
                 .find(|block| block.digest() == commitment)
                 .cloned()
+                .map(Arc::new)
         }
 
-        fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<B>> {
+        fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<Arc<B>>> {
             let (sender, receiver) = oneshot::channel();
             self.digest_subscriptions.lock().push(sender);
             Some(receiver)
         }
 
-        fn subscribe_by_commitment(&self, _commitment: D) -> Option<oneshot::Receiver<B>> {
+        fn subscribe_by_commitment(&self, _commitment: D) -> Option<oneshot::Receiver<Arc<B>>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)
