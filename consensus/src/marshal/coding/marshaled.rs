@@ -104,7 +104,6 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher,
 };
 use commonware_macros::select;
-use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     telemetry::{
@@ -663,10 +662,11 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. Shard fan-out for a freshly built
-    /// block is dispatched to the shards engine as soon as the block is encoded, concurrently
-    /// with the block's persistence: the persist's durable sync only gates the leader's own
-    /// finalize vote (via the certification gate registered below), not dissemination. The
+    /// contain the proposed block's commitment when ready. The propose path owns shard
+    /// dissemination: every branch (fresh build, leader recovery, and epoch-boundary
+    /// re-proposal) hands the coded block to the shards engine as soon as it is available,
+    /// concurrently with the block's persistence — the persist's durable sync only gates the
+    /// leader's own finalize vote (via the certification gate registered below). The
     /// block's persistence is enqueued before the commitment is delivered, and the resulting
     /// sync handle is awaited only at certification so it overlaps consensus voting. The
     /// commitment does not imply durability on its own;
@@ -745,6 +745,7 @@ where
                     }
                     let commitment = block.commitment();
                     let round = consensus_context.round;
+                    shards.proposed(round, block);
                     let success = tx.send_lossy(commitment);
                     debug!(
                         ?round,
@@ -801,6 +802,7 @@ where
                     let commitment = parent.commitment();
                     let round = consensus_context.round;
 
+                    shards.proposed(round, parent.clone());
                     let persist = marshal.verified_deferred(round, parent);
                     gates
                         .persist_and_defer(
@@ -861,18 +863,15 @@ where
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
 
-                // Dispatch shard fan-out directly to the shards engine before
-                // enqueueing the persist. The persist's durable sync only gates
-                // the leader's own finalize vote (via the certification gate
-                // registered in `persist_and_defer`), so dissemination must not
-                // wait on it — nor on the voter round trip that re-dispatches
-                // this block via `Relay::broadcast` -> `Forward` behind the
-                // marshal actor's persist handling (the shards engine
-                // deduplicates that second dispatch). Broadcasting shards casts
-                // no vote: the leader's proposal-carrying notarize vote is
-                // still journaled and synced by the voter before it reaches
-                // the network, and a post-crash rebuild for this round is
-                // prevented by the voter's journal, not by shard timing.
+                // Dispatch shard fan-out before enqueueing the persist. The
+                // persist's durable sync only gates the leader's own finalize
+                // vote (via the certification gate registered in
+                // `persist_and_defer`), so dissemination must not wait on it.
+                // Broadcasting shards casts no vote: the leader's
+                // proposal-carrying notarize vote is still journaled and
+                // synced by the voter before it reaches the network, and a
+                // post-crash rebuild for this round is prevented by the
+                // voter's journal, not by shard timing.
                 shards.proposed(round, coded_block.clone());
 
                 let persist = marshal.proposed_deferred(round, coded_block);
@@ -1138,22 +1137,16 @@ where
     type PublicKey = <Z::Scheme as Verifier>::PublicKey;
     type Plan = Plan<Self::PublicKey>;
 
-    fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
-        // Coding variant does not support targeted forwarding;
-        // peers reconstruct blocks from erasure-coded shards.
-        //
-        // For a freshly built proposal this re-dispatches a block the propose
-        // path already handed to the shards engine (which deduplicates the
-        // repeat broadcast). It remains load-bearing when propose did not
-        // dispatch directly: leader recovery after a restart (the reused
-        // verified block only reaches the shards engine via this `Forward`)
-        // and epoch-boundary re-proposals.
+    fn broadcast(&mut self, _commitment: Self::Digest, _plan: Self::Plan) -> Feedback {
+        // Dissemination for the coding variant is owned by the propose path:
+        // every branch of `propose` (fresh build, leader recovery, and
+        // epoch-boundary re-proposal) hands the coded block to the shards
+        // engine directly, so there is nothing left to dispatch when
+        // consensus later requests a broadcast. Peers reconstruct blocks from
+        // erasure-coded shards; targeted forwarding is not supported.
         //
         // TODO(#3389): Support checked data forwarding for PhasedScheme.
-        let Plan::Propose { round } = plan else {
-            return Feedback::Ok;
-        };
-        self.marshal.forward(round, commitment, Recipients::All)
+        Feedback::Ok
     }
 }
 

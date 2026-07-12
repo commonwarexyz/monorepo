@@ -3063,6 +3063,17 @@ mod tests {
                 commitment, commitment_a,
                 "propose must reuse the block marshal already persisted for this round"
             );
+
+            // The propose path owns dissemination for every branch:
+            // `Relay::broadcast` is a no-op for the coding variant, so the
+            // recovered block can only reach the shards engine if the
+            // recovery branch dispatched it (enqueued ahead of the
+            // commitment's publication on the engine's in-order mailbox).
+            let cached = shards.get(commitment_a).await;
+            assert!(
+                cached.is_some(),
+                "leader recovery must dispatch the reused block to the shards engine"
+            );
         });
     }
 

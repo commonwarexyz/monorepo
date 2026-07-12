@@ -917,9 +917,9 @@ where
 
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
     ///
-    /// A block already cached at the same round is not re-sent (the propose
-    /// path and the voter-driven `Forward` both dispatch the same local
-    /// proposal); only its local subscriber notifications are repeated.
+    /// Idempotent per `(commitment, round)`: a block already cached at the
+    /// same round has had its shards sent, so a duplicate dispatch repeats
+    /// only the local subscriber notifications.
     ///
     /// - Participants receive the shard matching their participant index.
     /// - Non-participants in aggregate membership receive the leader's shard.
@@ -936,14 +936,11 @@ where
     ) {
         let commitment = block.commitment();
 
-        // A local proposal is dispatched twice: directly by the propose path
-        // (so fan-out starts before the coded-block persist) and again by the
-        // voter's `Relay::broadcast` -> `Forward` once consensus accepts the
-        // proposal. A block already cached at the same round has had its
-        // shards sent, so repeat only the local notification side effects
-        // rather than doubling every send. A cached commitment at a different
-        // round is an epoch-boundary re-proposal and must rebroadcast under
-        // the new round.
+        // A block already cached at the same round has had its shards sent:
+        // repeat only the local notification side effects rather than
+        // doubling every send. A cached commitment at a different round is an
+        // epoch-boundary re-proposal and must rebroadcast under the new
+        // round.
         if self
             .reconstructed_blocks
             .get(&commitment)
