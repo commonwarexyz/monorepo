@@ -1360,12 +1360,8 @@ where
         } = delivery;
         match key {
             Key::Block(commitment) => {
-                let Ok(block) = V::decode_block(
-                    value.as_ref(),
-                    &self.block_codec_config,
-                    commitment,
-                    &self.strategy,
-                ) else {
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return false;
                 };
@@ -1514,9 +1510,8 @@ where
                     response.send_lossy(false);
                     return false;
                 }
-                let Ok(block) =
-                    V::decode_block(value, &self.block_codec_config, commitment, &self.strategy)
-                else {
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return false;
                 };

@@ -12,12 +12,10 @@ use crate::{
     types::Round,
     Block,
 };
-use bytes::Buf;
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{Error as CodecError, Read};
+use commonware_codec::Read;
 use commonware_cryptography::{certificate::Scheme, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::future::Future;
 
@@ -62,13 +60,11 @@ where
         true
     }
 
-    fn decode_block(
-        buf: impl Buf,
+    fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         _expected: Self::Commitment,
-        _strategy: &impl Strategy,
-    ) -> Result<Self::Block, CodecError> {
-        Self::Block::decode_cfg(buf, block_cfg)
+    ) -> <Self::Block as Read>::Cfg {
+        block_cfg.clone()
     }
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {

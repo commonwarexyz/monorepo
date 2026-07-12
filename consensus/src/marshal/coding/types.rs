@@ -319,13 +319,12 @@ impl<B: Block> Clone for CodedBlockCfg<B> {
     }
 }
 
-impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
-    /// Reads a block from `buf` and validates it against `cfg.expected`,
-    /// re-encoding with `strategy` to recompute the coding commitment.
-    pub(crate) fn read_validated(
+impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
+    type Cfg = CodedBlockCfg<B>;
+
+    fn read_cfg(
         buf: &mut impl bytes::Buf,
-        cfg: &CodedBlockCfg<B>,
-        strategy: &impl Strategy,
+        cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, &cfg.inner)?;
         let config = CodingConfig::read(buf)?;
@@ -346,9 +345,10 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
-        let (commitment, shards) = C::encode(&config, buf.as_slice(), strategy).map_err(|_| {
-            commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
-        })?;
+        let (commitment, shards) =
+            C::encode(&config, buf.as_slice(), &Sequential).map_err(|_| {
+                commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
+            })?;
 
         Ok(Self {
             inner: Arc::new(inner),
@@ -357,17 +357,6 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
             shards: Some(shards.into()),
             _hasher: PhantomData,
         })
-    }
-}
-
-impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
-    type Cfg = CodedBlockCfg<B>;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        Self::read_validated(buf, cfg, &Sequential)
     }
 }
 

@@ -13,11 +13,9 @@
 //! for lookup purposes.
 
 use crate::{simplex::scheme::Scheme, types::Round, Block};
-use bytes::Buf;
-use commonware_codec::{Codec, Error as CodecError, Read};
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, marker::PhantomData};
 
@@ -73,19 +71,14 @@ pub trait Variant: Clone + Send + Sync + 'static {
     where
         S: Scheme<Self::Commitment>;
 
-    /// Decodes a [`Self::Block`] received over the wire, consuming `buf`
-    /// entirely.
+    /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
     ///
-    /// Decoding may bind `expected` so that it rejects blocks that do not
-    /// match the expected commitment, re-encoding with `strategy` where
-    /// validation requires it. Callers must still compare the decoded block's
-    /// commitment against `expected`.
-    fn decode_block(
-        buf: impl Buf,
+    /// The returned configuration may bind `expected_commitment` so that decoding rejects
+    /// blocks that do not match the expected commitment.
+    fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: Self::Commitment,
-        strategy: &impl Strategy,
-    ) -> Result<Self::Block, CodecError>;
+    ) -> <Self::Block as Read>::Cfg;
 
     /// Converts a working block to an application block.
     ///

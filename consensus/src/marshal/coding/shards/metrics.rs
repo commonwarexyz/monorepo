@@ -28,15 +28,6 @@ pub struct ShardMetrics<P: PublicKey> {
     pub blocks_reconstructed_total: Counter,
     /// Total number of block reconstruction failures.
     pub reconstruction_failures_total: Counter,
-    /// Total number of extra shards forwarded to a predicted future leader.
-    pub shards_forwarded_total: Counter,
-    /// Total number of leader-sent foreign-index shards dropped because the
-    /// local router did not recognize their round.
-    ///
-    /// With a total router (one that resolves every round, like a fixed
-    /// round-robin elector), this should never increment: a nonzero value
-    /// indicates a router bug, a router rollout skew, or a Byzantine probe.
-    pub forwarded_shards_unrouted_total: Counter,
 }
 
 impl<P: PublicKey> ShardMetrics<P> {
@@ -65,14 +56,6 @@ impl<P: PublicKey> ShardMetrics<P> {
             "reconstruction_failures_total",
             "Total number of block reconstruction failures",
         );
-        let shards_forwarded_total = context.counter(
-            "shards_forwarded_total",
-            "Total number of extra shards forwarded to a predicted future leader",
-        );
-        let forwarded_shards_unrouted_total = context.counter(
-            "forwarded_shards_unrouted_total",
-            "Total number of leader-sent foreign-index shards dropped for unrecognized rounds",
-        );
 
         Self {
             erasure_decode_duration,
@@ -81,8 +64,6 @@ impl<P: PublicKey> ShardMetrics<P> {
             shards_received,
             blocks_reconstructed_total,
             reconstruction_failures_total,
-            shards_forwarded_total,
-            forwarded_shards_unrouted_total,
         }
     }
 }
