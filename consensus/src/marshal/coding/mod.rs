@@ -2871,13 +2871,13 @@ mod tests {
         });
     }
 
-    /// A freshly built proposal must reach the shards engine directly from
-    /// `propose`, ahead of the coded-block persist and without waiting for
-    /// `Relay::broadcast` (which consensus only invokes after the proposal
-    /// round trip). No `Relay::broadcast` runs in this test, so the block can
-    /// only be in the shards engine if `propose` dispatched it.
+    /// Dissemination waits for consensus: `propose` must NOT hand the built
+    /// block to the shards engine on its own — shards are dispatched only
+    /// when the voter requests a broadcast via `Relay::broadcast`, whose
+    /// forward resolves the block the core actor retained from the propose
+    /// path's persist enqueue.
     #[test_traced("WARN")]
-    fn test_marshaled_propose_dispatches_shards_before_persist() {
+    fn test_marshaled_dissemination_waits_for_relay_broadcast() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture {
@@ -2951,17 +2951,39 @@ mod tests {
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
 
-            // The shards-engine dispatch is enqueued before the commitment is
-            // published, so by the time `propose` resolves the engine's
-            // in-order mailbox already holds the block for fan-out.
+            // `propose` must not dispatch shards on its own: dissemination is
+            // consensus-driven.
             let cached = shards.get(commitment).await;
             assert!(
-                cached.is_some(),
-                "propose must dispatch the built block to the shards engine \
-                 without waiting for Relay::broadcast or the persist"
+                cached.is_none(),
+                "propose must not dispatch the built block to the shards engine \
+                 before consensus requests a broadcast"
             );
 
-            // The direct dispatch must not weaken the durability gate: the
+            // The voter's broadcast request forwards the block retained by
+            // the core actor into the shards engine. The forward crosses two
+            // mailboxes (core actor, then shards engine), so poll for it.
+            let _ = crate::Relay::broadcast(
+                &mut marshaled,
+                commitment,
+                crate::simplex::Plan::Propose {
+                    round: propose_round,
+                },
+            );
+            let mut cached = None;
+            for _ in 0..50 {
+                cached = shards.get(commitment).await;
+                if cached.is_some() {
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                cached.is_some(),
+                "Relay::broadcast must dispatch the proposed block to the shards engine"
+            );
+
+            // The deferred persist must not weaken the durability gate: the
             // leader's certify still awaits the deferred propose sync handle.
             assert!(
                 marshaled
@@ -3064,15 +3086,26 @@ mod tests {
                 "propose must reuse the block marshal already persisted for this round"
             );
 
-            // The propose path owns dissemination for every branch:
-            // `Relay::broadcast` is a no-op for the coding variant, so the
-            // recovered block can only reach the shards engine if the
-            // recovery branch dispatched it (enqueued ahead of the
-            // commitment's publication on the engine's in-order mailbox).
-            let cached = shards.get(commitment_a).await;
+            // Dissemination is consensus-driven for recovery too: the voter's
+            // broadcast request forwards the verified block marshal already
+            // holds into the shards engine. The forward crosses two mailboxes
+            // (core actor, then shards engine), so poll for it.
+            let _ = crate::Relay::broadcast(
+                &mut marshaled,
+                commitment_a,
+                crate::simplex::Plan::Propose { round },
+            );
+            let mut cached = None;
+            for _ in 0..50 {
+                cached = shards.get(commitment_a).await;
+                if cached.is_some() {
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
             assert!(
                 cached.is_some(),
-                "leader recovery must dispatch the reused block to the shards engine"
+                "Relay::broadcast must dispatch the recovered block to the shards engine"
             );
         });
     }
