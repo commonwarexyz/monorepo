@@ -126,6 +126,28 @@ where
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<'a, S, C> arbitrary::Arbitrary<'a> for SyncState<S, C>
+where
+    S: Scheme,
+    S::Certificate: for<'b> arbitrary::Arbitrary<'b>,
+    C: Digest + for<'b> arbitrary::Arbitrary<'b>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(if u.arbitrary::<bool>()? {
+            Self::InProgress {
+                height: u.arbitrary()?,
+                floor: u.arbitrary()?,
+            }
+        } else {
+            Self::Complete {
+                height: u.arbitrary()?,
+                floor: u.arbitrary()?,
+            }
+        })
+    }
+}
+
 /// The result of a state sync operation.
 pub struct SyncResult<E, A>
 where
@@ -428,6 +450,18 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::init_databases_from_marshal;
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use crate::stateful::{actor::syncer::SyncState, tests::mocks::TestScheme};
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<SyncState<TestScheme, Sha256Digest>>,
+        }
+    }
+
     use crate::stateful::tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant};
     use commonware_actor::Feedback;
     use commonware_consensus::{

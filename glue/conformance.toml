@@ -1,3 +1,7 @@
+["commonware_glue::stateful::actor::syncer::tests::conformance::CodecConformance<SyncState<TestScheme,Sha256Digest>>"]
+n_cases = 65536
+hash = "451747883b40ef26a45fba39f509760efaf3852633d5ec0bbbea7150e5d20ee6"
+
 ["commonware_glue::stateful::db::p2p::compact::handler::tests::conformance::CodecConformance<Request<mmr::Family,sha256::Digest>>"]
 n_cases = 65536
 hash = "290187801284530d0d7e82c33bb6ce975a5f4daa4b104230291cea9cffcd7686"
