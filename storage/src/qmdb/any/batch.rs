@@ -41,17 +41,77 @@ type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 /// One contiguous chunk of floor-raise candidates paired with their resolved operations.
 type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 
+/// Floor-raise candidates prefetched from the committed bitmap prefix, paired with their
+/// resolved operations.
+///
+/// The committed-prefix candidate sequence depends only on the base inactivity floor and the
+/// committed bitmap (never on this batch's operations), so a staged merkleize gathers and
+/// reads it before its serial bookkeeping runs. `finish` then serves its first read round(s)
+/// from this buffer and resumes the live scan at `next_scan` once it drains, yielding exactly
+/// the sequence the live scan would have produced.
+pub(crate) struct PrefetchedCandidates<F: Family, U: update::Update + Send + Sync>
+where
+    Operation<F, U>: Codec,
+{
+    /// Ascending committed candidate locations.
+    locs: Vec<Location<F>>,
+    /// The operation resolved for each location, chunk-partitioned as the reader probed
+    /// them; the chunks' concatenation matches `locs` order.
+    shards: Vec<Vec<Operation<F, U>>>,
+    /// Continuation point for the live scan after `locs`.
+    next_scan: Location<F>,
+}
+
 /// Sorted `(key, (value, loc))` vec consulted by `find_prev_key` to find the predecessor
 /// of a given key during ordered merkleization. The value is `None` for staged-resolved
 /// keys: the predecessor-rewrite loop only reads a value for keys outside this batch's
 /// mutations, and staged-resolved keys are always in `updated`.
 type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
-/// Staged update entry: key, old committed location, cached payload from the old update, and
+/// Where a staged read resolved: a committed location, or an uncommitted ancestor-diff
+/// location. Either way the location orders the staged write among this batch's emitted
+/// operations; they differ in which committed location (if any) the write supersedes.
+///
+/// An `Ancestor` resolution's `base_old_loc` reflects the chain at stage time. If the
+/// resolving ancestor commits (and drops out of the alive chain) before merkleize, `loc`
+/// migrates into the committed region and becomes the superseded committed location itself;
+/// the merkleize consumption re-derives the base against the merkleize-time committed
+/// boundary rather than trusting the stage-time value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StagedLoc<F: Family> {
+    /// Resolved directly in the committed DB snapshot; the location doubles as the
+    /// superseded committed location.
+    Committed(Location<F>),
+    /// Resolved in an uncommitted ancestor's diff at `loc`, superseding the key's committed
+    /// snapshot location `base_old_loc` (`None` when an ancestor created the key).
+    Ancestor {
+        loc: Location<F>,
+        base_old_loc: Option<Location<F>>,
+    },
+}
+
+impl<F: Family> StagedLoc<F> {
+    /// The resolved location: orders the staged write among the batch's emitted operations.
+    const fn loc(&self) -> Location<F> {
+        match self {
+            Self::Committed(loc) | Self::Ancestor { loc, .. } => *loc,
+        }
+    }
+
+    /// The key's committed snapshot location superseded by this staged write.
+    const fn base_old_loc(&self) -> Option<Location<F>> {
+        match self {
+            Self::Committed(loc) => Some(*loc),
+            Self::Ancestor { base_old_loc, .. } => *base_old_loc,
+        }
+    }
+}
+
+/// Staged update entry: key, resolved location, cached payload from the old update, and
 /// replacement value (`None` for delete).
 type StagedUpdate<F, U> = (
     <U as update::Update>::Key,
-    Location<F>,
+    StagedLoc<F>,
     <U as update::Update>::Cached,
     Option<<U as update::Update>::Value>,
 );
@@ -229,15 +289,18 @@ where
     base: Base<F, H::Digest, U, S>,
 }
 
-/// Pending mutations whose old committed locations were already resolved by staged reads, sorted
+/// Pending mutations whose old locations were already resolved by staged reads, sorted
 /// by location. Each value is `Some` for an update and `None` for a delete. Only the unordered
 /// path stages deletes (an ordered delete cannot skip the deleted key's predecessor-bucket scan,
 /// so its deletes fall back to normal mutations).
 pub(crate) type StagedUpdates<F, U> = Vec<StagedUpdate<F, U>>;
 
-/// A staged read slot's committed-DB resolution: the location and cached payload the read
-/// resolved to, or `None` when it resolved from batch mutations or ancestor diffs (or missed).
-type StagedResolution<F, U> = Option<(Location<F>, <U as update::Update>::Cached)>;
+/// A staged read slot's resolution: the location and cached payload the read resolved to,
+/// or `None` when it resolved from batch mutations (or missed). Ancestor-diff resolutions
+/// are recorded only when the update kind stages them (see
+/// [`update::Update::ancestor_cached`]); otherwise those slots stay `None` and fall back to
+/// normal mutations.
+type StagedResolution<F, U> = Option<(StagedLoc<F>, <U as update::Update>::Cached)>;
 
 /// Staged batch returned by [`UnmerkleizedBatch::stage`].
 ///
@@ -443,12 +506,16 @@ impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
 
 /// Resolve unresolved input slots against ancestor diffs, preserving final results by original
 /// input slot. The caller keeps `pending` in input order so DB fallthrough can do the same.
+///
+/// `on_hit` is invoked (serially, in `pending` order) with each resolving diff entry, so
+/// staged reads can record ancestor resolutions alongside the values.
 fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: Strategy>(
     pending: &[PendingRead<'a, K>],
     diffs: &[&'a DiffSlice<K, F, V>],
     strategy: &S,
     resolved: &mut [bool],
     results: &mut [Option<V>],
+    mut on_hit: impl FnMut(usize, &DiffEntry<F, V>),
 ) where
     K: Ord + Sync,
 {
@@ -456,18 +523,18 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
         return;
     }
 
-    let resolve = |chunk: &[PendingRead<'a, K>]| -> Vec<(usize, Option<V>)> {
+    let resolve = |chunk: &[PendingRead<'a, K>]| -> Vec<(usize, &'a DiffEntry<F, V>)> {
         chunk
             .iter()
             .filter_map(|(slot, key)| {
                 diffs
                     .iter()
                     .find_map(|diff| lookup_sorted(diff, key))
-                    .map(|entry| (*slot, entry.value().cloned()))
+                    .map(|entry| (*slot, entry))
             })
             .collect()
     };
-    let resolved_values: Vec<(usize, Option<V>)> = strategy.run(
+    let hits: Vec<(usize, &'a DiffEntry<F, V>)> = strategy.run(
         pending.len(),
         || resolve(pending),
         || {
@@ -482,20 +549,25 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
         },
     );
 
-    for (slot, value) in resolved_values {
+    for (slot, entry) in hits {
         resolved[slot] = true;
-        results[slot] = value;
+        results[slot] = entry.value().cloned();
+        on_hit(slot, entry);
     }
 }
 
 /// Resolve `keys` against a local source (`local` returns `Some` when it owns the key, with the
 /// inner `Option` distinguishing a live value from a delete) and then against `diffs`, returning
 /// per-slot results and the slots that still need committed DB reads.
+///
+/// `on_diff_hit` is invoked with each slot resolved by a diff entry (see
+/// [`resolve_pending_from_diffs`]); slots resolved by `local` do not report.
 fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
     keys: &[&'a K],
     local: impl Fn(&K) -> Option<Option<V>>,
     diffs: &[&DiffSlice<K, F, V>],
     strategy: &S,
+    on_diff_hit: impl FnMut(usize, &DiffEntry<F, V>),
 ) -> UncommittedReadResolution<'a, K, V>
 where
     K: Ord + Sync,
@@ -513,7 +585,14 @@ where
             pending.push((i, *key));
         }
     }
-    resolve_pending_from_diffs(&pending, diffs, strategy, &mut resolved, &mut results);
+    resolve_pending_from_diffs(
+        &pending,
+        diffs,
+        strategy,
+        &mut resolved,
+        &mut results,
+        on_diff_hit,
+    );
 
     let unresolved = pending.into_iter().filter(|(i, _)| !resolved[*i]).collect();
     (results, unresolved)
@@ -911,7 +990,8 @@ where
     /// `diff` may arrive in any order: it is key-sorted on the strategy pool, overlapping the
     /// first floor-raise candidate read. `superseded_locs` holds the committed locations
     /// superseded by `diff` (every `Some` `base_old_loc`), in any order; the floor raise
-    /// skips re-reading them.
+    /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
+    /// caller gathered and read ahead of time; the raise consumes them before scanning live.
     #[allow(clippy::too_many_arguments)]
     async fn finish<E, C, I, const N: usize>(
         self,
@@ -921,6 +1001,7 @@ where
         active_keys_delta: isize,
         user_steps: u64,
         metadata: Option<U::Value>,
+        mut prefetched: Option<PrefetchedCandidates<F, U>>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
@@ -978,8 +1059,27 @@ where
                 // `scan_from` tracks prefetch progress separately from `floor`, so
                 // early exit cannot leave `floor` past unprocessed candidates.
                 let limit = (total_steps - moved) as usize;
-                let mut candidates = Vec::with_capacity(limit);
-                scan_from = fill_candidates(scan_from, fixed_tip, limit, &mut candidates);
+                // Consume the prefetched committed prefix whole: it was gathered from the
+                // same floor with the same bitmap, so it is a prefix of the sequence the
+                // live scan would produce, and `next_scan` hands the live scan its
+                // continuation point. Handing the raise more candidates than `limit` is
+                // outcome-identical to fetching them across rounds: classification is pure
+                // per candidate and the apply loop stops advancing once enough ops moved.
+                let (mut candidates, pf_shards) = match prefetched.take() {
+                    Some(pf) => {
+                        scan_from = pf.next_scan;
+                        (pf.locs, pf.shards)
+                    }
+                    None => (Vec::with_capacity(limit), Vec::new()),
+                };
+                if candidates.len() < limit {
+                    scan_from = fill_candidates(
+                        scan_from,
+                        fixed_tip,
+                        limit - candidates.len(),
+                        &mut candidates,
+                    );
+                }
                 if candidates.is_empty() {
                     break;
                 }
@@ -989,25 +1089,33 @@ where
                 assert!(candidates[0] >= floor);
                 assert!(candidates.is_sorted_by(|a, b| a < b));
 
-                // `read_candidates` omits locations already superseded by this diff. Keep
-                // `resolved` and `outcomes` in that filtered order, then walk `candidates`
-                // below so superseded locations still advance the floor in scan order.
-                let read_candidates: Vec<_> = candidates
-                    .iter()
-                    .copied()
-                    .filter(|candidate| {
-                        !sorted_contains(&superseded_locs, &mut superseded_cursor, candidate)
-                    })
-                    .collect();
+                // `read_candidates` omits locations already superseded by this diff, saving
+                // their read. Keep `resolved` and `outcomes` in that filtered order, then
+                // walk `candidates` below so superseded locations still advance the floor in
+                // scan order. Prefetched candidates skip the filter -- their ops were read
+                // ahead of time, and a superseded candidate's key always resolves in the
+                // diff to a different location, classifying it `Inactive`.
+                let pf_count: usize = pf_shards.iter().map(Vec::len).sum();
+                debug_assert!(pf_count <= candidates.len());
+                let mut read_candidates: Vec<Location<F>> = Vec::with_capacity(candidates.len());
+                read_candidates.extend_from_slice(&candidates[..pf_count]);
+                for candidate in &candidates[pf_count..] {
+                    if !sorted_contains(&superseded_locs, &mut superseded_cursor, candidate) {
+                        read_candidates.push(*candidate);
+                    }
+                }
                 let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) =
                     if read_candidates.is_empty() {
                         (Vec::new(), Vec::new())
                     } else {
                         // Batch-read candidates: page-cache hits are served by one batched read,
-                        // disk misses are fetched concurrently.
-                        let resolved = self
-                            .read_ops_sharded(&read_candidates, &ops, &db.log)
-                            .await?;
+                        // disk misses are fetched concurrently. Prefetched shards enter as the
+                        // reader probed them, ahead of the live suffix's read.
+                        let live = &read_candidates[pf_count..];
+                        let mut resolved = pf_shards;
+                        if !live.is_empty() {
+                            resolved.extend(self.read_ops_sharded(live, &ops, &db.log).await?);
+                        }
 
                         // Classification is the first consumer of the sorted diff; by now the
                         // sort has overlapped the fill and read above.
@@ -1329,9 +1437,12 @@ where
     /// Upserts are applied last. If a caller passes an overlapping key, the upsert follows normal
     /// `write` semantics and wins.
     ///
-    /// Committed-resolved updates reuse the staged location. Committed-resolved deletes reuse it
-    /// only when [`update::Update::STAGES_DELETES`] is set (the unordered kind). Keys resolved
-    /// from ancestors or missing from committed state always fall back to normal mutations.
+    /// Location-resolved updates (committed, or ancestor-diff when the update kind stages
+    /// those -- see [`update::Update::ancestor_cached`]) reuse the staged location. Resolved
+    /// deletes reuse it only when [`update::Update::STAGES_DELETES`] is set (the unordered
+    /// kind). Unresolved keys (missing from committed state, resolved through this batch's
+    /// own mutations, or ancestor-resolved for a kind that does not stage those) always fall
+    /// back to normal mutations.
     ///
     /// # Panics
     ///
@@ -1353,7 +1464,6 @@ where
         if updates.is_empty() {
             return (Self::apply_upserts(batch, upserts), staged_updates);
         }
-
         // Resolve last-write-wins per distinct key without hashing on the merkleize path:
         // `key_ids` maps each slot to its distinct-key id, so a forward walk leaves each id's
         // final write (the same winner as a newest-first scan). Overlapping updates for upsert
@@ -1368,10 +1478,13 @@ where
             }
             winners[key_ids[slot] as usize] = Some((slot as u32, value));
         }
-
-        // Split the winners: updates whose slot resolved to a committed location become
-        // staged updates, the rest fall back to batch mutations. A surviving staged write
-        // must not also emit an older batch mutation for the same key, so it is removed here.
+        // Split the winners: updates whose slot resolved to a location become staged
+        // updates, the rest fall back to batch mutations. A surviving staged write must not
+        // also emit an older batch mutation for the same key, so it is removed here. The
+        // probe is skipped when the batch had no mutations before this call: each distinct
+        // key is visited at most once (winners are per key id), so a staged winner can never
+        // chase a fallback inserted by this same loop.
+        let had_mutations = !batch.mutations.is_empty();
         let mut order: Vec<(Location<F>, u32)> = Vec::with_capacity(winners.len());
         for winner in &mut winners {
             let Some((slot, value)) = winner else {
@@ -1379,9 +1492,11 @@ where
             };
             let key = &keys[*slot as usize];
             match &resolutions[*slot as usize] {
-                Some((loc, _)) if value.is_some() || U::STAGES_DELETES => {
-                    batch.mutations.remove(key);
-                    order.push((*loc, *slot));
+                Some((sloc, _)) if value.is_some() || U::STAGES_DELETES => {
+                    if had_mutations {
+                        batch.mutations.remove(key);
+                    }
+                    order.push((sloc.loc(), *slot));
                 }
                 _ => {
                     let (_, value) = winner.take().expect("winner checked above");
@@ -1390,20 +1505,20 @@ where
             }
         }
 
-        // Locations are unique after last-write-wins dedup, so the parallel sort is
-        // deterministic. Sorting compact `(location, slot)` pairs instead of the staged
-        // tuples keeps its memory traffic low; the tuples are then materialized in sorted
-        // order across the strategy.
+        // Locations are unique after last-write-wins dedup (each key resolves to exactly one
+        // location, committed or ancestor), so the parallel sort is deterministic. Sorting
+        // compact `(location, slot)` pairs instead of the staged tuples keeps its memory
+        // traffic low; the tuples are then materialized in sorted order across the strategy.
         strategy.manual().sort_by(&mut order, |a, b| a.0.cmp(&b.0));
-        staged_updates = strategy.map_collect_vec(&order, |&(loc, slot)| {
+        staged_updates = strategy.map_collect_vec(&order, |&(_, slot)| {
             let slot = slot as usize;
             let (_, value) = winners[key_ids[slot] as usize]
                 .as_ref()
                 .expect("winner recorded for staged slot");
-            let (_, payload) = resolutions[slot]
+            let (sloc, payload) = resolutions[slot]
                 .as_ref()
                 .expect("resolution checked above");
-            (keys[slot].clone(), loc, payload.clone(), value.clone())
+            (keys[slot].clone(), *sloc, payload.clone(), value.clone())
         });
         (Self::apply_upserts(batch, upserts), staged_updates)
     }
@@ -1447,11 +1562,40 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
+        // Overlap the serial update resolution with the floor-raise candidate prefetch: the
+        // committed-prefix candidate set depends only on the base floor, the committed
+        // bitmap, and a step bound, none of which depend on the resolution. Resolution runs
+        // as one job on the strategy while this task gathers and reads the candidates.
+        //
+        // The bound over-approximates the raise's steps (every emitted op traces to a
+        // distinct update key, upsert, or prior mutation, plus one for the CommitFloor);
+        // surplus candidates are dropped by the raise once it moves enough ops.
+        let steps_bound = updates.len() + upserts.len() + self.batch.mutations.len() + 1;
+        let scan_from = self.batch.base.inactivity_floor_loc();
+        let strategy = db.strategy().clone();
+        let resolve =
+            strategy.spawn(move |strategy| self.resolve_updates(updates, upserts, &strategy));
+
+        let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
+        let mut raw: Vec<u64> = Vec::with_capacity(steps_bound);
+        let next_scan = db
+            .bitmap
+            .fill_candidates(*scan_from, committed_tip, steps_bound, &mut raw);
+        let read = db.log.read_many_sharded(&raw).await;
+        let (batch, staged_updates) = resolve.await;
+        let prefetched = PrefetchedCandidates {
+            locs: raw.into_iter().map(Location::new).collect(),
+            shards: read?,
+            next_scan: Location::new(next_scan),
+        };
         batch
-            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                db,
+                metadata,
+                staged_updates,
+                Some(prefetched),
+                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            )
             .await
     }
 }
@@ -1517,10 +1661,15 @@ where
 
     /// Resolve keys against this batch's mutations and any live ancestor diffs, returning partial
     /// results and the unresolved slots that still need committed DB reads.
+    ///
+    /// `on_diff_hit` is invoked with each slot resolved by an ancestor diff entry (slots
+    /// resolved by this batch's mutations do not report), so staged reads can record
+    /// ancestor resolutions.
     fn resolve_uncommitted_reads<'a>(
         &self,
         keys: &[&'a U::Key],
         strategy: &S,
+        on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
     ) -> UncommittedReadResolution<'a, U::Key, U::Value>
     where
         U::Value: Send + Sync,
@@ -1540,6 +1689,7 @@ where
             |key| self.mutations.get(key).cloned(),
             &diffs,
             strategy,
+            on_diff_hit,
         )
     }
 
@@ -1606,7 +1756,8 @@ where
             return db.get_many(keys).await;
         }
 
-        let (mut results, unresolved) = self.resolve_uncommitted_reads(keys, db.strategy());
+        let (mut results, unresolved) =
+            self.resolve_uncommitted_reads(keys, db.strategy(), |_, _| {});
         Self::fill_committed_reads(
             unresolved,
             db,
@@ -1682,14 +1833,35 @@ where
     {
         let mut resolutions: Vec<StagedResolution<F, U>> =
             iter::repeat_with(|| None).take(keys.len()).collect();
-        let (mut results, unresolved) = self.resolve_uncommitted_reads(keys, db.strategy());
+        // Record ancestor-diff resolutions when the update kind stages them: the staged
+        // write then reuses the resolved location at merkleize instead of falling back to a
+        // normal mutation (whose cost -- location gathering, a journal re-read, and
+        // per-key ancestor re-resolution -- otherwise grows with ancestor overlap).
+        let (mut results, unresolved) =
+            self.resolve_uncommitted_reads(keys, db.strategy(), |slot, entry| {
+                let Some(cached) = U::ancestor_cached() else {
+                    return;
+                };
+                if let DiffEntry::Active {
+                    loc, base_old_loc, ..
+                } = entry
+                {
+                    resolutions[slot] = Some((
+                        StagedLoc::Ancestor {
+                            loc: *loc,
+                            base_old_loc: *base_old_loc,
+                        },
+                        cached,
+                    ));
+                }
+            });
         Self::fill_committed_reads(
             unresolved,
             db,
             &mut results,
             |data, loc| (data.value().clone(), loc, data.cached()),
             |slot, (value, loc, payload)| {
-                resolutions[slot] = Some((loc, payload));
+                resolutions[slot] = Some((StagedLoc::Committed(loc), payload));
                 value
             },
         )
@@ -1732,6 +1904,7 @@ where
             db,
             metadata,
             StagedUpdates::<F, update::Unordered<K, V>>::new(),
+            None,
             |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
         )
         .await
@@ -1739,7 +1912,9 @@ where
 
     /// Like [`merkleize`](Self::merkleize), but consumes staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would
-    /// otherwise require) and accepts the floor-raise candidate source.
+    /// otherwise require) and accepts the floor-raise candidate source, optionally seeded
+    /// with prefetched committed-prefix candidates (see [`PrefetchedCandidates`]; they must
+    /// come from the same floor and the same committed bitmap the callback scans).
     ///
     /// The callback must yield candidates in ascending location order, both within one call
     /// and across successive calls (the floor raise asserts this). It may skip locations only
@@ -1752,6 +1927,7 @@ where
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
+        prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
@@ -1809,12 +1985,31 @@ where
         // Process updates/deletes of existing keys in location order, merging staged entries
         // into the read results. This includes keys from both the committed snapshot and ancestor
         // diffs. A staged entry's `value` is `Some` for an update and `None` for a delete, and
-        // `emit` writes it as an `Update`/`Delete` at the staged location.
+        // `emit` writes it as an `Update`/`Delete` at the staged location. An ancestor-staged
+        // entry orders by its ancestor location but supersedes the key's committed base
+        // location, exactly as its mutation-fallback path would have.
+        //
+        // A staged location below the merkleize-time committed boundary means the resolving
+        // ancestor has since committed (and dropped out of the alive chain): the location
+        // itself is then the committed location this write supersedes, matching what the
+        // fallback path's live-snapshot resolution would produce. Resolutions whose ancestor
+        // is still in the alive chain keep their recorded base; `apply_batch`'s
+        // already-applied-ancestor fixup covers the case where that ancestor commits later.
+        let staged_base_old_loc = |sloc: StagedLoc<F>| {
+            if *sloc.loc() < m.db_size {
+                Some(sloc.loc())
+            } else {
+                sloc.base_old_loc()
+            }
+        };
         let mut cached = staged_updates.into_iter().peekable();
         for (op, &old_loc) in results.iter().zip(&locations) {
-            while cached.peek().is_some_and(|&(_, loc, (), _)| loc < old_loc) {
-                let (key, loc, (), mutation) = cached.next().expect("peeked entry exists");
-                emit(key, Some(loc), mutation);
+            while cached
+                .peek()
+                .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
+            {
+                let (key, sloc, (), mutation) = cached.next().expect("peeked entry exists");
+                emit(key, staged_base_old_loc(sloc), mutation);
             }
 
             let key = op.key().expect("updates should have a key");
@@ -1842,10 +2037,9 @@ where
 
             emit(key.clone(), base_old_loc, mutation);
         }
-        for (key, loc, (), mutation) in cached {
-            emit(key, Some(loc), mutation);
+        for (key, sloc, (), mutation) in cached {
+            emit(key, staged_base_old_loc(sloc), mutation);
         }
-
         // Handle parent-deleted keys that the child wants to re-create.
         let parent_deleted_creates = m.extract_parent_deleted_creates(&mut mutations);
 
@@ -1889,6 +2083,7 @@ where
             active_keys_delta,
             user_steps,
             metadata,
+            prefetched,
             fill_candidates,
             db,
         )
@@ -2006,8 +2201,11 @@ where
         // the predecessor-rewrite loop emits an op for the key, and that loop skips every key
         // present in `updated`. The ordered path never stages deletes (see
         // `Staged::resolve_updates`), so every staged entry carries a value.
-        for (key, loc, old_next, value) in staged_updates {
+        for (key, sloc, old_next, value) in staged_updates {
             let value = value.expect("ordered path never stages deletes");
+            let StagedLoc::Committed(loc) = sloc else {
+                unreachable!("ordered path never stages ancestor resolutions")
+            };
             next_candidates.push(old_next);
             prev_candidates.push((key.clone(), (None, loc)));
             updated.push((key, value, loc));
@@ -2309,6 +2507,7 @@ where
             active_keys_delta,
             user_steps,
             metadata,
+            None,
             fill_candidates,
             db,
         )
@@ -2420,6 +2619,7 @@ where
             |key| lookup_sorted(self.diff.as_slice(), key).map(|entry| entry.value().cloned()),
             &diffs,
             db.strategy(),
+            |_, _| {},
         );
 
         if !unresolved.is_empty() {
@@ -2809,6 +3009,10 @@ mod tests {
 
     fn loc(n: u64) -> Location<mmr::Family> {
         Location::new(n)
+    }
+
+    fn committed(n: u64) -> StagedLoc<mmr::Family> {
+        StagedLoc::Committed(loc(n))
     }
 
     fn shared_with<F>(build: F) -> Shared<BITMAP_CHUNK_BYTES>
@@ -3632,11 +3836,11 @@ mod tests {
                 db.new_batch(),
                 vec![k0, k1, k0, k2, k1, k3],
                 vec![
-                    Some((loc(30), ())),
-                    Some((loc(10), ())),
-                    Some((loc(30), ())),
-                    Some((loc(40), ())),
-                    Some((loc(10), ())),
+                    Some((committed(30), ())),
+                    Some((committed(10), ())),
+                    Some((committed(30), ())),
+                    Some((committed(40), ())),
+                    Some((committed(10), ())),
                     None,
                 ],
             );
@@ -3656,7 +3860,10 @@ mod tests {
 
             assert_eq!(
                 staged_updates,
-                vec![(k1, loc(10), (), None), (k0, loc(30), (), Some(new0))]
+                vec![
+                    (k1, committed(10), (), None),
+                    (k0, committed(30), (), Some(new0))
+                ]
             );
             assert_eq!(batch.mutations.len(), 2);
             assert_eq!(batch.mutations.get(&k2), Some(&Some(upsert)));
@@ -3714,15 +3921,15 @@ mod tests {
             let mut staged_keys = keys.clone();
             staged_keys.extend(keys.iter().cloned());
             staged_keys.extend([mut_newer, mut_newer, staged_newer, staged_newer, overlapped]);
-            let mut resolutions: Vec<Option<(Location<mmr::Family>, ())>> = (0..2 * n)
-                .map(|slot| Some((loc(1_000 + (slot % n) as u64), ())))
+            let mut resolutions: Vec<Option<(StagedLoc<mmr::Family>, ())>> = (0..2 * n)
+                .map(|slot| Some((committed(1_000 + (slot % n) as u64), ())))
                 .collect();
             resolutions.extend([
-                Some((loc(500), ())),
+                Some((committed(500), ())),
                 None,
                 None,
-                Some((loc(501), ())),
-                Some((loc(502), ())),
+                Some((committed(501), ())),
+                Some((committed(502), ())),
             ]);
 
             let staged = staged_with::<mmr::Family, Sha256, TestUpdate, Sequential>(
@@ -3746,9 +3953,15 @@ mod tests {
             let (batch, staged_updates) =
                 staged.resolve_updates(updates, vec![(overlapped, Some(upsert))], &Sequential);
 
-            let mut expected = vec![(staged_newer, loc(501), (), Some(staged_new))];
-            expected
-                .extend((0..n).map(|i| (keys[i], loc(1_000 + i as u64), (), Some(new_values[i]))));
+            let mut expected = vec![(staged_newer, committed(501), (), Some(staged_new))];
+            expected.extend((0..n).map(|i| {
+                (
+                    keys[i],
+                    committed(1_000 + i as u64),
+                    (),
+                    Some(new_values[i]),
+                )
+            }));
             assert_eq!(staged_updates, expected);
             assert_eq!(batch.mutations.len(), 2);
             assert_eq!(batch.mutations.get(&mut_newer), Some(&Some(mut_new)));
@@ -3804,7 +4017,7 @@ mod tests {
             let staged = staged_with::<mmr::Family, Sha256, TestUpdate, Sequential>(
                 db.new_batch().write(key, Some(prior)),
                 vec![key],
-                vec![Some((old_loc, ()))],
+                vec![Some((StagedLoc::Committed(old_loc), ()))],
             );
             let staged = staged
                 .merkleize(vec![(0, Some(replacement))], Vec::new(), None, &db)
@@ -3848,9 +4061,9 @@ mod tests {
                 db.new_batch(),
                 vec![delete_key, update_a, update_b],
                 vec![
-                    Some((loc(11), next_delete)),
-                    Some((loc(30), next_a)),
-                    Some((loc(7), next_b)),
+                    Some((committed(11), next_delete)),
+                    Some((committed(30), next_a)),
+                    Some((committed(7), next_b)),
                 ],
             );
 
@@ -3863,8 +4076,8 @@ mod tests {
             assert_eq!(
                 staged_updates,
                 vec![
-                    (update_b, loc(7), next_b, Some(value_b)),
-                    (update_a, loc(30), next_a, Some(value_a)),
+                    (update_b, committed(7), next_b, Some(value_b)),
+                    (update_a, committed(30), next_a, Some(value_a)),
                 ]
             );
             assert_eq!(batch.mutations.len(), 1);
