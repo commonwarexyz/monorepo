@@ -16,8 +16,9 @@
 //! # Erasure Coding
 //!
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
-//! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
-//! participants. When verifying a proposed block (the precondition for notarization), the wrapper
+//! proposes a new block, it is automatically erasure encoded and staged with the shard engine; its
+//! shards are broadcast to active participants once consensus requests dissemination.
+//! When verifying a proposed block (the precondition for notarization), the wrapper
 //! ensures the commitment's context digest matches the consensus context and waits for validation of
 //! the shard assigned to this participant by the proposer. If that shard is valid, the assigned shard is
 //! relayed to all other participants to aid in block reconstruction.
@@ -104,7 +105,6 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher,
 };
 use commonware_macros::select;
-use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     telemetry::{
@@ -663,13 +663,14 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. Shard dissemination waits for
-    /// consensus: the voter requests it via [`crate::Relay::broadcast`] once it accepts the
-    /// proposal, and the resulting forward is ordered behind this task's persist enqueue on
-    /// the core actor's mailbox (which retains the block, so no storage reload is needed).
-    /// The persist's durable sync only gates the leader's own finalize vote (via the
-    /// certification gate registered below), not the commitment's return. The
-    /// block's persistence is enqueued before the commitment is delivered, and the resulting
+    /// contain the proposed block's commitment when ready. The task stages the block with the
+    /// shards engine and then enqueues the persist, both before the commitment is delivered.
+    /// Staging is pure data movement (the engine caches the block and notifies local
+    /// subscribers, with no network sends); dissemination waits for consensus: the voter
+    /// requests it via [`crate::Relay::broadcast`] once it accepts the proposal, and that
+    /// trigger fans shards out directly from the engine's staged copy (no storage reload and
+    /// no core-actor hop). The persist's durable sync only gates the leader's own finalize
+    /// vote (via the certification gate registered below), not the commitment's return: the
     /// sync handle is awaited only at certification so it overlaps consensus voting. The
     /// commitment does not imply durability on its own;
     /// [`CertifiableAutomaton::certify`] awaits the registered certification gate before the
@@ -681,6 +682,7 @@ where
         consensus_context: Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let marshal = self.marshal.clone();
+        let shards = self.shards.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
@@ -746,6 +748,15 @@ where
                     }
                     let commitment = block.commitment();
                     let round = consensus_context.round;
+
+                    // Stage the recovered block with the shards engine before
+                    // delivering the commitment: the voter's broadcast
+                    // request (enqueued only after it receives the
+                    // commitment) must find the block cached there. Staging
+                    // is data movement only; nothing hits the network until
+                    // that request arrives.
+                    shards.stage(round, block);
+
                     let success = tx.send_lossy(commitment);
                     debug!(
                         ?round,
@@ -801,6 +812,13 @@ where
                 if parent.height() == last_in_epoch {
                     let commitment = parent.commitment();
                     let round = consensus_context.round;
+
+                    // Stage the boundary block with the shards engine under
+                    // the re-proposal round before enqueueing the persist:
+                    // the voter's broadcast request must find it cached, and
+                    // a commitment whose shards were sent under an earlier
+                    // round must be re-sent under this one.
+                    shards.stage(round, parent.clone());
 
                     let persist = marshal.verified_deferred(round, parent);
                     gates
@@ -862,11 +880,17 @@ where
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
 
-                // Dissemination waits for consensus: shards are dispatched
-                // only when the voter requests a broadcast (via
-                // `Relay::broadcast`), which arrives at the core actor
-                // ordered after the `Proposed` message enqueued here (the
-                // actor retains the block so the broadcast needs no reload).
+                // Stage the built block with the shards engine before
+                // enqueueing the persist. Staging is data movement, not
+                // dissemination: the engine caches the block and notifies
+                // local subscribers, but nothing hits the network until the
+                // voter requests a broadcast via `Relay::broadcast`. That
+                // trigger lands in the shards engine's FIFO mailbox strictly
+                // after this staging message, because the commitment is
+                // delivered to the voter only after the persist below is
+                // enqueued — which itself follows this stage call.
+                shards.stage(round, coded_block.clone());
+
                 // The persist's durable sync only gates the leader's own
                 // finalize vote (via the certification gate registered in
                 // `persist_and_defer`), not the commitment's return.
@@ -1134,20 +1158,22 @@ where
     type Plan = Plan<Self::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
-        // Coding variant does not support targeted forwarding;
-        // peers reconstruct blocks from erasure-coded shards.
+        // Coding variant does not support targeted forwarding; peers
+        // reconstruct blocks from erasure-coded shards, so the batcher's
+        // `Plan::Forward` is ignored.
         //
-        // Dissemination waits for consensus to request it: the forward is
-        // ordered behind the propose path's `Proposed`/`Verified` enqueue on
-        // the core actor's mailbox, which retains the block so the broadcast
-        // needs no storage reload. The shards engine's dispatch is idempotent
-        // per `(commitment, round)`.
+        // Dissemination waits for consensus to request it: the propose path
+        // already staged the block, so this trigger goes straight to the
+        // shards engine that holds the staged copy — the core actor is no
+        // longer on the coding dissemination path (its persist enqueue only
+        // serves durability). The engine's fan-out is idempotent per
+        // `(commitment, round)`.
         //
         // TODO(#3389): Support checked data forwarding for PhasedScheme.
         let Plan::Propose { round } = plan else {
             return Feedback::Ok;
         };
-        self.marshal.forward(round, commitment, Recipients::All)
+        self.shards.broadcast(round, commitment)
     }
 }
 

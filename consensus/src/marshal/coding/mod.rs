@@ -1037,7 +1037,7 @@ mod tests {
             let block = make_coding_block(block_ctx.clone(), genesis.digest(), Height::new(1), 100);
             let coded_block = CodedBlock::new(block, coding_config, &Sequential);
             let commitment = coded_block.commitment();
-            shards.proposed(round, coded_block);
+            shards.stage(round, coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1239,7 +1239,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
+            shards.stage(Round::new(Epoch::new(0), View::new(1)), coded_parent);
 
             // Block A at view 5 (height 2) - create with context matching what verify will receive
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -1251,7 +1251,7 @@ mod tests {
             let block_a = make_coding_block(context_a.clone(), parent_digest, Height::new(2), 200);
             let coded_block_a = CodedBlock::new(block_a.clone(), coding_config, &Sequential);
             let commitment_a = coded_block_a.commitment();
-            shards.proposed(round_a, coded_block_a);
+            shards.stage(round_a, coded_block_a);
 
             // Block B at view 10 (height 2, different block same height - could happen with
             // different proposers or re-proposals)
@@ -1264,7 +1264,7 @@ mod tests {
             let block_b = make_coding_block(context_b.clone(), parent_digest, Height::new(2), 300);
             let coded_block_b = CodedBlock::new(block_b.clone(), coding_config, &Sequential);
             let commitment_b = coded_block_b.commitment();
-            shards.proposed(round_b, coded_block_b);
+            shards.stage(round_b, coded_block_b);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1366,7 +1366,7 @@ mod tests {
                 let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
                 let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
                 last_commitment = coded_block.commitment();
-                shards.proposed(round, coded_block);
+                shards.stage(round, coded_block);
                 parent = block.digest();
                 last_view = View::new(i);
             }
@@ -1388,7 +1388,7 @@ mod tests {
             let coded_boundary =
                 CodedBlock::new(boundary_block.clone(), coding_config, &Sequential);
             let boundary_commitment = coded_boundary.commitment();
-            shards.proposed(boundary_round, coded_boundary);
+            shards.stage(boundary_round, coded_boundary);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1449,7 +1449,7 @@ mod tests {
             let non_boundary_commitment = coded_non_boundary.commitment();
 
             // Make the non-boundary block available
-            shards.proposed(non_boundary_round, coded_non_boundary);
+            shards.stage(non_boundary_round, coded_non_boundary);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1577,7 +1577,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent);
+            shards.stage(Round::new(Epoch::zero(), View::new(1)), coded_parent);
 
             // Build a block with context A (commitment hash uses this context).
             let round_a = Round::new(Epoch::zero(), View::new(2));
@@ -1692,7 +1692,7 @@ mod tests {
             drop(verify_rx);
             context.sleep(Duration::from_millis(10)).await;
 
-            shards.proposed(boundary_round, coded_boundary);
+            shards.stage(boundary_round, coded_boundary);
             context.sleep(Duration::from_millis(10)).await;
 
             // Certify should not return the stale closed certification gate task; it
@@ -1963,7 +1963,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent);
+            shards.stage(Round::new(Epoch::zero(), View::new(19)), coded_parent);
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let block_ctx = CodingCtx {
@@ -1974,7 +1974,7 @@ mod tests {
             let block = make_coding_block(block_ctx, parent_digest, Height::new(20), 2000);
             let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
             let block_commitment = coded_block.commitment();
-            shards.proposed(Round::new(Epoch::new(1), View::new(20)), coded_block);
+            shards.stage(Round::new(Epoch::new(1), View::new(20)), coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2074,7 +2074,7 @@ mod tests {
             let parent_digest = honest_parent.digest();
             let coded_parent = CodedBlock::new(honest_parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent);
+            shards.stage(Round::new(Epoch::new(1), View::new(21)), coded_parent);
 
             // Byzantine proposer broadcasts malicious block at height 35
             // The block has the correct context (matching what consensus will provide)
@@ -2094,7 +2094,7 @@ mod tests {
             let coded_malicious =
                 CodedBlock::new(malicious_block.clone(), coding_config, &Sequential);
             let malicious_commitment = coded_malicious.commitment();
-            shards.proposed(byzantine_round, coded_malicious);
+            shards.stage(byzantine_round, coded_malicious);
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
@@ -2139,7 +2139,7 @@ mod tests {
             let coded_malicious2 =
                 CodedBlock::new(malicious_block2.clone(), coding_config, &Sequential);
             let malicious_commitment2 = coded_malicious2.commitment();
-            shards.proposed(byzantine_round2, coded_malicious2);
+            shards.stage(byzantine_round2, coded_malicious2);
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
@@ -2231,7 +2231,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent);
+            shards.stage(parent_round, coded_parent);
 
             // Create child at height 2.
             let child_round = Round::new(Epoch::zero(), View::new(2));
@@ -2243,7 +2243,7 @@ mod tests {
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let coded_child = CodedBlock::new(child, coding_config, &Sequential);
             let child_commitment = coded_child.commitment();
-            shards.proposed(child_round, coded_child);
+            shards.stage(child_round, coded_child);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2355,7 +2355,7 @@ mod tests {
             let parent = make_coding_block(parent_context, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent);
+            shards.stage(parent_round, coded_parent);
 
             // 3) Publish a valid child so optimistic verify can succeed.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -2368,7 +2368,7 @@ mod tests {
                 make_coding_block(verify_context.clone(), parent.digest(), Height::new(2), 200);
             let coded_block = CodedBlock::new(block, coding_config, &Sequential);
             let commitment = coded_block.commitment();
-            shards.proposed(round, coded_block);
+            shards.stage(round, coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2674,7 +2674,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent);
+            shards.stage(parent_round, coded_parent);
 
             let child_round = Round::new(Epoch::zero(), View::new(2));
             let child_ctx = CodingCtx {
@@ -2686,7 +2686,7 @@ mod tests {
             let coded_child = CodedBlock::new(child.clone(), coding_config, &Sequential);
             let child_commitment = coded_child.commitment();
             let child_digest = coded_child.digest();
-            shards.proposed(child_round, coded_child);
+            shards.stage(child_round, coded_child);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2871,11 +2871,41 @@ mod tests {
         });
     }
 
-    /// Dissemination waits for consensus: `propose` must NOT hand the built
-    /// block to the shards engine on its own — shards are dispatched only
-    /// when the voter requests a broadcast via `Relay::broadcast`, whose
-    /// forward resolves the block the core actor retained from the propose
-    /// path's persist enqueue.
+    /// Starts a bare shards engine for `peer` on the shared oracle so a test
+    /// can observe whether the leader's fan-out reaches a consumer.
+    ///
+    /// Registers the same channel the harness uses for shards.
+    async fn start_observer_shards(
+        context: deterministic::Context,
+        oracle: &mut commonware_p2p::simulated::Oracle<K, deterministic::Context>,
+        peer: K,
+        provider: ConstantProvider<S, Epoch>,
+    ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
+        let control = oracle.control(peer);
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+            scheme_provider: provider,
+            blocker: control.clone(),
+            shard_codec_cfg: CodecConfig {
+                maximum_shard_size: 1024 * 1024,
+            },
+            block_codec_cfg: (),
+            strategy: Sequential,
+            mailbox_size: NZUsize!(10),
+            peer_buffer_size: NZUsize!(64),
+            background_channel_capacity: NZUsize!(1024),
+            peer_provider: oracle.manager(),
+        };
+        let (engine, mailbox) = shards::Engine::new(context, shard_config);
+        let network = control.register(2, TEST_QUOTA).await.unwrap();
+        engine.start(network);
+        mailbox
+    }
+
+    /// Dissemination waits for consensus: `propose` stages the built block
+    /// with the shards engine (data movement only — the block is cached for
+    /// local consumers) but nothing may hit the network until the voter
+    /// requests a broadcast via `Relay::broadcast`, which triggers the
+    /// fan-out directly on the engine from its staged copy.
     #[test_traced("WARN")]
     fn test_marshaled_dissemination_waits_for_relay_broadcast() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -2891,6 +2921,7 @@ mod tests {
                 participants.clone(),
             )
             .await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -2904,6 +2935,17 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
+
+            // A second participant's shards engine observes whether the
+            // leader's fan-out ever reaches the network.
+            let observer = participants[1].clone();
+            let observer_shards = start_observer_shards(
+                context.child("observer_shards"),
+                &mut oracle,
+                observer,
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
 
             let genesis_ctx = CodingCtx {
                 round: Round::zero(),
@@ -2944,6 +2986,12 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
+            // The observer knows the leader, so it processes its assigned
+            // shard the moment one arrives.
+            observer_shards.discovered(expected_commitment, me.clone(), propose_round);
+            let mut observer_sub =
+                observer_shards.subscribe_assigned_shard_verified(expected_commitment);
+
             let commitment = marshaled
                 .propose(propose_context)
                 .await
@@ -2951,18 +2999,32 @@ mod tests {
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
 
-            // `propose` must not dispatch shards on its own: dissemination is
-            // consensus-driven.
+            // `propose` stages the built block with the shards engine
+            // (enqueued before the commitment resolves, so it is already
+            // cached)...
             let cached = shards.get(commitment).await;
             assert!(
-                cached.is_none(),
-                "propose must not dispatch the built block to the shards engine \
-                 before consensus requests a broadcast"
+                cached.is_some(),
+                "propose must stage the built block in the shards engine"
             );
 
-            // The voter's broadcast request forwards the block retained by
-            // the core actor into the shards engine. The forward crosses two
-            // mailboxes (core actor, then shards engine), so poll for it.
+            // ...but nothing may have been sent: dissemination is
+            // consensus-driven.
+            context.sleep(LINK.latency * 20).await;
+            assert!(
+                matches!(
+                    observer_sub.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "no shard may reach a peer before consensus requests a broadcast"
+            );
+            assert!(
+                observer_shards.get(commitment).await.is_none(),
+                "no block data may reach a peer before consensus requests a broadcast"
+            );
+
+            // The voter's broadcast request triggers the fan-out directly on
+            // the shards engine from its staged copy.
             let _ = crate::Relay::broadcast(
                 &mut marshaled,
                 commitment,
@@ -2970,18 +3032,14 @@ mod tests {
                     round: propose_round,
                 },
             );
-            let mut cached = None;
-            for _ in 0..50 {
-                cached = shards.get(commitment).await;
-                if cached.is_some() {
-                    break;
-                }
-                context.sleep(Duration::from_millis(10)).await;
+            select! {
+                result = observer_sub => {
+                    result.expect("observer's assigned shard subscription should resolve");
+                },
+                _ = context.sleep(Duration::from_secs(10)) => {
+                    panic!("fan-out did not reach the observer after Relay::broadcast");
+                },
             }
-            assert!(
-                cached.is_some(),
-                "Relay::broadcast must dispatch the proposed block to the shards engine"
-            );
 
             // The deferred persist must not weaken the durability gate: the
             // leader's certify still awaits the deferred propose sync handle.
@@ -3017,6 +3075,7 @@ mod tests {
                 participants.clone(),
             )
             .await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -3030,6 +3089,17 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
+
+            // A second participant's shards engine observes whether the
+            // leader's fan-out ever reaches the network.
+            let observer = participants[1].clone();
+            let observer_shards = start_observer_shards(
+                context.child("observer_shards"),
+                &mut oracle,
+                observer,
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
 
             let genesis_ctx = CodingCtx {
                 round: Round::zero(),
@@ -3076,6 +3146,11 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
+            // The observer knows the leader, so it processes its assigned
+            // shard the moment one arrives.
+            observer_shards.discovered(commitment_a, me.clone(), round);
+            let mut observer_sub = observer_shards.subscribe_assigned_shard_verified(commitment_a);
+
             let commitment = marshaled
                 .propose(ctx)
                 .await
@@ -3086,27 +3161,40 @@ mod tests {
                 "propose must reuse the block marshal already persisted for this round"
             );
 
-            // Dissemination is consensus-driven for recovery too: the voter's
-            // broadcast request forwards the verified block marshal already
-            // holds into the shards engine. The forward crosses two mailboxes
-            // (core actor, then shards engine), so poll for it.
+            // Recovery stages the persisted block back into the shards
+            // engine (enqueued before the commitment resolves, so it is
+            // already cached)...
+            assert!(
+                shards.get(commitment_a).await.is_some(),
+                "propose recovery must stage the verified block in the shards engine"
+            );
+
+            // ...but dissemination is consensus-driven for recovery too:
+            // nothing is sent before the voter's broadcast request.
+            context.sleep(LINK.latency * 20).await;
+            assert!(
+                matches!(
+                    observer_sub.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "no shard may reach a peer before consensus requests a broadcast"
+            );
+
+            // The voter's broadcast request triggers the fan-out directly on
+            // the shards engine from its staged copy.
             let _ = crate::Relay::broadcast(
                 &mut marshaled,
                 commitment_a,
                 crate::simplex::Plan::Propose { round },
             );
-            let mut cached = None;
-            for _ in 0..50 {
-                cached = shards.get(commitment_a).await;
-                if cached.is_some() {
-                    break;
-                }
-                context.sleep(Duration::from_millis(10)).await;
+            select! {
+                result = observer_sub => {
+                    result.expect("observer's assigned shard subscription should resolve");
+                },
+                _ = context.sleep(Duration::from_secs(10)) => {
+                    panic!("fan-out did not reach the observer after Relay::broadcast");
+                },
             }
-            assert!(
-                cached.is_some(),
-                "Relay::broadcast must dispatch the recovered block to the shards engine"
-            );
         });
     }
 

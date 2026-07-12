@@ -131,8 +131,18 @@ where
     }
 
     fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
-        // Targeted forwarding is not supported by the coding variant.
-        self.proposed(round, block);
+        // Nothing routes coding dissemination through the core actor anymore:
+        // the propose path stages blocks directly with the shards engine and
+        // the voter's broadcast request triggers the fan-out there (see the
+        // coding `Marshaled`'s `Relay` impl), while the batcher's
+        // `Plan::Forward` is ignored by that same impl. This hook exists only
+        // because the core actor's generic `Forward` machinery requires a
+        // `Buffer` impl; keep it functional by staging and fanning out in one
+        // step. Targeted forwarding is not supported by the coding variant
+        // (peers reconstruct from shards), so the recipients are ignored.
+        let commitment = block.commitment();
+        self.stage(round, block);
+        let _ = self.broadcast(round, commitment);
     }
 }
 

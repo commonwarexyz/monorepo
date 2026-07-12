@@ -6,7 +6,9 @@
 //! # Overview
 //!
 //! The shard engine serves two primary functions:
-//! 1. Broadcast: When a node proposes a block, the engine broadcasts
+//! 1. Broadcast: When a node proposes a block, the propose path stages the
+//!    block in the engine's in-memory cache (data movement only — no sends).
+//!    Once consensus requests dissemination, the engine broadcasts
 //!    erasure-coded shards to all participants and to non-participants in
 //!    aggregate membership (peers in [`commonware_p2p::PeerSetUpdate::all`]
 //!    but not in the epoch participant list).
@@ -23,12 +25,14 @@
 //! ```text
 //!                           PROPOSER
 //!                              |
-//!                              | Proposed(block)
+//!                              | Stage(block)          [cache only, no sends]
 //!                              v
 //!                    +------------------+
 //!                    |   Shard Engine   |
 //!                    +------------------+
 //!                              |
+//!                              | Broadcast(commitment) [requested by consensus]
+//!                              v
 //!            broadcast_shards (each participant's indexed shard)
 //!                              |
 //!         +--------------------+--------------------+
@@ -300,6 +304,15 @@ where
 {
     round: Round,
     block: CodedBlock<B, C, H>,
+    /// The round at which this node last fanned out the block's shards, if
+    /// any.
+    ///
+    /// `None` for blocks that were reconstructed from peer shards or staged
+    /// but not yet disseminated. A consensus broadcast trigger at this round
+    /// is a duplicate (only local notifications are repeated), while a
+    /// trigger at a different round is an epoch-boundary re-proposal and
+    /// re-sends under the new round.
+    broadcast: Option<Round>,
 }
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
@@ -507,8 +520,11 @@ where
                 }
 
                 match message {
-                    Message::Proposed { block, round } => {
-                        self.broadcast_shards(&mut sender, round, block);
+                    Message::Stage { block, round } => {
+                        self.stage_proposal(round, block);
+                    }
+                    Message::Broadcast { commitment, round } => {
+                        self.broadcast_shards(&mut sender, round, commitment);
                     }
                     Message::Discovered {
                         commitment,
@@ -903,23 +919,51 @@ where
     }
 
     /// Cache a block and notify all subscribers waiting on it.
+    ///
+    /// A commitment already cached keeps its fan-out marker: re-caching is
+    /// data movement and must not make a previously sent broadcast look
+    /// unsent (or vice versa).
     fn cache_block(&mut self, round: Round, block: CodedBlock<B, C, H>) {
         let commitment = block.commitment();
+        let broadcast = self
+            .reconstructed_blocks
+            .get(&commitment)
+            .and_then(|cached| cached.broadcast);
         self.reconstructed_blocks.insert(
             commitment,
             ReconstructedBlock {
                 round,
                 block: block.clone(),
+                broadcast,
             },
         );
         self.notify_block_subscribers(block);
     }
 
-    /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
+    /// Stages a locally proposed [`CodedBlock`] in the in-memory cache.
     ///
-    /// Idempotent per `(commitment, round)`: a block already cached at the
-    /// same round has had its shards sent, so a duplicate dispatch repeats
-    /// only the local subscriber notifications.
+    /// Staging is pure data movement: the block is cached and local
+    /// subscribers are notified, but no shards are sent. Dissemination
+    /// happens only when consensus requests it via [`Message::Broadcast`].
+    fn stage_proposal(&mut self, round: Round, block: CodedBlock<B, C, H>) {
+        let commitment = block.commitment();
+        self.cache_block(round, block);
+
+        // Local proposals bypass reconstruction, so shard subscribers waiting
+        // for "our valid shard arrived" still need a notification: the
+        // proposer trivially holds all shards.
+        self.notify_assigned_shard_verified_subscribers(commitment);
+
+        debug!(?commitment, "staged local proposal");
+    }
+
+    /// Broadcasts the shards of a staged [`CodedBlock`].
+    ///
+    /// Idempotent per `(commitment, round)`: a commitment whose shards were
+    /// already sent at the same round has nothing left to disseminate, so a
+    /// duplicate trigger repeats only the local subscriber notifications. A
+    /// trigger for a commitment last sent under a different round is an
+    /// epoch-boundary re-proposal and re-sends under the new round.
     ///
     /// - Participants receive the shard matching their participant index.
     /// - Non-participants in aggregate membership receive the leader's shard.
@@ -932,20 +976,28 @@ where
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         round: Round,
-        mut block: CodedBlock<B, C, H>,
+        commitment: Commitment,
     ) {
-        let commitment = block.commitment();
+        // The propose path stages the block with this engine strictly before
+        // the commitment is handed to consensus, and the voter's broadcast
+        // request is enqueued on this same FIFO mailbox only after it has
+        // received that commitment, so a propose-flow trigger always finds
+        // the staged block cached here. A miss therefore means the
+        // commitment was evicted by a finalization-driven prune (or the
+        // trigger is stray), and dissemination is moot: warn and drop.
+        let Some(cached) = self.reconstructed_blocks.get(&commitment) else {
+            warn!(
+                %commitment,
+                "broadcast requested for uncached commitment, dropping"
+            );
+            return;
+        };
 
-        // A block already cached at the same round has had its shards sent:
+        // Shards already sent at this round make the trigger a duplicate:
         // repeat only the local notification side effects rather than
-        // doubling every send. A cached commitment at a different round is an
-        // epoch-boundary re-proposal and must rebroadcast under the new
-        // round.
-        if self
-            .reconstructed_blocks
-            .get(&commitment)
-            .is_some_and(|cached| cached.round == round)
-        {
+        // doubling every send.
+        if cached.broadcast == Some(round) {
+            let block = cached.block.clone();
             self.notify_assigned_shard_verified_subscribers(commitment);
             self.notify_block_subscribers(block);
             debug!(?commitment, "skipping duplicate shard broadcast");
@@ -965,7 +1017,15 @@ where
             return;
         };
 
-        let shard_count = block.shards(&self.strategy).len();
+        // Materialize the shards on the cached entry so later triggers (an
+        // epoch-boundary re-broadcast) reuse the encoding: clones share the
+        // shard backing store.
+        let strategy = self.strategy.clone();
+        let entry = self
+            .reconstructed_blocks
+            .get_mut(&commitment)
+            .expect("cached entry checked above");
+        let shard_count = entry.block.shards(&strategy).len();
         if shard_count != participants.len() {
             warn!(
                 %commitment,
@@ -975,6 +1035,7 @@ where
             );
             return;
         }
+        let block = entry.block.clone();
 
         let my_index = me.get() as usize;
         let leader_shard = block
@@ -1013,12 +1074,20 @@ where
             let _ = sender.send(Recipients::Some(non_participants), leader_shard, false);
         }
 
-        // Cache the block so we don't have to reconstruct it again.
-        self.cache_block(round, block);
+        // Record the fan-out so a repeat trigger at this round is treated as
+        // a duplicate, and keep the cached round in step with the round the
+        // shards were actually sent under.
+        let entry = self
+            .reconstructed_blocks
+            .get_mut(&commitment)
+            .expect("cached entry checked above");
+        entry.round = round;
+        entry.broadcast = Some(round);
 
         // Local proposals bypass reconstruction, so shard subscribers waiting
         // for "our valid shard arrived" still need a notification.
         self.notify_assigned_shard_verified_subscribers(commitment);
+        self.notify_block_subscribers(block);
 
         debug!(?commitment, "broadcasted shards");
     }
@@ -1954,6 +2023,17 @@ mod tests {
             .sum()
     }
 
+    /// Stage a local proposal and trigger its consensus-requested fan-out,
+    /// mirroring the production propose-then-`Relay::broadcast` sequence.
+    fn propose<S: CodingScheme>(
+        mailbox: &Mailbox<B, S, H, P>,
+        round: Round,
+        block: &CodedBlock<B, S, H>,
+    ) {
+        mailbox.stage(round, block.clone());
+        let _ = mailbox.broadcast(round, block.commitment());
+    }
+
     /// A participant in the test network with its engine mailbox and blocker.
     struct Peer<S: CodingScheme = C> {
         /// The peer's public key.
@@ -2177,7 +2257,7 @@ mod tests {
 
                 let leader = peers[0].public_key.clone();
                 let round = Round::new(Epoch::zero(), View::new(1));
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                propose(&peers[0].mailbox, round, &coded_block);
 
                 // Inform all peers of the leader so shards are processed.
                 for peer in peers[1..].iter_mut() {
@@ -2225,7 +2305,7 @@ mod tests {
 
                 let leader = peers[0].public_key.clone();
                 let round = Round::new(Epoch::zero(), View::new(1));
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                propose(&peers[0].mailbox, round, &coded_block);
 
                 // Inform all peers of the leader so shards are processed.
                 for peer in peers[1..].iter_mut() {
@@ -2275,7 +2355,7 @@ mod tests {
                 let commitment_sub = peers[1].mailbox.subscribe(commitment);
                 let digest_sub = peers[2].mailbox.subscribe_by_digest(digest);
 
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                propose(&peers[0].mailbox, round, &coded_block);
 
                 // Inform all peers of the leader so shards are processed.
                 for peer in peers[1..].iter_mut() {
@@ -2322,7 +2402,10 @@ mod tests {
             let commitment_sub = peers[0].mailbox.subscribe(commitment);
             let digest_sub = peers[0].mailbox.subscribe_by_digest(digest);
 
-            peers[0].mailbox.proposed(round, coded_block.clone());
+            // Staging alone (no consensus broadcast trigger) must resolve all
+            // local subscriptions: the proposer trivially holds the block and
+            // every shard.
+            peers[0].mailbox.stage(round, coded_block.clone());
             context.sleep(config.link.latency).await;
 
             select! {
@@ -2447,12 +2530,12 @@ mod tests {
             let commitment2 = block2.commitment();
             let commitment3 = block3.commitment();
 
-            // Cache all blocks via `proposed`.
+            // Cache all blocks via `stage`.
             let peer = &mut peers[0];
             let round = Round::new(Epoch::zero(), View::new(1));
-            peer.mailbox.proposed(round, block1);
-            peer.mailbox.proposed(round, block2);
-            peer.mailbox.proposed(round, block3);
+            peer.mailbox.stage(round, block1);
+            peer.mailbox.stage(round, block2);
+            peer.mailbox.stage(round, block3);
             context.sleep(Duration::from_millis(10)).await;
 
             // Verify all blocks are in the cache.
@@ -2491,13 +2574,13 @@ mod tests {
         });
     }
 
-    /// A local proposal is dispatched to the engine twice (directly by the
-    /// propose path, then again by the voter-driven `Forward`). The second
-    /// dispatch at the same round must not re-send any shards, while a
-    /// dispatch of the same block at a later round (an epoch-boundary
-    /// re-proposal) must still rebroadcast.
+    /// A staged proposal may receive multiple broadcast triggers (e.g., a
+    /// re-dispatch through the coding `Buffer::send` hook, which re-stages
+    /// and re-triggers). A repeat trigger at the same round must not re-send
+    /// any shards, while a trigger for the same block staged at a later round
+    /// (an epoch-boundary re-proposal) must still rebroadcast.
     #[test_traced]
-    fn test_duplicate_proposed_same_round_not_rebroadcast() {
+    fn test_duplicate_broadcast_same_round_not_resent() {
         let fixture = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -2510,7 +2593,7 @@ mod tests {
 
             let leader = peers[0].public_key.clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            peers[0].mailbox.proposed(round, coded_block.clone());
+            propose(&peers[0].mailbox, round, &coded_block);
             for peer in peers[1..].iter_mut() {
                 peer.mailbox.discovered(commitment, leader.clone(), round);
             }
@@ -2525,14 +2608,16 @@ mod tests {
             context.sleep(Duration::from_secs(5)).await;
             let settled = sum_counter(&context.encode(), "shards_received");
 
-            // The trailing dispatch of the same block at the same round
-            // must be absorbed without any network sends.
-            peers[0].mailbox.proposed(round, coded_block.clone());
+            // A repeat trigger at the same round must be absorbed without
+            // any network sends, with or without a preceding re-stage.
+            let _ = peers[0].mailbox.broadcast(round, commitment);
+            peers[0].mailbox.stage(round, coded_block.clone());
+            let _ = peers[0].mailbox.broadcast(round, commitment);
             context.sleep(Duration::from_secs(5)).await;
             assert_eq!(
                 sum_counter(&context.encode(), "shards_received"),
                 settled,
-                "duplicate proposed at the same round must not re-send shards"
+                "duplicate broadcast at the same round must not re-send shards"
             );
 
             // The dedup path still serves local lookups and proposer
@@ -2547,19 +2632,117 @@ mod tests {
                 .mailbox
                 .subscribe_assigned_shard_verified(commitment)
                 .await
-                .expect("proposer readiness must survive the duplicate dispatch");
+                .expect("proposer readiness must survive the duplicate trigger");
 
-            // A re-proposal of the same block at a later round must
-            // rebroadcast under the new round.
+            // A re-proposal of the same block at a later round (staged under
+            // the new round by the propose path, then triggered again by
+            // consensus) must rebroadcast under the new round.
             let reproposal_round = Round::new(Epoch::zero(), View::new(2));
-            peers[0]
-                .mailbox
-                .proposed(reproposal_round, coded_block.clone());
+            propose(&peers[0].mailbox, reproposal_round, &coded_block);
             context.sleep(Duration::from_secs(5)).await;
             assert!(
                 sum_counter(&context.encode(), "shards_received") > settled,
                 "re-proposal at a new round must rebroadcast shards"
             );
+        });
+    }
+
+    /// Staging a local proposal is pure data movement: the block becomes
+    /// available to local consumers, but nothing hits the network until
+    /// consensus requests the fan-out.
+    #[test_traced]
+    fn test_stage_without_broadcast_sends_nothing() {
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+
+            let leader = peers[0].public_key.clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            peers[0].mailbox.stage(round, coded_block.clone());
+            for peer in peers[1..].iter_mut() {
+                peer.mailbox.discovered(commitment, leader.clone(), round);
+            }
+
+            // The staged block serves local lookups on the proposer...
+            let cached = peers[0]
+                .mailbox
+                .get(commitment)
+                .await
+                .expect("staged block must be cached on the proposer");
+            assert_eq!(cached.commitment(), commitment);
+
+            // ...but no shard leaves the proposer before the trigger.
+            context.sleep(Duration::from_secs(5)).await;
+            assert_eq!(
+                sum_counter(&context.encode(), "shards_received"),
+                0,
+                "staging must not send any shards"
+            );
+            assert!(
+                peers[1].mailbox.get(commitment).await.is_none(),
+                "peers must not observe the block before the broadcast trigger"
+            );
+
+            // The consensus-requested trigger fans out; peers reconstruct.
+            let _ = peers[0].mailbox.broadcast(round, commitment);
+            for peer in peers.iter_mut() {
+                peer.mailbox
+                    .subscribe(commitment)
+                    .await
+                    .expect("block should be reconstructed after the broadcast trigger");
+            }
+        });
+    }
+
+    /// A broadcast trigger for a commitment that was never staged (or was
+    /// already pruned) must warn and drop without sending or panicking, and
+    /// must leave the engine functional.
+    #[test_traced]
+    fn test_broadcast_uncached_commitment_dropped() {
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+
+            let leader = peers[0].public_key.clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+
+            // Trigger a broadcast without ever staging the block.
+            let _ = peers[0].mailbox.broadcast(round, commitment);
+            context.sleep(Duration::from_secs(5)).await;
+            assert_eq!(
+                sum_counter(&context.encode(), "shards_received"),
+                0,
+                "an uncached broadcast trigger must not send any shards"
+            );
+            assert!(
+                peers[0].mailbox.get(commitment).await.is_none(),
+                "an uncached broadcast trigger must not populate the cache"
+            );
+
+            // The engine remains functional: a staged proposal still fans
+            // out on the next trigger.
+            propose(&peers[0].mailbox, round, &coded_block);
+            for peer in peers[1..].iter_mut() {
+                peer.mailbox.discovered(commitment, leader.clone(), round);
+            }
+            for peer in peers.iter_mut() {
+                peer.mailbox
+                    .subscribe(commitment)
+                    .await
+                    .expect("block should be reconstructed after staging and broadcast");
+            }
         });
     }
 
@@ -3295,7 +3478,7 @@ mod tests {
                     .send(Recipients::One(peer2_pk.clone()), shard_a.encode(), true);
                 context.sleep(config.link.latency * 2).await;
 
-                peers[2].mailbox.proposed(round_b, block_b);
+                propose(&peers[2].mailbox, round_b, &block_b);
                 assert!(
                     peers[2].mailbox.get(commitment_b).await.is_some(),
                     "local proposal should be cached before pruning"
@@ -4860,7 +5043,7 @@ mod tests {
 
                 // Leader proposes. The victim will not receive a direct shard
                 // because the link is severed.
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                propose(&peers[0].mailbox, round, &coded_block);
 
                 // Inform all non-leader peers of the leader so they validate
                 // and re-broadcast their shards via Recipients::All.
@@ -4939,7 +5122,7 @@ mod tests {
                 let block_sub = peers[1].mailbox.subscribe(commitment);
 
                 // Leader broadcasts.
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                propose(&peers[0].mailbox, round, &coded_block);
 
                 // All non-leader peers discover the leader.
                 for peer in peers[1..].iter_mut() {
@@ -4979,7 +5162,7 @@ mod tests {
 
                 let leader = peers[0].public_key.clone();
                 let round = Round::new(Epoch::zero(), View::new(1));
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                propose(&peers[0].mailbox, round, &coded_block);
 
                 for peer in peers[1..].iter_mut() {
                     peer.mailbox.discovered(commitment, leader.clone(), round);
@@ -5163,7 +5346,7 @@ mod tests {
             // The gossiper must know the leader to eagerly verify (and then
             // rebroadcast) its assigned shard on arrival.
             gossiper_mailbox.discovered(commitment, leader.clone(), round);
-            leader_mailbox.proposed(round, coded_block.clone());
+            propose(&leader_mailbox, round, &coded_block);
             context.sleep(DEFAULT_LINK.latency * 4).await;
 
             let shard_codec_cfg = CodecConfig {
@@ -5234,7 +5417,7 @@ mod tests {
                 let round = Round::new(Epoch::zero(), View::new(1));
 
                 let leader = peers[0].public_key.clone();
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                propose(&peers[0].mailbox, round, &coded_block);
 
                 // Inform participants of the leader so they validate and re-broadcast
                 // shards.
@@ -5830,9 +6013,7 @@ mod tests {
 
                 // Leader proposes. All peers except the victim get their
                 // shard from the leader, verify it, and gossip it.
-                peers[leader_idx]
-                    .mailbox
-                    .proposed(round, coded_block.clone());
+                propose(&peers[leader_idx].mailbox, round, &coded_block);
 
                 // Inform all non-leader peers of the leader.
                 for peer in peers[1..].iter_mut() {
