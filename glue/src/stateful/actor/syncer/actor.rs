@@ -138,7 +138,7 @@ where
         {
             let mut sync_metadata = self.sync_metadata.lock().await;
             sync_metadata
-                .begin_sync(resolved_floor.marker, self.finalization.clone())
+                .begin_sync(resolved_floor.anchor.height, self.finalization.clone())
                 .await;
         }
 

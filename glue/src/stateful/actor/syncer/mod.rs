@@ -10,7 +10,6 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
     types::Height,
-    Heightable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner};
@@ -194,15 +193,13 @@ where
 }
 
 /// Resolved state sync floor data derived from the selected finalization.
-pub(crate) struct ResolvedFloor<E, A, C>
+pub(crate) struct ResolvedFloor<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    C: Digest,
 {
     pub anchor: Anchor<BlockDigest<A, E>>,
     pub targets: <A::Databases as DatabaseSet<E>>::SyncTargets,
-    pub marker: FloorMarker<C>,
 }
 
 /// Durable state-sync metadata.
@@ -294,17 +291,17 @@ where
     /// If an interrupted state sync already stored a floor, the newly selected
     /// floor must resume from that same floor or a later one. State sync runs
     /// at most once per node, so arming it after a completed sync panics.
-    pub(crate) async fn begin_sync(&mut self, marker: FloorMarker<C>, floor: Finalization<S, C>) {
-        assert!(
-            marker.commitment == floor.proposal.payload,
-            "state sync floor marker must identify the floor finalization",
-        );
+    ///
+    /// `height` is the height of the block `floor` finalizes.
+    pub(crate) async fn begin_sync(&mut self, height: Height, floor: Finalization<S, C>) {
+        let marker = FloorMarker::new(height, floor.proposal.payload);
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress {
-                height,
+                height: existing_height,
                 floor: existing,
             }) => {
-                FloorMarker::new(*height, existing.proposal.payload).ensure_not_behind(&marker);
+                FloorMarker::new(*existing_height, existing.proposal.payload)
+                    .ensure_not_behind(&marker);
             }
             Some(SyncState::Complete { .. }) => {
                 unreachable!("state sync cannot restart after completion");
@@ -313,13 +310,7 @@ where
         }
 
         self.metadata
-            .put_sync(
-                SYNC_STATE_KEY,
-                SyncState::InProgress {
-                    height: marker.height,
-                    floor,
-                },
-            )
+            .put_sync(SYNC_STATE_KEY, SyncState::InProgress { height, floor })
             .await
             .expect("failed to set state sync state to in-progress");
     }
@@ -366,7 +357,7 @@ where
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     finalization: &Finalization<S, V::Commitment>,
-) -> ResolvedFloor<E, A, V::Commitment>
+) -> ResolvedFloor<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -387,7 +378,6 @@ where
     ResolvedFloor {
         anchor: Anchor::from(&floor),
         targets: A::sync_targets(&floor),
-        marker: FloorMarker::new(floor.height(), finalization.proposal.payload),
     }
 }
 

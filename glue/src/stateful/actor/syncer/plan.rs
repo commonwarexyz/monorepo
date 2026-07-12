@@ -260,12 +260,7 @@ mod tests {
                 (),
             )
             .await;
-            metadata
-                .begin_sync(
-                    FloorMarker::new(Height::new(7), Sha256::fill(7)),
-                    stored.clone(),
-                )
-                .await;
+            metadata.begin_sync(Height::new(7), stored.clone()).await;
             drop(metadata);
 
             // No floor attached: resume from the persisted one, and anchor
@@ -327,10 +322,7 @@ mod tests {
             .await;
             metadata.set_complete(Height::new(7)).await;
             metadata
-                .begin_sync(
-                    FloorMarker::new(Height::new(8), Sha256::fill(8)),
-                    finalization(&context, 8),
-                )
+                .begin_sync(Height::new(8), finalization(&context, 8))
                 .await;
         });
     }
@@ -363,10 +355,7 @@ mod tests {
             )
             .await;
             metadata
-                .begin_sync(
-                    FloorMarker::new(Height::new(7), Sha256::fill(7)),
-                    finalization(&context, 7),
-                )
+                .begin_sync(Height::new(7), finalization(&context, 7))
                 .await;
             metadata.set_complete(Height::new(6)).await;
         });
@@ -376,7 +365,6 @@ mod tests {
     fn in_progress_sync_requires_compatible_floor() {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
-            let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
             let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
                 &context,
                 partition_prefix,
@@ -384,7 +372,7 @@ mod tests {
             )
             .await;
             metadata
-                .begin_sync(stored.clone(), finalization(&context, 7))
+                .begin_sync(Height::new(7), finalization(&context, 7))
                 .await;
             drop(metadata);
 
@@ -394,13 +382,10 @@ mod tests {
             assert!(plan.requires_state_sync_floor());
             assert!(plan.should_state_sync(false));
             plan.sync_metadata
-                .begin_sync(stored, finalization(&context, 7))
+                .begin_sync(Height::new(7), finalization(&context, 7))
                 .await;
             plan.sync_metadata
-                .begin_sync(
-                    FloorMarker::new(Height::new(9), Sha256::fill(9)),
-                    finalization(&context, 9),
-                )
+                .begin_sync(Height::new(9), finalization(&context, 9))
                 .await;
         });
     }
@@ -419,12 +404,7 @@ mod tests {
                 (),
             )
             .await;
-            metadata
-                .begin_sync(
-                    FloorMarker::new(Height::new(7), Sha256::fill(7)),
-                    floor.clone(),
-                )
-                .await;
+            metadata.begin_sync(Height::new(7), floor.clone()).await;
             metadata.set_complete(Height::new(7)).await;
             drop(metadata);
 
