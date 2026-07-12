@@ -73,7 +73,7 @@ where
     pub(super) marshal: MarshalMailbox<S, V>,
 
     /// Durable state-sync metadata.
-    pub(super) sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
+    pub(super) sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, S, V::Commitment>>>,
 
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
@@ -381,7 +381,7 @@ mod tests {
                     input_provider: (),
                     marshal: init_marshal_mailbox(context.child("marshal")).await,
                     sync_metadata: Arc::new(AsyncMutex::new(
-                        StateSyncMetadata::init(&context, "syncing-test").await,
+                        StateSyncMetadata::init(&context, "syncing-test", ()).await,
                     )),
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),

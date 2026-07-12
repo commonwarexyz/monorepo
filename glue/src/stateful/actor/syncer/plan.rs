@@ -1,4 +1,5 @@
 use super::StateSyncMetadata;
+use commonware_codec::Read;
 use commonware_consensus::{
     marshal::{core::Variant, Start},
     simplex::types::Finalization,
@@ -10,7 +11,7 @@ use commonware_storage::Context;
 /// The floor to state sync from (if any) and the durable metadata handle.
 type PlanParts<E, S, V> = (
     Option<Finalization<S, <V as Variant>::Commitment>>,
-    StateSyncMetadata<E, <V as Variant>::Commitment>,
+    StateSyncMetadata<E, S, <V as Variant>::Commitment>,
 );
 
 /// Startup plan that determines whether one-time peer state sync may still run.
@@ -36,7 +37,7 @@ where
     S: Scheme,
     V: Variant,
 {
-    sync_metadata: StateSyncMetadata<E, V::Commitment>,
+    sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
     floor: Option<Finalization<S, V::Commitment>>,
 }
 
@@ -48,14 +49,25 @@ where
 {
     /// Load the durable state sync metadata for this partition prefix.
     ///
+    /// `certificate_cfg` is the scheme's certificate codec configuration,
+    /// used to read the stored state sync floor finalization.
+    ///
     /// # Panics
     ///
     /// Panics if the metadata store cannot be opened. A node that cannot
     /// determine whether state sync already completed cannot safely choose a
     /// startup path.
-    pub async fn init(context: &E, partition_prefix: impl AsRef<str>) -> Self {
-        let sync_metadata =
-            StateSyncMetadata::<E, V::Commitment>::init(context, partition_prefix).await;
+    pub async fn init(
+        context: &E,
+        partition_prefix: impl AsRef<str>,
+        certificate_cfg: <S::Certificate as Read>::Cfg,
+    ) -> Self {
+        let sync_metadata = StateSyncMetadata::<E, S, V::Commitment>::init(
+            context,
+            partition_prefix,
+            certificate_cfg,
+        )
+        .await;
         Self {
             sync_metadata,
             floor: None,
@@ -94,11 +106,21 @@ where
 
     /// Attach a finalized floor to state sync from.
     ///
-    /// Has no effect if state sync has already completed.
+    /// Has no effect if state sync has already completed. An interrupted
+    /// state sync keeps its persisted floor unless the attached one is
+    /// strictly newer: floors are probed from peers near the tip, so a
+    /// sampled floor can lag what this node already durably armed.
     #[must_use]
     pub fn with_floor(mut self, floor: Finalization<S, V::Commitment>) -> Self {
         if !self.may_state_sync() {
             return self;
+        }
+
+        if let Some(stored) = self.sync_metadata.in_progress_floor() {
+            if floor.round() <= stored.round() {
+                self.floor = Some(stored.clone());
+                return self;
+            }
         }
 
         self.floor = Some(floor);
@@ -107,21 +129,35 @@ where
 
     /// Returns marshal's startup anchor for this plan.
     ///
-    /// If a finalized floor was attached, marshal starts from that floor.
-    /// Otherwise marshal starts from genesis and relies on its own durable
-    /// progress to override that anchor when available.
+    /// A newly attached state sync floor takes precedence. Otherwise a node
+    /// with an interrupted or completed state sync re-anchors marshal at its
+    /// persisted floor, which marshal ignores (or re-installs idempotently
+    /// in the brief window before the first post-sync acknowledgement) once
+    /// its durable progress covers it. The floor a node provides therefore
+    /// never advances after state sync, so marshal never jumps above the
+    /// databases. Nodes that never state synced start from genesis and rely
+    /// on marshal's durable progress to override that anchor when available.
     pub fn marshal_start<B>(&self, genesis: B) -> Start<S, V::Commitment, B> {
-        self.floor
-            .clone()
-            .map_or_else(|| Start::Genesis(genesis), Start::Floor)
+        if let Some(floor) = &self.floor {
+            return Start::Floor(floor.clone());
+        }
+        if let Some(floor) = self.sync_metadata.completed_floor() {
+            return Start::Floor(floor.clone());
+        }
+        if let Some(floor) = self.sync_metadata.in_progress_floor() {
+            return Start::Floor(floor.clone());
+        }
+        Start::Genesis(genesis)
     }
 
-    /// Returns whether startup must attach a new state sync floor.
+    /// Returns whether startup must resume an interrupted state sync.
     ///
     /// This is `true` after a previous process crashed while state sync was
     /// in progress. In that case [`Self::may_state_sync`] is also `true`, but
     /// starting from marshal/genesis is not allowed because partially synced
-    /// database state must be reopened through the state-sync path.
+    /// database state must be reopened through the state-sync path. The sync
+    /// resumes from the persisted floor unless [`Self::with_floor`] attaches
+    /// a strictly newer one.
     pub fn requires_state_sync_floor(&self) -> bool {
         self.sync_metadata.in_progress()
     }
@@ -131,6 +167,12 @@ where
     /// A caller can request peer state sync for a fresh node. An interrupted
     /// state sync always requires peer state sync, even if the caller did not
     /// explicitly request it.
+    ///
+    /// Callers must keep requesting state sync until a completed height is
+    /// recorded (this method returns `false`). Withdrawing the request after
+    /// marshal anchored at the floor but before durable sync progress exists
+    /// leaves marshal above a database set that never synced, which startup
+    /// treats as fatal.
     pub fn should_state_sync(&self, requested: bool) -> bool {
         self.may_state_sync() && (requested || self.requires_state_sync_floor())
     }
@@ -138,17 +180,13 @@ where
     /// Consumes this plan, returning the floor to state sync from (if any)
     /// and the durable state-sync metadata handle.
     ///
-    /// # Panics
-    ///
-    /// Panics if an interrupted state sync stored a floor but no new floor
-    /// was attached. Partially synced databases must be reopened through the
-    /// state-sync path, so startup cannot proceed without a fresh floor.
+    /// An interrupted state sync always yields a floor: the persisted one,
+    /// unless [`Self::with_floor`] attached a strictly newer selection.
     pub(crate) fn into_parts(self) -> PlanParts<E, S, V> {
-        assert!(
-            self.floor.is_some() || !self.requires_state_sync_floor(),
-            "interrupted state sync must resume from a newly selected floor"
-        );
-        (self.floor, self.sync_metadata)
+        let floor = self
+            .floor
+            .or_else(|| self.sync_metadata.in_progress_floor().cloned());
+        (floor, self.sync_metadata)
     }
 }
 
@@ -156,12 +194,26 @@ where
 mod tests {
     use super::SyncPlan;
     use crate::stateful::{
-        actor::syncer::{FloorMarker, StateSyncMetadata},
-        tests::mocks::{TestScheme, TestVariant},
+        actor::syncer::{tests::make_finalization, FloorMarker, StateSyncMetadata},
+        tests::mocks::{TestBlock, TestScheme, TestVariant},
     };
-    use commonware_consensus::types::Height;
+    use commonware_consensus::{
+        marshal::Start,
+        simplex::{mocks::scheme as scheme_mocks, types::Finalization},
+        types::Height,
+    };
     use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+
+    /// Builds a finalization whose payload matches `Sha256::fill(height)`.
+    fn finalization(
+        context: &deterministic::Context,
+        height: u64,
+    ) -> Finalization<TestScheme, Sha256Digest> {
+        let mut signing = context.child("signing");
+        let fixture = scheme_mocks::fixture(&mut signing, b"plan-floor", 1);
+        make_finalization(&fixture, &TestBlock::new(height, height as u8))
+    }
 
     #[test]
     fn stored_sync_height_disables_state_sync() {
@@ -169,20 +221,24 @@ mod tests {
             let partition_prefix = "stored_sync_height";
 
             let plan =
-                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix, ()).await;
             assert!(plan.may_state_sync());
             assert!(plan.should_state_sync(true));
             assert!(!plan.should_state_sync(false));
             assert_eq!(plan.sync_height(), None);
             drop(plan);
 
-            let mut metadata =
-                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                partition_prefix,
+                (),
+            )
+            .await;
             metadata.set_complete(Height::new(7)).await;
             drop(metadata);
 
             let plan =
-                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix, ()).await;
             assert!(!plan.may_state_sync());
             assert!(!plan.should_state_sync(true));
             assert_eq!(plan.sync_height(), Some(Height::new(7)));
@@ -190,21 +246,71 @@ mod tests {
         });
     }
 
+    /// An interrupted state sync restarts from its persisted floor when the
+    /// caller attaches nothing, keeps the persisted floor over a lagging
+    /// probe selection, and retargets to a strictly newer one.
     #[test]
-    #[should_panic(expected = "interrupted state sync must resume from a newly selected floor")]
-    fn interrupted_sync_without_floor_cannot_start() {
+    fn interrupted_sync_resumes_from_persisted_floor() {
         deterministic::Runner::default().start(|context| async move {
-            let partition_prefix = "interrupted_sync_without_floor";
-            let mut metadata =
-                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            let partition_prefix = "interrupted_sync_resumes";
+            let stored = finalization(&context, 7);
+            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                partition_prefix,
+                (),
+            )
+            .await;
             metadata
-                .begin_sync(FloorMarker::new(Height::new(7), Sha256::fill(7)))
+                .begin_sync(
+                    FloorMarker::new(Height::new(7), Sha256::fill(7)),
+                    stored.clone(),
+                )
                 .await;
             drop(metadata);
 
+            // No floor attached: resume from the persisted one, and anchor
+            // marshal at it.
             let plan =
-                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
-            let _ = plan.into_parts();
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix, ()).await;
+            assert!(plan.should_state_sync(false));
+            assert!(matches!(
+                plan.marshal_start(TestBlock::new(0, 0)),
+                Start::Floor(f) if f.proposal.payload == stored.proposal.payload
+            ));
+            let (floor, _) = plan.into_parts();
+            assert_eq!(
+                floor
+                    .expect("interrupted sync must yield a floor")
+                    .proposal
+                    .payload,
+                stored.proposal.payload,
+            );
+
+            // A lagging probe selection is ignored in favor of the persisted
+            // floor.
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix, ()).await;
+            let plan = plan.with_floor(finalization(&context, 6));
+            assert_eq!(
+                plan.floor()
+                    .expect("floor must be selected")
+                    .proposal
+                    .payload,
+                stored.proposal.payload,
+            );
+
+            // A strictly newer selection retargets the sync.
+            let newer = finalization(&context, 9);
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix, ()).await;
+            let plan = plan.with_floor(newer.clone());
+            assert_eq!(
+                plan.floor()
+                    .expect("floor must be selected")
+                    .proposal
+                    .payload,
+                newer.proposal.payload,
+            );
         });
     }
 
@@ -213,11 +319,18 @@ mod tests {
     fn completed_sync_cannot_be_rearmed() {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "completed_sync_cannot_be_rearmed";
-            let mut metadata =
-                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                partition_prefix,
+                (),
+            )
+            .await;
             metadata.set_complete(Height::new(7)).await;
             metadata
-                .begin_sync(FloorMarker::new(Height::new(8), Sha256::fill(8)))
+                .begin_sync(
+                    FloorMarker::new(Height::new(8), Sha256::fill(8)),
+                    finalization(&context, 8),
+                )
                 .await;
         });
     }
@@ -227,8 +340,12 @@ mod tests {
     fn complete_height_cannot_move_backward() {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "complete_height_cannot_move_backward";
-            let mut metadata =
-                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                partition_prefix,
+                (),
+            )
+            .await;
             metadata.set_complete(Height::new(7)).await;
             metadata.set_complete(Height::new(6)).await;
         });
@@ -239,10 +356,17 @@ mod tests {
     fn complete_height_cannot_be_behind_in_progress_floor() {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "complete_height_cannot_be_behind_in_progress_floor";
-            let mut metadata =
-                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                partition_prefix,
+                (),
+            )
+            .await;
             metadata
-                .begin_sync(FloorMarker::new(Height::new(7), Sha256::fill(7)))
+                .begin_sync(
+                    FloorMarker::new(Height::new(7), Sha256::fill(7)),
+                    finalization(&context, 7),
+                )
                 .await;
             metadata.set_complete(Height::new(6)).await;
         });
@@ -253,20 +377,81 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
             let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
-            let mut metadata =
-                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
-            metadata.begin_sync(stored.clone()).await;
+            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                partition_prefix,
+                (),
+            )
+            .await;
+            metadata
+                .begin_sync(stored.clone(), finalization(&context, 7))
+                .await;
             drop(metadata);
 
             let mut plan =
-                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix, ()).await;
             assert!(plan.may_state_sync());
             assert!(plan.requires_state_sync_floor());
             assert!(plan.should_state_sync(false));
-            plan.sync_metadata.begin_sync(stored).await;
             plan.sync_metadata
-                .begin_sync(FloorMarker::new(Height::new(9), Sha256::fill(9)))
+                .begin_sync(stored, finalization(&context, 7))
                 .await;
+            plan.sync_metadata
+                .begin_sync(
+                    FloorMarker::new(Height::new(9), Sha256::fill(9)),
+                    finalization(&context, 9),
+                )
+                .await;
+        });
+    }
+
+    /// A node that completed state sync re-anchors marshal at the stored
+    /// floor on every future boot, while a node that never state synced
+    /// starts marshal from genesis.
+    #[test]
+    fn completed_sync_reanchors_marshal_at_stored_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "completed_sync_reanchors";
+            let floor = finalization(&context, 7);
+            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                partition_prefix,
+                (),
+            )
+            .await;
+            metadata
+                .begin_sync(
+                    FloorMarker::new(Height::new(7), Sha256::fill(7)),
+                    floor.clone(),
+                )
+                .await;
+            metadata.set_complete(Height::new(7)).await;
+            drop(metadata);
+
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix, ()).await;
+            match plan.marshal_start(TestBlock::new(0, 0)) {
+                Start::Floor(stored) => {
+                    assert_eq!(stored.proposal.payload, floor.proposal.payload);
+                }
+                Start::Genesis(_) => panic!("completed sync must re-anchor marshal at its floor"),
+            }
+
+            // A marshal-path-only completion stores no floor and starts from
+            // genesis.
+            let other_prefix = "completed_sync_reanchors_marshal_only";
+            let mut metadata =
+                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, other_prefix, ())
+                    .await;
+            metadata.set_complete(Height::new(3)).await;
+            drop(metadata);
+
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, other_prefix, ()).await;
+            assert!(matches!(
+                plan.marshal_start(TestBlock::new(0, 0)),
+                Start::Genesis(_)
+            ));
         });
     }
 

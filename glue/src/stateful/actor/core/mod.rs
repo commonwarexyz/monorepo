@@ -221,7 +221,7 @@ where
     async fn start_state_sync(
         self,
         floor: Finalization<S, V::Commitment>,
-        sync_metadata: StateSyncMetadata<E, V::Commitment>,
+        sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
     ) {
         let metrics = StatefulMetrics::new(self.context.as_present());
         let sync_metadata = Arc::new(AsyncMutex::new(sync_metadata));
@@ -257,7 +257,7 @@ where
 
     /// Starts the application by initializing the database set at marshal's
     /// current floor, rewinding any databases that recovered ahead of it.
-    async fn start_from_marshal(self, mut sync_metadata: StateSyncMetadata<E, V::Commitment>) {
+    async fn start_from_marshal(self, mut sync_metadata: StateSyncMetadata<E, S, V::Commitment>) {
         let SyncResult { databases, anchor } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
             &self.marshal,
@@ -604,7 +604,7 @@ mod tests {
                 start_processed_marshal(&context, "startup-complete", 5).await;
 
             let partition_prefix = "startup-complete-stateful";
-            let plan = SyncPlan::init(&context, partition_prefix).await;
+            let plan = SyncPlan::init(&context, partition_prefix, ()).await;
             let (stateful, mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -634,7 +634,7 @@ mod tests {
             drop(mailbox);
 
             let plan =
-                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix, ()).await;
             assert_eq!(
                 plan.sync_height(),
                 Some(commonware_consensus::types::Height::new(5))
@@ -651,7 +651,7 @@ mod tests {
             let (marshal, _handler) = start_processed_marshal(&context, "genesis-silent", 0).await;
 
             let notified = Arc::new(AtomicBool::new(false));
-            let plan = SyncPlan::init(&context, "genesis-silent-stateful").await;
+            let plan = SyncPlan::init(&context, "genesis-silent-stateful", ()).await;
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -707,7 +707,7 @@ mod tests {
             // block 5 but before the second advanced from block 4: the set
             // acknowledgement for block 5 never fired, so marshal's floor
             // stays at 4.
-            let plan = SyncPlan::init(&context, "startup-torn-stateful").await;
+            let plan = SyncPlan::init(&context, "startup-torn-stateful", ()).await;
             let (stateful, mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -738,12 +738,12 @@ mod tests {
         });
     }
 
-    /// Databases behind a marshal floor are unreachable without storage
-    /// corruption or a floor above them: startup must panic instead of
-    /// running peer state sync.
+    /// A marshal floor provided outside the plan jumps marshal above its
+    /// durable progress and prunes the processed block: startup must panic
+    /// instead of running peer state sync.
     #[test]
-    #[should_panic(expected = "cannot rewind forward")]
-    fn startup_panics_when_databases_behind_floor() {
+    #[should_panic(expected = "must retain the block at the startup floor")]
+    fn startup_panics_when_floor_provided_outside_plan() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");
             let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-pruned", 1);
@@ -761,7 +761,7 @@ mod tests {
             )
             .await;
 
-            let plan = SyncPlan::init(&context, "startup-pruned-stateful").await;
+            let plan = SyncPlan::init(&context, "startup-pruned-stateful", ()).await;
             let (stateful, _mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -780,7 +780,7 @@ mod tests {
             // The actor panics while recovering, which propagates through the
             // deterministic runtime.
             let _ = stateful.start().await;
-            unreachable!("startup must panic when the databases are behind the floor");
+            unreachable!("startup must panic when the marshal floor block is pruned");
         });
     }
 
@@ -831,7 +831,7 @@ mod tests {
                 )
                 .await;
 
-            let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string()).await;
+            let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string(), ()).await;
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {

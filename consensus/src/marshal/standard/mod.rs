@@ -4055,6 +4055,96 @@ mod tests {
         });
     }
 
+    /// A startup floor at or below the durable processed height is
+    /// superseded: applications re-provide their original sync floor on
+    /// every boot, and marshal must ignore it, resume dispatch from durable
+    /// progress, and prune nothing.
+    #[test_traced("WARN")]
+    fn test_standard_start_floor_below_processed_height_is_superseded() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition_prefix = "start-floor-below-processed-height";
+
+            // Finalized chain through height 6, acknowledged through height 3.
+            let mut parent = Sha256::hash(b"genesis-parent");
+            let mut blocks = Vec::new();
+            let mut finalizations = Vec::new();
+            for height in 1..=6u64 {
+                let block = make_raw_block(parent, Height::new(height), 100 * height);
+                parent = block.digest();
+                let finalization = StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(height)),
+                        View::new(height - 1),
+                        StandardHarness::commitment(&block),
+                    ),
+                    &schemes,
+                    QUORUM,
+                );
+                finalizations.push((Height::new(height), finalization));
+                blocks.push(block);
+            }
+            seed_inconsistent_restart_state(
+                context.child("seed_restart_state"),
+                partition_prefix,
+                &blocks,
+                &finalizations,
+            )
+            .await;
+            seed_processed_height(
+                context.child("seed_processed"),
+                partition_prefix,
+                Height::new(3),
+            )
+            .await;
+
+            // Restart with the stored sync floor (height 2), as the plan
+            // re-provides on every boot of a synced node.
+            let floor_finalization = finalizations[1].1.clone();
+            let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                Some(RecordingBuffer::default()),
+                Start::Floor(floor_finalization),
+            )
+            .await;
+
+            // Dispatch resumes from durable progress, not the stale floor.
+            select! {
+                height = started_rx => {
+                    assert_eq!(
+                        height.expect("dispatch resume signal missing"),
+                        Height::new(4),
+                        "dispatch must resume above the durable processed height"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("dispatch did not resume after startup");
+                },
+            }
+
+            // The superseded floor changes nothing: durable progress stands
+            // and nothing below the stale floor was pruned.
+            assert_eq!(
+                mailbox.get_processed_height().await,
+                Some(Height::new(3)),
+                "a superseded startup floor must not move the processed height"
+            );
+            assert!(
+                mailbox
+                    .get_block(Identifier::Height(Height::new(1)))
+                    .await
+                    .is_some(),
+                "a superseded startup floor must not prune retained blocks"
+            );
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_standard_set_floor_holds_dispatch_until_anchor_arrives() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));

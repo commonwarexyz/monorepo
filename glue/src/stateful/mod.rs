@@ -38,9 +38,10 @@
 //! [`SyncPlan::with_floor`]. The same plan then drives marshal (via
 //! [`SyncPlan::marshal_start`]) and stateful (via [`Config::plan`]), so both
 //! actors are guaranteed to agree on the startup decision. Once the durable
-//! complete height is set, the plan never selects peer state sync again and
-//! future startups recover from the later of the stored height and marshal's
-//! processed height instead.
+//! complete height is set, the plan never selects peer state sync again:
+//! future startups re-anchor marshal at the stored sync floor (superseded by
+//! marshal's durable progress on healthy restarts) and recover from the
+//! later of the stored height and marshal's processed height.
 //!
 //! The actor supports two sync paths:
 //!

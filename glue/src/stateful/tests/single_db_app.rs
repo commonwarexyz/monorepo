@@ -435,7 +435,8 @@ impl EngineDefinition for SingleDbEngine {
         };
 
         let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
+        let mut plan =
+            SyncPlan::init(&stateful_startup_context, partition_prefix.clone(), ()).await;
         let should_state_sync = plan.should_state_sync(self.enable_state_sync && delayed);
         let provider = ConstantProvider::new(scheme.clone());
 
