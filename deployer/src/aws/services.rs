@@ -1031,7 +1031,45 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
 # per-view transfer — and bounds worst-case kernel socket memory across
 # ~50 peer connections. Disable slow-start-after-idle so per-view bursty
 # connections keep their congestion window between views.
-echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.rmem_max=16777216\nnet.core.wmem_max=16777216\nnet.ipv4.tcp_rmem=4096 262144 16777216\nnet.ipv4.tcp_wmem=4096 262144 16777216\nnet.ipv4.tcp_slow_start_after_idle=0" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.rmem_max=16777216\nnet.core.wmem_max=16777216\nnet.ipv4.tcp_rmem=4096 2097152 16777216\nnet.ipv4.tcp_wmem=4096 262144 16777216\nnet.ipv4.tcp_slow_start_after_idle=0" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+
+# The default_qdisc sysctl above only affects interfaces attached AFTER it is
+# set; the boot-time primary interface keeps the distribution mq+fq_codel,
+# which does no pacing — concurrent multi-hundred-KiB writes to ~50 peers
+# leave as line-rate bursts that inflate queueing RTT and cause incast loss
+# at receivers. Install fq on every tx queue explicitly so BBR's pacing rate
+# is enforced, and persist the setup across reboots (qdisc config does not
+# survive one). Deliberately no `maxrate`: all channels to a peer multiplex
+# over one TCP connection, so a per-flow cap makes small latency-critical
+# messages drain at the capped rate behind any large in-flight message
+# (measured as a view-latency regression despite halving retransmits).
+sudo tee /usr/local/bin/setup-qdisc.sh >/dev/null <<'EOF'
+#!/bin/bash
+set -e
+IFACE=$(ip -o route get 8.8.8.8 | awk '{{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}}')
+tc qdisc replace dev "$IFACE" root handle 1: mq
+NQ=$(ls -d "/sys/class/net/$IFACE/queues/tx-"* | wc -l)
+for h in $(seq 1 "$NQ"); do
+  tc qdisc del dev "$IFACE" parent "1:$(printf '%x' "$h")" 2>/dev/null || true
+  tc qdisc add dev "$IFACE" parent "1:$(printf '%x' "$h")" fq
+done
+EOF
+sudo chmod +x /usr/local/bin/setup-qdisc.sh
+sudo tee /etc/systemd/system/setup-qdisc.service >/dev/null <<'EOF'
+[Unit]
+Description=Install fq pacing qdisc on the primary interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-qdisc.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now setup-qdisc.service
 
 {image_services}
 
@@ -1535,6 +1573,10 @@ mod tests {
         assert!(setup.contains("sudo systemctl enable node_exporter"));
         assert!(setup.contains("sudo systemctl enable promtail"));
         assert!(setup.contains("sudo systemctl enable binary"));
+        assert!(setup.contains("tc qdisc replace dev \"$IFACE\" root handle 1: mq"));
+        assert!(!setup.contains("fq maxrate"));
+        assert!(setup.contains("sudo systemctl enable --now setup-qdisc.service"));
+        assert!(setup.contains("net.ipv4.tcp_rmem=4096 2097152 16777216"));
         assert!(setup.contains("sudo systemctl start node_exporter"));
         assert!(setup.contains("sudo systemctl start promtail"));
         assert!(setup.contains("sudo systemctl start binary || true"));
