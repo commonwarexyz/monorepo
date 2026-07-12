@@ -31,6 +31,8 @@ mod process;
 mod storage;
 
 stability_scope!(ALPHA {
+    #[cfg(feature = "arbitrary")]
+    pub mod conformance;
     pub mod deterministic;
     pub mod mocks;
 });
