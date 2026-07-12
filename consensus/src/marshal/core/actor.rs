@@ -644,7 +644,7 @@ where
                 // the handle still covering the original write's durability.
                 let handle = self
                     .cache
-                    .put_verified(round, digest, block.as_ref().clone().into())
+                    .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
                     .await;
                 ack.expect("durable ack present").send_lossy(handle);
             }
@@ -667,7 +667,7 @@ where
                     self.cache.start_sync_verified(round).await
                 } else {
                     self.cache
-                        .put_notarized(round, digest, block.as_ref().clone().into())
+                        .put_notarized(round, digest, Arc::unwrap_or_clone(block).into())
                         .await
                 };
 

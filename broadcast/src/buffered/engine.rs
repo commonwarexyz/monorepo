@@ -348,8 +348,7 @@ where
             .entry(digest)
             .and_modify(|c| *c = c.checked_add(1).unwrap())
             .or_insert(1);
-        let first = *count == 1;
-        if first {
+        if *count == 1 {
             let existing = self.items.insert(digest, msg());
             assert!(existing.is_none());
         }

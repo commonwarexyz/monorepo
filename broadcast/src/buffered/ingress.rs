@@ -112,19 +112,6 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
         receiver
     }
 
-    /// Subscribe to a message by digest with an externally prepared responder.
-    ///
-    /// The responder will be sent the message when it is available; either
-    /// instantly (if cached) or when it is received from the network. The request can be canceled
-    /// by dropping the responder.
-    ///
-    /// If the engine has shut down, this is a no-op.
-    pub fn subscribe_prepared(&self, digest: M::Digest, responder: oneshot::Sender<Arc<M>>) {
-        let _ = self
-            .sender
-            .enqueue(Message::Subscribe { digest, responder });
-    }
-
     /// Get a message by digest.
     ///
     /// If the engine has shut down, returns `None`.

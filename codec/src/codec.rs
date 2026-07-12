@@ -447,6 +447,14 @@ mod tests {
     }
 
     #[test]
+    fn test_arc_encode() {
+        let value = Arc::new(vec![1u8, 2, 3]);
+
+        assert_eq!(value.encode(), value.as_ref().encode());
+        assert_eq!(value.encode_size(), value.as_ref().encode_size());
+    }
+
+    #[test]
     #[should_panic(expected = "Can't encode 4 bytes into 5 bytes")]
     fn test_encode_fixed_panic() {
         let _: [u8; 5] = 42u32.encode_fixed();

@@ -713,6 +713,7 @@ mod test {
         let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
         let cloned = coded_block.clone();
 
+        assert!(Arc::ptr_eq(&coded_block.inner, &cloned.inner));
         assert!(Arc::ptr_eq(
             coded_block.shards.get().unwrap(),
             cloned.shards.get().unwrap()
