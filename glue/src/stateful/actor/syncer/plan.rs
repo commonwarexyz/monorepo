@@ -194,7 +194,7 @@ where
 mod tests {
     use super::SyncPlan;
     use crate::stateful::{
-        actor::syncer::{tests::make_finalization, FloorMarker, StateSyncMetadata},
+        actor::syncer::{tests::make_finalization, StateSyncMetadata},
         tests::mocks::{TestBlock, TestScheme, TestVariant},
     };
     use commonware_consensus::{
@@ -202,7 +202,7 @@ mod tests {
         simplex::{mocks::scheme as scheme_mocks, types::Finalization},
         types::Height,
     };
-    use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
     /// Builds a finalization whose payload matches `Sha256::fill(height)`.
@@ -417,6 +417,13 @@ mod tests {
                 Start::Genesis(_) => panic!("completed sync must re-anchor marshal at its floor"),
             }
 
+            // A completed plan ignores late floor attachments and never arms
+            // state sync again.
+            let plan = plan.with_floor(finalization(&context, 9));
+            assert!(plan.floor().is_none());
+            let (armed, _) = plan.into_parts();
+            assert!(armed.is_none(), "a completed plan must not arm state sync");
+
             // A marshal-path-only completion stores no floor and starts from
             // genesis.
             let other_prefix = "completed_sync_reanchors_marshal_only";
@@ -440,8 +447,20 @@ mod tests {
         expected = "selected state sync floor cannot move behind the persisted in-progress floor"
     )]
     fn in_progress_sync_panics_for_backward_floor() {
-        let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
-        stored.ensure_not_behind(&FloorMarker::new(Height::new(6), Sha256::fill(6)));
+        deterministic::Runner::default().start(|context| async move {
+            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                "backward_floor",
+                (),
+            )
+            .await;
+            metadata
+                .begin_sync(Height::new(7), finalization(&context, 7))
+                .await;
+            metadata
+                .begin_sync(Height::new(6), finalization(&context, 6))
+                .await;
+        });
     }
 
     #[test]
@@ -449,7 +468,21 @@ mod tests {
         expected = "selected state sync floor conflicts with the persisted in-progress floor"
     )]
     fn in_progress_sync_panics_for_conflicting_floor() {
-        let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
-        stored.ensure_not_behind(&FloorMarker::new(Height::new(7), Sha256::fill(8)));
+        deterministic::Runner::default().start(|context| async move {
+            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                "conflicting_floor",
+                (),
+            )
+            .await;
+            metadata
+                .begin_sync(Height::new(7), finalization(&context, 7))
+                .await;
+            // A different block at the same height.
+            let mut signing = context.child("signing_conflict");
+            let fixture = scheme_mocks::fixture(&mut signing, b"plan-floor-conflict", 1);
+            let conflicting = make_finalization(&fixture, &TestBlock::new(7, 8));
+            metadata.begin_sync(Height::new(7), conflicting).await;
+        });
     }
 }

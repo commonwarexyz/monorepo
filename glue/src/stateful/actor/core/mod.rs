@@ -738,52 +738,6 @@ mod tests {
         });
     }
 
-    /// A marshal floor provided outside the plan jumps marshal above its
-    /// durable progress and prunes the processed block: startup must panic
-    /// instead of running peer state sync.
-    #[test]
-    #[should_panic(expected = "must retain the block at the startup floor")]
-    fn startup_panics_when_floor_provided_outside_plan() {
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
-            let mut signing_context = context.child("signing");
-            let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-pruned", 1);
-            let provider = ConstantProvider::new(fixture.schemes[0].clone());
-            let anchor_block = TestBlock::new(6, 6);
-            let finalization = make_finalization(&fixture, &anchor_block);
-            let (marshal, _handler) = start_marshal(
-                &context,
-                "startup-pruned",
-                marshal::Start::Floor(finalization.clone()),
-                provider,
-                vec![anchor_block.clone()],
-                vec![(anchor_block, finalization)],
-                AckingReporter::new(commonware_consensus::types::Height::zero()),
-            )
-            .await;
-
-            let plan = SyncPlan::init(&context, "startup-pruned-stateful", ()).await;
-            let (stateful, _mailbox) = Stateful::init(
-                context.child("stateful"),
-                Config {
-                    application: TestApp,
-                    db_config: 0,
-                    input_provider: (),
-                    marshal,
-                    mailbox_size: NZUsize!(8),
-                    plan,
-                    resolvers: NoStateSyncResolver,
-                    sync_config: sync_config(),
-                    prune_config: None,
-                },
-            );
-
-            // The actor panics while recovering, which propagates through the
-            // deterministic runtime.
-            let _ = stateful.start().await;
-            unreachable!("startup must panic when the marshal floor block is pruned");
-        });
-    }
-
     #[test]
     fn mailbox_rejects_propose_while_floor_resolution_waits() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {

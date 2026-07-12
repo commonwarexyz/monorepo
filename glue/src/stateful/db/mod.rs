@@ -1515,6 +1515,8 @@ mod tests {
         prune_count: Arc<AtomicUsize>,
     }
 
+    struct FailingRewindDb;
+
     impl<E: Send> ManagedDb<E> for TestDb {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
@@ -1577,6 +1579,38 @@ mod tests {
             self.current_target = target;
             self.rewind_count += 1;
             Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for FailingRewindDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = &'static str;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("FailingRewindDb is constructed directly in tests")
+        }
+
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn sync_target(&self) -> Self::SyncTarget {
+            0
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Err("rewind refused")
         }
     }
 
@@ -1746,6 +1780,20 @@ mod tests {
             let right = right.read().await;
             assert_eq!(right.current_target, 1);
             assert_eq!(right.rewind_count, 0);
+        });
+    }
+
+    /// A database rewind failure escalates to a panic: startup must never
+    /// proceed with a handle whose rewind failed.
+    #[test]
+    #[should_panic(expected = "database rewind failed")]
+    fn rewind_failure_is_fatal() {
+        deterministic::Runner::default().start(|_context| async move {
+            let database = Arc::new(TracedAsyncRwLock::new("test", FailingRewindDb));
+            <Shared<FailingRewindDb> as DatabaseSet<deterministic::Context>>::rewind_to_targets(
+                &database, 1,
+            )
+            .await;
         });
     }
 

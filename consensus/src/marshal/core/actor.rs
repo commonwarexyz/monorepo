@@ -1099,11 +1099,9 @@ where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
-        // Applications re-provide their startup floor on every boot, so a
-        // superseded floor is routine rather than anomalous.
         let round = finalization.round();
         if round <= self.floor.processed_round() {
-            debug!(
+            warn!(
                 ?round,
                 floor = ?self.floor.processed_round(),
                 "floor not updated, below existing round floor"

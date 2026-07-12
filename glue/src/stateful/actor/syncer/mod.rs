@@ -34,47 +34,6 @@ const SYNC_STATE_KEY: FixedBytes<1> = fixed_bytes!("C0");
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
-/// Identity of a state sync floor used to validate restarts.
-///
-/// The height enforces monotonic restarts, and the commitment distinguishes
-/// conflicting blocks at the same height.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FloorMarker<C>
-where
-    C: Digest,
-{
-    height: Height,
-    commitment: C,
-}
-
-impl<C> FloorMarker<C>
-where
-    C: Digest,
-{
-    /// Constructs a durable floor marker from the resolved floor block.
-    pub(crate) const fn new(height: Height, commitment: C) -> Self {
-        Self { height, commitment }
-    }
-
-    /// Ensures a newly selected floor is compatible with this persisted one.
-    ///
-    /// Restarts may resume from the same floor or advance to a newer one, but
-    /// must never move backward or switch to a different block at the same height.
-    pub(crate) fn ensure_not_behind(&self, selected: &Self) {
-        assert!(
-            selected.height >= self.height,
-            "selected state sync floor cannot move behind the persisted in-progress floor",
-        );
-
-        if selected.height == self.height {
-            assert!(
-                selected.commitment == self.commitment,
-                "selected state sync floor conflicts with the persisted in-progress floor",
-            );
-        }
-    }
-}
-
 /// Durable sync progress.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SyncState<S, C>
@@ -294,17 +253,27 @@ where
     ///
     /// `height` is the height of the block `floor` finalizes.
     pub(crate) async fn begin_sync(&mut self, height: Height, floor: Finalization<S, C>) {
-        let marker = FloorMarker::new(height, floor.proposal.payload);
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress {
                 height: existing_height,
                 floor: existing,
             }) => {
-                FloorMarker::new(*existing_height, existing.proposal.payload)
-                    .ensure_not_behind(&marker);
+                // Restarts may resume from the same floor or advance to a
+                // newer one, but must never move backward or switch to a
+                // different block at the same height.
+                assert!(
+                    height >= *existing_height,
+                    "selected state sync floor cannot move behind the persisted in-progress floor",
+                );
+                if height == *existing_height {
+                    assert!(
+                        floor.proposal.payload == existing.proposal.payload,
+                        "selected state sync floor conflicts with the persisted in-progress floor",
+                    );
+                }
             }
             Some(SyncState::Complete { .. }) => {
-                unreachable!("state sync cannot restart after completion");
+                panic!("state sync cannot restart after completion");
             }
             None => {}
         }
@@ -352,8 +321,7 @@ where
     }
 }
 
-/// Resolves the selected state sync floor into the anchor, targets, and
-/// durable floor marker used by restart validation.
+/// Resolves the selected state sync floor into the anchor and sync targets.
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     finalization: &Finalization<S, V::Commitment>,
@@ -786,6 +754,52 @@ pub(crate) mod tests {
                 &context, &marshal, 0, None,
             )
             .await;
+        });
+    }
+
+    /// A long-running synced node restarts with marshal's processed height
+    /// above its stored sync height: the floor must follow the later of the
+    /// two.
+    #[test]
+    fn startup_follows_processed_height_above_stored_sync_floor() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"processed-above", 1);
+            let provider = ConstantProvider::new(fixture.schemes[0].clone());
+
+            let mut blocks = Vec::new();
+            let mut finalizations = Vec::new();
+            for height in 1..=5u64 {
+                let block = TestBlock::new(height, height as u8);
+                finalizations.push((block.clone(), make_finalization(&fixture, &block)));
+                blocks.push(block);
+            }
+            let (marshal, _handler) = start_marshal(
+                &context,
+                "processed-above",
+                marshal::Start::Genesis(TestBlock::new(0, 0)),
+                provider,
+                blocks,
+                finalizations,
+                AckingReporter::new(Height::new(5)),
+            )
+            .await;
+            while marshal.get_processed_height().await != Some(Height::new(5)) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let result = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
+                &context,
+                &marshal,
+                5,
+                Some(Height::new(2)),
+            )
+            .await;
+            assert_eq!(
+                result.anchor.height,
+                Height::new(5),
+                "the floor must follow processed height past the stored sync height",
+            );
         });
     }
 
