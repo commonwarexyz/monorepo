@@ -2872,6 +2872,109 @@ mod tests {
         });
     }
 
+    /// A freshly built proposal must reach the shards engine directly from
+    /// `propose`, ahead of the coded-block persist and without waiting for
+    /// `Relay::broadcast` (which consensus only invokes after the proposal
+    /// round trip). No `Relay::broadcast` runs in this test, so the block can
+    /// only be in the shards engine if `propose` dispatched it.
+    #[test_traced("WARN")]
+    fn test_marshaled_propose_dispatches_shards_before_persist() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+
+            let propose_round = Round::new(Epoch::zero(), View::new(1));
+            let propose_context = CodingCtx {
+                round: propose_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let block_to_propose = make_coding_block(
+                propose_context.clone(),
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let expected_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                block_to_propose.clone(),
+                coding_config,
+                &Sequential,
+            )
+            .commitment();
+
+            let mock_app: MockVerifyingApp<CodingB, S> =
+                MockVerifyingApp::new().with_propose_result(block_to_propose);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let commitment = marshaled
+                .propose(propose_context)
+                .await
+                .await
+                .expect("propose should produce a commitment");
+            assert_eq!(commitment, expected_commitment);
+
+            // The shards-engine dispatch is enqueued before the commitment is
+            // published, so by the time `propose` resolves the engine's
+            // in-order mailbox already holds the block for fan-out.
+            let cached = shards.get(commitment).await;
+            assert!(
+                cached.is_some(),
+                "propose must dispatch the built block to the shards engine \
+                 without waiting for Relay::broadcast or the persist"
+            );
+
+            // The direct dispatch must not weaken the durability gate: the
+            // leader's certify still awaits the deferred propose sync handle.
+            assert!(
+                marshaled
+                    .certify(propose_round, commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "certify must succeed for the leader's own proposal"
+            );
+        });
+    }
+
     /// Regression: if marshal already holds a verified block for a round
     /// (say, persisted by a pre-crash propose whose notarize vote never
     /// reached the journal), a restarted leader's `propose` must return

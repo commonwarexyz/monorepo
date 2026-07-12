@@ -1046,6 +1046,10 @@ where
 
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
     ///
+    /// A block already cached at the same round is not re-sent (the propose
+    /// path and the voter-driven `Forward` both dispatch the same local
+    /// proposal); only its local subscriber notifications are repeated.
+    ///
     /// - Participants receive the shard matching their participant index.
     /// - Non-participants in aggregate membership receive the leader's shard.
     /// - When the round has a forward route naming this node as leader, the
@@ -1067,6 +1071,25 @@ where
         mut block: CodedBlock<B, C, H>,
     ) {
         let commitment = block.commitment();
+
+        // A local proposal is dispatched twice: directly by the propose path
+        // (so fan-out starts before the coded-block persist) and again by the
+        // voter's `Relay::broadcast` -> `Forward` once consensus accepts the
+        // proposal. A block already cached at the same round has had its
+        // shards sent, so repeat only the local notification side effects
+        // rather than doubling every send. A cached commitment at a different
+        // round is an epoch-boundary re-proposal and must rebroadcast under
+        // the new round.
+        if self
+            .reconstructed_blocks
+            .get(&commitment)
+            .is_some_and(|cached| cached.round == round)
+        {
+            self.notify_assigned_shard_verified_subscribers(commitment);
+            self.notify_block_subscribers(block);
+            debug!(?commitment, "skipping duplicate shard broadcast");
+            return;
+        }
 
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme available, cannot broadcast shards");
@@ -2517,6 +2540,80 @@ mod tests {
                 assert_eq!(
                     sum_counter(&context.encode(), "shards_forwarded_total"),
                     0
+                );
+            },
+        );
+    }
+
+    /// A local proposal is dispatched to the engine twice (directly by the
+    /// propose path, then again by the voter-driven `Forward`). The second
+    /// dispatch at the same round must not re-send any shards, while a
+    /// dispatch of the same block at a later round (an epoch-boundary
+    /// re-proposal) must still rebroadcast.
+    #[test_traced]
+    fn test_duplicate_proposed_same_round_not_rebroadcast() {
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |_, context, _, mut peers, _, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+
+                let leader = peers[0].public_key.clone();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                peers[0].mailbox.proposed(round, coded_block.clone());
+                for peer in peers[1..].iter_mut() {
+                    peer.mailbox.discovered(commitment, leader.clone(), round);
+                }
+
+                // Let fan-out, gossip, and reconstruction fully settle.
+                for peer in peers.iter_mut() {
+                    peer.mailbox
+                        .subscribe(commitment)
+                        .await
+                        .expect("block should be reconstructed");
+                }
+                context.sleep(Duration::from_secs(5)).await;
+                let settled = sum_counter(&context.encode(), "shards_received");
+
+                // The trailing dispatch of the same block at the same round
+                // must be absorbed without any network sends.
+                peers[0].mailbox.proposed(round, coded_block.clone());
+                context.sleep(Duration::from_secs(5)).await;
+                assert_eq!(
+                    sum_counter(&context.encode(), "shards_received"),
+                    settled,
+                    "duplicate proposed at the same round must not re-send shards"
+                );
+
+                // The dedup path still serves local lookups and proposer
+                // readiness.
+                let cached = peers[0]
+                    .mailbox
+                    .get(commitment)
+                    .await
+                    .expect("proposer must retain the cached block");
+                assert_eq!(cached.commitment(), commitment);
+                peers[0]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment)
+                    .await
+                    .expect("proposer readiness must survive the duplicate dispatch");
+
+                // A re-proposal of the same block at a later round must
+                // rebroadcast under the new round.
+                let reproposal_round = Round::new(Epoch::zero(), View::new(2));
+                peers[0]
+                    .mailbox
+                    .proposed(reproposal_round, coded_block.clone());
+                context.sleep(Duration::from_secs(5)).await;
+                assert!(
+                    sum_counter(&context.encode(), "shards_received") > settled,
+                    "re-proposal at a new round must rebroadcast shards"
                 );
             },
         );

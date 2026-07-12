@@ -663,11 +663,15 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. The block's persistence is enqueued
-    /// before the commitment is delivered, and the resulting sync handle is awaited only at
-    /// certification so it overlaps consensus voting. The commitment does not imply durability
-    /// on its own; [`CertifiableAutomaton::certify`] awaits the registered certification gate
-    /// before the finalize vote.
+    /// contain the proposed block's commitment when ready. Shard fan-out for a freshly built
+    /// block is dispatched to the shards engine as soon as the block is encoded, concurrently
+    /// with the block's persistence: the persist's durable sync only gates the leader's own
+    /// finalize vote (via the certification gate registered below), not dissemination. The
+    /// block's persistence is enqueued before the commitment is delivered, and the resulting
+    /// sync handle is awaited only at certification so it overlaps consensus voting. The
+    /// commitment does not imply durability on its own;
+    /// [`CertifiableAutomaton::certify`] awaits the registered certification gate before the
+    /// finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn propose(
@@ -675,6 +679,7 @@ where
         consensus_context: Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let marshal = self.marshal.clone();
+        let shards = self.shards.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
@@ -855,6 +860,20 @@ where
 
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
+
+                // Dispatch shard fan-out directly to the shards engine before
+                // enqueueing the persist. The persist's durable sync only gates
+                // the leader's own finalize vote (via the certification gate
+                // registered in `persist_and_defer`), so dissemination must not
+                // wait on it — nor on the voter round trip that re-dispatches
+                // this block via `Relay::broadcast` -> `Forward` behind the
+                // marshal actor's persist handling (the shards engine
+                // deduplicates that second dispatch). Broadcasting shards casts
+                // no vote: the leader's proposal-carrying notarize vote is
+                // still journaled and synced by the voter before it reaches
+                // the network, and a post-crash rebuild for this round is
+                // prevented by the voter's journal, not by shard timing.
+                shards.proposed(round, coded_block.clone());
 
                 let persist = marshal.proposed_deferred(round, coded_block);
                 gates
@@ -1122,6 +1141,13 @@ where
     fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
         // Coding variant does not support targeted forwarding;
         // peers reconstruct blocks from erasure-coded shards.
+        //
+        // For a freshly built proposal this re-dispatches a block the propose
+        // path already handed to the shards engine (which deduplicates the
+        // repeat broadcast). It remains load-bearing when propose did not
+        // dispatch directly: leader recovery after a restart (the reused
+        // verified block only reaches the shards engine via this `Forward`)
+        // and epoch-boundary re-proposals.
         //
         // TODO(#3389): Support checked data forwarding for PhasedScheme.
         let Plan::Propose { round } = plan else {
