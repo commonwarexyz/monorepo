@@ -5,7 +5,10 @@ use crate::{
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
-use commonware_actor::mailbox::{Overflow, Policy, Sender};
+use commonware_actor::{
+    mailbox::{Overflow, Policy, Sender},
+    Feedback,
+};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
@@ -21,10 +24,24 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    /// A request to broadcast a proposed [`CodedBlock`] to all peers.
-    Proposed {
+    /// A request to stage a locally proposed [`CodedBlock`] in the engine's
+    /// in-memory cache.
+    ///
+    /// Staging is pure data movement: the block becomes available to local
+    /// consumers (lookups and subscriptions) but no shards are sent. The
+    /// network fan-out happens only when consensus requests it via
+    /// [`Message::Broadcast`].
+    Stage {
         /// The erasure coded block.
         block: CodedBlock<B, C, H>,
+        /// The round in which the block was proposed.
+        round: Round,
+    },
+    /// A request from consensus to fan out the staged block's shards for a
+    /// [`Commitment`] to all peers.
+    Broadcast {
+        /// The [`Commitment`] of the staged block to disseminate.
+        commitment: Commitment,
         /// The round in which the block was proposed.
         round: Round,
     },
@@ -116,7 +133,8 @@ where
             Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
             Self::SubscribeByCommitment { response, .. }
             | Self::SubscribeByDigest { response, .. } => response.is_closed(),
-            Self::Proposed { .. }
+            Self::Stage { .. }
+            | Self::Broadcast { .. }
             | Self::Discovered { .. }
             | Self::Notarized { .. }
             | Self::Prune { .. } => false,
@@ -215,9 +233,24 @@ where
         Self { sender }
     }
 
-    /// Broadcast a proposed erasure coded block's shards to the participants.
-    pub fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
-        let _ = self.sender.enqueue(Message::Proposed { block, round });
+    /// Stage a locally proposed erasure coded block in the engine's in-memory
+    /// cache, notifying local subscribers.
+    ///
+    /// No shards are sent: dissemination happens only when consensus requests
+    /// it via [`Self::broadcast`].
+    pub fn stage(&self, round: Round, block: CodedBlock<B, C, H>) {
+        let _ = self.sender.enqueue(Message::Stage { block, round });
+    }
+
+    /// Fan out the staged block's shards for `commitment` to all peers.
+    ///
+    /// Idempotent per `(commitment, round)`: a repeat trigger repeats only
+    /// the local subscriber notifications. A trigger for a commitment whose
+    /// shards were last sent under an earlier round (an epoch-boundary
+    /// re-proposal) re-sends under the new round.
+    pub fn broadcast(&self, round: Round, commitment: Commitment) -> Feedback {
+        self.sender
+            .enqueue(Message::Broadcast { commitment, round })
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].

@@ -24,11 +24,17 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     type ValueEncoding: ValueEncoding<Value = Self::Value>;
 
     /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
-    type Cached: Send + Sync;
+    type Cached: Clone + Send + Sync;
 
     /// Whether merkleize may emit a staged delete directly at its read-resolved committed
     /// location. When false, staged deletes fall back to normal mutations.
     const STAGES_DELETES: bool;
+
+    /// Cached payload attached to a staged read that resolved in an uncommitted ancestor's
+    /// diff, or `None` when such reads cannot be staged and must fall back to normal
+    /// mutations at merkleize. The ordered kind returns `None`: its cached payload is the
+    /// resolved op's next-key pointer, which a diff entry does not carry.
+    fn ancestor_cached() -> Option<Self::Cached>;
 
     /// The updated key.
     fn key(&self) -> &Self::Key;

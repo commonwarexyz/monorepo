@@ -523,6 +523,7 @@ where
                 &db.any,
                 metadata,
                 staged_updates,
+                None,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
@@ -624,6 +625,7 @@ where
                 &db.any,
                 metadata,
                 StagedUpdates::<F, update::Unordered<K, V>>::new(),
+                None,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;

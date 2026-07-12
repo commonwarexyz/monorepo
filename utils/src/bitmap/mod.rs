@@ -971,6 +971,7 @@ pub trait Readable<const N: usize> {
             bitmap: self,
             pos: pos.max(pruned_start),
             len,
+            chunk: None,
         }
     }
 }
@@ -1011,6 +1012,10 @@ pub struct OnesIter<'a, B, const N: usize> {
     /// For layered bitmaps (e.g. `BitmapBatch`), `len()` walks the layer chain, so caching
     /// this avoids that walk on every `next`.
     len: u64,
+    /// Chunk cached by the previous `next`, tagged with its index. Dense regions yield many
+    /// set bits per chunk, so caching avoids re-fetching (and, for layered bitmaps,
+    /// re-resolving) the chunk for every yielded bit. Coherent for the same reason as `len`.
+    chunk: Option<(usize, [u8; N])>,
 }
 
 impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
@@ -1020,7 +1025,13 @@ impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
         let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
         while self.pos < self.len {
             let chunk_idx = BitMap::<N>::to_chunk_index(self.pos);
-            let chunk = self.bitmap.get_chunk(chunk_idx);
+            let chunk = match self.chunk {
+                Some((cached_idx, ref chunk)) if cached_idx == chunk_idx => chunk,
+                _ => {
+                    let chunk = self.bitmap.get_chunk(chunk_idx);
+                    &self.chunk.insert((chunk_idx, chunk)).1
+                }
+            };
             let chunk_start = chunk_idx as u64 * chunk_bits;
             let rel = (self.pos - chunk_start) as usize;
             let mut byte_idx = rel / 8;

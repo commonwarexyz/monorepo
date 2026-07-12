@@ -128,7 +128,12 @@ pub trait Unmerkleized: Sized + Send {
 ///
 /// The application uses [`root`](Self::root) in block headers, and the wrapper
 /// later finalizes this batch.
-pub trait Merkleized: Sized + Send + Sync {
+///
+/// Implementations must be cheap, shareable handles (typically `Arc`-backed):
+/// cloning shares the same underlying batch. The stateful actor relies on this
+/// to retain a forkable pending entry while a clone of the same batch is
+/// committed off the actor loop.
+pub trait Merkleized: Sized + Send + Sync + Clone {
     /// The digest type used for the state root.
     type Digest: Digest;
 
@@ -241,7 +246,10 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     type Unmerkleized: Send;
 
     /// Tuple of [`ManagedDb::Merkleized`] for every database in the set.
-    type Merkleized: Send + Sync;
+    ///
+    /// Cloning must be cheap and share the same underlying batches (see
+    /// [`Merkleized`]).
+    type Merkleized: Send + Sync + Clone;
 
     /// Configuration needed to construct every database in the set.
     ///
