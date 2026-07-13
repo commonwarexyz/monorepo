@@ -6639,7 +6639,7 @@ mod tests {
     /// anchor whose height is at or below the processed height. That anchor
     /// path calls `try_dispatch_blocks` mid-batch, before the batch-end
     /// `start_finalized_sync` runs, so dispatch must be gated by the write
-    /// itself (via `unsynced_finalized_write`) rather than by a started sync.
+    /// itself (via `DispatchGate::defer`) rather than by a started sync.
     /// Without the gate, the frontier block reaches the application while its
     /// archive write is still buffered, and a crash after the application ack
     /// could durably advance the processed floor past a lost write.

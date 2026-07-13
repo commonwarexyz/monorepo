@@ -2,7 +2,7 @@ use super::{
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
-    durability::Durable as _,
+    durability::{DispatchGate, Durable as _},
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
@@ -75,9 +75,7 @@ enum PooledSync {
     Observed,
     /// A finalized-archive sync batch became durable. Carries the sequence
     /// assigned by [`Actor::start_finalized_sync`] so the completion arm can
-    /// release the application-dispatch barrier for every batch the sync
-    /// covers (a sync makes durable every write accepted before it started,
-    /// including batches adopted by earlier sequences).
+    /// release every batch the sync covers (see [`DispatchGate::release`]).
     Finalized(u64),
 }
 
@@ -142,19 +140,9 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
-    // Lowest height written to the finalized archives since the last sync
-    // (blocking or pooled) was started. Buffered writes are readable from
-    // the archives before they are durable, so `try_dispatch_blocks` never
-    // dispatches at or above this height. The next started sync adopts it
-    // into `pending_finalized_syncs`.
-    unsynced_finalized_write: Option<Height>,
-    // Lowest write height adopted by each in-flight pooled finalized-archive
-    // sync, keyed by start order. `try_dispatch_blocks` never dispatches at
-    // or above the lowest entry, and a completed sync releases every entry
-    // at or below its sequence (see `finalized_sync_completed`).
-    pending_finalized_syncs: BTreeMap<u64, Height>,
-    // Sequence assigned to the next started pooled finalized-archive sync.
-    finalized_sync_seq: u64,
+    // Defers application dispatch of finalized-archive writes until a sync
+    // covering them completes
+    dispatch_gate: DispatchGate,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -265,9 +253,7 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
-                unsynced_finalized_write: None,
-                pending_finalized_syncs: BTreeMap::new(),
-                finalized_sync_seq: 0,
+                dispatch_gate: DispatchGate::default(),
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
@@ -449,7 +435,7 @@ where
             // for the batches it covers and resumes application dispatch.
             sync = syncs.next_completed() => {
                 if let PooledSync::Finalized(seq) = sync {
-                    self.finalized_sync_completed(seq);
+                    self.dispatch_gate.release(seq);
                     self.try_dispatch_blocks(&mut application).await;
                 }
             },
@@ -1753,13 +1739,12 @@ where
     /// handler updates the processed height.
     ///
     /// Blocks are dispatched only once durable. Every buffered
-    /// finalized-archive write freezes dispatch at or above its height, first
-    /// via `unsynced_finalized_write` and then, once a started sync adopts it,
-    /// via `pending_finalized_syncs`. Dispatch is re-attempted by the
-    /// pool-completion arm for pooled syncs and by the caller itself after a
-    /// blocking sync. Callers that buffer writes must still call
-    /// [`Self::sync_finalized`] or [`Self::start_finalized_sync`] before
-    /// yielding to the `select_loop!` so the freeze is released.
+    /// finalized-archive write freezes dispatch at or above its height until
+    /// a sync covering it completes (see [`DispatchGate`]). Dispatch is
+    /// re-attempted by the pool-completion arm for pooled syncs and by the
+    /// caller itself after a blocking sync. Callers that buffer writes must
+    /// still call [`Self::sync_finalized`] or [`Self::start_finalized_sync`]
+    /// before yielding to the `select_loop!` so the freeze is released.
     ///
     /// Acks are processed in FIFO order so the processed floor height always
     /// advances sequentially.
@@ -1789,15 +1774,9 @@ where
         }
 
         // Durability barrier: buffered writes are readable from the archives
-        // before they are durable, and every such write is tracked in
-        // `unsynced_finalized_write` or `pending_finalized_syncs` until a sync
-        // covering it completes. Never dispatch at or above the lowest one.
-        let non_durable = self
-            .pending_finalized_syncs
-            .values()
-            .copied()
-            .chain(self.unsynced_finalized_write)
-            .min();
+        // before they are durable. Never dispatch at or above the lowest
+        // write not yet covered by a completed sync.
+        let non_durable = self.dispatch_gate.barrier();
         while self.pending_acks.has_capacity() {
             let next_height = self
                 .pending_acks
@@ -1868,11 +1847,9 @@ where
             panic!("failed to sync finalization archives: {e}");
         }
 
-        // A blocking sync waits on (and covers) every previously accepted
-        // write, including writes adopted by in-flight pooled syncs and writes
-        // no sync has adopted yet, so nothing gates dispatch once it returns.
-        self.unsynced_finalized_write = None;
-        self.pending_finalized_syncs.clear();
+        // Everything accepted before this sync is now durable, so nothing
+        // remains to gate dispatch.
+        self.dispatch_gate.clear();
     }
 
     /// Start a non-blocking sync of both finalization archives on the
@@ -1880,27 +1857,23 @@ where
     /// (blocking or pooled) started.
     ///
     /// The pooled entry resolves to [`PooledSync::Finalized`] once every write
-    /// accepted before this call is durable. The sync adopts
-    /// `unsynced_finalized_write`, and until the pool-completion arm observes
-    /// the completion, [`Self::try_dispatch_blocks`] will not dispatch at or
-    /// above the lowest height a pending batch wrote. This preserves the
-    /// durability barrier described there without blocking the mailbox on an
-    /// fsync like [`Self::sync_finalized`].
+    /// accepted before this call is durable. The sync adopts every deferred
+    /// write (see [`DispatchGate::adopt`]), and until the pool-completion arm
+    /// observes the completion, [`Self::try_dispatch_blocks`] will not
+    /// dispatch at or above the lowest height a pending batch wrote. This
+    /// preserves the durability barrier described there without blocking the
+    /// mailbox on an fsync like [`Self::sync_finalized`].
     ///
     /// Like [`Self::sync_finalized`], this must be called within the same
     /// `select_loop!` arm as the writes it covers, before yielding back to the
     /// loop. `round` only labels the sync in diagnostics.
     #[tracing::instrument(name = "marshal.actor.start_finalized_sync", level = "info", skip_all)]
     async fn start_finalized_sync(&mut self, round: Round, syncs: &mut Pool<PooledSync>) {
-        // Adopt every write since the last started sync. If there are none,
-        // every accepted write is already covered by a blocking or in-flight
-        // sync.
-        let Some(lowest) = self.unsynced_finalized_write.take() else {
+        // If no write needs syncing, every accepted write is already covered
+        // by a blocking or in-flight sync.
+        let Some(seq) = self.dispatch_gate.adopt() else {
             return;
         };
-        let seq = self.finalized_sync_seq;
-        self.finalized_sync_seq += 1;
-        self.pending_finalized_syncs.insert(seq, lowest);
 
         let (blocks, finalizations) = match try_join!(
             async {
@@ -1933,16 +1906,6 @@ where
                 PooledSync::Observed
             }
         });
-    }
-
-    /// Releases the dispatch barrier for every finalized-archive batch covered
-    /// by the completed pooled sync `seq`.
-    ///
-    /// A sync makes durable every write accepted before it started, so all
-    /// batches with an equal or lower sequence are released, regardless of the
-    /// order in which pooled syncs complete.
-    fn finalized_sync_completed(&mut self, seq: u64) {
-        self.pending_finalized_syncs = self.pending_finalized_syncs.split_off(&(seq + 1));
     }
 
     // -------------------- Immutable Storage --------------------
@@ -2051,11 +2014,9 @@ where
             panic!("failed to finalize: {e}");
         }
 
-        // Gate dispatch at or above this write until a sync covers it.
-        self.unsynced_finalized_write = Some(
-            self.unsynced_finalized_write
-                .map_or(height, |lowest| lowest.min(height)),
-        );
+        // The write above is buffered and readable before it is durable, so
+        // hold dispatch at or above it until a sync covers it.
+        self.dispatch_gate.defer(height);
 
         // Update metrics and application
         if let Some(round) = round.filter(|_| height > self.tip) {
