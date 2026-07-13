@@ -2219,14 +2219,6 @@ impl<E: Context, V: CodecShared> authenticated::Inner<E> for Journal<E, V> {
 
 #[cfg(test)]
 impl<E: Context, V: CodecShared> Journal<E, V> {
-    /// Test helper: Run prune through data removal, then simulate a crash before offsets pruning.
-    pub(crate) async fn test_prune_before_offsets(
-        &mut self,
-        min_position: u64,
-    ) -> Result<bool, Error> {
-        Ok(self.prune_data(min_position).await?.is_some())
-    }
-
     /// Test helper: Prune the data blobs directly (simulates crash scenario).
     pub(crate) async fn test_prune_data(&mut self, min_blob: u64) -> Result<bool, Error> {
         let min_blob = min_blob.min(self.blobs.tail_blob_index());
@@ -3494,7 +3486,7 @@ mod tests {
 
             // Crash after prune's durability barrier and data removal, but before offsets.prune
             // has made the appended offsets durable.
-            journal.test_prune_before_offsets(10).await.unwrap();
+            assert!(journal.prune_data(10).await.unwrap().is_some());
             drop(journal);
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
