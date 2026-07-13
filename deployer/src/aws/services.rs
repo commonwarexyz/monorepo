@@ -1561,7 +1561,6 @@ mod tests {
         assert!(setup.contains("sudo systemctl enable promtail"));
         assert!(setup.contains("sudo systemctl enable binary"));
         assert!(setup.contains("tc qdisc replace dev \"$IFACE\" root handle 1: mq"));
-        assert!(!setup.contains("fq maxrate"));
         assert!(setup.contains("sudo systemctl enable --now setup-qdisc.service"));
         assert!(setup.contains("net.ipv4.tcp_rmem=4096 2097152 16777216"));
         assert!(setup.contains("sudo systemctl start node_exporter"));

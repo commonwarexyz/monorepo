@@ -71,8 +71,7 @@ struct ResolverDelivery<V: Variant> {
 
 /// Completion marker for entries in the actor's durability sync pool.
 enum PooledSync {
-    /// Observed only so the fatal policy in `Durable` applies; no
-    /// continuation runs on completion.
+    /// A sync that requires no action on completion.
     Observed,
     /// A finalized-archive sync batch became durable. Carries the sequence
     /// assigned by [`Actor::start_finalized_sync`] so the completion arm can
