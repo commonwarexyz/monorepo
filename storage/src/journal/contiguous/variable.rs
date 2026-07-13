@@ -1590,7 +1590,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // journal whose surviving items no longer justify its boundary. Dirty blobs below the
         // prune point are flushed too: removal is oldest-first and may be interrupted, and
         // recovery truncates at the first torn item, so an unsynced survivor below the
-        // boundary could discard every synced blob behind it.
+        // boundary could discard every synced blob behind it. Runs even when no blob will
+        // be removed: every prune call makes retained items recoverable.
         self.flush_dirty_data().await?;
         self.dirty_from_blob = None;
 
@@ -1603,6 +1604,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // Offsets entries for retained items must survive the same crash: recovery treats an
         // offsets journal that ends behind the surviving data as corruption. Data is flushed
         // first (above), matching the ordering every other durability path maintains.
+        // Deferred until the prune is known effective: offsets only need to be durable
+        // before a removal.
         self.offsets.commit().await?;
 
         self.blobs.prune(min_blob).await?;

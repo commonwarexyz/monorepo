@@ -1057,7 +1057,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // journal whose surviving items no longer justify its boundary. Dirty blobs below the
         // prune point are flushed too: removal is oldest-first and may be interrupted, and
         // recovery truncates at the first torn item, so an unsynced survivor below the
-        // boundary could discard every synced blob behind it.
+        // boundary could discard every synced blob behind it. Runs even when no blob will
+        // be removed: every prune call makes retained items recoverable.
         self.flush_dirty_blobs().await?;
         self.dirty_from_blob = None;
 
