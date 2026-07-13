@@ -898,6 +898,49 @@ mod test {
         });
     }
 
+    /// Pruning to a floor advanced by applied-but-uncommitted entries must not durably outrun
+    /// the last durable commit: after a crash, the recovered floor would lie below the pruned
+    /// boundary and the store could never reopen.
+    #[test_traced("WARN")]
+    pub fn test_store_db_prune_after_unsynced_floor_recovery() {
+        let executor = deterministic::Runner::default();
+        const ELEMENTS: u64 = 1000;
+        executor.start(|context| async move {
+            let mut db = create_test_store(context.child("store").with_attribute("index", 0)).await;
+
+            // Establish a durable state whose last commit declares an early inactivity floor.
+            for i in 0u64..ELEMENTS {
+                let k = Blake3::hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                apply_entries(&mut db, [(k, Some(v))]).await;
+            }
+            db.commit().await.unwrap();
+            let durable_floor = db.inactivity_floor_loc;
+
+            // Apply (but do not commit) entries that advance the in-memory floor past the
+            // durable commit's floor.
+            for i in 0u64..ELEMENTS {
+                let k = Blake3::hash(&i.to_be_bytes());
+                let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
+                apply_entries(&mut db, [(k, Some(v))]).await;
+            }
+            let unsynced_floor = db.inactivity_floor_loc;
+            assert!(unsynced_floor > durable_floor);
+
+            // Prune to the in-memory floor, then crash before any further commit.
+            db.prune(unsynced_floor).await.unwrap();
+            let op_count = db.bounds().end;
+            drop(db);
+
+            // Reopening must succeed: prune committed the buffered operations first, so the
+            // replayed log reproduces the advanced floor.
+            let db = create_test_store(context.child("store").with_attribute("index", 1)).await;
+            assert_eq!(db.bounds().end, op_count);
+            assert_eq!(db.inactivity_floor_loc, unsynced_floor);
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("WARN")]
     pub fn test_store_db_recovery() {
         let executor = deterministic::Runner::default();
