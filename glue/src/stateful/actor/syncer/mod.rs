@@ -35,111 +35,44 @@ const SYNC_STATE_KEY: FixedBytes<1> = fixed_bytes!("C0");
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
-/// Durable identity for an in-progress state sync floor.
-///
-/// The height enforces monotonic restarts, and the commitment distinguishes
-/// conflicting blocks at the same height.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FloorMarker<C>
-where
-    C: Digest,
-{
-    height: Height,
-    commitment: C,
-}
-
-impl<C> FloorMarker<C>
-where
-    C: Digest,
-{
-    /// Constructs a durable floor marker from the resolved floor block.
-    pub(crate) const fn new(height: Height, commitment: C) -> Self {
-        Self { height, commitment }
-    }
-
-    /// Ensures a newly selected floor is compatible with this persisted one.
-    ///
-    /// Restarts may resume from the same floor or advance to a newer one, but
-    /// must never move backward or switch to a different block at the same height.
-    pub(crate) fn ensure_not_behind(&self, selected: &Self) {
-        assert!(
-            selected.height >= self.height,
-            "selected state sync floor cannot move behind the persisted in-progress floor",
-        );
-
-        if selected.height == self.height {
-            assert!(
-                selected.commitment == self.commitment,
-                "selected state sync floor conflicts with the persisted in-progress floor",
-            );
-        }
-    }
-}
-
-impl<C> Write for FloorMarker<C>
-where
-    C: Digest,
-{
-    fn write(&self, writer: &mut impl BufMut) {
-        self.height.write(writer);
-        self.commitment.write(writer);
-    }
-}
-
-impl<C> EncodeSize for FloorMarker<C>
-where
-    C: Digest,
-{
-    fn encode_size(&self) -> usize {
-        self.height.encode_size() + self.commitment.encode_size()
-    }
-}
-
-impl<C> Read for FloorMarker<C>
-where
-    C: Digest,
-{
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        Ok(Self {
-            height: Height::read(reader)?,
-            commitment: C::read_cfg(reader, &())?,
-        })
-    }
-}
-
 /// Durable sync progress.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SyncState<C>
+pub(crate) enum SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
-    InProgress(FloorMarker<C>),
+    InProgress {
+        height: Height,
+        floor: Finalization<S, C>,
+    },
     Complete(Height),
 }
 
-impl<C> SyncState<C>
+impl<S, C> SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
     /// Returns the completed state sync height, if state sync has finished.
     pub(crate) const fn sync_height(&self) -> Option<Height> {
         match self {
-            Self::InProgress(_) => None,
+            Self::InProgress { .. } => None,
             Self::Complete(height) => Some(*height),
         }
     }
 }
 
-impl<C> Write for SyncState<C>
+impl<S, C> Write for SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::InProgress(floor) => {
+            Self::InProgress { height, floor } => {
                 0u8.write(writer);
+                height.write(writer);
                 floor.write(writer);
             }
             Self::Complete(height) => {
@@ -150,31 +83,55 @@ where
     }
 }
 
-impl<C> EncodeSize for SyncState<C>
+impl<S, C> EncodeSize for SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
     fn encode_size(&self) -> usize {
         u8::SIZE
             + match self {
-                Self::InProgress(floor) => floor.encode_size(),
+                Self::InProgress { height, floor } => height.encode_size() + floor.encode_size(),
                 Self::Complete(height) => height.encode_size(),
             }
     }
 }
 
-impl<C> Read for SyncState<C>
+impl<S, C> Read for SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
-    type Cfg = ();
+    type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(reader)? {
-            0 => Ok(Self::InProgress(FloorMarker::<C>::read(reader)?)),
+            0 => Ok(Self::InProgress {
+                height: Height::read(reader)?,
+                floor: Finalization::read_cfg(reader, cfg)?,
+            }),
             1 => Ok(Self::Complete(Height::read(reader)?)),
             n => Err(Error::InvalidEnum(n)),
         }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a, S, C> arbitrary::Arbitrary<'a> for SyncState<S, C>
+where
+    S: Scheme,
+    S::Certificate: for<'b> arbitrary::Arbitrary<'b>,
+    C: Digest + for<'b> arbitrary::Arbitrary<'b>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(if u.arbitrary::<bool>()? {
+            Self::InProgress {
+                height: u.arbitrary()?,
+                floor: u.arbitrary()?,
+            }
+        } else {
+            Self::Complete(u.arbitrary()?)
+        })
     }
 }
 
@@ -204,30 +161,30 @@ where
 }
 
 /// Resolved state sync floor data derived from the selected finalization.
-pub(crate) struct ResolvedFloor<E, A, C>
+pub(crate) struct ResolvedFloor<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    C: Digest,
 {
     pub anchor: Anchor<BlockDigest<A, E>>,
     pub targets: <A::Databases as DatabaseSet<E>>::SyncTargets,
-    pub marker: FloorMarker<C>,
 }
 
 /// Durable state-sync metadata.
-pub(crate) struct StateSyncMetadata<E, C>
+pub(crate) struct StateSyncMetadata<E, S, C>
 where
     E: Context,
+    S: Scheme,
     C: Digest,
 {
     partition_prefix: String,
-    metadata: Metadata<E, FixedBytes<1>, SyncState<C>>,
+    metadata: Metadata<E, FixedBytes<1>, SyncState<S, C>>,
 }
 
-impl<E, C> StateSyncMetadata<E, C>
+impl<E, S, C> StateSyncMetadata<E, S, C>
 where
     E: Context,
+    S: Scheme,
     C: Digest,
 {
     /// Load the durable state-sync metadata partition, creating it if needed.
@@ -237,7 +194,7 @@ where
             context.child("metadata"),
             metadata::Config {
                 partition: format!("{partition_prefix}{SYNC_METADATA_SUFFIX}"),
-                codec_config: (),
+                codec_config: S::certificate_codec_config_unbounded(),
             },
         )
         .await
@@ -265,8 +222,16 @@ where
     pub(crate) fn in_progress(&self) -> bool {
         matches!(
             self.metadata.get(&SYNC_STATE_KEY),
-            Some(SyncState::InProgress(_))
+            Some(SyncState::InProgress { .. })
         )
+    }
+
+    /// Returns the floor selected before an interrupted state sync.
+    pub(crate) fn in_progress_floor(&self) -> Option<&Finalization<S, C>> {
+        match self.metadata.get(&SYNC_STATE_KEY) {
+            Some(SyncState::InProgress { floor, .. }) => Some(floor),
+            _ => None,
+        }
     }
 
     /// Marks state sync as in progress for the resolved floor.
@@ -276,10 +241,22 @@ where
     ///
     /// If an interrupted state sync already stored a floor, the newly selected
     /// floor must resume from that same floor or a later one.
-    pub(crate) async fn begin_sync(&mut self, floor: FloorMarker<C>) {
+    pub(crate) async fn begin_sync(&mut self, height: Height, floor: Finalization<S, C>) {
         match self.metadata.get(&SYNC_STATE_KEY) {
-            Some(SyncState::InProgress(existing)) => {
-                existing.ensure_not_behind(&floor);
+            Some(SyncState::InProgress {
+                height: existing_height,
+                floor: existing,
+            }) => {
+                assert!(
+                    height >= *existing_height,
+                    "selected state sync floor cannot move behind the persisted in-progress floor",
+                );
+                if height == *existing_height {
+                    assert!(
+                        floor.proposal.payload == existing.proposal.payload,
+                        "selected state sync floor conflicts with the persisted in-progress floor",
+                    );
+                }
             }
             Some(SyncState::Complete(_)) => {
                 panic!("completed state sync cannot be marked in-progress");
@@ -288,7 +265,7 @@ where
         }
 
         self.metadata
-            .put_sync(SYNC_STATE_KEY, SyncState::InProgress(floor))
+            .put_sync(SYNC_STATE_KEY, SyncState::InProgress { height, floor })
             .await
             .expect("failed to set state sync state to in-progress");
     }
@@ -300,9 +277,12 @@ where
     /// action is irreversible.
     pub(crate) async fn set_complete(&mut self, height: Height) {
         match self.metadata.get(&SYNC_STATE_KEY) {
-            Some(SyncState::InProgress(floor)) => {
+            Some(SyncState::InProgress {
+                height: floor_height,
+                ..
+            }) => {
                 assert!(
-                    height >= floor.height,
+                    height >= *floor_height,
                     "completed state sync height cannot be behind the in-progress floor",
                 );
             }
@@ -316,18 +296,17 @@ where
         }
 
         self.metadata
-            .put_sync(SYNC_STATE_KEY, SyncState::<C>::Complete(height))
+            .put_sync(SYNC_STATE_KEY, SyncState::Complete(height))
             .await
             .expect("failed to set state sync state to complete");
     }
 }
 
-/// Resolves the selected state sync floor into the anchor, targets, and
-/// durable floor marker used by restart validation.
+/// Resolves the selected state sync floor into its anchor and targets.
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     finalization: &Finalization<S, V::Commitment>,
-) -> ResolvedFloor<E, A, V::Commitment>
+) -> ResolvedFloor<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -348,7 +327,6 @@ where
     ResolvedFloor {
         anchor: Anchor::from(floor.as_ref()),
         targets: A::sync_targets(floor.as_ref()),
-        marker: FloorMarker::new(floor.height(), finalization.proposal.payload),
     }
 }
 
@@ -381,7 +359,7 @@ pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
-    mut sync_metadata: StateSyncMetadata<E, V::Commitment>,
+    mut sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
 ) -> StartupResult<E, A>
 where
     E: Rng + Spawner + Context,
@@ -441,5 +419,18 @@ where
     StartupResult {
         sync: SyncResult { databases, anchor },
         skip_finalized_until,
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod tests {
+    mod conformance {
+        use crate::stateful::{actor::syncer::SyncState, tests::mocks::TestScheme};
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<SyncState<TestScheme, Sha256Digest>>,
+        }
     }
 }

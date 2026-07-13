@@ -73,7 +73,7 @@ where
     pub(super) marshal: MarshalMailbox<S, V>,
 
     /// Durable state-sync metadata.
-    pub(super) sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
+    pub(super) sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, S, V::Commitment>>>,
 
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,

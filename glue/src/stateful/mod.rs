@@ -63,9 +63,10 @@
 //!   above `database_anchor` arrives first, the actor processes it during handoff.
 //!   Durable metadata is marked in-progress before any database mutation and is
 //!   marked complete at the converged anchor before handoff acknowledgement. A
-//!   crash before completion restarts through the state-sync path, reopening
-//!   the existing sync journals. Subsequent restarts after completion take the
-//!   marshal sync path to ensure a contiguous stream.
+//!   crash before completion restarts through the state-sync path from the
+//!   persisted floor, reopening the existing sync journals. A lagging floor
+//!   sampled during restart cannot move that floor backward. Subsequent restarts
+//!   after completion take the marshal sync path to ensure a contiguous stream.
 //!
 //! # Lazy Recovery
 //!
