@@ -1440,6 +1440,9 @@ mod tests {
                 db.apply_batch(merkleized).await.unwrap();
             }
             assert!(db.sync_boundary() > durable_floor);
+            let bounds = db.bounds();
+            let floor = db.inactivity_floor_loc();
+            let root = db.root();
 
             // Drop the production prune future while it is parked after the metadata sync,
             // before the log prune: a genuine cancellation at that await.
@@ -1452,16 +1455,24 @@ mod tests {
                     "prune must park before the log prune"
                 );
             }
+            let pruned_bits = db.any.bitmap.pruned_bits();
+            assert!(pruned_bits > *durable_floor);
             drop(db);
 
-            // Reopening must succeed: prune committed the buffered operations before durably
-            // recording the pruning metadata that depends on them.
+            // Reopening must succeed and recover the post-batch state: prune committed the
+            // buffered operations before durably recording the pruning metadata that depends
+            // on them. Asserting the advanced floor, root, and persisted pruned boundary
+            // proves the drop happened after both the commit and the metadata sync.
             let db = MmrDb::init(
                 ctx.child("reopen"),
                 fixed_config::<OneCap>("prune-park", &ctx),
             )
             .await
             .expect("prune crash must leave the db recoverable");
+            assert_eq!(db.bounds(), bounds);
+            assert_eq!(db.inactivity_floor_loc(), floor);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.any.bitmap.pruned_bits(), pruned_bits);
             db.destroy().await.unwrap();
         });
     }
