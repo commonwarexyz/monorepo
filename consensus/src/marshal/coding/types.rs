@@ -242,6 +242,11 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         Arc::clone(&self.inner)
     }
 
+    /// Takes the shared inner [`Block`].
+    pub fn into_inner_shared(self) -> Arc<B> {
+        self.inner
+    }
+
     /// Takes the inner [`Block`].
     pub fn into_inner(self) -> B {
         Arc::unwrap_or_clone(self.inner)

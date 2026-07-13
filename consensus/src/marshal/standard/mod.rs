@@ -3198,7 +3198,7 @@ mod tests {
     }
 
     /// Recorded `send` call on the [`RecordingBuffer`].
-    type BufferSend = (Round, B, Recipients<PublicKey>);
+    type BufferSend = (Round, Arc<B>, Recipients<PublicKey>);
 
     /// A buffer that records each `send` invocation, keeps subscriptions open,
     /// and optionally serves locally inserted blocks.
@@ -3263,7 +3263,7 @@ mod tests {
 
         fn finalized(&self, _commitment: D) {}
 
-        fn send(&self, round: Round, block: B, recipients: Recipients<PublicKey>) {
+        fn send(&self, round: Round, block: Arc<B>, recipients: Recipients<PublicKey>) {
             self.sends.lock().push((round, block, recipients));
         }
     }

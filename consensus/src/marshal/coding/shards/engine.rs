@@ -694,7 +694,7 @@ where
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
-        let block = self.cache_block(round, CodedBlock::new_trusted(inner, commitment));
+        let block = self.cache_block(round, Arc::new(CodedBlock::new_trusted(inner, commitment)));
         self.metrics.blocks_reconstructed_total.inc();
         Ok(Some(block))
     }
@@ -883,9 +883,8 @@ where
     fn cache_block(
         &mut self,
         round: Round,
-        block: CodedBlock<B, C, H>,
+        block: Arc<CodedBlock<B, C, H>>,
     ) -> Arc<CodedBlock<B, C, H>> {
-        let block = Arc::new(block);
         let commitment = block.commitment();
         self.reconstructed_blocks.insert(
             commitment,
@@ -906,7 +905,7 @@ where
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         round: Round,
-        block: CodedBlock<B, C, H>,
+        block: Arc<CodedBlock<B, C, H>>,
     ) {
         let commitment = block.commitment();
 

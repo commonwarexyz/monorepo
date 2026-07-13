@@ -14,7 +14,7 @@ pub(crate) enum Message<P: PublicKey, M: Digestible> {
     /// Broadcast a [crate::Broadcaster::Message] to the network.
     Broadcast {
         recipients: Recipients<P>,
-        message: M,
+        message: Arc<M>,
     },
 
     /// Subscribe to receive a message by digest.
@@ -120,6 +120,16 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
         let _ = self.sender.enqueue(Message::Get { digest, responder });
         receiver.await.unwrap_or_default()
     }
+
+    /// Broadcast a shared message to recipients.
+    ///
+    /// If the engine has shut down, returns [`Feedback::Closed`].
+    pub fn broadcast_shared(&self, recipients: Recipients<P>, message: Arc<M>) -> Feedback {
+        self.sender.enqueue(Message::Broadcast {
+            recipients,
+            message,
+        })
+    }
 }
 
 impl<P: PublicKey, M: Digestible + Codec> Broadcaster for Mailbox<P, M> {
@@ -130,9 +140,6 @@ impl<P: PublicKey, M: Digestible + Codec> Broadcaster for Mailbox<P, M> {
     ///
     /// If the engine has shut down, returns [`Feedback::Closed`].
     fn broadcast(&self, recipients: Self::Recipients, message: Self::Message) -> Feedback {
-        self.sender.enqueue(Message::Broadcast {
-            recipients,
-            message,
-        })
+        self.broadcast_shared(recipients, Arc::new(message))
     }
 }

@@ -87,6 +87,11 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Converts a shared working block to a shared application block.
     fn into_inner_shared(block: Arc<Self::Block>) -> Arc<Self::ApplicationBlock>;
 
+    /// Converts an owned working block to a shared application block.
+    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
+        Arc::new(Self::into_inner(block))
+    }
+
     /// Reconstructs a working block from an application block and trusted payload.
     fn from_application_block(
         block: Self::ApplicationBlock,
@@ -165,7 +170,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn finalized(&self, commitment: V::Commitment);
 
     /// Send a block to peers.
-    fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
+    fn send(&self, round: Round, block: Arc<V::Block>, recipients: Recipients<Self::PublicKey>);
 }
 
 /// A buffer implementation that never stores, subscribes, finalizes, or sends blocks.
@@ -220,5 +225,5 @@ where
 
     fn finalized(&self, _: V::Commitment) {}
 
-    fn send(&self, _: Round, _: V::Block, _: Recipients<Self::PublicKey>) {}
+    fn send(&self, _: Round, _: Arc<V::Block>, _: Recipients<Self::PublicKey>) {}
 }

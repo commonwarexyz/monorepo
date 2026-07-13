@@ -113,7 +113,7 @@ mod tests {
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
-    type CodingSendRecord = (Round, TestCodedBlock, Recipients<K>);
+    type CodingSendRecord = (Round, Arc<TestCodedBlock>, Recipients<K>);
 
     // Smallest valid coding config used to build trusted genesis commitments.
     const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
@@ -176,7 +176,7 @@ mod tests {
 
         fn finalized(&self, _commitment: Commitment) {}
 
-        fn send(&self, round: Round, block: TestCodedBlock, recipients: Recipients<K>) {
+        fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
         }
     }

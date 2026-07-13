@@ -239,14 +239,14 @@ where
         &mut self,
         sender: &mut WrappedSender<Sr, M>,
         recipients: Recipients<P>,
-        msg: M,
+        msg: Arc<M>,
     ) {
         // Store the message, continue even if it was already stored
         let digest = msg.digest();
-        let _ = self.insert_message(self.public_key.clone(), digest, msg.clone());
+        let _ = self.insert_shared_message(self.public_key.clone(), digest, &msg);
 
         // Broadcast the message to the network
-        sender.send(recipients, msg, self.priority);
+        sender.send_ref(recipients, msg.as_ref(), self.priority);
     }
 
     /// Handles a `subscribe` request from the application.
@@ -302,13 +302,25 @@ where
     fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> InsertMessageResult {
         if let Some(waiters) = self.waiters.remove(&digest) {
             let msg = Arc::new(msg);
-            for waiter in waiters {
-                self.respond_subscribe(waiter.responder, Arc::clone(&msg));
-            }
+            self.respond_waiters(waiters, &msg);
             return self.insert_cache_entry(peer, digest, || Arc::clone(&msg));
         }
 
         self.insert_cache_entry(peer, digest, || Arc::new(msg))
+    }
+
+    /// Inserts a shared message into the cache.
+    fn insert_shared_message(
+        &mut self,
+        peer: P,
+        digest: M::Digest,
+        msg: &Arc<M>,
+    ) -> InsertMessageResult {
+        if let Some(waiters) = self.waiters.remove(&digest) {
+            self.respond_waiters(waiters, msg);
+        }
+
+        self.insert_cache_entry(peer, digest, || Arc::clone(msg))
     }
 
     /// Records a peer's reference to a message, acquiring an `Arc` only when
@@ -406,6 +418,12 @@ where
         } else {
             Status::Dropped
         });
+    }
+
+    fn respond_waiters(&mut self, waiters: Vec<Waiter<M>>, msg: &Arc<M>) {
+        for waiter in waiters {
+            self.respond_subscribe(waiter.responder, Arc::clone(msg));
+        }
     }
 
     /// Respond to a get request.

@@ -53,6 +53,16 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         message: V,
         priority: bool,
     ) -> Vec<S::PublicKey> {
+        self.send_ref(recipients, &message, priority)
+    }
+
+    /// Send a borrowed message to a set of recipients.
+    pub fn send_ref(
+        &mut self,
+        recipients: Recipients<S::PublicKey>,
+        message: &V,
+        priority: bool,
+    ) -> Vec<S::PublicKey> {
         let encoded = message.encode_with_pool(&self.pool);
         self.sender.send(recipients, encoded, priority)
     }
@@ -87,6 +97,10 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
     }
 
     pub fn send(self, message: V, priority: bool) -> Unreliable<Feedback> {
+        self.send_ref(&message, priority)
+    }
+
+    pub fn send_ref(self, message: &V, priority: bool) -> Unreliable<Feedback> {
         let encoded = message.encode_with_pool(self.pool);
         self.sender.send(encoded, priority)
     }

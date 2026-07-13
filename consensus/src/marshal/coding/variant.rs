@@ -88,6 +88,10 @@ where
         block.inner_shared()
     }
 
+    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
+        block.into_inner_shared()
+    }
+
     fn from_application_block(
         block: Self::ApplicationBlock,
         payload: Self::Commitment,
@@ -134,9 +138,9 @@ where
         self.prune(commitment);
     }
 
-    fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
+    fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
-        self.proposed(round, block);
+        self.proposed_shared(round, block);
     }
 }
 

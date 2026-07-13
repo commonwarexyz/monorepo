@@ -102,18 +102,14 @@ impl<V: Variant> Subscriptions<V> {
                 entry.get_mut().subscribers.push(subscriber);
             }
             Entry::Vacant(entry) => {
-                let aborter = match key {
-                    Key::Digest(digest) => buffer.subscribe_by_digest(digest).map(|rx| {
-                        waiters.push(async move { rx.await.map_err(|_| Key::Digest(digest)) })
-                    }),
-                    Key::Commitment(commitment) => {
-                        buffer.subscribe_by_commitment(commitment).map(|rx| {
-                            waiters.push(async move {
-                                rx.await.map_err(|_| Key::Commitment(commitment))
-                            })
-                        })
-                    }
+                let rx = match key {
+                    Key::Digest(digest) => buffer.subscribe_by_digest(digest),
+                    Key::Commitment(commitment) => buffer.subscribe_by_commitment(commitment),
                 };
+                let aborter = rx.map(|rx| {
+                    let waiter_key = key;
+                    waiters.push(async move { rx.await.map_err(|_| waiter_key) })
+                });
                 entry.insert(BlockSubscription {
                     subscribers: vec![subscriber],
                     _aborter: aborter,
@@ -195,7 +191,7 @@ mod tests {
 
         fn finalized(&self, _commitment: Digest) {}
 
-        fn send(&self, _round: Round, _block: TestBlock, _recipients: Recipients<PublicKey>) {}
+        fn send(&self, _round: Round, _block: Arc<TestBlock>, _recipients: Recipients<PublicKey>) {}
     }
 
     fn block(height: u64, timestamp: u64) -> TestBlock {

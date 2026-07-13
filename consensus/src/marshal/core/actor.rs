@@ -604,7 +604,7 @@ where
                         block
                     }
                 };
-                buffer.send(round, Arc::unwrap_or_clone(block), recipients);
+                buffer.send(round, block, recipients);
             }
             Message::Proposed {
                 round, block, ack, ..
@@ -709,7 +709,7 @@ where
                     } else {
                         let handle = self
                             .cache
-                            .put_notarized(round, digest, block.as_ref().clone().into())
+                            .put_notarized(round, digest, Arc::unwrap_or_clone(block).into())
                             .await;
                         syncs.push(handle.durable(round, "notarized"));
                     }
@@ -1203,6 +1203,11 @@ where
         true
     }
 
+    /// Applies the pending floor transition using its matching anchor block.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no pending floor anchor is installed.
     async fn apply_pending_floor<Buf: Buffer<V>>(
         &mut self,
         block: Arc<V::Block>,
@@ -1252,7 +1257,7 @@ where
         try_join!(
             async {
                 self.finalized_blocks
-                    .put(block.as_ref().clone().into())
+                    .put(Arc::unwrap_or_clone(block).into())
                     .await
                     .map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
@@ -1391,7 +1396,7 @@ where
                                     bounds.epoch(),
                                     height,
                                     digest,
-                                    block.as_ref().clone().into(),
+                                    Arc::unwrap_or_clone(block).into(),
                                 )
                                 .await;
                         }
@@ -1768,7 +1773,7 @@ where
 
             let (height, commitment) = (block.height(), V::commitment(&block));
             let (ack, ack_waiter) = A::handle();
-            application.report(Update::Block(V::into_inner_shared(Arc::new(block)), ack));
+            application.report(Update::Block(V::owned_into_inner_shared(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,

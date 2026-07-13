@@ -12,7 +12,7 @@ use crate::{
     types::Round,
     Block,
 };
-use commonware_broadcast::{buffered, Broadcaster};
+use commonware_broadcast::buffered;
 use commonware_codec::Read;
 use commonware_cryptography::{certificate::Scheme, Digestible, PublicKey};
 use commonware_p2p::Recipients;
@@ -110,8 +110,8 @@ where
         // No cleanup needed in standard mode - the buffer handles its own pruning
     }
 
-    fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
-        Broadcaster::broadcast(self, recipients, block);
+    fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
+        self.broadcast_shared(recipients, block);
     }
 }
 

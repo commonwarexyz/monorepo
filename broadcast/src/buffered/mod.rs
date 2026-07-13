@@ -60,6 +60,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, VecDeque},
         num::NonZeroU32,
+        sync::Arc,
         time::Duration,
     };
 
@@ -476,6 +477,27 @@ mod tests {
 
             // Verify the second retrieval was instant (less than 10ms)
             assert!(duration < A_JIFFY, "get not instant");
+        });
+    }
+
+    #[test_traced]
+    fn test_shared_broadcast_reuses_message() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.child("network"), 1, 1.0).await;
+            let mailboxes =
+                spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
+            let mailbox = mailboxes.get(&peers[0]).unwrap();
+
+            let message = Arc::new(TestMessage::shared(b"shared broadcast"));
+            let digest = message.digest();
+            assert!(mailbox
+                .broadcast_shared(Recipients::All, Arc::clone(&message))
+                .accepted());
+
+            let cached = mailbox.get(digest).await.expect("message should be cached");
+            assert!(Arc::ptr_eq(&message, &cached));
         });
     }
 
