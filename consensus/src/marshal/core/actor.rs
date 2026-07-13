@@ -1002,6 +1002,10 @@ where
         // Attempt to fill gaps before handling produce requests so we can serve
         // data received earlier in the same batch.
         needs_sync |= self.try_repair_gaps(buffer, resolver, application).await;
+
+        // Start a pooled sync so the batch's buffered writes become durable
+        // without blocking the mailbox. Dispatch of the written heights
+        // resumes when the sync completes.
         if needs_sync {
             self.start_finalized_sync(self.floor.processed_round(), syncs)
                 .await;
@@ -1767,9 +1771,10 @@ where
     ///
     /// Blocks are dispatched only once durable. Every buffered
     /// finalized-archive write freezes dispatch at or above its height until
-    /// a sync covering it completes (see [`Self::record_finalized_write`]),
-    /// at which point the pool-completion arm re-runs this method. Callers
-    /// that buffer writes must still call [`Self::sync_finalized`] or
+    /// a sync covering it completes (see [`Self::record_finalized_write`]).
+    /// Dispatch is then re-attempted by the pool-completion arm for pooled
+    /// syncs and by the caller itself after a blocking sync. Callers that
+    /// buffer writes must still call [`Self::sync_finalized`] or
     /// [`Self::start_finalized_sync`] before yielding to the `select_loop!`
     /// so the freeze is released.
     ///

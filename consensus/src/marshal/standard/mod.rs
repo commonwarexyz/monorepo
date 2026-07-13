@@ -6649,6 +6649,11 @@ mod tests {
     /// height it already processed. Marshal cannot cross-check certificates
     /// against each other, so it must stay crash-safe when one lands in
     /// `apply_pending_floor`'s stale-anchor branch.
+    ///
+    /// The two repair blocks are delivered in ascending height order, so the
+    /// batch entry must keep the lowest written height. Tracking the latest
+    /// write instead would leave the gate above the first block and let it
+    /// dispatch non-durably.
     #[test_traced("WARN")]
     fn test_standard_stale_floor_anchor_holds_dispatch_until_durable() {
         const PACE: Duration = Duration::from_millis(100);
@@ -6745,10 +6750,11 @@ mod tests {
                 })
                 .expect("anchor fetch missing");
 
-            // Enqueue both deliveries back-to-back (no intervening await) so
-            // the actor drains them in a single resolver batch: first a repair
-            // block at the dispatch frontier (a buffered finalized-archive
-            // write), then the stale floor anchor.
+            // Enqueue all deliveries back-to-back (no intervening await) so
+            // the actor drains them in a single resolver batch: two repair
+            // blocks at and above the dispatch frontier (buffered
+            // finalized-archive writes, ascending), then the stale floor
+            // anchor.
             let next = make_raw_block(block.digest(), Height::new(2), 200);
             let (next_response, next_response_rx) = oneshot::channel();
             assert!(resolver
@@ -6764,6 +6770,23 @@ mod tests {
                     },
                     value: next.encode(),
                     response: next_response,
+                })
+                .accepted());
+            let above = make_raw_block(next.digest(), Height::new(3), 300);
+            let (above_response, above_response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Block(StandardHarness::commitment(&above)),
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                height: Height::new(3),
+                            }),
+                            tracing::Span::none(),
+                        )),
+                    },
+                    value: above.encode(),
+                    response: above_response,
                 })
                 .accepted());
             let (anchor_response, anchor_response_rx) = oneshot::channel();
@@ -6783,6 +6806,10 @@ mod tests {
             let delivered_at = context.current();
             assert!(
                 next_response_rx.await.expect("repair response missing"),
+                "repair block delivery should validate"
+            );
+            assert!(
+                above_response_rx.await.expect("repair response missing"),
                 "repair block delivery should validate"
             );
             assert!(
@@ -6806,18 +6833,160 @@ mod tests {
             wait_until(
                 &context,
                 Duration::from_millis(50),
-                "repair block dispatched",
-                || application.blocks().contains_key(&Height::new(2)),
+                "repair blocks dispatched",
+                || application.blocks().contains_key(&Height::new(3)),
             )
             .await;
+            assert!(application.blocks().contains_key(&Height::new(2)));
             let dispatched = context
                 .current()
                 .duration_since(delivered_at)
                 .expect("time went backwards");
-            tracing::info!(?dispatched, "repair block dispatched");
+            tracing::info!(?dispatched, "repair blocks dispatched");
             assert!(
                 dispatched >= PACE,
                 "block dispatched before the paced sync completed: {dispatched:?}"
+            );
+        });
+    }
+
+    /// Overlapping pooled syncs must release the dispatch gate per batch.
+    ///
+    /// Two finalizations arrive 50ms apart, each starting its own paced 100ms
+    /// sync. The first sync covers only the first write, so block 1 must
+    /// dispatch as soon as that sync completes while block 2 stays held until
+    /// the second sync completes. This pins the sequence accounting in
+    /// `start_finalized_sync`: if a started sync failed to advance
+    /// `finalized_sync_seq`, the second write would accumulate under the
+    /// first sync's sequence and that sync's completion would release a write
+    /// it never covered.
+    #[test_traced("WARN")]
+    fn test_standard_overlapping_finalized_syncs_release_per_batch() {
+        const PACE: Duration = Duration::from_millis(100);
+        const STAGGER: Duration = Duration::from_millis(50);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention_timeout: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(4),
+                block_codec_config: (),
+                partition_prefix: "overlapping-finalized-syncs".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "overlapping-finalized-syncs", PACE).await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "genesis processed",
+                || parse_processed_height(&context.encode()) == Some(0),
+            )
+            .await;
+
+            // Store both verified blocks, then finalize them one STAGGER
+            // apart so their pooled syncs overlap.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let first_round = Round::new(Epoch::zero(), View::new(1));
+            let first = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(first_round, first.clone()).await);
+            let second_round = Round::new(Epoch::zero(), View::new(2));
+            let second = make_raw_block(first.digest(), Height::new(2), 200);
+            assert!(mailbox.verified(second_round, second.clone()).await);
+
+            let started_at = context.current();
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    first_round,
+                    View::zero(),
+                    StandardHarness::commitment(&first),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            context.sleep(STAGGER).await;
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    second_round,
+                    View::new(1),
+                    StandardHarness::commitment(&second),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            // Block 1 dispatches as soon as the first sync completes, without
+            // waiting for the second sync.
+            wait_until(
+                &context,
+                Duration::from_millis(150),
+                "first block dispatched",
+                || application.blocks().contains_key(&Height::new(1)),
+            )
+            .await;
+            let first_dispatched = context
+                .current()
+                .duration_since(started_at)
+                .expect("time went backwards");
+            tracing::info!(?first_dispatched, "first block dispatched");
+            assert!(
+                first_dispatched >= PACE,
+                "block dispatched before its sync completed: {first_dispatched:?}"
+            );
+            assert!(
+                first_dispatched < STAGGER + PACE,
+                "first block waited for the second sync: {first_dispatched:?}"
+            );
+
+            // Block 2 stays held until its own sync completes.
+            assert!(
+                !application.blocks().contains_key(&Height::new(2)),
+                "block dispatched before its sync completed"
+            );
+            context.sleep(Duration::from_millis(20)).await;
+            assert!(
+                !application.blocks().contains_key(&Height::new(2)),
+                "block dispatched before its sync completed"
+            );
+            wait_until(
+                &context,
+                Duration::from_millis(50),
+                "second block dispatched",
+                || application.blocks().contains_key(&Height::new(2)),
+            )
+            .await;
+            let second_dispatched = context
+                .current()
+                .duration_since(started_at)
+                .expect("time went backwards");
+            tracing::info!(?second_dispatched, "second block dispatched");
+            assert!(
+                second_dispatched >= STAGGER + PACE,
+                "block dispatched before its sync completed: {second_dispatched:?}"
             );
         });
     }
