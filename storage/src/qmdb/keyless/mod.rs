@@ -368,8 +368,7 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor declared by
-    ///   the last committed batch.
+    /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor.
     #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
         let _timer = self.metrics.prune_timer();

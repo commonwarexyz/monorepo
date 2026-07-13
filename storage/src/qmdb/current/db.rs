@@ -500,6 +500,9 @@ where
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
+    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
+    /// uncommitted operations are not guaranteed to survive.
+    ///
     /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
     /// advance past the point where the grafting overlay has been pruned. The bitmap and grafted
     /// tree advance to the sync boundary regardless of `prune_loc`.
