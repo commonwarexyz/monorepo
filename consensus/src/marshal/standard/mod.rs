@@ -6639,7 +6639,7 @@ mod tests {
     /// anchor whose height is at or below the processed height. That anchor
     /// path calls `try_dispatch_blocks` mid-batch, before the batch-end
     /// `start_finalized_sync` runs, so dispatch must be gated by the write
-    /// itself (see `record_finalized_write`) rather than by a started sync.
+    /// itself (via `unsynced_finalized_write`) rather than by a started sync.
     /// Without the gate, the frontier block reaches the application while its
     /// archive write is still buffered, and a crash after the application ack
     /// could durably advance the processed floor past a lost write.
@@ -6855,11 +6855,10 @@ mod tests {
     /// Two finalizations arrive 50ms apart, each starting its own paced 100ms
     /// sync. The first sync covers only the first write, so block 1 must
     /// dispatch as soon as that sync completes while block 2 stays held until
-    /// the second sync completes. This pins the sequence accounting in
-    /// `start_finalized_sync`: if a started sync failed to advance
-    /// `finalized_sync_seq`, the second write would accumulate under the
-    /// first sync's sequence and that sync's completion would release a write
-    /// it never covered.
+    /// the second sync completes. This pins the batch accounting in
+    /// `start_finalized_sync`: if the second write were folded into the first
+    /// sync's batch, that sync's completion would release a write it never
+    /// covered.
     #[test_traced("WARN")]
     fn test_standard_overlapping_finalized_syncs_release_per_batch() {
         const PACE: Duration = Duration::from_millis(100);

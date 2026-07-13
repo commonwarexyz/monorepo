@@ -77,7 +77,7 @@ enum PooledSync {
     /// assigned by [`Actor::start_finalized_sync`] so the completion arm can
     /// release the application-dispatch barrier for every batch the sync
     /// covers (a sync makes durable every write accepted before it started,
-    /// including batches registered under earlier sequences).
+    /// including batches adopted by earlier sequences).
     Finalized(u64),
 }
 
@@ -142,14 +142,18 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
-    // Lowest buffered finalized-archive write height per sync batch, keyed
-    // by sync sequence. Writes accumulate under `finalized_sync_seq` until a
-    // sync starts and adopts them. `try_dispatch_blocks` never dispatches at
-    // or above the lowest entry: buffered writes are readable from the
-    // archives before they are durable.
+    // Lowest height written to the finalized archives since the last sync
+    // (blocking or pooled) was started. Buffered writes are readable from
+    // the archives before they are durable, so `try_dispatch_blocks` never
+    // dispatches at or above this height. The next started sync adopts it
+    // into `pending_finalized_syncs`.
+    unsynced_finalized_write: Option<Height>,
+    // Lowest write height adopted by each in-flight pooled finalized-archive
+    // sync, keyed by start order. `try_dispatch_blocks` never dispatches at
+    // or above the lowest entry, and a completed sync releases every entry
+    // at or below its sequence (see `finalized_sync_completed`).
     pending_finalized_syncs: BTreeMap<u64, Height>,
-    // Sequence assigned to the next pooled finalized-archive sync and the
-    // key under which new writes accumulate until that sync starts.
+    // Sequence assigned to the next started pooled finalized-archive sync.
     finalized_sync_seq: u64,
 
     // ---------- Storage ----------
@@ -261,6 +265,7 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                unsynced_finalized_write: None,
                 pending_finalized_syncs: BTreeMap::new(),
                 finalized_sync_seq: 0,
                 cache,
@@ -922,8 +927,8 @@ where
         }
     }
 
-    /// Handles a batch of resolver messages, syncing finalized archives once if
-    /// any accepted delivery buffered a write.
+    /// Handles a batch of resolver messages, starting one pooled
+    /// finalized-archive sync if any accepted delivery buffered a write.
     async fn handle_resolver_message<Buf, R>(
         &mut self,
         message: handler::Message<V::Commitment>,
@@ -936,7 +941,6 @@ where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
-        let mut needs_sync = false;
         let mut handled = false;
         let mut produces = Vec::new();
         let mut delivers = Vec::new();
@@ -970,20 +974,19 @@ where
                     for (_, subscriber_span) in delivery.subscribers.iter().skip(1) {
                         span.follows_from(subscriber_span.id());
                     }
-                    needs_sync |= self
-                        .handle_deliver(
-                            ResolverDelivery {
-                                delivery,
-                                value,
-                                response,
-                            },
-                            &mut delivers,
-                            buffer,
-                            application,
-                            resolver,
-                        )
-                        .instrument(span)
-                        .await;
+                    self.handle_deliver(
+                        ResolverDelivery {
+                            delivery,
+                            value,
+                            response,
+                        },
+                        &mut delivers,
+                        buffer,
+                        application,
+                        resolver,
+                    )
+                    .instrument(span)
+                    .await;
                 }
             }
         }
@@ -992,21 +995,18 @@ where
         }
 
         // Batch verify and process all certificate-bearing deliveries.
-        needs_sync |= self
-            .verify_delivered(delivers, buffer, application, resolver)
+        self.verify_delivered(delivers, buffer, application, resolver)
             .await;
 
         // Attempt to fill gaps before handling produce requests so we can serve
         // data received earlier in the same batch.
-        needs_sync |= self.try_repair_gaps(buffer, resolver, application).await;
+        self.try_repair_gaps(buffer, resolver, application).await;
 
-        // Start a pooled sync so the batch's buffered writes become durable
-        // without blocking the mailbox. Dispatch of the written heights
-        // resumes when the sync completes.
-        if needs_sync {
-            self.start_finalized_sync(self.floor.processed_round(), syncs)
-                .await;
-        }
+        // Start a pooled sync so any writes buffered by this batch become
+        // durable without blocking the mailbox. Dispatch of the written
+        // heights resumes when the sync completes.
+        self.start_finalized_sync(self.floor.processed_round(), syncs)
+            .await;
 
         // Handle produce requests in parallel.
         join_all(
@@ -1311,7 +1311,6 @@ where
             }
         )
         .expect("failed to store floor anchor");
-        self.record_finalized_write(height);
         self.sync_finalized().await;
 
         if height > self.tip {
@@ -1354,7 +1353,6 @@ where
     /// Handle a deliver message from the resolver. Block delivers are handled
     /// immediately. Finalized/Notarized delivers are parsed and structurally
     /// validated, then collected into `delivers` for batch certificate verification.
-    /// Returns true if finalization archives were written and need syncing.
     async fn handle_deliver<Buf: Buffer<V>>(
         &mut self,
         message: ResolverDelivery<V>,
@@ -1362,7 +1360,7 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> bool {
+    ) {
         let ResolverDelivery {
             delivery,
             mut value,
@@ -1376,11 +1374,11 @@ where
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 };
                 if V::commitment(&block) != commitment {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 }
 
                 // This block may match the pending floor request. Whether it
@@ -1392,7 +1390,7 @@ where
                     .await
                 {
                     response.send_lossy(true);
-                    return false;
+                    return;
                 }
 
                 // The peer-visible request only says "give me this block".
@@ -1412,7 +1410,7 @@ where
                     self.update_processed_round_floor(height, finalization.round(), resolver)
                         .await;
                 }
-                let wrote = if finalization.is_some()
+                if finalization.is_some()
                     || annotations
                         .iter()
                         .any(|annotation| matches!(annotation, Annotation::Finalized(_)))
@@ -1424,29 +1422,25 @@ where
                         finalization,
                         application,
                     )
-                    .await
-                } else {
-                    if annotations
-                        .iter()
-                        .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
-                        && height > self.floor.processed_height()
-                    {
-                        if let Some(bounds) = self.epocher.containing(height) {
-                            self.cache
-                                .put_certified(
-                                    bounds.epoch(),
-                                    height,
-                                    digest,
-                                    Arc::unwrap_or_clone(block).into(),
-                                )
-                                .await;
-                        }
+                    .await;
+                } else if annotations
+                    .iter()
+                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
+                    && height > self.floor.processed_height()
+                {
+                    if let Some(bounds) = self.epocher.containing(height) {
+                        self.cache
+                            .put_certified(
+                                bounds.epoch(),
+                                height,
+                                digest,
+                                Arc::unwrap_or_clone(block).into(),
+                            )
+                            .await;
                     }
-                    false
-                };
+                }
                 debug!(?digest, %height, "received block");
                 response.send_lossy(true);
-                wrote
             }
             Key::Finalized { height } => {
                 let Some((epoch, certificate_codec_config)) =
@@ -1458,14 +1452,14 @@ where
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
-                    return false;
+                    return;
                 };
 
                 let Ok(finalization) =
                     Finalization::read_cfg(&mut value, &certificate_codec_config)
                 else {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 };
 
                 // We decoded the certificate with the codec config for the height's epoch, so the
@@ -1473,7 +1467,7 @@ where
                 // against the wrong participant set, so reject before verification.
                 if finalization.epoch() != epoch {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 }
 
                 // Decode the block carried with the finalization. Below, it is checked against
@@ -1482,7 +1476,7 @@ where
                     V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
                 else {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 };
 
                 // In contrast to the `Block` and `Notarization` deliveries, the finalization delivery
@@ -1497,14 +1491,13 @@ where
                 if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
                 {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 }
                 delivers.push(PendingVerification::Finalized {
                     finalization,
                     block,
                     response,
                 });
-                false
             }
             Key::Notarized { round } => {
                 let Some(scheme) = self.provider.scheme(round.epoch()) else {
@@ -1514,21 +1507,21 @@ where
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
-                    return false;
+                    return;
                 };
                 let certificate_codec_config = scheme.certificate_codec_config();
                 let Ok(notarization) =
                     Notarization::read_cfg(&mut value, &certificate_codec_config)
                 else {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 };
 
                 // The resolver key binds this response to `round`; a certificate for any other
                 // round is a bad response even if it decodes correctly.
                 if notarization.round() != round {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 }
 
                 // Use the notarization payload to derive the block decode config. Below, the
@@ -1536,30 +1529,28 @@ where
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 }
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 };
 
                 if V::commitment(&block) != notarization.proposal.payload {
                     response.send_lossy(false);
-                    return false;
+                    return;
                 }
                 delivers.push(PendingVerification::Notarized {
                     notarization,
                     block,
                     response,
                 });
-                false
             }
         }
     }
 
-    /// Batch verify pending certificates and process valid items. Returns true
-    /// if finalization archives were written and need syncing.
+    /// Batch verify pending certificates and process valid items.
     #[tracing::instrument(name = "marshal.actor.verify_delivered", level = "info", skip_all, fields(count = delivers.len().traced()))]
     async fn verify_delivered<Buf: Buffer<V>>(
         &mut self,
@@ -1567,10 +1558,10 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> bool {
+    ) {
         delivers.retain(|item| !item.response_closed());
         if delivers.is_empty() {
-            return false;
+            return;
         }
 
         // Extract (subject, certificate) pairs for batch verification.
@@ -1617,7 +1608,6 @@ where
         }
 
         // Process each verified item, rejecting unverified ones.
-        let mut wrote = false;
         for (index, item) in delivers.drain(..).enumerate() {
             if !verified[index] {
                 match item {
@@ -1657,15 +1647,14 @@ where
                     self.update_processed_round_floor(height, round, resolver)
                         .await;
 
-                    wrote |= self
-                        .store_finalization(
-                            height,
-                            digest,
-                            Arc::unwrap_or_clone(block),
-                            Some(finalization),
-                            application,
-                        )
-                        .await;
+                    self.store_finalization(
+                        height,
+                        digest,
+                        Arc::unwrap_or_clone(block),
+                        Some(finalization),
+                        application,
+                    )
+                    .await;
                 }
                 PendingVerification::Notarized {
                     notarization,
@@ -1717,21 +1706,18 @@ where
 
                         // SAFETY: `digest` identifies a unique `commitment`, so this
                         // cached finalization payload must match `V::commitment(&block)`.
-                        wrote |= self
-                            .store_finalization(
-                                height,
-                                digest,
-                                Arc::unwrap_or_clone(block),
-                                Some(finalization),
-                                application,
-                            )
-                            .await;
+                        self.store_finalization(
+                            height,
+                            digest,
+                            Arc::unwrap_or_clone(block),
+                            Some(finalization),
+                            application,
+                        )
+                        .await;
                     }
                 }
             }
         }
-
-        wrote
     }
 
     /// Returns the certificate codec config for `epoch`.
@@ -1767,13 +1753,13 @@ where
     /// handler updates the processed height.
     ///
     /// Blocks are dispatched only once durable. Every buffered
-    /// finalized-archive write freezes dispatch at or above its height until
-    /// a sync covering it completes (see [`Self::record_finalized_write`]).
-    /// Dispatch is then re-attempted by the pool-completion arm for pooled
-    /// syncs and by the caller itself after a blocking sync. Callers that
-    /// buffer writes must still call [`Self::sync_finalized`] or
-    /// [`Self::start_finalized_sync`] before yielding to the `select_loop!`
-    /// so the freeze is released.
+    /// finalized-archive write freezes dispatch at or above its height, first
+    /// via `unsynced_finalized_write` and then, once a started sync adopts it,
+    /// via `pending_finalized_syncs`. Dispatch is re-attempted by the
+    /// pool-completion arm for pooled syncs and by the caller itself after a
+    /// blocking sync. Callers that buffer writes must still call
+    /// [`Self::sync_finalized`] or [`Self::start_finalized_sync`] before
+    /// yielding to the `select_loop!` so the freeze is released.
     ///
     /// Acks are processed in FIFO order so the processed floor height always
     /// advances sequentially.
@@ -1804,9 +1790,14 @@ where
 
         // Durability barrier: buffered writes are readable from the archives
         // before they are durable, and every such write is tracked in
-        // `pending_finalized_syncs` until the sync covering it completes.
-        // Never dispatch at or above the lowest one.
-        let non_durable = self.pending_finalized_syncs.values().min().copied();
+        // `unsynced_finalized_write` or `pending_finalized_syncs` until a sync
+        // covering it completes. Never dispatch at or above the lowest one.
+        let non_durable = self
+            .pending_finalized_syncs
+            .values()
+            .copied()
+            .chain(self.unsynced_finalized_write)
+            .min();
         while self.pending_acks.has_capacity() {
             let next_height = self
                 .pending_acks
@@ -1878,30 +1869,38 @@ where
         }
 
         // A blocking sync waits on (and covers) every previously accepted
-        // write, including batches whose pooled syncs are still in flight or
-        // not yet started, so all pending batches are durable once it returns.
+        // write, including writes adopted by in-flight pooled syncs and writes
+        // no sync has adopted yet, so nothing gates dispatch once it returns.
+        self.unsynced_finalized_write = None;
         self.pending_finalized_syncs.clear();
     }
 
     /// Start a non-blocking sync of both finalization archives on the
-    /// durability pool.
+    /// durability pool. A no-op if nothing was written since the last sync
+    /// (blocking or pooled) started.
     ///
     /// The pooled entry resolves to [`PooledSync::Finalized`] once every write
-    /// accepted before this call is durable. The sync adopts the batch of
-    /// writes recorded under the current sequence (see
-    /// [`Self::record_finalized_write`]), and until the pool-completion arm
-    /// observes the completion, [`Self::try_dispatch_blocks`] will not
-    /// dispatch at or above the lowest height a pending batch wrote. This
-    /// preserves the durability barrier described there without blocking the
-    /// mailbox on an fsync like [`Self::sync_finalized`].
+    /// accepted before this call is durable. The sync adopts
+    /// `unsynced_finalized_write`, and until the pool-completion arm observes
+    /// the completion, [`Self::try_dispatch_blocks`] will not dispatch at or
+    /// above the lowest height a pending batch wrote. This preserves the
+    /// durability barrier described there without blocking the mailbox on an
+    /// fsync like [`Self::sync_finalized`].
     ///
     /// Like [`Self::sync_finalized`], this must be called within the same
     /// `select_loop!` arm as the writes it covers, before yielding back to the
     /// loop. `round` only labels the sync in diagnostics.
     #[tracing::instrument(name = "marshal.actor.start_finalized_sync", level = "info", skip_all)]
     async fn start_finalized_sync(&mut self, round: Round, syncs: &mut Pool<PooledSync>) {
+        // Adopt every write since the last started sync. If there are none,
+        // every accepted write is already covered by a blocking or in-flight
+        // sync.
+        let Some(lowest) = self.unsynced_finalized_write.take() else {
+            return;
+        };
         let seq = self.finalized_sync_seq;
         self.finalized_sync_seq += 1;
+        self.pending_finalized_syncs.insert(seq, lowest);
 
         let (blocks, finalizations) = match try_join!(
             async {
@@ -1944,16 +1943,6 @@ where
     /// order in which pooled syncs complete.
     fn finalized_sync_completed(&mut self, seq: u64) {
         self.pending_finalized_syncs = self.pending_finalized_syncs.split_off(&(seq + 1));
-    }
-
-    /// Records a buffered finalized-archive write at `height` under the next
-    /// sync's sequence, deferring dispatch at or above it until that sync (or
-    /// a blocking [`Self::sync_finalized`]) makes it durable.
-    fn record_finalized_write(&mut self, height: Height) {
-        self.pending_finalized_syncs
-            .entry(self.finalized_sync_seq)
-            .and_modify(|lowest| *lowest = (*lowest).min(height))
-            .or_insert(height);
     }
 
     // -------------------- Immutable Storage --------------------
@@ -2061,7 +2050,12 @@ where
         ) {
             panic!("failed to finalize: {e}");
         }
-        self.record_finalized_write(height);
+
+        // Gate dispatch at or above this write until a sync covers it.
+        self.unsynced_finalized_write = Some(
+            self.unsynced_finalized_write
+                .map_or(height, |lowest| lowest.min(height)),
+        );
 
         // Update metrics and application
         if let Some(round) = round.filter(|_| height > self.tip) {
