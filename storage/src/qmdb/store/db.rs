@@ -312,8 +312,8 @@ where
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
     /// or current snapshot.
     ///
-    /// Buffered operations are committed first, so pruning is crash-safe even immediately
-    /// after an uncommitted batch.
+    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
+    /// uncommitted operations are not guaranteed to survive.
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
