@@ -1150,14 +1150,19 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let items_per_blob = cfg.items_per_section.get();
         let data_partition = cfg.data_partition();
         let data_context = context.child("data");
+        let offsets_partition = cfg.offsets_partition();
+        let offsets_context = context.child("offsets");
+
+        // Fail before writing intent if the offsets blob partitions are already inconsistent.
+        Partition::select(&offsets_context, &offsets_partition).await?;
 
         // `init_at_size_cleared` durably stages the offsets reset, clears the data partition,
         // then completes the reset. A crash at any point leaves a staged clear that the next
         // `init` (via `init_cleared`) finishes, so stale data can never outlive the reset.
         let offsets = fixed::Journal::<E, u64>::init_at_size_cleared(
-            context.child("offsets"),
+            offsets_context,
             fixed::Config {
-                partition: cfg.offsets_partition(),
+                partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
                 page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
@@ -4904,6 +4909,36 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_rejects_conflicting_offsets_partitions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-at-size-conflicting-offsets".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let legacy_partition = cfg.offsets_partition();
+            let blobs_partition = format!("{legacy_partition}-blobs");
+
+            for partition in [&legacy_partition, &blobs_partition] {
+                let (blob, _) = context.open(partition, &0u64.to_be_bytes()).await.unwrap();
+                blob.write_at_sync(0, vec![0]).await.unwrap();
+            }
+
+            let result = Journal::<_, u64>::init_at_size(context.child("storage"), cfg, 7).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The consistency check must fail before staging a reset, which would erase the
+            // conflicting partitions and their corruption evidence.
+            assert_eq!(context.scan(&legacy_partition).await.unwrap().len(), 1);
+            assert_eq!(context.scan(&blobs_partition).await.unwrap().len(), 1);
         });
     }
 
