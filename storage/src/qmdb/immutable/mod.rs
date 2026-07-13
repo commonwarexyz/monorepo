@@ -485,11 +485,9 @@ where
     /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
     /// affect retrieval of any keys that were set prior to `prune_loc`.
     ///
-    /// Pruning is irreversible. Callers must ensure any floor-raising batch has been durably
-    /// committed (via [`Immutable::commit`] or [`Immutable::sync`]) before pruning. The
-    /// inactivity floor used to gate pruning is updated by [`Immutable::apply_batch`] before
-    /// the batch is durable. If the batch is lost on crash, recovery replays from the prior
-    /// durable floor, which may reference data that has already been pruned.
+    /// Pruning is irreversible. Retained operations -- including the floor-raising commit that
+    /// justifies `loc` -- are made recoverable before anything is removed, so pruning is
+    /// crash-safe even immediately after an uncommitted [`Immutable::apply_batch`].
     ///
     /// # Errors
     ///

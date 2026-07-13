@@ -1039,6 +1039,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
     ///
+    /// Prune first makes all retained items recoverable, as [Self::commit] does, so a crash
+    /// never recovers a journal whose surviving items fail to justify its pruning boundary.
+    ///
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
@@ -1048,6 +1051,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
         let min_blob = std::cmp::min(target_blob, tail_blob);
 
+        // Make all dirty blobs durable before removing any: the prune target is often
+        // justified by an appended-but-unflushed item (e.g. a consumer's commit record), and
+        // removals are durable, so pruning without this barrier could leave a recovered
+        // journal whose surviving items no longer justify its boundary. Dirty blobs below the
+        // prune point are flushed too: removal is oldest-first and may be interrupted, and
+        // recovery truncates at the first torn item, so an unsynced survivor below the
+        // boundary could discard every synced blob behind it.
+        self.flush_dirty_blobs().await?;
+        self.dirty_from_blob = None;
+
         if min_blob <= self.blobs.oldest_blob_index() {
             return Ok(false);
         }
@@ -1056,9 +1069,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
-        if let Some(dirty_from) = self.dirty_from_blob {
-            self.dirty_from_blob = Some(dirty_from.max(min_blob));
-        }
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,

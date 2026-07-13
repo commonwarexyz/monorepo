@@ -1551,10 +1551,31 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
     ///
+    /// Prune first makes all retained items recoverable, as [Self::commit] does, so a crash
+    /// never recovers a journal whose surviving items fail to justify its pruning boundary.
+    ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        let Some(new_boundary) = self.prune_data(min_position).await? else {
+            return Ok(false);
+        };
+
+        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
+        // pruning offsets to match.
+        self.offsets.prune(new_boundary).await?;
+        self.metrics.update(
+            self.bounds.end,
+            self.bounds.start,
+            self.items_per_blob.get(),
+        );
+
+        Ok(true)
+    }
+
+    /// Flush dirty data and remove blobs before updating the offsets journal.
+    async fn prune_data(&mut self, min_position: u64) -> Result<Option<u64>, Error> {
         let items_per_blob = self.items_per_blob.get();
 
         // Calculate the blob that would contain min_position, capped to the tail (which is
@@ -1563,28 +1584,30 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
         let min_blob = target_blob.min(tail_blob);
 
+        // Make all dirty blobs durable before removing any: the prune target is often
+        // justified by an appended-but-unflushed item (e.g. a consumer's commit record), and
+        // removals are durable, so pruning without this barrier could leave a recovered
+        // journal whose surviving items no longer justify its boundary. Dirty blobs below the
+        // prune point are flushed too: removal is oldest-first and may be interrupted, and
+        // recovery truncates at the first torn item, so an unsynced survivor below the
+        // boundary could discard every synced blob behind it.
+        self.flush_dirty_data().await?;
+        self.dirty_from_blob = None;
+
         if min_blob <= self.blobs.oldest_blob_index() {
-            return Ok(false);
+            return Ok(None);
         }
 
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
 
-        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
-        // pruning offsets to match.
+        // Offsets entries for retained items must survive the same crash: recovery treats an
+        // offsets journal that ends behind the surviving data as corruption. Data is flushed
+        // first (above), matching the ordering every other durability path maintains.
+        self.offsets.commit().await?;
+
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
-        self.offsets.prune(new_boundary).await?;
-
-        if let Some(dirty_from) = self.dirty_from_blob {
-            self.dirty_from_blob = Some(dirty_from.max(min_blob));
-        }
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
-
-        Ok(true)
+        Ok(Some(new_boundary))
     }
 
     /// Make dirty data blobs durable.
@@ -2196,6 +2219,14 @@ impl<E: Context, V: CodecShared> authenticated::Inner<E> for Journal<E, V> {
 
 #[cfg(test)]
 impl<E: Context, V: CodecShared> Journal<E, V> {
+    /// Test helper: Run prune through data removal, then simulate a crash before offsets pruning.
+    pub(crate) async fn test_prune_before_offsets(
+        &mut self,
+        min_position: u64,
+    ) -> Result<bool, Error> {
+        Ok(self.prune_data(min_position).await?.is_some())
+    }
+
     /// Test helper: Prune the data blobs directly (simulates crash scenario).
     pub(crate) async fn test_prune_data(&mut self, min_blob: u64) -> Result<bool, Error> {
         let min_blob = min_blob.min(self.blobs.tail_blob_index());
@@ -3429,6 +3460,51 @@ mod tests {
             assert_eq!(variable.read(39).await.unwrap(), 3900);
 
             variable.destroy().await.unwrap();
+        });
+    }
+
+    /// A crash after data pruning but before offsets pruning must remain recoverable even when
+    /// the last durable offsets end is below the new data boundary.
+    #[test_traced]
+    fn test_variable_recovery_prune_crash_offsets_end_behind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-prune-offsets-end-behind".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Persist offsets only through position 7, then append enough unsynced items for a
+            // prune to advance the data boundary beyond that durable offsets end.
+            for i in 0..7u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            for i in 7..12u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+
+            // Crash after prune's durability barrier and data removal, but before offsets.prune
+            // has made the appended offsets durable.
+            journal.test_prune_before_offsets(10).await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("prune crash must leave a recoverable journal");
+            assert_eq!(journal.bounds(), 10..12);
+            for i in 10..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            journal.destroy().await.unwrap();
         });
     }
 
