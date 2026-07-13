@@ -576,11 +576,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     "legacy journal has a short non-tail blob".into(),
                 ));
             }
-            // Legacy journals have no watermark. Under the old rollover-sync invariant, all
-            // non-tail blobs are durable; only the tail may have unfsynced data.
+            // Legacy journals have no watermark. The old writer fsynced each blob before
+            // writing to the next, so every retained blob before the one containing the last
+            // item is durable. That final blob may not be, even when full: it may never have
+            // rolled over. Start the watermark at the final blob so commit/sync includes it.
+            // An empty journal has no retained blob to mark dirty.
+            None if size == pruning_boundary => size,
             None => first_in_blob(
                 pruning_boundary,
-                super::position_to_blob(size, items_per_blob),
+                super::position_to_blob(size - 1, items_per_blob),
                 items_per_blob,
             )?,
         };
@@ -2659,6 +2663,45 @@ mod tests {
             assert!(
                 journal.commit().await.is_err(),
                 "commit must sync recovered data before the watermark can advance"
+            );
+        });
+    }
+
+    /// Regression: at a blob-aligned size, legacy recovery must mark the final non-empty blob
+    /// dirty rather than treating the empty next tail as the durability boundary.
+    #[test_traced]
+    fn test_fixed_journal_legacy_upgrade_marks_aligned_tail_dirty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..10u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Remove the watermark to simulate a legacy journal.
+            journal.checkpoint.set_watermark(None);
+            journal.checkpoint.sync().await.unwrap();
+            drop(journal);
+
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.recovery_watermark(), 5);
+
+            // The final full blob must be included in the recovered dirty range.
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                sync_rate: Some(1.0),
+                ..Default::default()
+            };
+            assert!(
+                journal.commit().await.is_err(),
+                "commit must sync the final full blob after legacy recovery"
             );
         });
     }
