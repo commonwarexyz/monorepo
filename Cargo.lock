@@ -1600,6 +1600,7 @@ dependencies = [
  "prometheus-client",
  "rand 0.10.2",
  "rand_core 0.10.1",
+ "rstest",
  "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
