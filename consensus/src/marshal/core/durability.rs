@@ -1,4 +1,4 @@
-//! Durability helpers for marshal's deferred fsyncs: the fatal policy for
+//! Durability helpers for marshal's deferred syncs: the fatal policy for
 //! awaiting durable syncs, and the gate that defers application dispatch
 //! until finalized-archive writes are durable.
 //!

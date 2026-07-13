@@ -373,7 +373,7 @@ where
         // notarization and finalization paths). A flush failure inside
         // `start_sync` is reported only through the returned handle, so every
         // handle must be observed to apply the fatal policy. This pool does
-        // so without blocking the actor on fsync.
+        // so without blocking the actor on a sync.
         let mut syncs = Pool::<PooledSync>::default();
 
         // Anchor all startup work under a single root span. Tip recovery, floor
@@ -1827,7 +1827,7 @@ where
     /// It also ensures archives are durable before the ack handler advances
     /// the processed floor height. See [`Self::try_dispatch_blocks`] for details.
     ///
-    /// Blocking the actor stalls every mailbox caller behind the fsync.
+    /// Blocking the actor stalls every mailbox caller behind the sync.
     /// Prefer [`Self::start_finalized_sync`] unless work later in the same
     /// arm requires the writes to already be durable.
     #[tracing::instrument(name = "marshal.actor.sync_finalized", level = "info", skip_all)]
@@ -1863,7 +1863,7 @@ where
     /// observes the completion, [`Self::try_dispatch_blocks`] will not
     /// dispatch at or above the lowest height a pending batch wrote. This
     /// preserves the durability barrier described there without blocking the
-    /// mailbox on an fsync like [`Self::sync_finalized`].
+    /// mailbox on a sync like [`Self::sync_finalized`].
     ///
     /// Like [`Self::sync_finalized`], this must be called within the same
     /// `select_loop!` arm as the writes it covers, before yielding back to the

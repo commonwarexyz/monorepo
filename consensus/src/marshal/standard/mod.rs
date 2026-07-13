@@ -6342,7 +6342,7 @@ mod tests {
     }
 
     /// A finalized-store wrapper that delays durability by `pace` of
-    /// deterministic time to model a slow fsync: `sync` blocks the caller for
+    /// deterministic time to model a slow sync: `sync` blocks the caller for
     /// the pace, while `start_sync` returns immediately with a handle that
     /// completes after the pace (like an archive with a non-blocking sync
     /// path, e.g. [`prunable::Archive`]).
@@ -6510,11 +6510,11 @@ mod tests {
         )
     }
 
-    /// A slow finalized-archive fsync must not block the marshal mailbox.
+    /// A slow finalized-archive sync must not block the marshal mailbox.
     ///
     /// Processing a finalization requires making the finalized archives
     /// durable before the block is dispatched to the application, but the
-    /// fsync itself must not serialize unrelated mailbox traffic: a proposer's
+    /// sync itself must not serialize unrelated mailbox traffic: a proposer's
     /// `get_verified` (a pure prunable-cache read) issued while the sync is in
     /// flight must be answered immediately.
     ///
@@ -6587,7 +6587,7 @@ mod tests {
             let finalized_at = context.current();
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            // Issue a get_verified 1ms later: it must not queue behind the fsync.
+            // Issue a get_verified 1ms later: it must not queue behind the sync.
             context.sleep(Duration::from_millis(1)).await;
             let requested_at = context.current();
             let verified = mailbox.get_verified(round).await;
