@@ -6,6 +6,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_storage::Context;
+use tracing::warn;
 
 /// Startup plan that determines whether one-time peer state sync may still run.
 ///
@@ -99,8 +100,13 @@ where
             return self;
         }
 
-        if let Some(stored) = self.sync_metadata.in_progress_floor() {
-            if floor.round() <= stored.round() {
+        if let Some(selected) = &self.floor {
+            if floor.round() <= selected.round() {
+                warn!(
+                    candidate = ?floor.round(),
+                    selected = ?selected.round(),
+                    "state sync floor not updated, candidate is not newer",
+                );
                 return self;
             }
         }
@@ -319,6 +325,25 @@ mod tests {
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             let plan = plan.with_floor(newer.clone());
+            assert_eq!(plan.floor(), Some(&newer));
+        });
+    }
+
+    #[test]
+    fn with_floor_does_not_replace_newer_selection() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
+            let newer = finalization(&fixture.schemes, 9, 9);
+
+            let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                &context,
+                "with_floor_does_not_replace_newer_selection",
+            )
+            .await;
+            let plan =
+                plan.with_floor(newer.clone())
+                    .with_floor(finalization(&fixture.schemes, 8, 8));
+
             assert_eq!(plan.floor(), Some(&newer));
         });
     }
