@@ -576,11 +576,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     "legacy journal has a short non-tail blob".into(),
                 ));
             }
-            // Legacy journals have no watermark. The old writer fsynced each blob before
-            // writing to the next, so every retained blob before the one containing the last
-            // item is durable. That final blob may not be, even when full: it may never have
-            // rolled over. Start the watermark at the final blob so commit/sync includes it.
-            // An empty journal has no retained blob to mark dirty.
+
+            // Legacy journals have no watermark. The old writer fsynced each blob before writing to
+            // the next, so every blob before the final retained blob is durable. The final blob may
+            // not be durable since it may not have successfully rolled over even when full.
+            // Conservatively start the watermark at the final blob so the next commit/sync includes
+            // it. An empty journal has no retained blob to mark dirty.
+            //
+            // (Note that this is mostly defense-in-depth on Linux since the runtime fsyncs the
+            // filesystem on startup. Other platforms provide only best-effort behavior.)
             None if size == pruning_boundary => size,
             None => first_in_blob(
                 pruning_boundary,
