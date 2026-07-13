@@ -1034,12 +1034,16 @@ sudo tee /usr/local/bin/setup-qdisc.sh >/dev/null <<'EOF'
 #!/bin/bash
 set -e
 IFACE=$(ip -o route get 8.8.8.8 | awk '{{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}}')
-tc qdisc replace dev "$IFACE" root handle 1: mq
-NQ=$(ls -d "/sys/class/net/$IFACE/queues/tx-"* | wc -l)
-for h in $(seq 1 "$NQ"); do
-  tc qdisc del dev "$IFACE" parent "1:$(printf '%x' "$h")" 2>/dev/null || true
-  tc qdisc add dev "$IFACE" parent "1:$(printf '%x' "$h")" fq
-done
+# Single-queue interfaces reject mq, so pace on the root instead.
+if tc qdisc replace dev "$IFACE" root handle 1: mq; then
+  NQ=$(ls -d "/sys/class/net/$IFACE/queues/tx-"* | wc -l)
+  for h in $(seq 1 "$NQ"); do
+    tc qdisc del dev "$IFACE" parent "1:$(printf '%x' "$h")" 2>/dev/null || true
+    tc qdisc add dev "$IFACE" parent "1:$(printf '%x' "$h")" fq
+  done
+else
+  tc qdisc replace dev "$IFACE" root fq
+fi
 EOF
 sudo chmod +x /usr/local/bin/setup-qdisc.sh
 sudo tee /etc/systemd/system/setup-qdisc.service >/dev/null <<'EOF'
@@ -1561,6 +1565,7 @@ mod tests {
         assert!(setup.contains("sudo systemctl enable promtail"));
         assert!(setup.contains("sudo systemctl enable binary"));
         assert!(setup.contains("tc qdisc replace dev \"$IFACE\" root handle 1: mq"));
+        assert!(setup.contains("tc qdisc replace dev \"$IFACE\" root fq"));
         assert!(setup.contains("sudo systemctl enable --now setup-qdisc.service"));
         assert!(setup.contains("net.ipv4.tcp_rmem=4096 2097152 16777216"));
         assert!(setup.contains("sudo systemctl start node_exporter"));
