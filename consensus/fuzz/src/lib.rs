@@ -511,7 +511,7 @@ pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Verifier>::
 type CertCfgOf<P> =
     <<<P as simplex::Simplex>::Scheme as Verifier>::Certificate as commonware_codec::Read>::Cfg;
 /// Happens-before sink for a [`SniffingReceiver`].
-struct Sniff<P: simplex::Simplex> {
+pub(crate) struct Sniff<P: simplex::Simplex> {
     /// Receiving node id events are attributed to.
     node: u32,
     /// Shared event log.
@@ -524,9 +524,9 @@ struct Sniff<P: simplex::Simplex> {
     ambiguous: Arc<[u32]>,
 }
 
-type SniffSink<P> = Option<Sniff<P>>;
+pub(crate) type SniffSink<P> = Option<Sniff<P>>;
 
-fn sniff_sink<P: simplex::Simplex>(
+pub(crate) fn sniff_sink<P: simplex::Simplex>(
     hb_log: &Option<happens_before::capture::EventLog>,
     node: u32,
     peers: &Arc<[PublicKeyOf<P>]>,
@@ -1169,7 +1169,7 @@ fn run_with_warn_trace_collection<T>(run: impl FnOnce(&Dispatch) -> T) -> T {
 
 /// The consensus channel a [`SniffingReceiver`] decodes.
 #[derive(Clone, Copy)]
-enum SniffChannel {
+pub(crate) enum SniffChannel {
     Vote,
     Certificate,
     Resolver,
@@ -1231,7 +1231,7 @@ fn sniff_event<P: simplex::Simplex>(
 /// tracing event): a message can arrive and be dropped without being processed.
 /// Transparent (forwards the message unchanged); a `None` sink is a zero-decode
 /// pass-through for runs without happens-before capture.
-struct SniffingReceiver<P: simplex::Simplex, R> {
+pub(crate) struct SniffingReceiver<P: simplex::Simplex, R> {
     inner: R,
     channel: SniffChannel,
     cert_cfg: CertCfgOf<P>,
@@ -1240,7 +1240,7 @@ struct SniffingReceiver<P: simplex::Simplex, R> {
 }
 
 impl<P: simplex::Simplex, R> SniffingReceiver<P, R> {
-    fn new(inner: R, channel: SniffChannel, cert_cfg: CertCfgOf<P>, sink: SniffSink<P>) -> Self {
+    pub(crate) fn new(inner: R, channel: SniffChannel, cert_cfg: CertCfgOf<P>, sink: SniffSink<P>) -> Self {
         Self {
             inner,
             channel,
@@ -2285,6 +2285,7 @@ pub enum Mode {
     FaultyMessaging,
     FaultyNet,
     Byzzfuzz,
+    ByzzfuzzQLearn,
 }
 
 pub trait FuzzMode {
@@ -2447,6 +2448,23 @@ impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
 }
 
+/// **ByzzfuzzQLearn mode** - ByzzFuzz with a Q-learning adaptive fault scheduler.
+///
+/// Same four-honest engine setup and safety+liveness oracle as [`Byzzfuzz`], but
+/// the per-episode fault schedule is produced by a campaign-persistent tabular
+/// Q-policy (Mallory-style, arXiv:2305.02601) instead of being sampled i.i.d.
+/// Each libFuzzer input drives one episode of bounded steps; each step picks a
+/// [`byzzfuzz::qlearn::FaultAction`] by softmax over the observed state's Q-row,
+/// enacts it on the live fault schedule, runs to the next finalization boundary,
+/// and applies a temporal-difference update rewarding novel protocol-state and
+/// happens-before fingerprints. The learned policy persists across inputs, so
+/// later iterations are steered toward rare interleavings. See
+/// [`byzzfuzz::run_qlearn`].
+pub struct ByzzfuzzQLearn;
+impl FuzzMode for ByzzfuzzQLearn {
+    const MODE: Mode = Mode::ByzzfuzzQLearn;
+}
+
 /// Install (once per process) a panic-hook chain that drains and prints the
 /// ByzzFuzz decision log when the `CONSENSUS_FUZZ_LOG` environment variable is
 /// set (any value). Off by default to keep the libfuzzer crash output
@@ -2479,7 +2497,7 @@ fn install_byzzfuzz_panic_hook() {
 }
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput) {
-    if matches!(M::MODE, Mode::Byzzfuzz) {
+    if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzQLearn) {
         install_byzzfuzz_panic_hook();
     } else {
         if matches!(M::MODE, Mode::FaultyNet) {
@@ -2510,12 +2528,15 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Mode::Byzzfuzz => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
         }
+        Mode::ByzzfuzzQLearn => {
+            panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run_qlearn::<P>(input)))
+        }
     };
     match run_result {
         Ok(()) => {
             // Drain the byzzfuzz log on success too so a *next* run (Byzzfuzz
             // or otherwise) starts clean. This is cheap when the log is empty.
-            if matches!(M::MODE, Mode::Byzzfuzz) {
+            if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzQLearn) {
                 let _ = byzzfuzz::log::take();
             }
         }

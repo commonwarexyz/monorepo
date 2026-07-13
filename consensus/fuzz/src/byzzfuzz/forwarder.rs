@@ -204,7 +204,7 @@ fn intercept_proc_fault_targets<P: PublicKey>(
 pub fn make_vote<S: Scheme<Sha256Digest>>(
     participants: Arc<[S::PublicKey]>,
     sender_idx: usize,
-    network_schedule: Arc<Vec<NetworkFault>>,
+    network_schedule: Arc<Mutex<Vec<NetworkFault>>>,
     proc_schedule: Arc<Mutex<Vec<ProcessFault<S::PublicKey>>>>,
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
@@ -227,7 +227,7 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
                 expanded.clone(),
                 &participants,
                 sender_idx,
-                &network_schedule,
+                &network_schedule.lock(),
                 view,
             ) {
                 None => {
@@ -253,7 +253,7 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
                 expanded.clone(),
                 &participants,
                 sender_idx,
-                &network_schedule,
+                &network_schedule.lock(),
                 view,
             ) {
                 None => {
@@ -297,7 +297,7 @@ pub fn make_certificate<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
     participants: Arc<[S::PublicKey]>,
     sender_idx: usize,
-    network_schedule: Arc<Vec<NetworkFault>>,
+    network_schedule: Arc<Mutex<Vec<NetworkFault>>>,
     proc_schedule: Arc<Mutex<Vec<ProcessFault<S::PublicKey>>>>,
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
@@ -324,7 +324,7 @@ where
                 expanded.clone(),
                 &participants,
                 sender_idx,
-                &network_schedule,
+                &network_schedule.lock(),
                 view,
             ) {
                 None => {
@@ -350,7 +350,7 @@ where
                 expanded.clone(),
                 &participants,
                 sender_idx,
-                &network_schedule,
+                &network_schedule.lock(),
                 view,
             ) {
                 None => {
@@ -397,7 +397,7 @@ pub fn make_resolver<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
     participants: Arc<[S::PublicKey]>,
     sender_idx: usize,
-    network_schedule: Arc<Vec<NetworkFault>>,
+    network_schedule: Arc<Mutex<Vec<NetworkFault>>>,
     proc_schedule: Arc<Mutex<Vec<ProcessFault<S::PublicKey>>>>,
     sender_view: SenderViewCell,
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
@@ -428,7 +428,7 @@ where
                 expanded.clone(),
                 &participants,
                 sender_idx,
-                &network_schedule,
+                &network_schedule.lock(),
                 view,
             ) {
                 None => {

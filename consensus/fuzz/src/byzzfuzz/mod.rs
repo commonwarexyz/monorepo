@@ -28,10 +28,11 @@ mod intercept;
 pub mod log;
 mod mutator;
 mod observed;
+pub(crate) mod qlearn;
 mod runner;
 mod sampling;
 mod scope;
 
 pub(crate) use crate::BYZANTINE_IDX;
-pub use runner::run;
+pub use runner::{run, run_qlearn};
 pub(crate) use sampling::ByzzFuzz;
