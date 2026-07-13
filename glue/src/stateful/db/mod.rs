@@ -183,6 +183,11 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         config: Self::Config,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
+    /// Return the sync target produced by a newly initialized database.
+    ///
+    /// This must match [`sync_target`](Self::sync_target) after opening an empty partition.
+    fn initial_sync_target() -> Self::SyncTarget;
+
     /// Create a new unmerkleized batch rooted at the database's committed
     /// state.
     ///
@@ -258,6 +263,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Construct the database set from its configuration.
     fn init(context: E, config: Self::Config) -> impl Future<Output = Self> + Send;
+
+    /// Return the sync targets produced by a newly initialized database set.
+    fn initial_sync_targets() -> Self::SyncTargets;
 
     /// Create unmerkleized batches from each database's committed state.
     ///
@@ -438,6 +446,10 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
             .await
             .expect("database init failed");
         Self::new(TracedAsyncRwLock::new("stateful.db", db))
+    }
+
+    fn initial_sync_targets() -> Self::SyncTargets {
+        T::initial_sync_target()
     }
 
     async fn new_batches(&self) -> Self::Unmerkleized {
@@ -667,6 +679,10 @@ macro_rules! impl_database_set {
                     },
                 )+);
                 result
+            }
+
+            fn initial_sync_targets() -> Self::SyncTargets {
+                ($($T::initial_sync_target(),)+)
             }
 
             async fn new_batches(&self) -> Self::Unmerkleized {
@@ -1522,6 +1538,8 @@ mod tests {
         type Config = ();
         type SyncTarget = ();
 
+        fn initial_sync_target() -> Self::SyncTarget {}
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             Ok(Self)
         }
@@ -1552,6 +1570,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("CountingRewindDb is constructed directly in tests")
@@ -1586,6 +1608,8 @@ mod tests {
         type Error = Infallible;
         type Config = Arc<AtomicUsize>;
         type SyncTarget = ();
+
+        fn initial_sync_target() -> Self::SyncTarget {}
 
         async fn init(_context: E, prune_count: Self::Config) -> Result<Self, Self::Error> {
             Ok(Self { prune_count })
@@ -1692,6 +1716,8 @@ mod tests {
         type Config = ();
         type SyncTarget = ();
 
+        fn initial_sync_target() -> Self::SyncTarget {}
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             Ok(Self)
         }
@@ -1774,6 +1800,8 @@ mod tests {
         type Config = ();
         type SyncTarget = ();
 
+        fn initial_sync_target() -> Self::SyncTarget {}
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("BlockingFinalizeDb is constructed directly in tests")
         }
@@ -1810,6 +1838,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
@@ -1841,6 +1873,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!(
@@ -1876,6 +1912,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
@@ -1907,6 +1947,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
@@ -1940,6 +1984,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
@@ -1971,6 +2019,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
@@ -2004,6 +2056,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
@@ -2035,6 +2091,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
@@ -2068,6 +2128,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
@@ -2099,6 +2163,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!(
@@ -2242,6 +2310,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")

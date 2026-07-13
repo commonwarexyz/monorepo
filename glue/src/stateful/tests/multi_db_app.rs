@@ -35,15 +35,12 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     certificate::{mocks::Fixture, ConstantProvider},
-    ed25519,
-    sha256::{self, Digest as Sha256Digest},
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    ed25519, sha256, Digest as _, Digestible, Hasher, Sha256, Signer as _,
 };
-use commonware_formatting::hex;
 use commonware_p2p::utils::mux::Muxer;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, Handle, Quota, Spawner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, Buf, BufMut, Handle, Quota, Spawner, Supervisor as _,
 };
 use commonware_storage::{
     archive::prunable,
@@ -524,20 +521,14 @@ impl EngineDefinition for MultiDbEngine {
         .await
         .expect("failed to initialize blocks archive");
 
-        let genesis_block = {
-            let empty_db_root = Sha256Digest::from(hex!(
-                "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
-            ));
-            let empty_compact_db_root = Sha256Digest::from(hex!(
-                "290cbd39f3eaaca7cb4a92f4a2740fc438cabb99144258b24ba0cf54b3f4cfec"
-            ));
-            Block::genesis(
-                empty_db_root,
-                non_empty_range!(Location::new(0), Location::new(1)),
-                empty_compact_db_root,
-                non_empty_range!(Location::new(0), Location::new(1)),
-            )
-        };
+        let (initial_a, initial_b) =
+            <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+        let genesis_block = Block::genesis(
+            initial_a.root,
+            initial_a.range,
+            initial_b.root,
+            non_empty_range!(Location::new(0), initial_b.leaf_count),
+        );
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;

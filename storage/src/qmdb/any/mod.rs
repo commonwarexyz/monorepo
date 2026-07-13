@@ -75,12 +75,12 @@ use crate::{
         bitmap::Shared,
         metrics::Metrics,
         operation::Committable,
-        ROOT_BAGGING,
+        root_from_initial_commit, ROOT_BAGGING,
     },
     translator::Translator,
     Context,
 };
-use commonware_codec::CodecShared;
+use commonware_codec::{CodecShared, Encode};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -98,6 +98,17 @@ pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
+
+/// Compute the authenticated root of a newly initialized database without opening storage.
+pub fn initial_root<F, U, H>() -> H::Digest
+where
+    F: Family,
+    H: Hasher,
+    U: Update,
+    Operation<F, U>: Encode,
+{
+    root_from_initial_commit::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
+}
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 

@@ -25,6 +25,7 @@ use commonware_storage::{
         any::{
             batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
             db::Db,
+            initial_root,
             operation::{Operation, Update},
             ordered, unordered,
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
@@ -514,6 +515,13 @@ where
         <Self>::init(context, config).await
     }
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         AnyUnmerkleized {
@@ -609,6 +617,13 @@ where
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
+    }
+
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, unordered::Update<K, VariableEncoding<V>>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
     }
 
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {

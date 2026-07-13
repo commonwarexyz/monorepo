@@ -59,6 +59,10 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Config = ();
     type SyncTarget = u64;
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        0
+    }
+
     async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
         Ok(Self)
     }
