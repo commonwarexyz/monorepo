@@ -311,13 +311,13 @@ where
         self.insert_cache_entry(peer, digest, || Arc::new(msg))
     }
 
-    /// Records a peer's reference to a message, constructing the shared value
-    /// only when this is the first reference retained by the cache.
+    /// Records a peer's reference to a message, acquiring an `Arc` only when
+    /// the cache needs to store the message.
     fn insert_cache_entry(
         &mut self,
         peer: P,
         digest: M::Digest,
-        msg: impl FnOnce() -> Arc<M>,
+        make_shared: impl FnOnce() -> Arc<M>,
     ) -> InsertMessageResult {
         // Only peers listed in `latest.primary` may buffer
         if self.latest_primary_peers.position(&peer).is_none() {
@@ -349,7 +349,7 @@ where
             .and_modify(|c| *c = c.checked_add(1).unwrap())
             .or_insert(1);
         if *count == 1 {
-            let existing = self.items.insert(digest, msg());
+            let existing = self.items.insert(digest, make_shared());
             assert!(existing.is_none());
         }
 
