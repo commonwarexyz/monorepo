@@ -149,10 +149,7 @@ where
     // archives before they are durable.
     pending_finalized_syncs: BTreeMap<u64, Height>,
     // Sequence assigned to the next pooled finalized-archive sync and the
-    // key under which new writes accumulate until that sync starts. Never
-    // reused: a late completion releases every entry at or below its
-    // sequence, so a reused sequence could release batches the completed
-    // sync never covered.
+    // key under which new writes accumulate until that sync starts.
     finalized_sync_seq: u64,
 
     // ---------- Storage ----------
