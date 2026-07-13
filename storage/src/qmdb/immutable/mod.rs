@@ -86,7 +86,7 @@ use crate::{
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
         any::ValueEncoding, build_snapshot_from_log, metrics::Metrics, operation::Key,
-        root_from_initial_commit, Error,
+        single_operation_root, Error,
     },
     translator::Translator,
     Context,
@@ -122,7 +122,7 @@ where
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
 {
-    root_from_initial_commit::<F, H>(&Operation::<F, K, V>::Commit(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, K, V>::Commit(None, Location::new(0)))
 }
 
 /// Configuration for an [Immutable] authenticated db.

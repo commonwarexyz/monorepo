@@ -1572,7 +1572,7 @@ mod tests {
         type SyncTarget = u64;
 
         fn initial_sync_target() -> Self::SyncTarget {
-            0
+            unreachable!("CountingRewindDb is constructed directly in tests")
         }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {

@@ -50,7 +50,7 @@ use crate::{
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
-        any::value::ValueEncoding, batch_chain, metrics::Metrics, root_from_initial_commit, Error,
+        any::value::ValueEncoding, batch_chain, metrics::Metrics, single_operation_root, Error,
     },
     Context,
 };
@@ -81,7 +81,7 @@ where
     H: Hasher,
     Operation<F, V>: EncodeShared,
 {
-    root_from_initial_commit::<F, H>(&Operation::<F, V>::Commit(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, V>::Commit(None, Location::new(0)))
 }
 
 /// Configuration for a [Keyless] authenticated db.

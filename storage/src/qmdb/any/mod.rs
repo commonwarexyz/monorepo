@@ -75,7 +75,7 @@ use crate::{
         bitmap::Shared,
         metrics::Metrics,
         operation::Committable,
-        root_from_initial_commit, ROOT_BAGGING,
+        single_operation_root, ROOT_BAGGING,
     },
     translator::Translator,
     Context,
@@ -107,7 +107,7 @@ where
     U: Update,
     Operation<F, U>: Encode,
 {
-    root_from_initial_commit::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
 }
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;

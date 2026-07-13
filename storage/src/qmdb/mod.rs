@@ -88,7 +88,11 @@ pub const fn hasher<H: Hasher>() -> StandardHasher<H> {
     StandardHasher::new(ROOT_BAGGING)
 }
 
-fn root_from_initial_commit<F: Family, H: Hasher>(operation: &impl Encode) -> H::Digest {
+/// Return the root of an operation log containing only `operation`.
+///
+/// This lets database variants derive their initial root from the bootstrap commit without
+/// opening a database.
+fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Digest {
     let hasher = hasher::<H>();
     let leaf = MerkleHasher::<F>::leaf_digest(
         &hasher,
