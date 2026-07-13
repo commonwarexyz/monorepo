@@ -416,9 +416,6 @@ where
             }
 
             // Attempt to repair any gaps in the finalized blocks archive, if there are any.
-            //
-            // Sync inline (blocking): the mailbox is not being served yet, and
-            // the dispatch below must observe durable repairs.
             if self
                 .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                 .await
