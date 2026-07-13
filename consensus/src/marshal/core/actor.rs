@@ -1776,12 +1776,12 @@ where
         // Durability barrier: buffered writes are readable from the archives
         // before they are durable. Never dispatch at or above the lowest
         // write not yet covered by a completed sync.
-        let non_durable = self.dispatch_gate.barrier();
+        let barrier = self.dispatch_gate.barrier();
         while self.pending_acks.has_capacity() {
             let next_height = self
                 .pending_acks
                 .next_dispatch_height(self.stream.next_height());
-            if non_durable.is_some_and(|lowest| next_height >= lowest) {
+            if barrier.is_some_and(|lowest| next_height >= lowest) {
                 return;
             }
             let Some(block) = self.get_finalized_block(next_height).await else {
