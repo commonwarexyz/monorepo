@@ -1810,18 +1810,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             compressed,
         )
         .await?;
-        let data_size = data_size.ok_or_else(|| {
-            if data_sync_start == offsets_bounds.start {
-                Error::Corruption(format!(
-                    "data blobs shorter than pruning boundary {}",
-                    offsets_bounds.start
-                ))
-            } else {
-                Error::Corruption(format!(
-                    "data blobs shorter than offsets recovery watermark {data_sync_start}"
-                ))
-            }
-        })?;
 
         // Final invariant checks. These hold by construction after alignment, but the inputs are
         // recovered from disk, so a violation means corruption rather than a logic bug.
@@ -1967,8 +1955,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Rebuild the offsets suffix by replaying the data blobs from a recovery anchor.
     ///
-    /// Returns `Ok(None)` if the anchor is ahead of the data. If replay finds a short blob after
-    /// the anchor, recovery truncates newer blobs and returns the contiguous data-backed size.
+    /// Returns corruption if the data does not reach the anchor. If replay finds a short blob
+    /// after the anchor, recovery truncates newer blobs and returns the contiguous data-backed
+    /// size.
     async fn rebuild_offsets_from_anchor(
         partition: &Partition<E>,
         pending: &mut BTreeMap<u64, Writer<E::Blob>>,
@@ -1977,15 +1966,27 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         anchor: u64,
         codec_config: &V::Cfg,
         compressed: bool,
-    ) -> Result<Option<u64>, Error> {
+    ) -> Result<u64, Error> {
         assert!(
             !pending.is_empty(),
             "rebuild_offsets called with no data blobs"
         );
 
         let offsets_bounds = offsets.pruning_boundary()..offsets.size();
+        let data_too_short = || {
+            if anchor == offsets_bounds.start {
+                Error::Corruption(format!(
+                    "data blobs shorter than pruning boundary {}",
+                    offsets_bounds.start
+                ))
+            } else {
+                Error::Corruption(format!(
+                    "data blobs shorter than offsets recovery watermark {anchor}"
+                ))
+            }
+        };
         if anchor < offsets_bounds.start || anchor > offsets_bounds.end {
-            return Ok(None);
+            return Err(data_too_short());
         }
 
         if offsets_bounds.end > anchor {
@@ -2006,7 +2007,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let Some(writer) = pending.get_mut(&blob) else {
                 if skip > 0 {
                     // The data ends before the anchor.
-                    return Ok(None);
+                    return Err(data_too_short());
                 }
                 // A missing blob ends the contiguous data-backed prefix: any newer blobs are
                 // unreachable and removed.
@@ -2017,7 +2018,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     );
                     Self::remove_blobs_after(partition, pending, blob).await?;
                 }
-                return Ok(Some(size));
+                return Ok(size);
             };
 
             let replay = writer
@@ -2061,7 +2062,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 // The blob's frames ended here (short blob, or torn junk at capacity).
                 if skip > 0 {
                     // The data ends before the anchor.
-                    return Ok(None);
+                    return Err(data_too_short());
                 }
                 if torn {
                     warn!(
@@ -2078,7 +2079,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     warn!(blob, size, "crash repair: truncating data after short blob");
                     Self::remove_blobs_after(partition, pending, blob).await?;
                 }
-                return Ok(Some(size));
+                return Ok(size);
             }
 
             blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
@@ -4307,7 +4308,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_rebuild_offsets_anchor_outside_bounds_returns_none() {
+    fn test_variable_rebuild_offsets_rejects_anchor_outside_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let offsets_cfg = fixed::Config {
@@ -4343,9 +4344,8 @@ mod tests {
                 &(),
                 false,
             )
-            .await
-            .unwrap();
-            assert!(result.is_none());
+            .await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
 
             drop(pending);
             Partition::<deterministic::Context>::remove_all(
