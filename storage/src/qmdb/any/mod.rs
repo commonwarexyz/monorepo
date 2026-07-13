@@ -100,6 +100,9 @@ pub(crate) mod sync;
 pub mod unordered;
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
+///
+/// The initial commit never carries metadata, so this root always represents
+/// `CommitFloor(None, 0)`.
 pub fn initial_root<F, U, H>() -> H::Digest
 where
     F: Family,
