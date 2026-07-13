@@ -389,8 +389,9 @@ impl<C> Config<C> {
 /// temporarily diverge during crashes. Divergences are automatically aligned during init():
 /// * If offsets are behind data after the recovery watermark: rebuild missing offsets by replaying
 ///   data from the recovery anchor.
-/// * If offsets are ahead of the retained data prefix: rewind offsets to match the data-backed
-///   size.
+/// * If offsets are ahead of the retained data prefix but the data still reaches the recovery
+///   watermark: rewind offsets to match the data-backed size. Retained data ending before the
+///   watermark is corruption because acknowledged data is missing.
 /// * If offsets.bounds().start < the oldest data blob's start: prune offsets to match (this can
 ///   happen if we crash after pruning the data blobs but before pruning the offsets journal).
 ///
@@ -400,12 +401,14 @@ impl<C> Config<C> {
 ///
 /// ## 2. Offsets Recovery Watermark
 ///
-/// The offsets journal's recovery watermark records a preferred point for replaying data to
-/// rebuild offset entries after a crash. Fixed-journal recovery rejects watermarks beyond the
-/// recovered offsets size as corruption. If the watermark is otherwise unusable, such as being
-/// below the recovered offsets start or beyond the retained data prefix, init falls back to the
-/// offsets start. Replay after the anchor stops at the first short data blob and truncates newer
-/// blobs so the recovered journal remains a contiguous prefix.
+/// The offsets journal's recovery watermark records a durable lower bound on the journal size and
+/// a preferred point for replaying data to rebuild offset entries after a crash. Fixed-journal
+/// recovery rejects watermarks beyond the recovered offsets size as corruption. A watermark below
+/// the recovered offsets start is stale after a prune, so init falls back to the offsets start. If
+/// retained data exists but ends before the watermark, init returns corruption because acknowledged
+/// data is missing. If no retained data exists, init reconciles both sides to an empty journal.
+/// Replay after a valid anchor stops at the first short data blob and truncates newer blobs so the
+/// recovered journal remains a contiguous prefix.
 pub struct Journal<E: Context, V: Codec> {
     /// The data blobs: sealed history plus the writable tail.
     blobs: Writable<E>,
