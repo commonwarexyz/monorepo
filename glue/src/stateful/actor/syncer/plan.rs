@@ -174,12 +174,12 @@ mod tests {
 
     fn finalization(
         schemes: &[TestScheme],
-        height: u64,
+        view: u64,
         digest_byte: u8,
     ) -> Finalization<TestScheme, Sha256Digest> {
         let proposal = Proposal {
-            round: Round::new(Epoch::zero(), View::new(height)),
-            parent: View::new(height.saturating_sub(1)),
+            round: Round::new(Epoch::zero(), View::new(view)),
+            parent: View::new(view.saturating_sub(1)),
             payload: Sha256::fill(digest_byte),
         };
         let finalizes = schemes
@@ -229,7 +229,7 @@ mod tests {
                     .await;
             metadata.set_complete(Height::new(7)).await;
             metadata
-                .begin_sync(Height::new(8), finalization(&fixture.schemes, 8, 8))
+                .begin_sync(finalization(&fixture.schemes, 8, 8))
                 .await;
         });
     }
@@ -248,22 +248,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "completed state sync height cannot be behind the in-progress floor")]
-    fn complete_height_cannot_be_behind_in_progress_floor() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let partition_prefix = "complete_height_cannot_be_behind_in_progress_floor";
-            let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
-            let mut metadata =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, partition_prefix)
-                    .await;
-            metadata
-                .begin_sync(Height::new(7), finalization(&fixture.schemes, 7, 7))
-                .await;
-            metadata.set_complete(Height::new(6)).await;
-        });
-    }
-
-    #[test]
     fn in_progress_sync_requires_compatible_floor() {
         deterministic::Runner::default().start(|mut context| async move {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
@@ -272,7 +256,7 @@ mod tests {
             let mut metadata =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, partition_prefix)
                     .await;
-            metadata.begin_sync(Height::new(7), stored.clone()).await;
+            metadata.begin_sync(stored.clone()).await;
             drop(metadata);
 
             let mut plan =
@@ -280,9 +264,9 @@ mod tests {
             assert!(plan.may_state_sync());
             assert!(plan.requires_state_sync_floor());
             assert!(plan.should_state_sync(false));
-            plan.sync_metadata.begin_sync(Height::new(7), stored).await;
+            plan.sync_metadata.begin_sync(stored).await;
             plan.sync_metadata
-                .begin_sync(Height::new(9), finalization(&fixture.schemes, 9, 9))
+                .begin_sync(finalization(&fixture.schemes, 9, 9))
                 .await;
         });
     }
@@ -297,7 +281,7 @@ mod tests {
             let mut metadata =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, partition_prefix)
                     .await;
-            metadata.begin_sync(Height::new(7), stored.clone()).await;
+            metadata.begin_sync(stored.clone()).await;
             drop(metadata);
 
             let plan =
@@ -361,31 +345,31 @@ mod tests {
             )
             .await;
             metadata
-                .begin_sync(Height::new(7), finalization(&fixture.schemes, 7, 7))
+                .begin_sync(finalization(&fixture.schemes, 7, 7))
                 .await;
             metadata
-                .begin_sync(Height::new(6), finalization(&fixture.schemes, 6, 6))
+                .begin_sync(finalization(&fixture.schemes, 6, 6))
                 .await;
         });
     }
 
     #[test]
     #[should_panic(
-        expected = "selected state sync floor conflicts with the persisted in-progress floor"
+        expected = "selected state sync floor conflicts with the persisted in-progress round"
     )]
-    fn in_progress_sync_panics_for_conflicting_floor() {
+    fn in_progress_sync_panics_for_conflicting_round() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
             let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
                 &context,
-                "in_progress_sync_panics_for_conflicting_floor",
+                "in_progress_sync_panics_for_conflicting_round",
             )
             .await;
             metadata
-                .begin_sync(Height::new(7), finalization(&fixture.schemes, 7, 7))
+                .begin_sync(finalization(&fixture.schemes, 7, 7))
                 .await;
             metadata
-                .begin_sync(Height::new(7), finalization(&fixture.schemes, 7, 8))
+                .begin_sync(finalization(&fixture.schemes, 7, 8))
                 .await;
         });
     }

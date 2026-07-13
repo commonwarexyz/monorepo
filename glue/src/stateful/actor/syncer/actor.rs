@@ -137,9 +137,7 @@ where
             resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
         {
             let mut sync_metadata = self.sync_metadata.lock().await;
-            sync_metadata
-                .begin_sync(resolved_floor.anchor.height, self.finalization.clone())
-                .await;
+            sync_metadata.begin_sync(self.finalization.clone()).await;
         }
 
         let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));

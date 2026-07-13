@@ -42,10 +42,7 @@ where
     S: Scheme,
     C: Digest,
 {
-    InProgress {
-        height: Height,
-        floor: Finalization<S, C>,
-    },
+    InProgress(Finalization<S, C>),
     Complete(Height),
 }
 
@@ -57,7 +54,7 @@ where
     /// Returns the completed state sync height, if state sync has finished.
     pub(crate) const fn sync_height(&self) -> Option<Height> {
         match self {
-            Self::InProgress { .. } => None,
+            Self::InProgress(_) => None,
             Self::Complete(height) => Some(*height),
         }
     }
@@ -70,9 +67,8 @@ where
 {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::InProgress { height, floor } => {
+            Self::InProgress(floor) => {
                 0u8.write(writer);
-                height.write(writer);
                 floor.write(writer);
             }
             Self::Complete(height) => {
@@ -91,7 +87,7 @@ where
     fn encode_size(&self) -> usize {
         u8::SIZE
             + match self {
-                Self::InProgress { height, floor } => height.encode_size() + floor.encode_size(),
+                Self::InProgress(floor) => floor.encode_size(),
                 Self::Complete(height) => height.encode_size(),
             }
     }
@@ -106,10 +102,7 @@ where
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(reader)? {
-            0 => Ok(Self::InProgress {
-                height: Height::read(reader)?,
-                floor: Finalization::read_cfg(reader, cfg)?,
-            }),
+            0 => Ok(Self::InProgress(Finalization::read_cfg(reader, cfg)?)),
             1 => Ok(Self::Complete(Height::read(reader)?)),
             n => Err(Error::InvalidEnum(n)),
         }
@@ -125,10 +118,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(if u.arbitrary::<bool>()? {
-            Self::InProgress {
-                height: u.arbitrary()?,
-                floor: u.arbitrary()?,
-            }
+            Self::InProgress(u.arbitrary()?)
         } else {
             Self::Complete(u.arbitrary()?)
         })
@@ -222,14 +212,14 @@ where
     pub(crate) fn in_progress(&self) -> bool {
         matches!(
             self.metadata.get(&SYNC_STATE_KEY),
-            Some(SyncState::InProgress { .. })
+            Some(SyncState::InProgress(_))
         )
     }
 
     /// Returns the floor selected before an interrupted state sync.
     pub(crate) fn in_progress_floor(&self) -> Option<&Finalization<S, C>> {
         match self.metadata.get(&SYNC_STATE_KEY) {
-            Some(SyncState::InProgress { floor, .. }) => Some(floor),
+            Some(SyncState::InProgress(floor)) => Some(floor),
             _ => None,
         }
     }
@@ -240,21 +230,18 @@ where
     /// sync engine can reopen partial sync state and validate the next selected floor after a crash.
     ///
     /// If an interrupted state sync already stored a floor, the newly selected
-    /// floor must resume from that same floor or a later one.
-    pub(crate) async fn begin_sync(&mut self, height: Height, floor: Finalization<S, C>) {
+    /// floor must resume from the same or a later consensus round.
+    pub(crate) async fn begin_sync(&mut self, floor: Finalization<S, C>) {
         match self.metadata.get(&SYNC_STATE_KEY) {
-            Some(SyncState::InProgress {
-                height: existing_height,
-                floor: existing,
-            }) => {
+            Some(SyncState::InProgress(existing)) => {
                 assert!(
-                    height >= *existing_height,
+                    floor.round() >= existing.round(),
                     "selected state sync floor cannot move behind the persisted in-progress floor",
                 );
-                if height == *existing_height {
+                if floor.round() == existing.round() {
                     assert!(
                         floor.proposal.payload == existing.proposal.payload,
-                        "selected state sync floor conflicts with the persisted in-progress floor",
+                        "selected state sync floor conflicts with the persisted in-progress round",
                     );
                 }
             }
@@ -265,7 +252,7 @@ where
         }
 
         self.metadata
-            .put_sync(SYNC_STATE_KEY, SyncState::InProgress { height, floor })
+            .put_sync(SYNC_STATE_KEY, SyncState::InProgress(floor))
             .await
             .expect("failed to set state sync state to in-progress");
     }
@@ -276,23 +263,11 @@ where
     /// from the later of this height and marshal's processed height instead. This
     /// action is irreversible.
     pub(crate) async fn set_complete(&mut self, height: Height) {
-        match self.metadata.get(&SYNC_STATE_KEY) {
-            Some(SyncState::InProgress {
-                height: floor_height,
-                ..
-            }) => {
-                assert!(
-                    height >= *floor_height,
-                    "completed state sync height cannot be behind the in-progress floor",
-                );
-            }
-            Some(SyncState::Complete(existing)) => {
-                assert!(
-                    height >= *existing,
-                    "completed state sync height cannot move backward",
-                );
-            }
-            None => {}
+        if let Some(SyncState::Complete(existing)) = self.metadata.get(&SYNC_STATE_KEY) {
+            assert!(
+                height >= *existing,
+                "completed state sync height cannot move backward",
+            );
         }
 
         self.metadata
