@@ -1592,11 +1592,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
 
-        // Offsets entries for retained items must survive the same crash: recovery treats an
-        // offsets journal that ends behind the surviving data as corruption. Data is flushed
-        // first (above), matching the ordering every other durability path maintains.
-        // Deferred until the prune is known effective: offsets only need to be durable
-        // before a removal.
+        // Offsets entries for retained items must survive the same crash: recovery rebuilds
+        // offsets that end behind the surviving data's end by replaying data, but offsets that
+        // end behind its start are unrecoverable because the data needed to rebuild the missing
+        // entries is about to be removed. Data is flushed first (above), matching the ordering
+        // every other durability path maintains. Deferred until the prune is known effective:
+        // offsets only need to be durable before a removal.
         self.offsets.commit().await?;
 
         self.blobs.prune(min_blob).await?;

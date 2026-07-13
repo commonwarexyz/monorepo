@@ -3311,6 +3311,44 @@ mod tests {
         });
     }
 
+    /// A crash right after pruning must not lose retained items that were appended but never
+    /// synced. Blob removal is durable, so prune flushes every dirty blob first: otherwise the
+    /// unsynced tail would vanish with the crash and recovery would truncate the journal to
+    /// empty even though the removal survived.
+    #[test_traced]
+    fn test_fixed_recovery_prune_crash_retains_unsynced_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Durably persist blob 0 (positions 0..10), then append positions 10..25 across
+            // blobs 1 and 2 without syncing.
+            for i in 0..10u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            for i in 10..25u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            // Prune away blob 0, then crash before any sync.
+            assert!(journal.prune(10).await.unwrap());
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..25);
+            for i in 10..25u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test recovery when the oldest blob is empty but a newer blob still holds durable items.
     ///
     /// This is the fixed-journal analog of the variable-journal empty-oldest-blob gap bug. A
@@ -4124,8 +4162,10 @@ mod tests {
         });
     }
 
+    /// Prune flushes every dirty blob and clears the dirty state, so a commit issued right
+    /// after must not attempt to sync the removed blobs.
     #[test_traced]
-    fn test_fixed_journal_prune_adjusts_dirty_boundary() {
+    fn test_fixed_journal_commit_after_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -4141,7 +4181,7 @@ mod tests {
             journal
                 .commit()
                 .await
-                .expect("commit should not try to sync pruned dirty blobs");
+                .expect("commit should not try to sync pruned blobs");
             assert_eq!(journal.bounds(), 5..12);
             journal.destroy().await.unwrap();
         });
