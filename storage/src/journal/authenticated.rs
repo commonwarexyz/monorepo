@@ -558,7 +558,12 @@ where
         // Sync the Merkle structure before pruning the journal, otherwise its last element could
         // end up behind the journal's first element after a crash, and there would be no way to
         // replay the items between the structure's last element and the journal's first element.
-        self.merkle.sync().await?;
+        // Commit the journal alongside: the prune target may be justified by a buffered append
+        // (e.g. a commit operation), and pruning does not guarantee buffered appends are durable.
+        try_join!(
+            self.journal.commit().map_err(Error::Journal),
+            self.merkle.sync().map_err(Error::Merkle)
+        )?;
 
         let journal_pruned = self.journal.prune(*prune_loc).await?;
         let bounds = self.journal.bounds();

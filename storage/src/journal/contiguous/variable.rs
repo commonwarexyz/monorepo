@@ -1560,9 +1560,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
     ///
-    /// Prune first makes all retained items recoverable, as [Self::commit] does, so a crash
-    /// never recovers a journal whose surviving items fail to justify its pruning boundary.
-    ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
@@ -1575,29 +1572,25 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
         let min_blob = target_blob.min(tail_blob);
 
-        // Make all dirty blobs durable before removing any: the prune target is often
-        // justified by an appended-but-unflushed item (e.g. a consumer's commit record), and
-        // removals are durable, so pruning without this barrier could leave a recovered
-        // journal whose surviving items no longer justify its boundary. Dirty blobs below the
-        // prune point are flushed too: removal is oldest-first and may be interrupted, and
-        // recovery truncates at the first torn item, so an unsynced survivor below the
-        // boundary could discard every synced blob behind it. Runs even when no blob will
-        // be removed: every prune call makes retained items recoverable.
-        self.flush_dirty_data().await?;
-        self.dirty_from_blob = None;
-
         if min_blob <= self.blobs.oldest_blob_index() {
             return Ok(false);
         }
 
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
 
-        // Offsets entries for retained items must survive the same crash: recovery rebuilds
-        // offsets that end behind the surviving data's end by replaying data, but offsets that
-        // end behind its start are unrecoverable because the data needed to rebuild the missing
-        // entries is about to be removed. Data is flushed first (above), matching the ordering
-        // every other durability path maintains. Deferred until the prune is known effective:
-        // offsets only need to be durable before a removal.
+        // Make all dirty blobs durable before removing any: the prune target may be
+        // justified by an appended-but-unflushed item (e.g. a consumer's commit record), and
+        // removals are durable, so pruning without this barrier could leave a recovered
+        // journal whose surviving items no longer justify its boundary. Dirty blobs below the
+        // prune point are flushed too: removal may be interrupted, and recovery truncates at
+        // the first torn item, so an unsynced survivor below the boundary could discard
+        // every synced blob behind it. Offsets entries for retained items must survive the
+        // same crash: recovery rebuilds offsets that end behind the surviving data's end by
+        // replaying data, but offsets that end behind its start are unrecoverable because
+        // the data needed to rebuild the missing entries is about to be removed. Data is
+        // flushed first, matching the ordering every other durability path maintains.
+        self.flush_dirty_data().await?;
+        self.dirty_from_blob = None;
         self.offsets.commit().await?;
 
         self.blobs.prune(min_blob).await?;

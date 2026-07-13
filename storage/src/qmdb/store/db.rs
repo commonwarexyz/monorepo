@@ -311,6 +311,9 @@ where
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
     /// or current snapshot.
+    ///
+    /// Buffered operations are committed first, so pruning is crash-safe even immediately
+    /// after an uncommitted batch.
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
@@ -318,6 +321,11 @@ where
                 self.inactivity_floor_loc,
             ));
         }
+
+        // The floor justifying the boundary may exist only in buffered operations (it
+        // advances before its batch is durable), and pruning does not guarantee buffered
+        // appends are durable. Commit so the justification survives the prune.
+        self.log.commit().await?;
 
         // Prune the log. The log will prune at section boundaries, so the actual oldest retained
         // location may be less than requested.

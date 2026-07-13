@@ -1039,9 +1039,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
     ///
-    /// Prune first makes all retained items recoverable, as [Self::commit] does, so a crash
-    /// never recovers a journal whose surviving items fail to justify its pruning boundary.
-    ///
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
@@ -1051,20 +1048,19 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
         let min_blob = std::cmp::min(target_blob, tail_blob);
 
-        // Make all dirty blobs durable before removing any: the prune target is often
-        // justified by an appended-but-unflushed item (e.g. a consumer's commit record), and
-        // removals are durable, so pruning without this barrier could leave a recovered
-        // journal whose surviving items no longer justify its boundary. Dirty blobs below the
-        // prune point are flushed too: removal is oldest-first and may be interrupted, and
-        // recovery truncates at the first torn item, so an unsynced survivor below the
-        // boundary could discard every synced blob behind it. Runs even when no blob will
-        // be removed: every prune call makes retained items recoverable.
-        self.flush_dirty_blobs().await?;
-        self.dirty_from_blob = None;
-
         if min_blob <= self.blobs.oldest_blob_index() {
             return Ok(false);
         }
+
+        // Make all dirty blobs durable before removing any: the prune target may be
+        // justified by an appended-but-unflushed item (e.g. a consumer's commit record), and
+        // removals are durable, so pruning without this barrier could leave a recovered
+        // journal whose surviving items no longer justify its boundary. Dirty blobs below the
+        // prune point are flushed too: removal may be interrupted, and recovery truncates at
+        // the first torn item, so an unsynced survivor below the boundary could discard
+        // every synced blob behind it.
+        self.flush_dirty_blobs().await?;
+        self.dirty_from_blob = None;
 
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs.prune(min_blob).await?;

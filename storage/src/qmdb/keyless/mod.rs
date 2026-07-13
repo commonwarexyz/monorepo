@@ -363,6 +363,9 @@ where
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
     ///
+    /// Buffered operations are committed first, so pruning is crash-safe even immediately
+    /// after an uncommitted batch.
+    ///
     /// # Errors
     ///
     /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor declared by
