@@ -431,6 +431,9 @@ impl<V: Variant> Certificate<V> {
     /// Attempts to get the decoded signature.
     ///
     /// Returns `None` if the signature fails to decode.
+    // `Lazy::get` is only `const` under some feature combinations, so this
+    // cannot be `const` without breaking the default build.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn get(&self) -> Option<&V::Signature> {
         self.signature.get()
     }
