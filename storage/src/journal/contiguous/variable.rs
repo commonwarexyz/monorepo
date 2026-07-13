@@ -420,6 +420,11 @@ pub struct Journal<E: Context, V: Codec> {
     /// Earliest data blob modified since the last `commit()` or `sync()`.
     dirty_from_blob: Option<u64>,
 
+    /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
+    /// so tests can drop the pending future at that exact point.
+    #[cfg(test)]
+    halt_before_offsets_prune: bool,
+
     /// The number of items per blob.
     ///
     /// # Invariant
@@ -1130,6 +1135,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets,
             bounds,
             dirty_from_blob: None,
+            #[cfg(test)]
+            halt_before_offsets_prune: false,
             items_per_blob: cfg.items_per_section,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
@@ -1193,6 +1200,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets,
             bounds: size..size,
             dirty_from_blob: None,
+            #[cfg(test)]
+            halt_before_offsets_prune: false,
             items_per_blob: cfg.items_per_section,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
@@ -1558,24 +1567,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        let Some(new_boundary) = self.prune_data(min_position).await? else {
-            return Ok(false);
-        };
-
-        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
-        // pruning offsets to match.
-        self.offsets.prune(new_boundary).await?;
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
-
-        Ok(true)
-    }
-
-    /// Flush dirty data and remove blobs before updating the offsets journal.
-    async fn prune_data(&mut self, min_position: u64) -> Result<Option<u64>, Error> {
         let items_per_blob = self.items_per_blob.get();
 
         // Calculate the blob that would contain min_position, capped to the tail (which is
@@ -1596,7 +1587,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.dirty_from_blob = None;
 
         if min_blob <= self.blobs.oldest_blob_index() {
-            return Ok(None);
+            return Ok(false);
         }
 
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
@@ -1610,7 +1601,22 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
-        Ok(Some(new_boundary))
+
+        #[cfg(test)]
+        if self.halt_before_offsets_prune {
+            std::future::pending::<()>().await;
+        }
+
+        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
+        // pruning offsets to match.
+        self.offsets.prune(new_boundary).await?;
+        self.metrics.update(
+            self.bounds.end,
+            self.bounds.start,
+            self.items_per_blob.get(),
+        );
+
+        Ok(true)
     }
 
     /// Make dirty data blobs durable.
@@ -3487,9 +3493,18 @@ mod tests {
                 journal.append(&(i * 100)).await.unwrap();
             }
 
-            // Crash after prune's durability barrier and data removal, but before offsets.prune
-            // has made the appended offsets durable.
-            assert!(journal.prune_data(10).await.unwrap().is_some());
+            // Drop the production prune future while it is parked after the data-blob
+            // removal, before offsets.prune has made the appended offsets durable: a
+            // genuine cancellation at that await.
+            journal.halt_before_offsets_prune = true;
+            {
+                let fut = journal.prune(10);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before offsets.prune"
+                );
+            }
             drop(journal);
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
