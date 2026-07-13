@@ -990,7 +990,8 @@ where
 
         // Start a pooled sync so any writes buffered by this batch become
         // durable without blocking the mailbox. Dispatch of the written
-        // heights resumes when the sync completes.
+        // heights resumes when the sync completes. A batch has no single
+        // round, so the label is the node's processed round when it started.
         self.start_finalized_sync(self.floor.processed_round(), syncs)
             .await;
 
