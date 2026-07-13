@@ -836,7 +836,7 @@ where
                 height, targets, ..
             } => {
                 // Skip if finalization is already available locally.
-                if self.get_finalization_by_height(height).await.is_some() {
+                if self.has_finalization_by_height(height).await {
                     return;
                 }
 
@@ -1934,6 +1934,15 @@ where
         {
             Ok(finalization) => finalization,
             Err(e) => panic!("failed to get finalization: {e}"),
+        }
+    }
+
+    /// Check whether a finalization exists in the archive at `height` without
+    /// fetching it.
+    async fn has_finalization_by_height(&self, height: Height) -> bool {
+        match self.finalizations_by_height.has(height).await {
+            Ok(has) => has,
+            Err(e) => panic!("failed to check finalization: {e}"),
         }
     }
 

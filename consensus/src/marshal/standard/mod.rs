@@ -6434,6 +6434,10 @@ mod tests {
             self.inner.get(id).await
         }
 
+        async fn has(&self, height: Height) -> Result<bool, Self::Error> {
+            self.inner.has(height).await
+        }
+
         async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
             self.inner.prune(min).await
         }
