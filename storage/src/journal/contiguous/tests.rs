@@ -1,11 +1,44 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::{Contiguous, Many};
+use super::{fixed, variable, Contiguous, Many};
 use crate::journal::{contiguous::Mutable, Error};
 use commonware_macros::boxed;
-use commonware_utils::NZUsize;
-use futures::{future::BoxFuture, StreamExt};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use commonware_runtime::{
+    buffer::paged::CacheRef,
+    deterministic,
+    mocks::{DelayedSyncContext, PendingSyncs},
+    reschedule, Blob as _, Handle, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+};
+use commonware_utils::{NZUsize, NZU16, NZU64};
+use futures::{future::BoxFuture, FutureExt as _, StreamExt};
+use std::{
+    future::Future,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+/// Flip one byte inside physical page `page` of `blob`, leaving every other page valid. Models
+/// a torn interior page: a crash during an in-flight fsync can lose an interior page while later
+/// pages persist. Physical pages are the logical page plus the 12-byte checksum record.
+pub(super) async fn corrupt_page(
+    context: &deterministic::Context,
+    partition: &str,
+    blob: u64,
+    page: u64,
+    logical_page_size: u64,
+) {
+    let physical_page_size = logical_page_size + 12;
+    let offset = page * physical_page_size + 5;
+    let (blob, size) = context.open(partition, &blob.to_be_bytes()).await.unwrap();
+    assert!(
+        offset < size - physical_page_size,
+        "corruption target must be an interior page"
+    );
+    let byte = blob.read_at(offset, 1).await.unwrap().coalesce();
+    blob.write_at(offset, vec![byte.as_ref()[0] ^ 0xFF])
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+}
 
 /// Run the full suite of generic tests on a [Contiguous] implementation.
 ///
@@ -1261,4 +1294,500 @@ where
     assert_eq!(journal.read(0).await.unwrap(), 42);
 
     journal.destroy().await.unwrap();
+}
+
+trait CommitHandle: Mutable<Item = u64> {
+    fn commit_handle(&mut self) -> impl Future<Output = Handle<()>> + Send;
+}
+
+impl<E: crate::Context> CommitHandle for fixed::Journal<E, u64> {
+    fn commit_handle(&mut self) -> impl Future<Output = Handle<()>> + Send {
+        Self::start_commit(self)
+    }
+}
+
+impl<E: crate::Context> CommitHandle for variable::Journal<E, u64> {
+    fn commit_handle(&mut self) -> impl Future<Output = Handle<()>> + Send {
+        Self::start_commit(self)
+    }
+}
+
+#[boxed]
+async fn test_commit_handle_durability<F, Fut, J>(factory: F)
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: CommitHandle,
+{
+    let mut journal = factory("a").await.unwrap();
+    for i in 0..7u64 {
+        journal.append(&(i * 10)).await.unwrap();
+    }
+    let handle = journal.commit_handle().await;
+    handle.await.unwrap();
+    let size = journal.bounds().end;
+    drop(journal);
+
+    let journal = factory("b").await.unwrap();
+    assert_eq!(journal.bounds().end, size);
+    for i in 0..7u64 {
+        assert_eq!(journal.read(i).await.unwrap(), i * 10);
+    }
+    journal.destroy().await.unwrap();
+}
+
+#[test]
+fn test_fixed_commit_handle_durability() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let cfg = fixed::Config {
+            partition: "fixed-commit-handle".into(),
+            items_per_blob: NZU64!(3),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_commit_handle_durability(|label| {
+            let cfg = cfg.clone();
+            fixed::Journal::<_, u64>::init(context.child(label), cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_commit_handle_durability() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let cfg = variable::Config {
+            partition: "variable-commit-handle".into(),
+            items_per_section: NZU64!(3),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_commit_handle_durability(|label| {
+            let cfg = cfg.clone();
+            variable::Journal::<_, u64>::init(context.child(label), cfg)
+        })
+        .await;
+    });
+}
+
+/// A commit handle must not block journal use while backend sync is pending.
+#[boxed]
+async fn test_commit_handle_overlaps_work<F, Fut, J>(
+    context: deterministic::Context,
+    pending: PendingSyncs,
+    make: F,
+) where
+    F: Fn(DelayedSyncContext<deterministic::Context>) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: CommitHandle,
+{
+    let mut journal = make(DelayedSyncContext {
+        inner: context.child("a"),
+        pending: pending.clone(),
+    })
+    .await
+    .unwrap();
+    for i in 0..4u64 {
+        journal.append(&i).await.unwrap();
+    }
+
+    let handle = journal.commit_handle().await;
+    assert!(pending.starts() >= 1);
+    assert_eq!(pending.completions(), 0);
+
+    // Observe the sync while the journal keeps working.
+    let waiter = context
+        .child("await_sync")
+        .spawn(|_| async move { handle.await.unwrap() });
+    while pending.entered() == 0 {
+        reschedule().await;
+    }
+
+    // Append/read complete before sync.
+    journal.append(&999).await.unwrap();
+    assert_eq!(journal.read(0).await.unwrap(), 0);
+    assert_eq!(
+        pending.completions(),
+        0,
+        "the journal made progress while the sync was still in flight"
+    );
+
+    pending.unblock();
+    waiter.await.unwrap();
+    assert!(pending.completions() >= 1);
+
+    // Mid-sync append is durable after the next commit.
+    let handle = journal.commit_handle().await;
+    handle.await.unwrap();
+    drop(journal);
+
+    let journal = make(DelayedSyncContext {
+        inner: context.child("b"),
+        pending: pending.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(journal.bounds().end, 5);
+    for i in 0..4u64 {
+        assert_eq!(journal.read(i).await.unwrap(), i);
+    }
+    assert_eq!(journal.read(4).await.unwrap(), 999);
+    journal.destroy().await.unwrap();
+}
+
+/// A commit handle completes only once both the tail sync and the predecessor's rollover sync
+/// are durable.
+#[boxed]
+async fn test_commit_handle_overlaps_predecessor_and_tail<F, Fut, J>(
+    context: deterministic::Context,
+    pending: PendingSyncs,
+    make: F,
+) where
+    F: FnOnce(DelayedSyncContext<deterministic::Context>) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: CommitHandle + 'static,
+{
+    let mut journal = make(DelayedSyncContext {
+        inner: context.child("a"),
+        pending: pending.clone(),
+    })
+    .await
+    .unwrap();
+    for i in 0..4u64 {
+        journal.append(&i).await.unwrap();
+    }
+    let starts_before = pending.starts();
+    assert!(starts_before > 0);
+
+    let handle = journal.commit_handle().await;
+    assert!(
+        pending.starts() > starts_before,
+        "tail sync was not started while predecessor was in flight"
+    );
+
+    // The tail sync parked last. Releasing it alone must not complete the handle: the handle
+    // also joins the predecessor's rollover sync.
+    let tail = {
+        let mut parked = pending.lock();
+        assert!(
+            parked.len() >= 2,
+            "expected predecessor and tail syncs parked"
+        );
+        parked.pop().unwrap()
+    };
+    tail.release.send(Ok(())).unwrap();
+    futures::pin_mut!(handle);
+    assert!(
+        handle.as_mut().now_or_never().is_none(),
+        "commit handle completed without the predecessor sync"
+    );
+
+    // Releasing the predecessor completes the handle.
+    pending.unblock();
+    handle.await.unwrap();
+    journal.destroy().await.unwrap();
+}
+
+/// A commit whose in-flight sync fails surfaces the error through both the returned handle and the
+/// next durability operation.
+#[boxed]
+async fn test_commit_handle_failure_propagates<F, Fut, J>(
+    context: deterministic::Context,
+    pending: PendingSyncs,
+    make: F,
+) where
+    F: FnOnce(DelayedSyncContext<deterministic::Context>) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: CommitHandle,
+{
+    let mut journal = make(DelayedSyncContext {
+        inner: context.child("a"),
+        pending: pending.clone(),
+    })
+    .await
+    .unwrap();
+    for i in 0..4u64 {
+        journal.append(&i).await.unwrap();
+    }
+
+    // Arm the in-flight sync to fail, and unblock it so it resolves to an error.
+    pending.arm_fail();
+    pending.unblock();
+
+    let handle = journal.commit_handle().await;
+    assert!(
+        handle.await.is_err(),
+        "the commit handle surfaces the failure"
+    );
+    assert!(
+        matches!(Mutable::commit(&mut journal).await, Err(Error::Runtime(_))),
+        "the next durability op surfaces the failed in-flight sync"
+    );
+
+    // A mutable method returned an error, so the journal is unusable per the failures-are-fatal
+    // contract; just drop it.
+    drop(journal);
+}
+
+fn fixed_overlap_cfg(context: &deterministic::Context, partition: &str) -> fixed::Config {
+    fixed::Config {
+        partition: partition.into(),
+        items_per_blob: NZU64!(10),
+        page_cache: CacheRef::from_pooler(context, NZU16!(44), NZUsize!(8)),
+        write_buffer: NZUsize!(2048),
+    }
+}
+
+fn variable_overlap_cfg(context: &deterministic::Context, partition: &str) -> variable::Config<()> {
+    variable::Config {
+        partition: partition.into(),
+        items_per_section: NZU64!(10),
+        compression: None,
+        codec_config: (),
+        page_cache: CacheRef::from_pooler(context, NZU16!(44), NZUsize!(8)),
+        write_buffer: NZUsize!(2048),
+    }
+}
+
+#[test]
+fn test_fixed_commit_handle_overlaps_predecessor_and_tail() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = fixed::Config {
+            partition: "fixed-commit-handle-predecessor".into(),
+            items_per_blob: NZU64!(3),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_commit_handle_overlaps_predecessor_and_tail(context, pending, move |ctx| {
+            fixed::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_commit_handle_overlaps_predecessor_and_tail() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = variable::Config {
+            partition: "variable-commit-handle-predecessor".into(),
+            items_per_section: NZU64!(3),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_commit_handle_overlaps_predecessor_and_tail(context, pending, move |ctx| {
+            variable::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_fixed_commit_handle_overlaps_work() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = fixed_overlap_cfg(&context, "fixed-commit-handle-overlap");
+        test_commit_handle_overlaps_work(context, pending, move |ctx| {
+            let cfg = cfg.clone();
+            fixed::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_commit_handle_overlaps_work() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = variable_overlap_cfg(&context, "variable-commit-handle-overlap");
+        test_commit_handle_overlaps_work(context, pending, move |ctx| {
+            let cfg = cfg.clone();
+            variable::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_fixed_commit_handle_failure_propagates() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = fixed_overlap_cfg(&context, "fixed-commit-handle-fail");
+        test_commit_handle_failure_propagates(context, pending, move |ctx| {
+            fixed::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_commit_handle_failure_propagates() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = variable_overlap_cfg(&context, "variable-commit-handle-fail");
+        test_commit_handle_failure_propagates(context, pending, move |ctx| {
+            variable::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+/// Destructive operations drain the in-flight rollover sync before mutating storage.
+#[boxed]
+async fn test_prune_waits_for_pending_sync<F, Fut, J>(
+    context: deterministic::Context,
+    pending: PendingSyncs,
+    make: F,
+) where
+    F: FnOnce(DelayedSyncContext<deterministic::Context>) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: Mutable<Item = u64>,
+{
+    let mut journal = make(DelayedSyncContext {
+        inner: context.child("a"),
+        pending: pending.clone(),
+    })
+    .await
+    .unwrap();
+    for i in 0..4u64 {
+        journal.append(&i).await.unwrap();
+    }
+    assert!(pending.starts() > 0);
+
+    {
+        let prune = journal.prune(3);
+        futures::pin_mut!(prune);
+        assert!(
+            prune.as_mut().now_or_never().is_none(),
+            "prune proceeded while the rollover sync was pending"
+        );
+        pending.unblock();
+        prune.await.unwrap();
+    }
+    assert_eq!(journal.bounds(), 3..4);
+    journal.destroy().await.unwrap();
+}
+
+/// Destructive operations surface a failed in-flight sync instead of proceeding.
+#[boxed]
+async fn test_rewind_surfaces_failed_sync<F, Fut, J>(
+    context: deterministic::Context,
+    pending: PendingSyncs,
+    make: F,
+) where
+    F: FnOnce(DelayedSyncContext<deterministic::Context>) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: Mutable<Item = u64>,
+{
+    let mut journal = make(DelayedSyncContext {
+        inner: context.child("a"),
+        pending: pending.clone(),
+    })
+    .await
+    .unwrap();
+    for i in 0..4u64 {
+        journal.append(&i).await.unwrap();
+    }
+    assert!(pending.starts() > 0);
+
+    // Fail the parked rollover sync; the drain in rewind must surface it.
+    pending.arm_fail();
+    pending.unblock();
+    assert!(
+        matches!(journal.rewind(3).await, Err(Error::Runtime(_))),
+        "rewind must surface the failed rollover sync"
+    );
+
+    // A mutable method returned an error, so the journal is unusable per the failures-are-fatal
+    // contract; just drop it.
+    drop(journal);
+}
+
+#[test]
+fn test_fixed_prune_waits_for_pending_sync() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = fixed::Config {
+            partition: "fixed-prune-pending".into(),
+            items_per_blob: NZU64!(3),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_prune_waits_for_pending_sync(context, pending, move |ctx| {
+            fixed::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_prune_waits_for_pending_sync() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = variable::Config {
+            partition: "variable-prune-pending".into(),
+            items_per_section: NZU64!(3),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_prune_waits_for_pending_sync(context, pending, move |ctx| {
+            variable::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_fixed_rewind_surfaces_failed_sync() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = fixed::Config {
+            partition: "fixed-rewind-fail".into(),
+            items_per_blob: NZU64!(3),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_rewind_surfaces_failed_sync(context, pending, move |ctx| {
+            fixed::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_rewind_surfaces_failed_sync() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = variable::Config {
+            partition: "variable-rewind-fail".into(),
+            items_per_section: NZU64!(3),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_rewind_surfaces_failed_sync(context, pending, move |ctx| {
+            variable::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
 }

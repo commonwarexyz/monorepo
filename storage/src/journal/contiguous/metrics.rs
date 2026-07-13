@@ -49,7 +49,8 @@ pub(super) struct Metrics<E: Clock> {
     pub cache_misses: Counter,
     /// Items returned by read, read_many, try_read_sync, and try_read_many_sync.
     pub items_read: Counter,
-    /// Durable commit calls that do not fully sync all indexes.
+    /// Data-persist operations begun via `start_commit` (including those issued by `commit` and
+    /// `sync`).
     pub commit_calls: Counter,
     /// Duration of commit calls that do not fully sync all indexes.
     commit_duration: Timed,
