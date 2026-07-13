@@ -383,6 +383,56 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_has() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the freezer
+            let cfg = Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
+                table_partition: "test-table".into(),
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
+                codec_config: (),
+            };
+            let mut freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("storage"), cfg, None)
+                    .await
+                    .expect("Failed to initialize freezer");
+
+            // Absent key
+            let key = test_key("testkey");
+            assert!(!freezer.has(&key).await.expect("Failed to check key"));
+
+            // Present key
+            freezer
+                .put(key.clone(), 42)
+                .await
+                .expect("Failed to put data");
+            assert!(freezer.has(&key).await.expect("Failed to check key"));
+
+            // A different key remains absent
+            assert!(!freezer
+                .has(&test_key("otherkey"))
+                .await
+                .expect("Failed to check key"));
+
+            // Existence checks are counted as has, never as gets
+            let buffer = context.encode();
+            assert!(buffer.contains("has_total 3"), "{}", buffer);
+            assert!(buffer.contains("gets_total 0"), "{}", buffer);
+        });
+    }
+
+    #[test_traced]
     fn test_multiple_keys() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

@@ -287,7 +287,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
 
         match identifier {
             Identifier::Index(index) => Ok(self.ordinal.has(index)),
-            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
+            Identifier::Key(key) => Ok(self.freezer.has(key).await?),
         }
     }
 
