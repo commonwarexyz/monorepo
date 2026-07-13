@@ -6631,6 +6631,197 @@ mod tests {
         });
     }
 
+    /// A buffered finalized-archive write must freeze dispatch even when a
+    /// stale floor anchor triggers dispatch before the batch's sync starts.
+    ///
+    /// Within one resolver batch, a repair delivery can buffer a block at the
+    /// dispatch frontier and a later delivery can resolve a pending floor
+    /// anchor whose height is at or below the processed height. That anchor
+    /// path calls `try_dispatch_blocks` mid-batch, before the batch-end
+    /// `start_finalized_sync` runs, so dispatch must be gated by the write
+    /// itself (see `record_finalized_write`) rather than by a started sync.
+    /// Without the gate, the frontier block reaches the application while its
+    /// archive write is still buffered, and a crash after the application ack
+    /// could durably advance the processed floor past a lost write.
+    ///
+    /// The stale anchor models adversarial input: a verified finalization at
+    /// a round above the round floor naming a block marshal never stored at a
+    /// height it already processed. Marshal cannot cross-check certificates
+    /// against each other, so it must stay crash-safe when one lands in
+    /// `apply_pending_floor`'s stale-anchor branch.
+    #[test_traced("WARN")]
+    fn test_standard_stale_floor_anchor_holds_dispatch_until_durable() {
+        const PACE: Duration = Duration::from_millis(100);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention_timeout: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(4),
+                block_codec_config: (),
+                partition_prefix: "stale-floor-anchor".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "stale-floor-anchor", PACE).await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+
+            // Finalize block 1 and wait until the application has acknowledged
+            // it, so the processed height reaches the anchor height below.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(round, block.clone()).await);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "block 1 processed",
+                || parse_processed_height(&context.encode()) == Some(1),
+            )
+            .await;
+
+            // Install a pending floor anchor for a forked block at height 1:
+            // a valid certificate at a round above the round floor whose block
+            // is unknown locally, so marshal fetches it. Its height (at or
+            // below the processed height) routes the arriving anchor into the
+            // stale-anchor branch.
+            let fork = make_raw_block(genesis.digest(), Height::new(1), 999);
+            let fork_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(5)),
+                    View::new(4),
+                    StandardHarness::commitment(&fork),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(fork_finalization);
+            wait_until(&context, Duration::from_secs(5), "anchor fetch", || {
+                resolver.fetches().iter().any(|fetch| {
+                    matches!(
+                        fetch.key,
+                        handler::Key::Block(commitment)
+                            if commitment == StandardHarness::commitment(&fork)
+                    )
+                })
+            })
+            .await;
+            let anchor_fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| {
+                    matches!(
+                        fetch.key,
+                        handler::Key::Block(commitment)
+                            if commitment == StandardHarness::commitment(&fork)
+                    )
+                })
+                .expect("anchor fetch missing");
+
+            // Enqueue both deliveries back-to-back (no intervening await) so
+            // the actor drains them in a single resolver batch: first a repair
+            // block at the dispatch frontier (a buffered finalized-archive
+            // write), then the stale floor anchor.
+            let next = make_raw_block(block.digest(), Height::new(2), 200);
+            let (next_response, next_response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Block(StandardHarness::commitment(&next)),
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                height: Height::new(2),
+                            }),
+                            tracing::Span::none(),
+                        )),
+                    },
+                    value: next.encode(),
+                    response: next_response,
+                })
+                .accepted());
+            let (anchor_response, anchor_response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: anchor_fetch.key,
+                        subscribers: NonEmptyVec::new((
+                            anchor_fetch.subscriber,
+                            tracing::Span::none()
+                        )),
+                    },
+                    value: fork.encode(),
+                    response: anchor_response,
+                })
+                .accepted());
+            let delivered_at = context.current();
+            assert!(
+                next_response_rx.await.expect("repair response missing"),
+                "repair block delivery should validate"
+            );
+            assert!(
+                anchor_response_rx.await.expect("anchor response missing"),
+                "anchor delivery should validate"
+            );
+
+            // Durability barrier: the stale-anchor branch runs dispatch before
+            // the batch's sync starts, so the repair block at height 2 must
+            // stay held until the paced sync completes.
+            context.sleep(Duration::from_millis(1)).await;
+            assert!(
+                !application.blocks().contains_key(&Height::new(2)),
+                "block dispatched before the finalized archives were durable"
+            );
+            context.sleep(Duration::from_millis(90)).await;
+            assert!(
+                !application.blocks().contains_key(&Height::new(2)),
+                "block dispatched before the finalized archives were durable"
+            );
+            wait_until(
+                &context,
+                Duration::from_millis(50),
+                "repair block dispatched",
+                || application.blocks().contains_key(&Height::new(2)),
+            )
+            .await;
+            let dispatched = context
+                .current()
+                .duration_since(delivered_at)
+                .expect("time went backwards");
+            tracing::info!(?dispatched, "repair block dispatched");
+            assert!(
+                dispatched >= PACE,
+                "block dispatched before the paced sync completed: {dispatched:?}"
+            );
+        });
+    }
+
     /// Parse the `processed_height` gauge value from a prometheus-encoded
     /// metrics dump produced by `Metrics::encode`. Looks for any line of the
     /// form `<prefix>processed_height <value>` or
