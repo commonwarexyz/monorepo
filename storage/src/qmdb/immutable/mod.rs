@@ -485,8 +485,8 @@ where
     /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
     /// affect retrieval of any keys that were set prior to `prune_loc`.
     ///
-    /// Pruning is irreversible. Retained operations -- including the floor-raising commit that
-    /// justifies `loc` -- are made recoverable before anything is removed, so pruning is
+    /// Pruning is irreversible. Retained operations, including the floor-raising commit that
+    /// justifies `loc`, are made recoverable before anything is removed, so pruning is
     /// crash-safe even immediately after an uncommitted [`Immutable::apply_batch`].
     ///
     /// # Errors
