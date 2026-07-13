@@ -88,9 +88,7 @@ pub trait Variant: Clone + Send + Sync + 'static {
     fn into_inner_shared(block: Arc<Self::Block>) -> Arc<Self::ApplicationBlock>;
 
     /// Converts an owned working block to a shared application block.
-    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
-        Arc::new(Self::into_inner(block))
-    }
+    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock>;
 
     /// Reconstructs a working block from an application block and trusted payload.
     fn from_application_block(

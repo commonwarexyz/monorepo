@@ -75,6 +75,10 @@ where
         block
     }
 
+    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
+        Arc::new(block)
+    }
+
     fn from_application_block(
         block: Self::ApplicationBlock,
         _payload: Self::Commitment,
