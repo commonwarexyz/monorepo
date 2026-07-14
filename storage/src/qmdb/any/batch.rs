@@ -65,16 +65,16 @@ where
 /// mutations, and staged-resolved keys are always in `updated`.
 type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
-/// Where a staged read resolved: a committed location, or an uncommitted ancestor-diff
-/// location. Either way the location orders the staged write among this batch's emitted
-/// operations, and the variants differ in which committed location (if any) the write
-/// supersedes. An `Ancestor` resolution records the chain at stage time and stays
-/// trustworthy while the resolving ancestor is alive at merkleize (its diff travels with
-/// this batch, so `apply_batch` re-resolves the base from it if the ancestor commits
-/// first). If the ancestor commits and is freed before merkleize, the recorded base is one
-/// transition stale (the ancestor's own apply retired it and made `loc` the key's
-/// committed location), so the merkleize consumption supersedes `loc` itself whenever it
-/// sits below the merkleize-time committed boundary.
+/// Where a staged read resolved: in the committed snapshot, or in an uncommitted
+/// ancestor's diff. Either way, the resolved location orders the staged write among this
+/// batch's emitted operations. The variants differ in which committed location the write
+/// supersedes: `Committed` supersedes the resolved location itself, while `Ancestor`
+/// supersedes the committed location it recorded at stage time. The recorded base stays
+/// valid while the resolving ancestor is alive at merkleize, because the ancestor's diff
+/// travels with this batch and `apply_batch` re-resolves the base if the ancestor commits
+/// first. If the ancestor instead commits and is freed before merkleize, its apply has
+/// made `loc` the key's committed location, so merkleize supersedes `loc` whenever it lies
+/// below the merkleize-time committed boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StagedLoc<F: Family> {
     /// Resolved directly in the committed DB snapshot. The location doubles as the
