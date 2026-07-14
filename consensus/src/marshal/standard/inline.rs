@@ -326,7 +326,6 @@ where
                     .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
-
                     gates
                         .stage_and_defer(
                             consensus_context.round,
