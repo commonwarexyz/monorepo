@@ -1283,8 +1283,7 @@ where
         // never revisits it), so the merge inputs are disjoint.
         let mut diff_merge = None;
         if !floor_diff.is_empty() {
-            let strategy = db.strategy();
-            diff_merge = Some(strategy.spawn(move |strategy| {
+            diff_merge = Some(db.strategy().spawn(move |strategy| {
                 let mut floor_diff = floor_diff;
                 strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
                 let diff = merge_sorted_diffs(diff, floor_diff);
