@@ -4478,13 +4478,16 @@ mod tests {
         // - we receive a shard for commitment B (the certifiable one)
         // - commitment A reconstructs first
         // - commitment B must still remain recoverable
+        // - the leader must not be blocked (a leader that crashes after its
+        //   broadcast but before its local persist legitimately re-proposes
+        //   a different block for the same round after restart)
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
 
         fixture.start(
-            |config, context, _oracle, mut peers, _, coding_config| async move {
+            |config, context, oracle, mut peers, _, coding_config| async move {
                 let receiver_idx = 3usize;
                 let receiver_pk = peers[receiver_idx].public_key.clone();
                 let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
@@ -4572,6 +4575,17 @@ mod tests {
                         panic!("certifiable commitment was not recoverable after same-round equivocation");
                     },
                 }
+
+                // Cross-commitment equivocation within a round is tolerated,
+                // so the leader must not be blocked.
+                let blocked_peers = oracle.blocked().await.unwrap();
+                let is_blocked = blocked_peers
+                    .iter()
+                    .any(|(a, b)| a == &receiver_pk && b == &leader);
+                assert!(
+                    !is_blocked,
+                    "leader must not be blocked for same-round cross-commitment shards"
+                );
             },
         );
     }
