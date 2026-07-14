@@ -41,14 +41,11 @@ type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 /// One contiguous chunk of floor-raise candidates paired with their resolved operations.
 type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 
-/// Floor-raise candidates prefetched from the committed bitmap prefix, paired with their
-/// resolved operations.
-///
-/// The committed-prefix candidate sequence depends only on the base inactivity floor and the
-/// committed bitmap (never on this batch's operations), so a staged merkleize gathers and
-/// reads it before its serial bookkeeping runs. `finish` then serves its first read round(s)
-/// from this buffer and resumes the live scan at `next_scan` once it drains, yielding exactly
-/// the sequence the live scan would have produced.
+/// Floor-raise candidates prefetched from the committed bitmap prefix, with their resolved
+/// operations. The candidate sequence depends only on the base floor and the committed
+/// bitmap, so a staged merkleize reads it before its serial bookkeeping runs. `finish`
+/// drains this buffer, then resumes the live scan at `next_scan`, producing exactly the
+/// sequence the live scan alone would have.
 pub(crate) struct PrefetchedCandidates<F: Family, U: update::Update + Send + Sync>
 where
     Operation<F, U>: Codec,
@@ -70,19 +67,14 @@ type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
 /// Where a staged read resolved: a committed location, or an uncommitted ancestor-diff
 /// location. Either way the location orders the staged write among this batch's emitted
-/// operations. They differ in which committed location (if any) the write supersedes.
-///
-/// An `Ancestor` resolution's `base_old_loc` reflects the chain at stage time. It stays
-/// trustworthy while the resolving ancestor is in the alive chain at merkleize: the
-/// ancestor's diff then travels with this batch, so if the ancestor commits before this
-/// batch is applied, `apply_batch` resolves the key in that already-applied diff and
-/// supersedes its entry's location (the key's committed location by then) instead of the
-/// recorded base. If the ancestor commits and is freed before merkleize, its diff no
-/// longer rides along and the recorded base is one transition stale (the ancestor's own
-/// apply retired it and made `loc` the key's committed location, so trusting it would
-/// corrupt the snapshot and bitmap). The merkleize consumption catches this case as `loc`
-/// sitting below the merkleize-time committed boundary and supersedes `loc` itself
-/// instead.
+/// operations, and the variants differ in which committed location (if any) the write
+/// supersedes. An `Ancestor` resolution records the chain at stage time and stays
+/// trustworthy while the resolving ancestor is alive at merkleize (its diff travels with
+/// this batch, so `apply_batch` re-resolves the base from it if the ancestor commits
+/// first). If the ancestor commits and is freed before merkleize, the recorded base is one
+/// transition stale (the ancestor's own apply retired it and made `loc` the key's
+/// committed location), so the merkleize consumption supersedes `loc` itself whenever it
+/// sits below the merkleize-time committed boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StagedLoc<F: Family> {
     /// Resolved directly in the committed DB snapshot. The location doubles as the
@@ -907,12 +899,10 @@ where
     }
 
     /// Like [`read_ops`](Self::read_ops), but returns chunk-partitioned results whose
-    /// concatenation preserves `locations` order.
-    ///
-    /// A strictly ascending batch entirely within the committed region (the typical
-    /// floor-raise candidate read) stays partitioned as the reader probed it, so no serial
-    /// reassembly runs on the calling task. Other shapes resolve through
-    /// [`read_ops`](Self::read_ops) and return a single chunk.
+    /// concatenation preserves `locations` order. A strictly ascending batch entirely
+    /// within the committed region (the typical floor-raise candidate read) stays
+    /// partitioned as the reader probed it, skipping serial reassembly on the calling
+    /// task. Other shapes resolve through [`read_ops`](Self::read_ops) as a single chunk.
     async fn read_ops_sharded<E, C>(
         &self,
         locations: &[Location<F>],
