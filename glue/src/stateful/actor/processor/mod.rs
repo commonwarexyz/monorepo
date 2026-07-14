@@ -765,6 +765,14 @@ where
                 digest, self.last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
+            // The processed anchor advances when commit work is staged. Do not
+            // let a duplicate bypass the durability-gated acknowledgement.
+            assert!(
+                self.pending
+                    .get(&digest)
+                    .is_none_or(|entry| !entry.committing),
+                "received duplicate finalized block while commit is in flight",
+            );
             return None;
         }
 
@@ -779,8 +787,12 @@ where
         //
         // Safety contract: replayed `Application::apply` output must match the
         // block commitments previously enforced by `Application::verify`.
-        let batch = match self.pending.get(&digest) {
-            Some(entry) => entry.merkleized.clone(),
+        let batch = match self.pending.get_mut(&digest) {
+            Some(entry) => {
+                assert!(!entry.committing, "finalized digest already staged for commit");
+                entry.committing = true;
+                entry.merkleized.clone()
+            }
             None => {
                 // Fork the parent's retained overlay when its commit is still
                 // in flight; otherwise replay on committed state (which waits
@@ -805,17 +817,19 @@ where
                 );
                 // Retain the replayed state so concurrent propose/verify can
                 // fork it while the commit is in flight.
-                self.cache_pending(digest, parent, round, batch.clone());
+                self.pending.insert(
+                    digest,
+                    PendingEntry {
+                        round,
+                        parent,
+                        merkleized: batch.clone(),
+                        committing: true,
+                    },
+                );
                 batch
             }
         };
 
-        let entry = self
-            .pending
-            .get_mut(&digest)
-            .expect("finalized state must be pending");
-        assert!(!entry.committing, "finalized digest already staged for commit");
-        entry.committing = true;
         let prune = self
             .pruning
             .as_mut()
@@ -2123,6 +2137,30 @@ mod tests {
                 !harness.is_canonical_processed(&conflicting),
                 "conflicting stale block must not be accepted as already processed",
             );
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "received duplicate finalized block while commit is in flight")]
+    fn execution_finalize_panics_on_duplicate_while_commit_in_flight() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            let _commit = harness
+                .processor
+                .finalize(
+                    harness.context_cell.as_present(),
+                    Arc::new(block1.clone()),
+                )
+                .await
+                .expect("first finalization must produce commit work");
+
+            let _ = harness
+                .processor
+                .finalize(harness.context_cell.as_present(), Arc::new(block1))
+                .await;
         });
     }
 
