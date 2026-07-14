@@ -1176,7 +1176,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
-        debug_assert!(
+        assert!(
             positions.is_sorted_by(|a, b| a < b),
             "positions must be strictly increasing"
         );

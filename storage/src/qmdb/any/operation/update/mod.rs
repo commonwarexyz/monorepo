@@ -31,11 +31,7 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     const STAGES_DELETES: bool;
 
     /// Whether merkleize may stage a read that resolved in an uncommitted ancestor's diff,
-    /// expressed as the cached payload such a staged read carries. `None` means ancestor
-    /// resolutions cannot be staged and fall back to normal mutations. Staging requires a
-    /// payload, so the capability is the payload itself rather than a `bool`: the ordered
-    /// kind is `None` because its cached payload is the resolved op's next-key pointer,
-    /// which a diff entry does not carry.
+    /// expressed as the cached payload such a staged read carries.
     const STAGES_ANCESTORS: Option<Self::Cached>;
 
     /// The updated key.

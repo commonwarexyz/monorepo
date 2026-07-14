@@ -748,7 +748,7 @@ where
     S: Strategy,
 {
     /// Like [`Contiguous::read_many`], but returns the items partitioned into the shards the
-    /// probe ran with; concatenating the shards yields the items in `positions` order.
+    /// probe ran with. Concatenating the shards yields the items in `positions` order.
     ///
     /// Large batches shard the page-cache probe across the strategy pool. Each shard
     /// assembles its own hits while they are still cache-hot on the probing worker, so bulk
@@ -776,6 +776,7 @@ where
         );
         let strategy = self.strategy();
         let journal = &self.journal;
+
         // Each shard yields its hits densely plus the shard-local indices it declined.
         let probe = |positions: &[u64]| -> (Vec<C::Item>, Vec<usize>) {
             let probed = journal.try_read_many_sync(positions);
@@ -789,30 +790,25 @@ where
             }
             (hits, missed)
         };
-        let shard_len = positions
-            .len()
-            .div_ceil(strategy.manual().parallelism())
-            .max(1);
         let shards: Vec<(Vec<C::Item>, Vec<usize>)> = strategy.run(
             positions.len(),
             || vec![probe(positions)],
             || {
                 let manual = strategy.manual();
+                let shard_len = positions.len().div_ceil(manual.parallelism());
                 manual.map_collect_vec(positions.chunks(shard_len).collect::<Vec<_>>(), &probe)
             },
         );
 
         // The declined positions are a strictly increasing subsequence of `positions`, so one
-        // batched read serves them all.
-        let misses: Vec<u64> = shards
-            .iter()
-            .enumerate()
-            .flat_map(|(shard, (_, missed))| {
-                missed
-                    .iter()
-                    .map(move |idx| positions[shard * shard_len + idx])
-            })
-            .collect();
+        // batched read serves them all. Each shard covers the slice of `positions` starting
+        // at the previous shards' total item count, whatever geometry the probe ran with.
+        let mut misses: Vec<u64> = Vec::new();
+        let mut offset = 0;
+        for (hits, missed) in &shards {
+            misses.extend(missed.iter().map(|idx| positions[offset + idx]));
+            offset += hits.len() + missed.len();
+        }
         if misses.is_empty() {
             return Ok(shards.into_iter().map(|(hits, _)| hits).collect());
         }

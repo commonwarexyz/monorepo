@@ -310,6 +310,90 @@ pub(crate) mod test {
         });
     }
 
+    /// A staged read that resolved in a grandparent's diff must survive that grandparent
+    /// committing and being freed before `Staged::merkleize`. The recorded base is one
+    /// transition older than the resolved location (it is the committed location the
+    /// grandparent's own write superseded), and the grandparent's apply performs that
+    /// transition, making the resolved location the key's committed one. Merkleize must
+    /// therefore supersede the resolved location itself (see `StagedLoc`). Trusting the
+    /// recorded base instead fails at apply: a rewritten key's snapshot location no longer
+    /// matches the stale base (a panic), and a created key's `None` base emits a second
+    /// create that leaks the migrated location's active bit.
+    #[test_traced("WARN")]
+    fn unordered_variable_staged_ancestor_commit_before_merkleize() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = create_test_db(context.child("staged_ancestor")).await;
+
+            let key = |i: u64| Sha256::hash(&i.to_be_bytes());
+
+            // Committed base state, so the grandparent's write of key(0) supersedes a
+            // committed location. Its create of key(100) supersedes none.
+            let mut seed = db.new_batch();
+            for i in 0..8u64 {
+                seed = seed.write(key(i), Some(to_bytes(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Grandparent -> parent chain. The parent touches neither staged key, so the
+            // staged reads resolve in the grandparent's diff.
+            let grandparent = db
+                .new_batch()
+                .write(key(0), Some(to_bytes(1_000)))
+                .write(key(100), Some(to_bytes(1_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .write(key(1), Some(to_bytes(1_002)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let read_keys = [key(0), key(100)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let (values, staged) = parent
+                .new_batch::<Sha256>()
+                .stage(&keys, &db)
+                .await
+                .unwrap();
+            assert_eq!(values, vec![Some(to_bytes(1_000)), Some(to_bytes(1_001))]);
+
+            // Commit and free the grandparent: the staged resolutions' locations migrate
+            // into the committed region, retiring their recorded bases.
+            db.apply_batch(grandparent).await.unwrap();
+
+            let updates = vec![(0, Some(to_bytes(2_000))), (1, Some(to_bytes(2_001)))];
+            let staged = staged
+                .merkleize(updates, Vec::new(), None, &db)
+                .await
+                .unwrap();
+
+            // The explicit path over the same post-commit state must agree.
+            let explicit_root = parent
+                .new_batch::<Sha256>()
+                .write(key(0), Some(to_bytes(2_000)))
+                .write(key(100), Some(to_bytes(2_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap()
+                .root();
+            assert_eq!(staged.root(), explicit_root);
+
+            db.apply_batch(parent).await.unwrap();
+            db.apply_batch(staged).await.unwrap();
+            db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(to_bytes(2_000)));
+            assert_eq!(db.get(&key(100)).await.unwrap(), Some(to_bytes(2_001)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(to_bytes(1_002)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
         let cfg = create_test_config(0, &context);
