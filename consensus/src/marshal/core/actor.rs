@@ -626,11 +626,11 @@ where
                 ack,
                 ..
             } => {
-                // Hand the block to the network before ingesting and
-                // persisting it, so peers are not kept waiting on the storage
-                // write. Nothing consumes the durability ack before certify,
-                // and no certificate can form until peers receive the block,
-                // so ordering the write after the send is safe.
+                // We broadcast the block before persisting it because
+                // durability is not required until certify. Because the send
+                // precedes vote durability, a leader that crashes here may
+                // broadcast a conflicting block for the same round after
+                // restart.
                 buffer.send(round, Arc::clone(&block), recipients);
                 self.ingest(Arc::clone(&block), buffer, application, resolver)
                     .await;
