@@ -82,7 +82,7 @@ use crate::{
                 await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
                 ParentCheck,
             },
-            Standard,
+            variant, Standard,
         },
         Update,
     },
@@ -93,7 +93,6 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
-use commonware_p2p::Recipients;
 use commonware_runtime::{
     telemetry::{
         metrics::{
@@ -430,13 +429,6 @@ where
         digest: B::Digest,
         task: oneshot::Receiver<bool>,
     ) -> oneshot::Receiver<bool> {
-        // A staged proposal whose broadcast was never requested cannot resolve
-        // its gate. Certification now demands durability, so persist it
-        // (without broadcasting) to complete the handshake.
-        if let Some((block, ack)) = self.gates.take_staged(round, digest) {
-            self.marshal.verified_deferred(round, block, ack);
-        }
-
         // `verify()` waits only on local broadcast delivery, so nudge a
         // round-bound notarized fetch that can unblock the existing waiter
         // if local broadcast never arrives. For the standard variant, the
@@ -556,7 +548,7 @@ where
                         "reusing verified block from marshal on leader recovery"
                     );
                     gates
-                        .stage_and_defer(
+                        .wait(
                             consensus_context.round,
                             digest,
                             Arc::new(block),
@@ -612,7 +604,7 @@ where
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
                     gates
-                        .stage_and_defer(
+                        .wait(
                             consensus_context.round,
                             digest,
                             parent,
@@ -665,7 +657,7 @@ where
 
                 let digest = built_block.digest();
                 gates
-                    .stage_and_defer(
+                    .wait(
                         consensus_context.round,
                         digest,
                         Arc::new(built_block),
@@ -837,6 +829,8 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+        self.gates.flush(&self.marshal, round, digest);
+
         // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.gates.take(round, digest);
         if let Some(task) = task {
@@ -860,18 +854,7 @@ where
     type Plan = Plan<S::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
-        match plan {
-            Plan::Propose { round } => {
-                let Some((block, ack)) = self.gates.take_staged(round, commitment) else {
-                    debug!(%round, %commitment, "no staged proposal to relay");
-                    return Feedback::Ok;
-                };
-                self.marshal.proposed(round, block, Recipients::All, ack)
-            }
-            Plan::Forward { round, recipients } => {
-                self.marshal.forward(round, commitment, recipients)
-            }
-        }
+        variant::broadcast(&self.gates, &self.marshal, commitment, plan)
     }
 }
 

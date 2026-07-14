@@ -51,7 +51,7 @@ use crate::{
                 await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
                 ParentCheck,
             },
-            Standard,
+            variant, Standard,
         },
         Update,
     },
@@ -62,7 +62,6 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_p2p::Recipients;
 use commonware_runtime::{
     telemetry::{
         metrics::{
@@ -232,7 +231,7 @@ where
     /// block is staged before the digest is delivered and handed to marshal when consensus
     /// requests the relay broadcast, which persists it after the send. The resulting sync
     /// handle is awaited only at certification so it overlaps consensus voting. The digest does
-    /// not imply durability on its own; [`CertifiableAutomaton::certify`] awaits the registered
+    /// not imply durability on its own. [`CertifiableAutomaton::certify`] awaits the registered
     /// certification gate before the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
@@ -327,7 +326,7 @@ where
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
                     gates
-                        .stage_and_defer(
+                        .wait(
                             consensus_context.round,
                             digest,
                             parent,
@@ -380,7 +379,7 @@ where
 
                 let digest = built_block.digest();
                 gates
-                    .stage_and_defer(
+                    .wait(
                         consensus_context.round,
                         digest,
                         Arc::new(built_block),
@@ -566,18 +565,13 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+        self.gates.flush(&self.marshal, round, digest);
+
         // `propose`/`verify` register an in-flight certification gate whose result resolves
         // once the block's sync handle completes. Awaiting it here is the durability barrier
         // for the finalize vote, and it lets the sync overlap consensus voting
         // instead of freezing certify with a fresh fsync.
         let task = self.gates.take(round, digest);
-
-        // A staged proposal whose broadcast was never requested cannot resolve
-        // its gate. Certification now demands durability, so persist it
-        // (without broadcasting) to complete the handshake.
-        if let Some((block, ack)) = self.gates.take_staged(round, digest) {
-            self.marshal.verified_deferred(round, block, ack);
-        }
 
         // `verify()` waits only on local broadcast delivery, so nudge a
         // round-bound notarized fetch that can unblock the existing waiter
@@ -653,18 +647,7 @@ where
     type Plan = Plan<S::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
-        match plan {
-            Plan::Propose { round } => {
-                let Some((block, ack)) = self.gates.take_staged(round, commitment) else {
-                    debug!(%round, %commitment, "no staged proposal to relay");
-                    return Feedback::Ok;
-                };
-                self.marshal.proposed(round, block, Recipients::All, ack)
-            }
-            Plan::Forward { round, recipients } => {
-                self.marshal.forward(round, commitment, recipients)
-            }
-        }
+        variant::broadcast(&self.gates, &self.marshal, commitment, plan)
     }
 }
 

@@ -12,7 +12,7 @@ use crate::{
             Coding,
         },
         config::{Config, Start},
-        core::{durability::Durable as _, Actor, CommitmentFallback, DigestFallback, Mailbox},
+        core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -35,10 +35,7 @@ use commonware_cryptography::{
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
 use commonware_macros::select;
-use commonware_p2p::{
-    simulated::{self, Link, Network, Oracle},
-    Recipients,
-};
+use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef,
@@ -53,9 +50,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{
-    channel::oneshot, test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64,
-};
+use commonware_utils::{test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -275,22 +270,23 @@ pub trait TestHarness: 'static + Sized {
     /// Get the height from a test block.
     fn height(block: &Self::TestBlock) -> Height;
 
-    /// Drive the leader's full proposal flow as consensus would: request the
-    /// broadcast of the proposed block (mirroring [`crate::Relay::broadcast`]
-    /// with a propose plan) and await the durable-sync handle like the
-    /// certification gate does, asserting the block is durable.
+    /// Drive the leader's propose durability handshake: persist the proposed
+    /// block and assert it is durable, without broadcasting it (mirroring the
+    /// certify-time flush of a staged proposal whose broadcast was never
+    /// requested). Scenarios drive dissemination explicitly, so a proposal
+    /// must not pre-seed peer buffers and mask delivery and backfill paths.
     fn propose(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
         block: &Self::TestBlock,
     ) -> impl Future<Output = ()> + Send {
         async move {
-            let (ack, persist) = oneshot::channel();
             let block: <Self::Variant as crate::marshal::core::Variant>::Block =
                 block.clone().into();
-            let _ = handle.mailbox.proposed(round, block, Recipients::All, ack);
-            let sync = persist.await.expect("proposed sync handle missing");
-            assert!(sync.durable(round, "proposed").await);
+            assert!(
+                handle.mailbox.verified(round, block).await,
+                "proposed block must be durable"
+            );
         }
     }
 
@@ -916,7 +912,7 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: a durable propose handshake (the relayed proposal's sync handle
+/// Contract: a durable propose handshake (the proposal's sync handle
 /// resolving durable) means the block survives an immediate crash and
 /// repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(

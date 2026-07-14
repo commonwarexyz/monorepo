@@ -2829,7 +2829,7 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Drive the leader-side propose path. `propose` stages the block
-            // and returns the commitment; durability is established by the
+            // and returns the commitment. Durability is established by the
             // certify flush below.
             let commitment = marshaled
                 .propose(propose_context)

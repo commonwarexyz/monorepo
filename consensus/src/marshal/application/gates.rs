@@ -1,5 +1,8 @@
-use crate::{marshal::core::durability::Durable as _, types::Round};
-use commonware_cryptography::Digest;
+use crate::{
+    marshal::core::{durability::Durable as _, Mailbox, Variant},
+    types::Round,
+};
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_macros::select;
 use commonware_runtime::Handle;
 use commonware_utils::{
@@ -84,6 +87,24 @@ impl<D: Digest, B> Gates<D, B> {
         self.inner.lock().proposals.remove(&(round, digest))
     }
 
+    /// Persists the staged proposal for `(round, id)` without broadcasting it,
+    /// completing the propose durability handshake.
+    ///
+    /// A staged proposal whose broadcast was never requested cannot resolve
+    /// its certification gate. Certification demands durability, so the staged
+    /// block is flushed to `marshal` for persistence, which delivers the
+    /// durable-sync handle through the staged ack. Does nothing when no
+    /// proposal is staged (the relay broadcast already took it).
+    pub(crate) fn flush<S, V>(&self, marshal: &Mailbox<S, V>, round: Round, id: D)
+    where
+        S: Scheme,
+        V: Variant<Block = B>,
+    {
+        if let Some((block, ack)) = self.take_staged(round, id) {
+            marshal.verified_deferred(round, block, ack);
+        }
+    }
+
     /// Discards all entries whose round is at or before `finalized_round`.
     ///
     /// A discarded staged proposal drops its ack, which abandons the propose
@@ -114,7 +135,7 @@ impl<D: Digest, B> Gates<D, B> {
     /// dropped ack means the marshal actor is gone or the staged entry was
     /// pruned without ever being taken, so the gate is left unresolved and
     /// `certify` falls back to its recovery fetch.
-    pub(crate) async fn stage_and_defer(
+    pub(crate) async fn wait(
         &self,
         round: Round,
         id: D,
@@ -331,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stage_and_defer_handshake() {
+    fn test_wait_handshake() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let gates = TestGates::new();
@@ -340,9 +361,7 @@ mod tests {
 
             let staged = gates.clone();
             context.spawn(move |_| async move {
-                staged
-                    .stage_and_defer(round(1), digest, Arc::new(7), tx, "test")
-                    .await;
+                staged.wait(round(1), digest, Arc::new(7), tx, "test").await;
             });
 
             // The id is published only after the gate and staged block are registered.
@@ -371,9 +390,7 @@ mod tests {
 
             let staged = gates.clone();
             context.spawn(move |_| async move {
-                staged
-                    .stage_and_defer(round(1), digest, Arc::new(7), tx, "test")
-                    .await;
+                staged.wait(round(1), digest, Arc::new(7), tx, "test").await;
             });
             assert_eq!(rx.await.expect("id published"), digest);
 

@@ -632,38 +632,14 @@ where
                 // broadcast a conflicting block for the same round after
                 // restart.
                 buffer.send(round, Arc::clone(&block), recipients);
-                self.ingest(Arc::clone(&block), buffer, application, resolver)
+                self.persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
-
-                // If the round has already been pruned by tip advancement,
-                // `put_verified` is a no-op because the round is below
-                // the retention floor (and no longer is required by consensus
-                // to make progress). A duplicate delivery is also a no-op, with
-                // the handle still covering the original write's durability.
-                let digest = block.digest();
-                let handle = self
-                    .cache
-                    .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
-                    .await;
-                ack.send_lossy(handle);
             }
             Message::Verified {
                 round, block, ack, ..
             } => {
-                self.ingest(Arc::clone(&block), buffer, application, resolver)
+                self.persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
-                let digest = block.digest();
-
-                // If the round has already been pruned by tip advancement,
-                // `put_verified` is a no-op because the round is below
-                // the retention floor (and no longer is required by consensus
-                // to make progress). A duplicate delivery is also a no-op, with
-                // the handle still covering the original write's durability.
-                let handle = self
-                    .cache
-                    .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
-                    .await;
-                ack.send_lossy(handle);
             }
             Message::Certified {
                 round, block, ack, ..
@@ -1191,6 +1167,32 @@ where
                 Request::finalized_block_by_round(commitment, round),
             )
             .ignore();
+    }
+
+    /// Ingests `block` and persists it as a verify-stage candidate for `round`,
+    /// delivering the write's durable-sync handle through `ack`.
+    ///
+    /// If the round has already been pruned by tip advancement, `put_verified`
+    /// is a no-op because the round is below the retention floor (and no longer
+    /// is required by consensus to make progress). A duplicate delivery is also
+    /// a no-op, with the handle still covering the original write's durability.
+    async fn persist_verified<Buf: Buffer<V>>(
+        &mut self,
+        round: Round,
+        block: Arc<V::Block>,
+        ack: oneshot::Sender<Handle<()>>,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) {
+        self.ingest(Arc::clone(&block), buffer, application, resolver)
+            .await;
+        let digest = block.digest();
+        let handle = self
+            .cache
+            .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
+            .await;
+        ack.send_lossy(handle);
     }
 
     /// Notifies subscribers of a validated block and applies it to any

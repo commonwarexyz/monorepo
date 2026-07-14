@@ -604,13 +604,6 @@ where
         payload: Commitment,
         task: oneshot::Receiver<bool>,
     ) -> oneshot::Receiver<bool> {
-        // A staged proposal whose broadcast was never requested cannot resolve
-        // its gate. Certification now demands durability, so persist it
-        // (without broadcasting) to complete the handshake.
-        if let Some((block, ack)) = self.gates.take_staged(round, payload) {
-            self.marshal.verified_deferred(round, block, ack);
-        }
-
         // `verify()` intentionally waits only for local candidate data. Once
         // certification starts, a notarization exists and the same pending
         // verifier must be unblocked by round-bound recovery if local
@@ -674,7 +667,7 @@ where
     /// commitment is delivered and handed to marshal when consensus requests the relay
     /// broadcast, which persists it after the shards are sent. The resulting sync handle is
     /// awaited only at certification so it overlaps consensus voting. The commitment does not
-    /// imply durability on its own; [`CertifiableAutomaton::certify`] awaits the registered
+    /// imply durability on its own. [`CertifiableAutomaton::certify`] awaits the registered
     /// certification gate before the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
@@ -759,7 +752,7 @@ where
                         "reusing verified block from marshal on leader recovery"
                     );
                     gates
-                        .stage_and_defer(round, commitment, Arc::new(block), tx, "recovered block")
+                        .wait(round, commitment, Arc::new(block), tx, "recovered block")
                         .await;
                     return;
                 }
@@ -811,13 +804,7 @@ where
                     let round = consensus_context.round;
 
                     gates
-                        .stage_and_defer(
-                            round,
-                            commitment,
-                            parent,
-                            tx,
-                            "re-proposed boundary block",
-                        )
+                        .wait(round, commitment, parent, tx, "re-proposed boundary block")
                         .await;
                     return;
                 }
@@ -870,7 +857,7 @@ where
                 let round = consensus_context.round;
 
                 gates
-                    .stage_and_defer(
+                    .wait(
                         round,
                         commitment,
                         Arc::new(coded_block),
@@ -1112,6 +1099,8 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+        self.gates.flush(&self.marshal, round, payload);
+
         // First, check for an in-progress certification gate task.
         let task = self.gates.take(round, payload);
         if let Some(task) = task {
@@ -1147,8 +1136,8 @@ where
         };
 
         let Some((block, ack)) = self.gates.take_staged(round, commitment) else {
-            debug!(%round, %commitment, "no staged proposal to relay");
-            return Feedback::Ok;
+            debug!(%round, %commitment, "no staged proposal to relay, attempting forwarding");
+            return self.marshal.forward(round, commitment, Recipients::All);
         };
         self.marshal.proposed(round, block, Recipients::All, ack)
     }
