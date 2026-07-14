@@ -6341,6 +6341,659 @@ mod tests {
         });
     }
 
+    /// A finalized-store wrapper that delays durability by `pace` of
+    /// deterministic time to model a slow sync: `sync` blocks the caller for
+    /// the pace, while `start_sync` returns immediately with a handle that
+    /// completes after the pace (like an archive with a non-blocking sync
+    /// path, e.g. [`prunable::Archive`]).
+    struct PacedStore<T> {
+        inner: T,
+        context: deterministic::Context,
+        pace: Duration,
+    }
+
+    impl<T: crate::marshal::store::Blocks> crate::marshal::store::Blocks for PacedStore<T> {
+        type Block = T::Block;
+        type Error = T::Error;
+
+        async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
+            self.inner.put(block).await
+        }
+
+        async fn sync(&mut self) -> Result<(), Self::Error> {
+            self.context.sleep(self.pace).await;
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&mut self) -> Result<commonware_runtime::Handle<()>, Self::Error> {
+            let inner = self.inner.start_sync().await?;
+            let sleep = self.context.sleep(self.pace);
+            Ok(commonware_runtime::Handle::from_future(async move {
+                sleep.await;
+                inner.await
+            }))
+        }
+
+        async fn get(
+            &self,
+            id: commonware_storage::archive::Identifier<'_, <Self::Block as Digestible>::Digest>,
+        ) -> Result<Option<Self::Block>, Self::Error> {
+            self.inner.get(id).await
+        }
+
+        async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+            self.inner.prune(min).await
+        }
+
+        fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+            self.inner.missing_items(start, max)
+        }
+
+        fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+            self.inner.next_gap(value)
+        }
+
+        fn last_index(&self) -> Option<Height> {
+            self.inner.last_index()
+        }
+    }
+
+    impl<T: crate::marshal::store::Certificates> crate::marshal::store::Certificates for PacedStore<T> {
+        type BlockDigest = T::BlockDigest;
+        type Commitment = T::Commitment;
+        type Scheme = T::Scheme;
+        type Error = T::Error;
+
+        async fn put(
+            &mut self,
+            height: Height,
+            digest: Self::BlockDigest,
+            finalization: Finalization<Self::Scheme, Self::Commitment>,
+        ) -> Result<(), Self::Error> {
+            self.inner.put(height, digest, finalization).await
+        }
+
+        async fn sync(&mut self) -> Result<(), Self::Error> {
+            self.context.sleep(self.pace).await;
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&mut self) -> Result<commonware_runtime::Handle<()>, Self::Error> {
+            let inner = self.inner.start_sync().await?;
+            let sleep = self.context.sleep(self.pace);
+            Ok(commonware_runtime::Handle::from_future(async move {
+                sleep.await;
+                inner.await
+            }))
+        }
+
+        async fn get(
+            &self,
+            id: commonware_storage::archive::Identifier<'_, Self::BlockDigest>,
+        ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+            self.inner.get(id).await
+        }
+
+        async fn has(&self, height: Height) -> Result<bool, Self::Error> {
+            self.inner.has(height).await
+        }
+
+        async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+            self.inner.prune(min).await
+        }
+
+        fn last_index(&self) -> Option<Height> {
+            self.inner.last_index()
+        }
+
+        fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+            self.inner.ranges_from(from)
+        }
+    }
+
+    /// Initialize paced prunable finalized stores for direct actor tests.
+    #[allow(clippy::type_complexity)]
+    async fn paced_finalized_stores(
+        context: &deterministic::Context,
+        partition_prefix: &str,
+        pace: Duration,
+    ) -> (
+        PacedStore<prunable::Archive<EightCap, deterministic::Context, D, Finalization<S, D>>>,
+        PacedStore<prunable::Archive<EightCap, deterministic::Context, D, B>>,
+    ) {
+        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            prunable::Config {
+                translator: EightCap,
+                key_partition: format!("{partition_prefix}-fbh-key"),
+                key_page_cache: page_cache.clone(),
+                value_partition: format!("{partition_prefix}-fbh-value"),
+                compression: None,
+                codec_config: S::certificate_codec_config_unbounded(),
+                items_per_section: NZU64!(10),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            },
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = prunable::Archive::init(
+            context.child("finalized_blocks"),
+            prunable::Config {
+                translator: EightCap,
+                key_partition: format!("{partition_prefix}-fb-key"),
+                key_page_cache: page_cache,
+                value_partition: format!("{partition_prefix}-fb-value"),
+                compression: None,
+                codec_config: (),
+                items_per_section: NZU64!(10),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            },
+        )
+        .await
+        .expect("failed to initialize finalized blocks archive");
+        (
+            PacedStore {
+                inner: finalizations_by_height,
+                context: context.child("finalizations_pacer"),
+                pace,
+            },
+            PacedStore {
+                inner: finalized_blocks,
+                context: context.child("blocks_pacer"),
+                pace,
+            },
+        )
+    }
+
+    /// A slow finalized-archive sync must not block the marshal mailbox.
+    ///
+    /// Processing a finalization requires making the finalized archives
+    /// durable before the block is dispatched to the application, but the
+    /// sync itself must not serialize unrelated mailbox traffic: a proposer's
+    /// `get_verified` (a pure prunable-cache read) issued while the sync is in
+    /// flight must be answered immediately.
+    ///
+    /// Paces both finalized stores so sync completion takes 100ms of
+    /// deterministic time, processes a finalization, issues `get_verified` 1ms
+    /// later, and asserts that (1) the read is served while the sync is still
+    /// in flight and (2) the finalized block reaches the application only
+    /// after the paced sync completes (the durability barrier).
+    #[test_traced("WARN")]
+    fn test_standard_finalization_sync_does_not_block_mailbox() {
+        const PACE: Duration = Duration::from_millis(100);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention_timeout: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(1),
+                block_codec_config: (),
+                partition_prefix: "paced-finalized-sync".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "paced-finalized-sync", PACE).await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+
+            // Wait for the genesis block to flow through dispatch so the ack
+            // pipeline is idle before the measurement starts.
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "genesis dispatched",
+                || application.blocks().contains_key(&Height::zero()),
+            )
+            .await;
+
+            // Store a verified block for round 1 in the (unpaced) prunable cache.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(round, block.clone()).await);
+
+            // Report the finalization: the actor buffers the block into the
+            // finalized archives and starts the paced 100ms sync.
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            let finalized_at = context.current();
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            // Issue a get_verified 1ms later: it must not queue behind the sync.
+            context.sleep(Duration::from_millis(1)).await;
+            let requested_at = context.current();
+            let verified = mailbox.get_verified(round).await;
+            let elapsed = context
+                .current()
+                .duration_since(requested_at)
+                .expect("time went backwards");
+            assert_eq!(
+                verified.expect("verified block missing").digest(),
+                block.digest()
+            );
+            tracing::info!(?elapsed, "get_verified answered");
+            assert!(
+                elapsed < Duration::from_millis(5),
+                "get_verified queued behind the finalized-archive sync: took {elapsed:?}"
+            );
+
+            // Durability barrier: the finalized block must not reach the
+            // application until the paced sync completes.
+            assert!(
+                !application.blocks().contains_key(&Height::new(1)),
+                "block dispatched before the finalized archives were durable"
+            );
+            context.sleep(Duration::from_millis(90)).await;
+            assert!(
+                !application.blocks().contains_key(&Height::new(1)),
+                "block dispatched before the finalized archives were durable"
+            );
+            wait_until(
+                &context,
+                Duration::from_millis(50),
+                "finalized block dispatched",
+                || application.blocks().contains_key(&Height::new(1)),
+            )
+            .await;
+            let dispatched = context
+                .current()
+                .duration_since(finalized_at)
+                .expect("time went backwards");
+            tracing::info!(?dispatched, "finalized block dispatched");
+            assert!(
+                dispatched >= PACE,
+                "block dispatched before the paced sync completed: {dispatched:?}"
+            );
+        });
+    }
+
+    /// A buffered finalized-archive write must freeze dispatch even when a
+    /// stale floor anchor triggers dispatch before the batch's sync starts.
+    ///
+    /// Within one resolver batch, a repair delivery can buffer a block at the
+    /// dispatch frontier and a later delivery can resolve a pending floor
+    /// anchor whose height is at or below the processed height. That anchor
+    /// path calls `try_dispatch_blocks` mid-batch, before the batch-end
+    /// `start_finalized_sync` runs, so dispatch must be gated by the write
+    /// itself (via `DispatchGate::defer`) rather than by a started sync.
+    /// Without the gate, the frontier block reaches the application while its
+    /// archive write is still buffered, and a crash after the application ack
+    /// could durably advance the processed floor past a lost write.
+    ///
+    /// The stale anchor models adversarial input: a verified finalization at
+    /// a round above the round floor naming a block marshal never stored at a
+    /// height it already processed. Marshal cannot cross-check certificates
+    /// against each other, so it must stay crash-safe when one lands in
+    /// `apply_pending_floor`'s stale-anchor branch.
+    ///
+    /// The two repair blocks are delivered in ascending height order, so the
+    /// batch entry must keep the lowest written height. Tracking the latest
+    /// write instead would leave the gate above the first block and let it
+    /// dispatch non-durably.
+    #[test_traced("WARN")]
+    fn test_standard_stale_floor_anchor_holds_dispatch_until_durable() {
+        const PACE: Duration = Duration::from_millis(100);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention_timeout: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(4),
+                block_codec_config: (),
+                partition_prefix: "stale-floor-anchor".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "stale-floor-anchor", PACE).await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+
+            // Finalize block 1 and wait until the application has acknowledged
+            // it, so the processed height reaches the anchor height below.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(round, block.clone()).await);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "block 1 processed",
+                || parse_processed_height(&context.encode()) == Some(1),
+            )
+            .await;
+
+            // Install a pending floor anchor for a forked block at height 1:
+            // a valid certificate at a round above the round floor whose block
+            // is unknown locally, so marshal fetches it. Its height (at or
+            // below the processed height) routes the arriving anchor into the
+            // stale-anchor branch.
+            let fork = make_raw_block(genesis.digest(), Height::new(1), 999);
+            let fork_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(5)),
+                    View::new(4),
+                    StandardHarness::commitment(&fork),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(fork_finalization);
+            wait_until(&context, Duration::from_secs(5), "anchor fetch", || {
+                resolver.fetches().iter().any(|fetch| {
+                    matches!(
+                        fetch.key,
+                        handler::Key::Block(commitment)
+                            if commitment == StandardHarness::commitment(&fork)
+                    )
+                })
+            })
+            .await;
+            let anchor_fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| {
+                    matches!(
+                        fetch.key,
+                        handler::Key::Block(commitment)
+                            if commitment == StandardHarness::commitment(&fork)
+                    )
+                })
+                .expect("anchor fetch missing");
+
+            // Enqueue all deliveries back-to-back (no intervening await) so
+            // the actor drains them in a single resolver batch: two repair
+            // blocks at and above the dispatch frontier (buffered
+            // finalized-archive writes, ascending), then the stale floor
+            // anchor.
+            let next = make_raw_block(block.digest(), Height::new(2), 200);
+            let (next_response, next_response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Block(StandardHarness::commitment(&next)),
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                height: Height::new(2),
+                            }),
+                            tracing::Span::none(),
+                        )),
+                    },
+                    value: next.encode(),
+                    response: next_response,
+                })
+                .accepted());
+            let above = make_raw_block(next.digest(), Height::new(3), 300);
+            let (above_response, above_response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Block(StandardHarness::commitment(&above)),
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                height: Height::new(3),
+                            }),
+                            tracing::Span::none(),
+                        )),
+                    },
+                    value: above.encode(),
+                    response: above_response,
+                })
+                .accepted());
+            let (anchor_response, anchor_response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: anchor_fetch.key,
+                        subscribers: NonEmptyVec::new((
+                            anchor_fetch.subscriber,
+                            tracing::Span::none()
+                        )),
+                    },
+                    value: fork.encode(),
+                    response: anchor_response,
+                })
+                .accepted());
+            let delivered_at = context.current();
+            assert!(
+                next_response_rx.await.expect("repair response missing"),
+                "repair block delivery should validate"
+            );
+            assert!(
+                above_response_rx.await.expect("repair response missing"),
+                "repair block delivery should validate"
+            );
+            assert!(
+                anchor_response_rx.await.expect("anchor response missing"),
+                "anchor delivery should validate"
+            );
+
+            // Durability barrier: the stale-anchor branch runs dispatch before
+            // the batch's sync starts, so the repair block at height 2 must
+            // stay held until the paced sync completes.
+            context.sleep(Duration::from_millis(1)).await;
+            assert!(
+                !application.blocks().contains_key(&Height::new(2)),
+                "block dispatched before the finalized archives were durable"
+            );
+            context.sleep(Duration::from_millis(90)).await;
+            assert!(
+                !application.blocks().contains_key(&Height::new(2)),
+                "block dispatched before the finalized archives were durable"
+            );
+            wait_until(
+                &context,
+                Duration::from_millis(50),
+                "repair blocks dispatched",
+                || application.blocks().contains_key(&Height::new(3)),
+            )
+            .await;
+            assert!(application.blocks().contains_key(&Height::new(2)));
+            let dispatched = context
+                .current()
+                .duration_since(delivered_at)
+                .expect("time went backwards");
+            tracing::info!(?dispatched, "repair blocks dispatched");
+            assert!(
+                dispatched >= PACE,
+                "block dispatched before the paced sync completed: {dispatched:?}"
+            );
+        });
+    }
+
+    /// Overlapping pooled syncs must release the dispatch gate per batch.
+    ///
+    /// Two finalizations arrive 50ms apart, each starting its own paced 100ms
+    /// sync. The first sync covers only the first write, so block 1 must
+    /// dispatch as soon as that sync completes while block 2 stays held until
+    /// the second sync completes. This pins the batch accounting in
+    /// `start_finalized_sync`: if the second write were folded into the first
+    /// sync's batch, that sync's completion would release a write it never
+    /// covered.
+    #[test_traced("WARN")]
+    fn test_standard_overlapping_finalized_syncs_release_per_batch() {
+        const PACE: Duration = Duration::from_millis(100);
+        const STAGGER: Duration = Duration::from_millis(50);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention_timeout: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(4),
+                block_codec_config: (),
+                partition_prefix: "overlapping-finalized-syncs".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "overlapping-finalized-syncs", PACE).await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "genesis processed",
+                || parse_processed_height(&context.encode()) == Some(0),
+            )
+            .await;
+
+            // Store both verified blocks, then finalize them one STAGGER
+            // apart so their pooled syncs overlap.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let first_round = Round::new(Epoch::zero(), View::new(1));
+            let first = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(first_round, first.clone()).await);
+            let second_round = Round::new(Epoch::zero(), View::new(2));
+            let second = make_raw_block(first.digest(), Height::new(2), 200);
+            assert!(mailbox.verified(second_round, second.clone()).await);
+
+            let started_at = context.current();
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    first_round,
+                    View::zero(),
+                    StandardHarness::commitment(&first),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            context.sleep(STAGGER).await;
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    second_round,
+                    View::new(1),
+                    StandardHarness::commitment(&second),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            // Block 1 dispatches as soon as the first sync completes, without
+            // waiting for the second sync.
+            wait_until(
+                &context,
+                Duration::from_millis(150),
+                "first block dispatched",
+                || application.blocks().contains_key(&Height::new(1)),
+            )
+            .await;
+            let first_dispatched = context
+                .current()
+                .duration_since(started_at)
+                .expect("time went backwards");
+            tracing::info!(?first_dispatched, "first block dispatched");
+            assert!(
+                first_dispatched >= PACE,
+                "block dispatched before its sync completed: {first_dispatched:?}"
+            );
+            assert!(
+                first_dispatched < STAGGER + PACE,
+                "first block waited for the second sync: {first_dispatched:?}"
+            );
+
+            // Block 2 stays held until its own sync completes.
+            assert!(
+                !application.blocks().contains_key(&Height::new(2)),
+                "block dispatched before its sync completed"
+            );
+            context.sleep(Duration::from_millis(20)).await;
+            assert!(
+                !application.blocks().contains_key(&Height::new(2)),
+                "block dispatched before its sync completed"
+            );
+            wait_until(
+                &context,
+                Duration::from_millis(50),
+                "second block dispatched",
+                || application.blocks().contains_key(&Height::new(2)),
+            )
+            .await;
+            let second_dispatched = context
+                .current()
+                .duration_since(started_at)
+                .expect("time went backwards");
+            tracing::info!(?second_dispatched, "second block dispatched");
+            assert!(
+                second_dispatched >= STAGGER + PACE,
+                "block dispatched before its sync completed: {second_dispatched:?}"
+            );
+        });
+    }
+
     /// Parse the `processed_height` gauge value from a prometheus-encoded
     /// metrics dump produced by `Metrics::encode`. Looks for any line of the
     /// form `<prefix>processed_height <value>` or

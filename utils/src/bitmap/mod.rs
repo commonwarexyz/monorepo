@@ -966,12 +966,23 @@ pub trait Readable<const N: usize> {
         Self: Sized,
     {
         let len = self.len();
-        let pruned_start = (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS;
-        OnesIter {
+        let pruned_start = self.pruned_bits();
+        let pos = pos.max(pruned_start);
+        let mut iter = OnesIter {
             bitmap: self,
-            pos: pos.max(pruned_start),
             len,
+            base: len,
+            word: 0,
+            chunk: [0; N],
+        };
+        if pos < len {
+            let chunk_idx = BitMap::<N>::to_chunk_index(pos);
+            let chunk_start = chunk_idx as u64 * BitMap::<N>::CHUNK_SIZE_BITS;
+            iter.chunk = self.get_chunk(chunk_idx);
+            iter.base = chunk_start + (pos - chunk_start) / 64 * 64;
+            iter.word = iter.load_word() & (u64::MAX << (pos - iter.base));
         }
+        iter
     }
 }
 
@@ -1003,14 +1014,48 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 ///
 /// If the starting position falls within a pruned region, iteration
 /// begins at the first unpruned bit.
+///
+/// `len` and the current chunk are read from the bitmap once and reused (the chunk until
+/// iteration crosses into the next one), so the bitmap's contents must not change for the
+/// iterator's lifetime. Owned bitmaps (`BitMap`, `Prunable`) guarantee this through the
+/// immutable borrow. A `Readable` whose reads go through interior mutability (e.g. a
+/// lock-guarded shared bitmap) instead requires the caller to prevent concurrent mutation
+/// across the whole iteration, for example by constructing the iterator from a held read
+/// guard rather than a bare shared reference.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
-    pos: u64,
-    /// Cached `bitmap.len()` at iterator construction. The underlying bitmap is borrowed
-    /// immutably for the iterator's lifetime, so this can never change mid-iteration.
-    /// For layered bitmaps (e.g. `BitmapBatch`), `len()` walks the layer chain, so caching
-    /// this avoids that walk on every `next`.
+    /// Cached `bitmap.len()` at iterator construction. For layered bitmaps, `len()`
+    /// walks the layer chain, so caching this avoids that walk on every `next`.
     len: u64,
+    /// Bit index of bit 0 of `word`. Always a 64-bit word boundary relative to the start
+    /// of its chunk, except when the iterator is constructed exhausted (then `len`).
+    base: u64,
+    /// Set bits of the bitmap word at `base` that have not been yielded yet.
+    word: u64,
+    /// The chunk containing `base`. Retaining it serves every word of a multi-word chunk
+    /// with one fetch (and, for layered bitmaps, one layer resolution) rather than one
+    /// fetch per yielded bit.
+    chunk: [u8; N],
+}
+
+impl<B: Readable<N>, const N: usize> OnesIter<'_, B, N> {
+    /// Load the word at `base` from `chunk`, masking off bits at or beyond `len`.
+    ///
+    /// Requires `base < len` and that `chunk` is the chunk containing `base`. Chunks
+    /// shorter than a word (`N < 8`) and trailing sub-word regions (`N % 8 != 0`) are
+    /// zero-padded.
+    fn load_word(&self) -> u64 {
+        let off = ((self.base % BitMap::<N>::CHUNK_SIZE_BITS) / 8) as usize;
+        let take = (N - off).min(8);
+        let mut buf = [0u8; 8];
+        buf[..take].copy_from_slice(&self.chunk[off..off + take]);
+        let mut word = u64::from_le_bytes(buf);
+        let rem = self.len - self.base;
+        if rem < 64 {
+            word &= (1 << rem) - 1;
+        }
+        word
+    }
 }
 
 impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
@@ -1018,31 +1063,26 @@ impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
 
     fn next(&mut self) -> Option<u64> {
         let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-        while self.pos < self.len {
-            let chunk_idx = BitMap::<N>::to_chunk_index(self.pos);
-            let chunk = self.bitmap.get_chunk(chunk_idx);
-            let chunk_start = chunk_idx as u64 * chunk_bits;
-            let rel = (self.pos - chunk_start) as usize;
-            let mut byte_idx = rel / 8;
-            let mut bit_in_byte = rel % 8;
-            while byte_idx < N {
-                let masked = chunk[byte_idx] >> bit_in_byte;
-                if masked != 0 {
-                    let found = chunk_start
-                        + (byte_idx * 8 + bit_in_byte) as u64
-                        + masked.trailing_zeros() as u64;
-                    if found >= self.len {
-                        return None;
-                    }
-                    self.pos = found + 1;
-                    return Some(found);
-                }
-                byte_idx += 1;
-                bit_in_byte = 0;
+        while self.word == 0 {
+            // Advance to the next word: either the next 64-bit stride of the current
+            // chunk or the first word of the next chunk. Checked, because a heavily
+            // pruned bitmap can end within one stride of u64::MAX.
+            let rel = self.base % chunk_bits;
+            let same_chunk = rel + 64 < chunk_bits;
+            let stride = if same_chunk { 64 } else { chunk_bits - rel };
+            let next = self.base.checked_add(stride)?;
+            if next >= self.len {
+                return None;
             }
-            self.pos = chunk_start + chunk_bits;
+            self.base = next;
+            if !same_chunk {
+                self.chunk = self.bitmap.get_chunk(BitMap::<N>::to_chunk_index(next));
+            }
+            self.word = self.load_word();
         }
-        None
+        let bit = self.word.trailing_zeros() as u64;
+        self.word &= self.word - 1;
+        Some(self.base + bit)
     }
 }
 
@@ -1061,9 +1101,11 @@ impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_rng;
     use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
     use commonware_formatting::hex;
+    use rand::RngExt as _;
 
     #[test]
     fn test_constructors() {
@@ -2015,6 +2057,75 @@ mod tests {
         assert_eq!(bv4.ones_iter().collect::<Vec<_>>(), expected);
         assert_eq!(bv8.ones_iter().collect::<Vec<_>>(), expected);
         assert_eq!(bv16.ones_iter().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn test_ones_iter_multi_word_chunk() {
+        // 32-byte chunks hold four 64-bit words. Set bits adjacent to every word
+        // boundary within a chunk and to the chunk boundary itself.
+        let expected = vec![0, 63, 64, 127, 128, 255, 256, 511, 512, 599];
+        let mut bv = BitMap::<32>::zeroes(600);
+        for &bit in &expected {
+            bv.set(bit, true);
+        }
+        assert_eq!(bv.ones_iter().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn test_ones_iter_from_mid_word() {
+        // Starting positions inside every word of a multi-word chunk mask out exactly
+        // the bits below the start.
+        let bv = BitMap::<32>::ones(300);
+        for pos in [0, 1, 63, 64, 65, 191, 192, 255, 256, 299] {
+            let ones: Vec<u64> = Readable::ones_iter_from(&bv, pos).collect();
+            let expected: Vec<u64> = (pos..300).collect();
+            assert_eq!(ones, expected);
+        }
+    }
+
+    #[test]
+    fn test_ones_iter_word_aligned_len() {
+        // A length exactly at a word boundary must not mask off the final bit.
+        let bv = BitMap::<8>::ones(64);
+        assert_eq!(
+            bv.ones_iter().collect::<Vec<_>>(),
+            (0..64).collect::<Vec<_>>()
+        );
+        let bv = BitMap::<32>::ones(256);
+        assert_eq!(
+            bv.ones_iter().collect::<Vec<_>>(),
+            (0..256).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_ones_iter_matches_get_bit() {
+        // Pseudo-random pattern over every chunk shape: sub-word (1, 3, 4), exactly one
+        // word (8), multi-word (16, 32), and multi-word with a partial tail word (12,
+        // 23). Check the full iteration and every possible starting position against
+        // get_bit.
+        fn check<const N: usize>() {
+            let mut rng = test_rng();
+            let mut bv: BitMap<N> = BitMap::new();
+            let len = 5 * BitMap::<N>::CHUNK_SIZE_BITS + 7;
+            for _ in 0..len {
+                bv.push(rng.random_bool(0.375));
+            }
+            let expected: Vec<u64> = (0..len).filter(|&i| bv.get_bit(i)).collect();
+            assert_eq!(bv.ones_iter().collect::<Vec<_>>(), expected);
+            for pos in 0..=len {
+                let tail: Vec<u64> = expected.iter().copied().filter(|&b| b >= pos).collect();
+                assert_eq!(Readable::ones_iter_from(&bv, pos).collect::<Vec<_>>(), tail);
+            }
+        }
+        check::<1>();
+        check::<3>();
+        check::<4>();
+        check::<8>();
+        check::<12>();
+        check::<16>();
+        check::<23>();
+        check::<32>();
     }
 
     #[test]

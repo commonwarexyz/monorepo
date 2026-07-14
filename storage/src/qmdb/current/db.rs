@@ -157,6 +157,11 @@ pub struct Db<
 
     /// Metrics for the Current layer.
     pub(super) metrics: Metrics<E>,
+
+    /// Test-only: park [Self::prune] after the pruning-metadata sync, before the log prune,
+    /// so tests can drop the pending future at that exact point.
+    #[cfg(test)]
+    pub(super) halt_before_prune_log: bool,
 }
 
 // Shared read-only functionality.
@@ -495,6 +500,9 @@ where
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
+    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
+    /// uncommitted operations are not guaranteed to survive.
+    ///
     /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
     /// advance past the point where the grafting overlay has been pruned. The bitmap and grafted
     /// tree advance to the sync boundary regardless of `prune_loc`.
@@ -515,6 +523,13 @@ where
             return Err(Error::PruneBeyondMinRequired(prune_loc, sync_boundary));
         }
 
+        // The sync boundary may be advanced by applied-but-uncommitted operations, and the
+        // pruning metadata persisted below durably records it. Commit the log first so
+        // recovery can replay to that boundary: otherwise a crash before the log prune
+        // recovers the older durable floor alongside newer pruning metadata and fails to
+        // initialize the bitmap.
+        self.any.log.commit().await?;
+
         // Prune the bitmap to the sync boundary (most aggressive safe location).
         self.any.prune_bitmap(sync_boundary);
         self.prune_grafted_tree_to_bitmap()?;
@@ -525,6 +540,11 @@ where
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
         // a pruned log with stale metadata would lose peak digests permanently.
         self.sync_metadata().await?;
+
+        #[cfg(test)]
+        if self.halt_before_prune_log {
+            std::future::pending::<()>().await;
+        }
 
         self.any.prune_log(prune_loc).await?;
         self.any.update_metrics();
@@ -1391,6 +1411,73 @@ mod tests {
         let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
+    }
+
+    /// A prune dropped between the pruning-metadata sync and the log prune must remain
+    /// recoverable: the metadata durably records a bitmap boundary derived from a floor that
+    /// may exist only in buffered operations, and reopening panics if the recovered floor
+    /// lies below that boundary.
+    #[test_traced]
+    fn test_current_prune_dropped_before_log_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let mut db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("prune-park", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Establish a durable state, then apply (but do not commit) a batch that rewrites
+            // every key, advancing the in-memory floor well past the durable commit's floor.
+            populate_fixed_db::<mmr::Family, _>(&mut db, 0, 512).await;
+            let durable_floor = db.inactivity_floor_loc();
+            {
+                let mut batch = db.new_batch();
+                for idx in 0..512u64 {
+                    let key = Sha256::hash(&idx.to_be_bytes());
+                    let value = Sha256::hash(&(idx + 1024).to_be_bytes());
+                    batch = batch.write(key, Some(value));
+                }
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+            }
+            assert!(db.sync_boundary() > durable_floor);
+            let bounds = db.bounds();
+            let floor = db.inactivity_floor_loc();
+            let root = db.root();
+
+            // Drop the production prune future while it is parked after the metadata sync,
+            // before the log prune: a genuine cancellation at that await.
+            db.halt_before_prune_log = true;
+            {
+                let fut = db.prune(db.sync_boundary());
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the log prune"
+                );
+            }
+            let pruned_bits = db.any.bitmap.pruned_bits();
+            assert!(pruned_bits > *durable_floor);
+            drop(db);
+
+            // Reopening must succeed and recover the post-batch state: prune committed the
+            // buffered operations before durably recording the pruning metadata that depends
+            // on them. Asserting the advanced floor, root, and persisted pruned boundary
+            // proves the drop happened after both the commit and the metadata sync.
+            let db = MmrDb::init(
+                ctx.child("reopen"),
+                fixed_config::<OneCap>("prune-park", &ctx),
+            )
+            .await
+            .expect("prune crash must leave the db recoverable");
+            assert_eq!(db.bounds(), bounds);
+            assert_eq!(db.inactivity_floor_loc(), floor);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.any.bitmap.pruned_bits(), pruned_bits);
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]

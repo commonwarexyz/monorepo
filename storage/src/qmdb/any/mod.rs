@@ -552,6 +552,66 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// Pruning to a floor advanced by an applied-but-uncommitted batch must not durably outrun
+    /// the last durable commit: after a crash, the recovered commit's floor would lie below the
+    /// pruned boundary and the database could never reopen.
+    pub(crate) async fn test_any_db_prune_after_unsynced_floor_recovery<
+        F: Family,
+        D,
+        V: Clone + CodecShared,
+    >(
+        context: Context,
+        mut db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+    {
+        const ELEMENTS: u64 = 1000;
+
+        // Establish a durable state whose last commit declares an early inactivity floor.
+        {
+            let mut batch = db.new_batch();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                batch = batch.write(k, Some(make_value(i)));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+        }
+        db.commit().await.unwrap();
+        let durable_floor = db.inactivity_floor_loc();
+
+        // Apply (but do not commit) a batch that advances the in-memory floor well past the
+        // durable commit's floor.
+        {
+            let mut batch = db.new_batch();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                batch = batch.write(k, Some(make_value(i + 1)));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+        }
+        let unsynced_floor = db.inactivity_floor_loc();
+        assert!(unsynced_floor > durable_floor);
+
+        // Prune to the in-memory floor, then crash before any further commit.
+        db.prune(db.sync_boundary()).await.unwrap();
+        let root = db.root();
+        let op_count = db.size();
+        drop(db);
+
+        // Reopening must succeed: pruning made the floor-declaring commit durable before the
+        // journal durably advanced its boundary past positions that commit still needs.
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
+        assert_eq!(db.size(), op_count);
+        assert_eq!(db.inactivity_floor_loc(), unsynced_floor);
+        assert_eq!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
     /// Test rewinding to a prior committed state and recovering that state after reopen.
     pub(crate) async fn test_any_db_rewind_recovery<D, V>(
         context: Context,
@@ -1451,6 +1511,7 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_non_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
     test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
 
     fn key(i: u64) -> Digest {
