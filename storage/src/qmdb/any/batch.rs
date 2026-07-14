@@ -831,8 +831,9 @@ where
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
         // Fast path: a strictly ascending batch entirely within the committed region needs no
         // in-memory resolution, reordering, or per-location bookkeeping, so the positions can
-        // be handed to the reader directly. Depth-0 mutation reads and floor-raise candidate
-        // batches that stay within the committed prefix (the common case) take this path.
+        // be handed to the reader directly. Depth-0 mutation reads take this path. Floor-raise
+        // candidate reads hit the same predicate in read_ops_sharded and reach here only when
+        // candidates cross into the uncommitted region.
         if self.all_committed_ascending(locations) {
             let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
             return Ok(reader.read_many(&positions).await?);
