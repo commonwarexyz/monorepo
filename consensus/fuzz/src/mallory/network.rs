@@ -39,7 +39,10 @@ use commonware_p2p::{
     Message,
 };
 use commonware_runtime::{Clock, IoBuf};
-use commonware_utils::{channel::mpsc, sync::Mutex};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    sync::Mutex,
+};
 use std::{
     collections::VecDeque,
     fmt,
@@ -108,6 +111,14 @@ impl<P: PublicKey, E: Clock> Topology<P, E> {
         apply_partition(&self.oracle, &self.participants, None, &self.link).await;
     }
 }
+
+/// The reply half a heal-time flush carries (the F3 quiescence barrier). The
+/// runner sends the [`oneshot::Sender`] to a [`pump`] and awaits its receiver; the
+/// pump replies with `()` only AFTER draining its held reorder buffer and finishing
+/// any in-flight per-packet delay, so once the runner's await returns that pump
+/// holds no fault-injected packet and the fault can be cleared without leaking into
+/// the next decision step.
+pub(crate) type FlushAck = oneshot::Sender<()>;
 
 /// The deterministic, param-driven transform a [`pump`] applies to one honest
 /// node's one channel. Every parameter is sampled by the runner from the runtime
@@ -352,16 +363,20 @@ fn reorder_step<P: PublicKey>(
 ///
 /// A `Reorder` fault holds packets in a per-pump bounded buffer; every other path
 /// leaves that buffer empty, so the pump stays a direct FIFO relay. `flush_rx`
-/// carries the runner's heal-time signal to drain the held buffer in order, so no
-/// held packet is stranded (biased first so a pending flush drains promptly even
-/// under a steady packet stream). Breaks when the simulated channel closes, the
-/// internal receiver is dropped, or the runner drops the flush sender at teardown
-/// (any buffer still held is then discarded).
+/// carries the runner's heal-time flush requests, each a [`FlushAck`] the pump
+/// replies on: it drains the held buffer in order, then acks, so the runner can
+/// WAIT for quiescence before clearing the fault (the F3 barrier). The flush branch
+/// is biased first so a pending flush drains promptly even under a steady packet
+/// stream, and a per-packet delay in the sim branch is polled to completion before
+/// the flush is handled -- so the ack implies no in-flight delayed packet remains.
+/// Breaks when the simulated channel closes, the internal receiver is dropped, or
+/// the runner drops the flush sender at teardown (any buffer still held is then
+/// discarded).
 pub(crate) async fn pump<P, R, E>(
     context: E,
     mut sim_rx: R,
     internal_tx: mpsc::UnboundedSender<Message<P>>,
-    mut flush_rx: mpsc::UnboundedReceiver<()>,
+    mut flush_rx: mpsc::UnboundedReceiver<FlushAck>,
     cell: PacketFaultCell,
     node: usize,
     channel: SniffChannel,
@@ -379,16 +394,24 @@ pub(crate) async fn pump<P, R, E>(
     loop {
         select! {
             // Heal-time flush (biased first): drain any held reorder packets in
-            // arrival order, then keep relaying. `None` means the runner dropped
-            // the flush sender at teardown.
-            signal = flush_rx.recv() => {
-                if signal.is_none() {
+            // arrival order, then ACK so the runner's request-reply flush can wait
+            // for quiescence before clearing the fault (F3). `None` means the runner
+            // dropped the flush sender at teardown. The ack is sent even if the
+            // internal receiver has gone away, so the runner's await never hangs.
+            ack = flush_rx.recv() => {
+                let Some(ack) = ack else {
                     break;
-                }
+                };
+                let mut alive = true;
                 while let Some(held) = buffer.pop_front() {
                     if internal_tx.send(held).is_err() {
-                        return;
+                        alive = false;
+                        break;
                     }
+                }
+                let _ = ack.send(());
+                if !alive {
+                    return;
                 }
             },
             message = sim_rx.recv() => {
@@ -505,7 +528,7 @@ mod tests {
             let (internal_tx, internal_rx) = mpsc::unbounded_channel();
             // Held for the whole drive so the pump never sees a dropped flush
             // sender; these forward tests never signal a flush.
-            let (flush_tx, flush_rx) = mpsc::unbounded_channel::<()>();
+            let (flush_tx, flush_rx) = mpsc::unbounded_channel::<FlushAck>();
             let cell = PacketFaultCell::new();
             if let Some(f) = fault {
                 cell.set(f);
@@ -550,7 +573,7 @@ mod tests {
             let from = sender();
             let (src_tx, src_rx) = mpsc::unbounded_channel::<Message<Ed25519PublicKey>>();
             let (internal_tx, internal_rx) = mpsc::unbounded_channel();
-            let (flush_tx, flush_rx) = mpsc::unbounded_channel::<()>();
+            let (flush_tx, flush_rx) = mpsc::unbounded_channel::<FlushAck>();
             let cell = PacketFaultCell::new();
             cell.set(PacketFault {
                 node: NODE,
@@ -577,10 +600,13 @@ mod tests {
             });
 
             // The pump drains the queued source at t=0; wake later to flush the
-            // held buffer in order, then close the source so the pump stops.
+            // held buffer in order (request-reply: await the pump's ack), then close
+            // the source so the pump stops.
             context.child("flusher").spawn(move |ctx| async move {
                 ctx.sleep(Duration::from_secs(1)).await;
-                let _ = flush_tx.send(());
+                let (ack_tx, ack_rx) = oneshot::channel();
+                let _ = flush_tx.send(ack_tx);
+                let _ = ack_rx.await;
                 drop(src_tx);
             });
 
@@ -786,5 +812,64 @@ mod tests {
         let mut sorted = got.clone();
         sorted.sort_unstable();
         assert_eq!(sorted, vec![1, 2, 3, 4, 5], "the flush delivers every packet exactly once");
+    }
+
+    #[test]
+    fn flush_ack_implies_the_reorder_buffer_is_drained() {
+        // F3 request-reply barrier: the pump replies to a flush only AFTER draining
+        // its held reorder buffer, so once the runner's ack await returns, every held
+        // packet is already queued for the engine -- none remains buffered in the
+        // pump to leak into the next decision step.
+        let executor = deterministic::Runner::seeded(1);
+        let drained = executor.start(|context| async move {
+            let from = sender();
+            let (src_tx, src_rx) = mpsc::unbounded_channel::<Message<Ed25519PublicKey>>();
+            let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+            let (flush_tx, flush_rx) = mpsc::unbounded_channel::<FlushAck>();
+            let cell = PacketFaultCell::new();
+            cell.set(PacketFault {
+                node: NODE,
+                channel: SniffChannel::Vote,
+                kind: PacketFaultKind::Reorder { buffer: 8 },
+            });
+            for t in [1u8, 2, 3] {
+                src_tx
+                    .send((from.clone(), IoBuf::copy_from_slice(&[t])))
+                    .unwrap();
+            }
+
+            let pump_cell = cell.clone();
+            context.child("packet_pump").spawn(move |ctx| {
+                pump(
+                    ctx,
+                    PacketFaultReceiver::new(src_rx),
+                    internal_tx,
+                    flush_rx,
+                    pump_cell,
+                    NODE,
+                    SniffChannel::Vote,
+                )
+            });
+
+            // Let the pump process the queued source (some released, some held).
+            context.sleep(Duration::from_millis(10)).await;
+            // Request-reply flush and WAIT for the ack.
+            let (ack_tx, ack_rx) = oneshot::channel();
+            flush_tx.send(ack_tx).unwrap();
+            ack_rx.await.expect("the pump must ack the flush");
+            // After the ack, every packet (released + drained-on-flush) is already
+            // queued in the engine-facing receiver.
+            let mut drained = Vec::new();
+            while let Ok((_, payload)) = internal_rx.try_recv() {
+                drained.push(payload.as_ref()[0]);
+            }
+            drained.sort_unstable();
+            drained
+        });
+        assert_eq!(
+            drained,
+            vec![1, 2, 3],
+            "the ack must imply every packet is drained (none left buffered)"
+        );
     }
 }

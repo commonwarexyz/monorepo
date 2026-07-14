@@ -471,6 +471,22 @@ pub mod capture {
         /// subset of the sender's causal past at every copy, so the merge never
         /// imports post-send history. A receive with no known sender forms only
         /// local pairs.
+        ///
+        /// Cross-node causality comes only from this send/receive matching,
+        /// never from the fold order: a deterministic interleaving is one exact
+        /// execution order, but it orders causally-concurrent events on
+        /// different nodes arbitrarily, so it is not itself a cross-node
+        /// happens-before relation. Matching keys on `(sender, kind, view)`
+        /// with no per-transmission identity, so two same-key sends separated
+        /// by other local events are indistinguishable and a receive of the
+        /// later copy inherits the earlier, smaller snapshot. The summary is
+        /// therefore causally sound (it never fabricates a pair) but
+        /// incomplete: genuine predecessor pairs can be dropped, and distinct
+        /// schedules can collapse to the same fingerprint. This coarse-state
+        /// under-approximation is an accepted tradeoff; stable per-transmission
+        /// send/delivery correlation (a distinct id per copy, not a payload
+        /// hash) would restore exact coverage if a Learned-vs-Random campaign
+        /// shows the signal warrants it.
         pub fn summary(&self) -> Summary {
             let mut s = Summary::new();
             let mut snapshots: BTreeMap<(u32, EventKind, u64), NodeHistory> = BTreeMap::new();

@@ -255,11 +255,13 @@ impl FaultPlan {
         }
     }
 
-    /// Whether this plan installs a transient network/packet fault that the runner
-    /// heals before the next decision. The lifecycle faults ([`FaultPlan::CrashStop`],
-    /// [`FaultPlan::CrashRestartDurable`], [`FaultPlan::AmnesiaRestart`]) are NOT such
-    /// faults -- they are enacted against the managed validator, so they are not
-    /// "active" here and must not trigger a topology heal.
+    /// Whether this plan installs a transient network/packet fault. The lifecycle
+    /// faults ([`FaultPlan::CrashStop`], [`FaultPlan::CrashRestartDurable`],
+    /// [`FaultPlan::AmnesiaRestart`]) are NOT such faults -- they are enacted against
+    /// the managed validator, not the network. Test-only: the runner classifies each
+    /// plan directly via its heal-match arms and its `Enactment` accounting, so this
+    /// survives only as a catalog-property assertion.
+    #[cfg(test)]
     pub(crate) fn is_active(&self) -> bool {
         !matches!(
             self,

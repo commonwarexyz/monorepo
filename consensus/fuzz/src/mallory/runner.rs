@@ -37,7 +37,10 @@ use commonware_macros::select;
 use commonware_p2p::simulated::{Oracle, Receiver as SimReceiver};
 use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor};
 use commonware_utils::{
-    channel::mpsc::{self, Receiver as ViewReceiver},
+    channel::{
+        mpsc::{self, Receiver as ViewReceiver},
+        oneshot,
+    },
     FuzzRng,
 };
 use futures::future::join_all;
@@ -52,10 +55,89 @@ const MALLORY_EPISODE_STEPS: usize = 12;
 /// from being biased toward progress-preserving actions: a step that suppresses
 /// progress is observed over the same span as one that does not.
 const MALLORY_WINDOW: Duration = Duration::from_secs(5);
+/// Brief deterministic settle run after a packet fault heals: the F3 quiescence
+/// barrier flushes the pump, then this lets the engine consume the just-flushed
+/// packets so the next-state fingerprint reflects THIS step's fault rather than
+/// bleeding into the next step. Fixed (no RNG) so a same-seed replay is identical.
+const MALLORY_SETTLE: Duration = Duration::from_millis(500);
+
+/// Env-tag bit folded into the Q-state / novelty fingerprints once node 0 has become
+/// amnesiac (Running but empty-storage, so Byzantine). A distinct nonzero constant,
+/// well-separated from every [`adversary::AdversaryRole::tag`], so post-amnesia states
+/// key distinct Q-rows and novelty slots from the pre-amnesia Honest states they would
+/// otherwise alias despite a different legality and fault model.
+const AMNESIA_TAG: u64 = 0xa3f1_9c2d_7b64_e850;
 
 /// The honest reporter type the runner clones for state extraction and liveness.
 type MalloryReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
+
+/// Whether a step's sampled action actually perturbed the run. Logging / observability
+/// ONLY (the decision log's `applied` field); it never gates learning -- a `NoEffect`
+/// action still receives its TD credit, which is the correct RL treatment of a no-op.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Enactment {
+    /// The action perturbed the run: a lifecycle or topology fault (which always take
+    /// effect), or a packet fault the pump actually matched a packet on.
+    Applied,
+    /// The action installed but changed nothing: [`action::Action::NoFault`], or a
+    /// packet fault whose pump matched no packet this window.
+    NoEffect,
+}
+
+/// The per-step environment tag folded into the Q-state and novelty fingerprints:
+/// the episode [`adversary::AdversaryRole`] tag XOR [`AMNESIA_TAG`] once node 0 is
+/// amnesiac. Under the Honest role with no amnesia this is `0` (an identity mix, so
+/// the warm campaign's honest rows are unchanged).
+fn env_tag(role: adversary::AdversaryRole, node0_amnesiac: bool) -> u64 {
+    role.tag() ^ if node0_amnesiac { AMNESIA_TAG } else { 0 }
+}
+
+/// The remaining observation sleep so a step spans exactly [`MALLORY_WINDOW`] from its
+/// start regardless of any deterministic downtime already slept during enact (a
+/// restart's [`lifecycle::MALLORY_RESTART_DOWNTIME`]). Saturates to zero if enact
+/// already exceeded the window, so a restart observes `window - downtime` and totals
+/// exactly one window, matching every non-restart step (F6).
+fn observe_remaining(window: Duration, elapsed: Duration) -> Duration {
+    window.saturating_sub(elapsed)
+}
+
+/// The post-heal liveness target every live correct node must reach: one view past the
+/// highest pre-heal frontier `max_baseline`, proving each caught up after the last
+/// fault/heal/restart, but never below the absolute `required_containers`. On overflow
+/// of `max_baseline + 1` the absolute target is kept (F2).
+fn liveness_target(required_containers: u64, max_baseline: u64) -> u64 {
+    match max_baseline.checked_add(1) {
+        Some(next) => required_containers.max(next),
+        None => required_containers,
+    }
+}
+
+/// The decision-log effect of enacting `plan`, given whether its packet pump matched a
+/// packet. Logging only (see [`Enactment`]): a lifecycle or topology fault always takes
+/// effect; a packet fault takes effect iff the pump matched; [`action::FaultPlan::None`]
+/// never does. `matched` is ignored for the non-packet arms.
+fn enactment_of(plan: &action::FaultPlan, matched: bool) -> Enactment {
+    match plan {
+        action::FaultPlan::None => Enactment::NoEffect,
+        action::FaultPlan::PacketDelay { .. }
+        | action::FaultPlan::PacketLoss { .. }
+        | action::FaultPlan::PacketCorrupt { .. }
+        | action::FaultPlan::PacketDuplicate { .. }
+        | action::FaultPlan::PacketReorder { .. } => {
+            if matched {
+                Enactment::Applied
+            } else {
+                Enactment::NoEffect
+            }
+        }
+        action::FaultPlan::IsolateByzantine
+        | action::FaultPlan::Partition(_)
+        | action::FaultPlan::CrashStop
+        | action::FaultPlan::CrashRestartDurable
+        | action::FaultPlan::AmnesiaRestart => Enactment::Applied,
+    }
+}
 
 /// Which action-selection policy an episode uses.
 #[derive(Clone, Copy, Debug)]
@@ -115,7 +197,7 @@ fn spawn_packet_pump<P: Simplex>(
     channel: SniffChannel,
 ) -> (
     network::PacketFaultReceiver<PublicKeyOf<P>>,
-    mpsc::UnboundedSender<()>,
+    mpsc::UnboundedSender<network::FlushAck>,
 ) {
     let (internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (flush_tx, flush_rx) = mpsc::unbounded_channel();
@@ -125,12 +207,15 @@ fn spawn_packet_pump<P: Simplex>(
     (network::PacketFaultReceiver::new(internal_rx), flush_tx)
 }
 
-/// Signal the pump for `(node, channel)` to drain its held reorder buffer in
-/// arrival order. Only that single pump ever buffers (one fault is active at a
-/// time), so this is a no-op for every other pump. A dropped receiver (the pump
-/// stopped) is ignored.
-fn flush_pump(
-    senders: &[(usize, SniffChannel, mpsc::UnboundedSender<()>)],
+/// Signal the pump for `(node, channel)` to drain its held reorder buffer in arrival
+/// order and finish any in-flight per-packet delay, and WAIT for its ack (the F3
+/// quiescence barrier): once this returns, that pump holds no fault-injected packet, so
+/// the runner may clear the fault without step N's effects leaking into step N+1. Only
+/// the single active pump ever buffers (one fault at a time), so every other pump acks
+/// immediately. A dropped receiver or a failed send (the pump stopped) is ignored --
+/// there is nothing to drain from a stopped pump.
+async fn flush_pump_and_wait(
+    senders: &[(usize, SniffChannel, mpsc::UnboundedSender<network::FlushAck>)],
     node: usize,
     channel: SniffChannel,
 ) {
@@ -138,7 +223,10 @@ fn flush_pump(
         .iter()
         .find(|(n, c, _)| *n == node && *c == channel)
     {
-        let _ = tx.send(());
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if tx.send(ack_tx).is_ok() {
+            let _ = ack_rx.await;
+        }
     }
 }
 
@@ -147,7 +235,7 @@ fn flush_pump(
 /// pump's heal-time flush sender.
 type WrappedReceive<P, S> = (
     (S, SniffingReceiver<P, network::PacketFaultReceiver<PublicKeyOf<P>>>),
-    mpsc::UnboundedSender<()>,
+    mpsc::UnboundedSender<network::FlushAck>,
 );
 
 /// Wrap one honest node's one raw simulated channel into Mallory's receive stack:
@@ -216,7 +304,7 @@ async fn restart<P: Simplex>(
     peers: &Arc<[PublicKeyOf<P>]>,
     ambiguous: &Arc<[u32]>,
     packet_cell: &network::PacketFaultCell,
-    flush_senders: &mut Vec<(usize, SniffChannel, mpsc::UnboundedSender<()>)>,
+    flush_senders: &mut Vec<(usize, SniffChannel, mpsc::UnboundedSender<network::FlushAck>)>,
     input: &crate::FuzzInput,
     amnesia: bool,
 ) where
@@ -348,7 +436,7 @@ async fn restart_durable<P: Simplex>(
     peers: &Arc<[PublicKeyOf<P>]>,
     ambiguous: &Arc<[u32]>,
     packet_cell: &network::PacketFaultCell,
-    flush_senders: &mut Vec<(usize, SniffChannel, mpsc::UnboundedSender<()>)>,
+    flush_senders: &mut Vec<(usize, SniffChannel, mpsc::UnboundedSender<network::FlushAck>)>,
     input: &crate::FuzzInput,
 ) where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
@@ -386,7 +474,7 @@ async fn restart_amnesia<P: Simplex>(
     peers: &Arc<[PublicKeyOf<P>]>,
     ambiguous: &Arc<[u32]>,
     packet_cell: &network::PacketFaultCell,
-    flush_senders: &mut Vec<(usize, SniffChannel, mpsc::UnboundedSender<()>)>,
+    flush_senders: &mut Vec<(usize, SniffChannel, mpsc::UnboundedSender<network::FlushAck>)>,
     input: &crate::FuzzInput,
 ) where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
@@ -530,7 +618,7 @@ fn run_inner<P: Simplex>(
         // Per-pump heal-time flush senders, keyed by (node, channel). Held for the
         // whole episode so no pump ever sees a dropped flush sender mid-run; the
         // runner signals the one matching pump when a reorder fault heals.
-        let mut flush_senders: Vec<(usize, SniffChannel, mpsc::UnboundedSender<()>)> =
+        let mut flush_senders: Vec<(usize, SniffChannel, mpsc::UnboundedSender<network::FlushAck>)> =
             Vec::with_capacity(n * 3);
 
         // Each honest node's task handles are RETAINED in a `ManagedValidator` so
@@ -551,11 +639,17 @@ fn run_inner<P: Simplex>(
                 let ctx = context
                     .child("validator")
                     .with_attribute("public_key", &validator);
+                // The Equivocator shares the honest nodes' relay and leader
+                // schedule (`P::Elector::default()`, the same config the honest
+                // validators build with) so it equivocates as the elected leader;
+                // the other roles ignore both.
                 adversary::spawn_adversary::<P>(
                     role,
                     ctx,
                     schemes[i].clone(),
                     required_containers,
+                    relay.clone(),
+                    P::Elector::default(),
                     channels,
                 );
                 continue;
@@ -655,7 +749,6 @@ fn run_inner<P: Simplex>(
         let honest_indices: Vec<usize> = if byz { (1..n).collect() } else { (0..n).collect() };
         let mut reporters: Vec<MalloryReporter<P>> =
             managed.iter().map(|m| m.reporter()).collect();
-        let honest_reporters: Vec<MalloryReporter<P>> = reporters.clone();
 
         // Drain clock: the first honest reporter's finalization monitor. Used to
         // keep a current finalized frontier for the decision log and to keep the
@@ -668,9 +761,11 @@ fn run_inner<P: Simplex>(
         let mut episode_terminal = false;
         // Observe before the first decision: the initial (empty-history) HB
         // fingerprint is the step-0 Q-state, so there is no `state = 0` sentinel.
-        // The role tag is folded in so Honest and each byzantine role key distinct
-        // Q-rows / novelty (a campaign never merges incompatible environments).
-        let mut state = hb_log.summary().fingerprint() ^ role.tag();
+        // The env tag (role plus an amnesia bit) is folded in so Honest, each
+        // byzantine role, and a post-amnesia node 0 key distinct Q-rows / novelty (a
+        // campaign never merges incompatible environments). Node 0 cannot be amnesiac
+        // yet, so this reduces to the role tag.
+        let mut state = hb_log.summary().fingerprint() ^ env_tag(role, false);
         for step in 0..steps {
             // (a) Drain queued finalizations to the current frontier.
             while let Ok(v) = monitor.try_recv() {
@@ -728,6 +823,12 @@ fn run_inner<P: Simplex>(
             // shared cell every pump reads. Exactly one fault is applied per step
             // and healed before the next decision, so packet and topology faults
             // never stack (v1 contract).
+            //
+            // The step's clock starts HERE so the observation window is measured from
+            // the action's start: a restart sleeps its downtime inside enact, and
+            // folding that into the window keeps every step exactly one window long
+            // (F6) rather than a restart observing downtime + window.
+            let step_start = context.current();
             let plan = action.sample(&mut context, byz);
             let params = plan.describe();
             match &plan {
@@ -841,44 +942,54 @@ fn run_inner<P: Simplex>(
                 }
             }
 
-            // (g) Run the single fixed observation window.
-            context.sleep(MALLORY_WINDOW).await;
+            // (g) Run the single fixed observation window, measured from the action's
+            // start so a restart's in-enact downtime counts toward it (F6). A step
+            // whose enact already exceeded the window observes for zero more time.
+            let elapsed = context
+                .current()
+                .duration_since(step_start)
+                .unwrap_or_default();
+            context
+                .sleep(observe_remaining(MALLORY_WINDOW, elapsed))
+                .await;
 
             // (h) Settle ready work queued during the window.
             while let Ok(v) = monitor.try_recv() {
                 finalized = finalized.max(v.get());
             }
 
-            // (i) Heal the transient fault before the next decision, so at most
-            // one fault is ever active (v1 contract). A topology fault heals via
-            // the topology authority; a packet fault heals by clearing the shared
-            // cell (every pump reverts to a transparent relay and its counters
-            // reset). `matched` is read before the clear resets it, so an applied-
-            // but-matched-nothing packet fault is diagnosable. NoFault installs
-            // nothing, so there is nothing to heal.
-            let applied = plan.is_active();
-            let (healed, matched_log) = match &plan {
-                action::FaultPlan::None => ("none", "n/a".to_string()),
+            // (i) Heal the transient fault before the next decision, so at most one
+            // fault is ever active (v1 contract). A topology fault heals via the
+            // topology authority. A packet fault heals behind the F3 QUIESCENCE
+            // BARRIER: request-reply flush the target pump and WAIT for its ack, which
+            // (single-threaded pump) implies its reorder buffer is drained and any
+            // in-flight per-packet delay finished, so no fault-injected packet is left
+            // buffered; then clear the cell and run a brief deterministic settle so the
+            // engine consumes the just-flushed packets before next-state -- keeping
+            // this step's fault effect out of the next step. `matched` is read before
+            // the clear resets it. `enactment` is logging-only (F8): a packet fault
+            // that matched nothing is `NoEffect`, a lifecycle/topology fault is always
+            // `Applied`. NoFault installs nothing, so there is nothing to heal.
+            let (healed, matched_log, enactment) = match &plan {
+                action::FaultPlan::None => ("none", "n/a".to_string(), Enactment::NoEffect),
                 action::FaultPlan::IsolateByzantine | action::FaultPlan::Partition(_) => {
                     topology.heal().await;
-                    ("mesh", "n/a".to_string())
+                    ("mesh", "n/a".to_string(), Enactment::Applied)
                 }
-                action::FaultPlan::PacketDelay { .. }
-                | action::FaultPlan::PacketLoss { .. }
-                | action::FaultPlan::PacketCorrupt { .. }
-                | action::FaultPlan::PacketDuplicate { .. } => {
+                action::FaultPlan::PacketDelay { node, channel, .. }
+                | action::FaultPlan::PacketLoss { node, channel, .. }
+                | action::FaultPlan::PacketCorrupt { node, channel, .. }
+                | action::FaultPlan::PacketDuplicate { node, channel, .. }
+                | action::FaultPlan::PacketReorder { node, channel, .. } => {
                     let matched = packet_cell.matched();
+                    flush_pump_and_wait(&flush_senders, *node, *channel).await;
                     packet_cell.clear();
-                    ("packet_clear", matched.to_string())
-                }
-                action::FaultPlan::PacketReorder { node, channel, .. } => {
-                    // Drain the pump's held reorder buffer in order BEFORE clearing,
-                    // so no held packet is lost mid-episode (liveness). Only this
-                    // pump ever buffers, so signaling its (node, channel) suffices.
-                    let matched = packet_cell.matched();
-                    flush_pump(&flush_senders, *node, *channel);
-                    packet_cell.clear();
-                    ("packet_flush", matched.to_string())
+                    context.sleep(MALLORY_SETTLE).await;
+                    (
+                        "packet_flush",
+                        matched.to_string(),
+                        enactment_of(&plan, matched),
+                    )
                 }
                 action::FaultPlan::CrashStop
                 | action::FaultPlan::CrashRestartDurable
@@ -887,28 +998,57 @@ fn run_inner<P: Simplex>(
                     // not the network: there is no topology or packet fault to heal
                     // (re-meshing links does not un-crash a node). The episode-end
                     // heal still runs so a restarted node can catch up.
-                    ("lifecycle", "n/a".to_string())
+                    ("lifecycle", "n/a".to_string(), Enactment::Applied)
                 }
             };
 
-            // (j) Next abstract state and the reward's protocol-state descriptor,
-            // each folded with the role tag so `select`, `reward`, and `learn` all
-            // key the environment-specific Q-row / novelty (see the initial `state`).
-            let hb_fp = (hb_log.summary().fingerprint()) ^ role.tag();
-            let state_fp = state::state_descriptor::<P>(&honest_reporters, n) ^ role.tag();
+            // The packet-fault settle above may have produced new finalizations;
+            // fold them into the frontier before next-state.
+            while let Ok(v) = monitor.try_recv() {
+                finalized = finalized.max(v.get());
+            }
+
+            // Node 0's POST-enact lifecycle: an amnesia restart THIS step flips it to
+            // Amnesiac (Byzantine), which changes both the environment tag folded into
+            // the next fingerprints (F5a) and the legal bootstrap mask (F4). Under a
+            // byzantine role node 0 is unmanaged, so both stay false (short-circuit).
+            let node0_crashed_next =
+                !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Crashed);
+            let node0_amnesiac_next =
+                !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Amnesiac);
+            let next_tag = env_tag(role, node0_amnesiac_next);
+
+            // (j) Next abstract state and the reward's protocol-state descriptor, each
+            // folded with the env tag so `select`, `reward`, and `learn` all key the
+            // environment-specific Q-row / novelty (see the initial `state`). The reward
+            // descriptor is over the CURRENT correct reporters only (F5b): a crash-
+            // stopped node (no live engine) and an amnesiac node 0 (now Byzantine, and
+            // whose setup-clone reporter is stale after `adopt_amnesiac`) are excluded,
+            // so the reward reflects honest protocol state. The setup `reporters` clone
+            // is retained unchanged for the episode-end safety oracle.
+            let hb_fp = (hb_log.summary().fingerprint()) ^ next_tag;
+            let reward_reporters: Vec<MalloryReporter<P>> = (0..managed.len())
+                .filter(|&k| matches!(managed[k].lifecycle(), ValidatorLifecycle::Running))
+                .map(|k| reporters[k].clone())
+                .collect();
+            let state_fp = state::state_descriptor::<P>(&reward_reporters, n) ^ next_tag;
             // Terminal on the last step or when a crash-stop ended the episode.
             let terminal = step + 1 == steps || episode_terminal;
 
-            // (k) TD update (Learned only). Terminal on the last step (no
-            // bootstrap); the bootstrap max is over the actions legal at `next`.
+            // (k) TD update (Learned only). Terminal on the last step (no bootstrap);
+            // otherwise the bootstrap max is over the actions legal at NEXT --
+            // recomputed from node 0's POST-enact lifecycle so an amnesia restart, which
+            // flips the lifecycle faults illegal, does not bootstrap over now-illegal
+            // columns (F4). `select` above still used the pre-enact `legal`.
             let reward_log = if matches!(chooser, Chooser::Learned) {
+                let legal_next = action::legal_mask(node0_crashed_next, byz, node0_amnesiac_next);
                 let campaign = policy::campaign(action::N_ACTIONS);
                 let mut c = campaign.lock();
                 let reward = c.reward(state_fp, hb_fp);
                 if terminal {
                     c.policy.learn_terminal(state, action_id, reward);
                 } else {
-                    c.policy.learn(state, action_id, reward, hb_fp, &legal);
+                    c.policy.learn(state, action_id, reward, hb_fp, &legal_next);
                 }
                 format!("{reward}")
             } else {
@@ -928,7 +1068,7 @@ fn run_inner<P: Simplex>(
                 format!("{:?}", managed[0].lifecycle())
             };
             log::push(format!(
-                "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} action={action:?} legal={legal:?} params=[{params}] applied={applied} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} finalized={finalized} next_state={hb_fp:#018x} state_desc={state_fp:#018x} reward={reward_log} window={MALLORY_WINDOW:?} heal={healed} matched={matched_log}",
+                "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} action={action:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} finalized={finalized} next_state={hb_fp:#018x} state_desc={state_fp:#018x} reward={reward_log} window={MALLORY_WINDOW:?} heal={healed} matched={matched_log}",
                 role.label()
             ));
             state = hb_fp;
@@ -950,9 +1090,12 @@ fn run_inner<P: Simplex>(
         // the step's reorder buffer, so every pump's buffer is empty here. Signal
         // them all anyway so any residual held packet is drained in order rather
         // than stranded; anything not drained is discarded when the pump tasks are
-        // dropped at teardown (stale pre-catch-up packets).
+        // dropped at teardown (stale pre-catch-up packets). No wait needed here: the
+        // ack is DISCARDED (drop the receiver) -- held packets drain during the
+        // liveness catch-up below.
         for (_, _, tx) in &flush_senders {
-            let _ = tx.send(());
+            let (ack_tx, _ack_rx) = oneshot::channel();
+            let _ = tx.send(ack_tx);
         }
 
         // Unified "node 0 is Byzantine" flag, read HERE (episode end) so a late
@@ -997,10 +1140,22 @@ fn run_inner<P: Simplex>(
             let node = honest_indices[k];
             let (latest, monitor): (View, ViewReceiver<View>) = reporters[k].subscribe().await;
             watch_targets.push((k, node, latest.get()));
-            watcher_inputs.push((node, required_containers, latest, monitor));
+            watcher_inputs.push((node, latest, monitor));
         }
+        // Require post-heal PROGRESS, not just the absolute frontier (F2): after a
+        // full episode the honest nodes are already well past `required_containers`,
+        // so a node wedged by the LAST fault/heal/restart would pass instantly against
+        // it. Instead every live correct node must reach one view past the HIGHEST
+        // pre-heal frontier, proving it caught up. The target never drops below
+        // `required_containers` (a very short episode) and stays there on overflow.
+        let max_baseline = watch_targets
+            .iter()
+            .map(|&(_, _, baseline)| baseline)
+            .max()
+            .unwrap_or(0);
+        let target = liveness_target(required_containers, max_baseline);
         let mut watchers = Vec::with_capacity(watcher_inputs.len());
-        for (node, target, mut latest, mut monitor) in watcher_inputs {
+        for (node, mut latest, mut monitor) in watcher_inputs {
             watchers.push(
                 context
                     .child("mallory_liveness_watcher")
@@ -1033,7 +1188,7 @@ fn run_inner<P: Simplex>(
                 );
             }
             panic!(
-                "mallory: no post-episode liveness within {POST_GST_WINDOW:?} (target={required_containers});{diag}"
+                "mallory: no post-episode liveness within {POST_GST_WINDOW:?} (target={target} required_containers={required_containers} max_baseline={max_baseline});{diag}"
             );
         }
 
@@ -1144,6 +1299,193 @@ mod tests {
             assert!(legal[learned], "softmax select must return a legal id");
             let random = select_uniform_legal(&legal, &mut rng);
             assert!(legal[random], "uniform select must return a legal id");
+        }
+    }
+
+    #[test]
+    fn observe_remaining_folds_downtime_into_the_window() {
+        // F6: a restart sleeps its downtime during enact, so the remaining
+        // observation is `window - downtime`; a plain step observes the full window;
+        // an over-budget enact observes nothing (saturating). Every step totals one
+        // window.
+        assert_eq!(
+            observe_remaining(MALLORY_WINDOW, Duration::ZERO),
+            MALLORY_WINDOW,
+            "a plain step observes the full window"
+        );
+        assert_eq!(
+            observe_remaining(MALLORY_WINDOW, lifecycle::MALLORY_RESTART_DOWNTIME),
+            MALLORY_WINDOW - lifecycle::MALLORY_RESTART_DOWNTIME,
+            "a restart observes the window minus its downtime"
+        );
+        assert_eq!(
+            observe_remaining(MALLORY_WINDOW, MALLORY_WINDOW * 2),
+            Duration::ZERO,
+            "an over-budget enact observes nothing"
+        );
+    }
+
+    #[test]
+    fn restart_and_plain_steps_span_the_same_window() {
+        // F6 in the deterministic runtime: a step that sleeps the restart downtime
+        // during enact then observes `observe_remaining` spans exactly one
+        // MALLORY_WINDOW from its start -- identical to a plain step with no downtime.
+        let executor = deterministic::Runner::seeded(1);
+        executor.start(|context| async move {
+            let start = context.current();
+            context.sleep(lifecycle::MALLORY_RESTART_DOWNTIME).await;
+            let elapsed = context.current().duration_since(start).unwrap();
+            context
+                .sleep(observe_remaining(MALLORY_WINDOW, elapsed))
+                .await;
+            let restart_span = context.current().duration_since(start).unwrap();
+
+            let plain_start = context.current();
+            let plain_elapsed = context.current().duration_since(plain_start).unwrap();
+            context
+                .sleep(observe_remaining(MALLORY_WINDOW, plain_elapsed))
+                .await;
+            let plain_span = context.current().duration_since(plain_start).unwrap();
+
+            assert_eq!(restart_span, MALLORY_WINDOW, "a restart step spans one window");
+            assert_eq!(plain_span, MALLORY_WINDOW, "a plain step spans one window");
+            assert_eq!(
+                restart_span, plain_span,
+                "a restart step and a plain step span the same total window"
+            );
+        });
+    }
+
+    #[test]
+    fn liveness_target_requires_progress_past_the_frontier() {
+        // F2: the post-heal target is one view past the HIGHEST pre-heal frontier, so
+        // a node wedged by the last fault/heal/restart cannot pass by sitting at the
+        // frontier; it never drops below required_containers, and stays there on
+        // overflow.
+        assert_eq!(liveness_target(2, 10), 11, "one view past the frontier");
+        assert_eq!(liveness_target(20, 10), 20, "never below required_containers");
+        assert_eq!(
+            liveness_target(2, u64::MAX),
+            2,
+            "overflow keeps required_containers"
+        );
+        assert_eq!(
+            liveness_target(0, 0),
+            1,
+            "an empty frontier still demands one view of progress"
+        );
+    }
+
+    #[test]
+    fn env_tag_separates_post_amnesia_from_every_other_environment() {
+        // F5a: the amnesia bit keys a distinct Q-state / novelty slot, so post-amnesia
+        // node 0 no longer aliases the pre-amnesia Honest environment (nor any role).
+        assert_ne!(AMNESIA_TAG, 0, "the amnesia tag must be nonzero");
+        assert_eq!(
+            env_tag(adversary::AdversaryRole::Honest, false),
+            adversary::AdversaryRole::Honest.tag(),
+            "no amnesia reduces to the role tag"
+        );
+        assert_ne!(
+            env_tag(adversary::AdversaryRole::Honest, true),
+            env_tag(adversary::AdversaryRole::Honest, false),
+            "post-amnesia must differ from Honest"
+        );
+        for role in [
+            adversary::AdversaryRole::Honest,
+            adversary::AdversaryRole::Disrupter,
+            adversary::AdversaryRole::Conflicter,
+            adversary::AdversaryRole::Nuller,
+            adversary::AdversaryRole::Equivocator,
+            adversary::AdversaryRole::Impersonator,
+            adversary::AdversaryRole::Outdated,
+        ] {
+            assert_ne!(
+                env_tag(adversary::AdversaryRole::Honest, true),
+                env_tag(role, false),
+                "post-amnesia must not alias {role:?}"
+            );
+            // Equivalently, every role tag is distinct from AMNESIA_TAG, so no role
+            // environment collides with the post-amnesia environment as a Q-state key.
+            assert_ne!(role.tag(), AMNESIA_TAG, "{role:?} tag must differ from AMNESIA_TAG");
+        }
+    }
+
+    #[test]
+    fn enactment_accounts_lifecycle_applied_and_ineffective_packet_noeffect() {
+        // F8 (logging only): a lifecycle fault always logs Applied (the old
+        // is_active()-driven field logged applied=false for it); a packet fault that
+        // matched no packet logs NoEffect (the old field logged applied=true);
+        // NoFault is NoEffect.
+        let loss = action::FaultPlan::PacketLoss {
+            node: 1,
+            channel: crate::SniffChannel::Vote,
+            drop_count: 3,
+        };
+        assert_eq!(
+            enactment_of(&loss, true),
+            Enactment::Applied,
+            "a packet fault that matched is Applied"
+        );
+        assert_eq!(
+            enactment_of(&loss, false),
+            Enactment::NoEffect,
+            "a packet fault that matched nothing is NoEffect"
+        );
+        for plan in [
+            action::FaultPlan::CrashStop,
+            action::FaultPlan::CrashRestartDurable,
+            action::FaultPlan::AmnesiaRestart,
+            action::FaultPlan::IsolateByzantine,
+        ] {
+            assert_eq!(
+                enactment_of(&plan, false),
+                Enactment::Applied,
+                "{plan:?} always takes effect"
+            );
+        }
+        assert_eq!(
+            enactment_of(&action::FaultPlan::None, false),
+            Enactment::NoEffect,
+            "NoFault is NoEffect"
+        );
+    }
+
+    #[test]
+    fn amnesia_bootstrap_mask_excludes_lifecycle_columns() {
+        // F4: the runner recomputes the NEXT-state legal mask from node 0's POST-enact
+        // lifecycle and passes THAT as the TD bootstrap mask. After an amnesia restart
+        // that mask must exclude the three lifecycle columns the pre-enact running mask
+        // includes, so the bootstrap max cannot span a now-illegal lifecycle action.
+        // (The policy's exclusion of illegal columns from the bootstrap max is proven
+        // in `policy::tests::legal_mask_excludes_illegal_from_select_and_bootstrap`.)
+        let running = action::legal_mask(false, false, false);
+        let amnesiac = action::legal_mask(false, false, true);
+        for id in [
+            action::Action::CrashStop.id(),
+            action::Action::CrashRestartDurable.id(),
+            action::Action::AmnesiaRestart.id(),
+        ] {
+            assert!(running[id], "lifecycle columns are legal pre-enact (running)");
+            assert!(
+                !amnesiac[id],
+                "lifecycle columns must be excluded from the post-amnesia bootstrap mask"
+            );
+        }
+        // The two masks differ EXACTLY on the lifecycle columns, so the fix changes
+        // the bootstrap only for amnesia and leaves every other step untouched.
+        for id in 0..action::N_ACTIONS {
+            let is_lifecycle = matches!(
+                action::Action::from_id(id),
+                action::Action::CrashStop
+                    | action::Action::CrashRestartDurable
+                    | action::Action::AmnesiaRestart
+            );
+            assert_eq!(
+                running[id] != amnesiac[id],
+                is_lifecycle,
+                "masks differ exactly on lifecycle columns (id {id})"
+            );
         }
     }
 
@@ -1522,5 +1864,34 @@ mod tests {
     #[ignore]
     fn nuller_role_completes_and_safety_holds() {
         assert_byzantine_role_completes(adversary::AdversaryRole::Nuller, "nuller");
+    }
+
+    /// A [`adversary::AdversaryRole::Equivocator`] at node 0 (different proposals to
+    /// different nodes, consuming the vote and certificate channels) is tolerated:
+    /// the three honest nodes reach `required_containers` and safety holds over the
+    /// honest-only set -- node 0's equivocation is excluded from the vote check.
+    #[test]
+    #[ignore]
+    fn equivocator_role_completes_and_safety_holds() {
+        assert_byzantine_role_completes(adversary::AdversaryRole::Equivocator, "equivocator");
+    }
+
+    /// An [`adversary::AdversaryRole::Impersonator`] at node 0 (votes re-signed under
+    /// a swapped signer index on the vote channel) is tolerated: the three honest
+    /// nodes reach `required_containers` and safety holds over the honest-only set.
+    #[test]
+    #[ignore]
+    fn impersonator_role_completes_and_safety_holds() {
+        assert_byzantine_role_completes(adversary::AdversaryRole::Impersonator, "impersonator");
+    }
+
+    /// An [`adversary::AdversaryRole::Outdated`] at node 0 (re-notarizing/finalizing
+    /// a stale earlier-view proposal on the vote channel) is tolerated: the three
+    /// honest nodes reach `required_containers` and safety holds over the honest-only
+    /// set.
+    #[test]
+    #[ignore]
+    fn outdated_role_completes_and_safety_holds() {
+        assert_byzantine_role_completes(adversary::AdversaryRole::Outdated, "outdated");
     }
 }
