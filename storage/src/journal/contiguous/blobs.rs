@@ -289,6 +289,7 @@ impl<E: Context> Writable<E> {
         self.sealed.push(sealed);
         self.sealed_snapshot = None;
         debug_assert!(self.predecessor_sync.is_none());
+
         // seal() waits for any outstanding writer sync, so a successful seal proves any prior
         // tail sync already succeeded.
         self.tail_sync = None;
