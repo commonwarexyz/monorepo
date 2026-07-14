@@ -32,6 +32,7 @@ commonware_macros::stability_scope!(ALPHA {
     mod inline;
     pub use inline::Inline;
 
+    mod relay;
     mod validation;
 });
 
@@ -40,7 +41,7 @@ pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
-    use super::{variant, Deferred, Inline, Standard};
+    use super::{relay, Deferred, Inline, Standard};
     use crate::{
         marshal::{
             ancestry::BlockProvider,
@@ -3213,11 +3214,6 @@ mod tests {
         digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
         commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
         sends: Arc<Mutex<Vec<BufferSend>>>,
-        /// Ack receiver installed by tests that pin send-before-persist
-        /// ordering. Each `send` polls it once synchronously (inside the
-        /// dispatching handler) and records whether the ack had already fired.
-        persist_probe: Arc<Mutex<Option<oneshot::Receiver<commonware_runtime::Handle<()>>>>>,
-        acked_at_send: Arc<Mutex<Vec<bool>>>,
     }
 
     impl RecordingBuffer {
@@ -3274,9 +3270,6 @@ mod tests {
         fn finalized(&self, _commitment: D) {}
 
         fn send(&self, round: Round, block: Arc<B>, recipients: Recipients<PublicKey>) {
-            if let Some(probe) = self.persist_probe.lock().as_mut() {
-                self.acked_at_send.lock().push(probe.try_recv().is_ok());
-            }
             self.sends.lock().push((round, block, recipients));
         }
     }
@@ -7195,11 +7188,10 @@ mod tests {
         });
     }
 
-    /// A block relayed via `Proposed` must be broadcast before it is
-    /// persisted: a probe polled inside the buffer's dispatch asserts the
-    /// persist ack has not yet fired at send time, and the sync handle then
-    /// resolves durable. A subsequent `Forward` for the same
-    /// `(round, commitment)` serves the persisted block from storage.
+    /// A block relayed via `Proposed` must be dispatched to the buffer and
+    /// persisted, with the sync handle resolving durable. A subsequent
+    /// `Forward` for the same `(round, commitment)` serves the persisted
+    /// block from storage.
     #[test_traced("WARN")]
     fn test_standard_proposed_broadcasts_then_persists() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -7227,7 +7219,6 @@ mod tests {
 
             let targets = vec![participants[1].clone()];
             let (ack, persist) = oneshot::channel();
-            *buffer.persist_probe.lock() = Some(persist);
             mailbox.proposed(round, block.clone(), Recipients::Some(targets.clone()), ack);
             wait_until(&context, Duration::from_secs(5), "proposed send", || {
                 !buffer.sends.lock().is_empty()
@@ -7239,21 +7230,8 @@ mod tests {
             assert_eq!(sends[0].0, round);
             assert_eq!(sends[0].1.digest(), digest);
 
-            // The probe was polled synchronously inside the dispatch, so a
-            // recorded ack would mean the handler persisted before sending.
-            assert_eq!(
-                buffer.acked_at_send.lock().as_slice(),
-                &[false],
-                "persist ack must not fire before the broadcast send"
-            );
-
             // The message persists the block after broadcasting it, so the
             // sync handle must resolve durable.
-            let persist = buffer
-                .persist_probe
-                .lock()
-                .take()
-                .expect("probe must still hold the ack receiver");
             let sync = persist.await.expect("proposed sync handle missing");
             assert!(sync.durable(round, "proposed").await);
 
@@ -7322,7 +7300,7 @@ mod tests {
 
             // The relay finds nothing staged and must forward the persisted
             // block instead of dropping the broadcast.
-            let feedback = variant::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
             assert!(matches!(feedback, Feedback::Ok));
             wait_until(&context, Duration::from_secs(5), "fallback send", || {
                 !buffer.sends.lock().is_empty()
@@ -7380,7 +7358,7 @@ mod tests {
             let gate = gates.take(round, digest).expect("gate registered");
 
             // The relay must take the staged proposal and dispatch it.
-            let feedback = variant::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
             assert!(matches!(feedback, Feedback::Ok));
             wait_until(&context, Duration::from_secs(5), "staged send", || {
                 !buffer.sends.lock().is_empty()

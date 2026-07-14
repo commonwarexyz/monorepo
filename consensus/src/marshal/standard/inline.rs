@@ -47,11 +47,12 @@ use crate::{
         application::gates::{self, Gates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
+            relay,
             validation::{
                 await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
                 ParentCheck,
             },
-            variant, Standard,
+            Standard,
         },
         Update,
     },
@@ -647,7 +648,7 @@ where
     type Plan = Plan<S::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
-        variant::broadcast(&self.gates, &self.marshal, commitment, plan)
+        relay::broadcast(&self.gates, &self.marshal, commitment, plan)
     }
 }
 
