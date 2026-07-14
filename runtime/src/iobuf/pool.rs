@@ -389,10 +389,23 @@ impl BufferPoolConfig {
 
     /// Returns a copy of this config with an explicit per-thread cache size.
     ///
-    /// The explicit capacity replaces the automatic derivation and clamps
-    /// independently to each class limit, so one small class cannot invalidate
-    /// the configuration. Global-freelist striping is set separately by
-    /// [`Self::with_parallelism`].
+    /// Each size class keeps a small per-thread cache of free buffers for
+    /// same-thread reuse. By default its capacity is derived per class from
+    /// the class limit and [`Self::parallelism`], reserving about half of the
+    /// class for the shared global freelist. An explicit capacity replaces
+    /// that derivation and may be larger or smaller than the derived value.
+    ///
+    /// The effective capacity for each class is `min(capacity, class limit)`.
+    /// Clamping happens independently per class, so one small class cannot
+    /// invalidate the configuration.
+    ///
+    /// Buffers held in a thread's cache are invisible to other threads until
+    /// they spill to the global freelist or the thread exits, and each thread
+    /// can retain up to the effective capacity of every class it touches.
+    /// Larger values favor same-thread reuse while smaller values favor
+    /// cross-thread visibility and a lower per-thread memory ceiling.
+    ///
+    /// Global-freelist striping is set separately by [`Self::with_parallelism`].
     pub const fn with_max_thread_cache_capacity(mut self, capacity: NonZeroUsize) -> Self {
         self.thread_cache_config = BufferPoolThreadCacheConfig::Enabled(Some(capacity));
         self
