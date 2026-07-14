@@ -101,9 +101,7 @@ where
         while let Some((commit, acknowledgement)) = self.commits.recv().await {
             let height = commit.height();
             let timer = self.metrics.finalize_duration.timer(&context);
-            let (digest, prune) = commit
-                .apply(&context, &mut self.app, &self.databases)
-                .await;
+            let (digest, prune) = commit.apply(&context, &mut self.app, &self.databases).await;
             // The batch is durable: release the marshal acknowledgement.
             acknowledgement.acknowledge();
             timer.observe(&context);
@@ -149,14 +147,14 @@ where
         // Acquire before spawning so shutdown waits even if the committer has
         // not yet been polled.
         let shutdown = self.context.as_present().stopped();
-        let committer = self
-            .context
-            .as_present()
-            .child("committer")
-            .spawn(move |context| async move {
-                let _shutdown = shutdown;
-                committer.run(context).await;
-            });
+        let committer =
+            self.context
+                .as_present()
+                .child("committer")
+                .spawn(move |context| async move {
+                    let _shutdown = shutdown;
+                    committer.run(context).await;
+                });
 
         let mut pending_prune = None;
         select_loop! {
@@ -680,11 +678,7 @@ mod tests {
                 ack2_latency >= ack1_latency + COMMIT_LATENCY,
                 "commits must be applied in finalization order: {ack2_latency:?}",
             );
-            assert_eq!(
-                commits.lock().completed,
-                2,
-                "both batches must be durable"
-            );
+            assert_eq!(commits.lock().completed, 2, "both batches must be durable");
 
             // Global shutdown with a commit in flight must wait for that mutable
             // storage operation to finish before the processing actor exits.
@@ -700,7 +694,11 @@ mod tests {
             while commits.lock().started < 3 {
                 context.sleep(Duration::from_millis(1)).await;
             }
-            assert_eq!(commits.lock().completed, 2, "third commit must still be in flight");
+            assert_eq!(
+                commits.lock().completed,
+                2,
+                "third commit must still be in flight"
+            );
 
             context
                 .child("stop")
@@ -712,11 +710,7 @@ mod tests {
                 .await
                 .expect("processing actor must drain the committer");
             waiter3.await.expect("queued commit must be acknowledged");
-            assert_eq!(
-                commits.lock().completed,
-                3,
-                "queued commit must be durable"
-            );
+            assert_eq!(commits.lock().completed, 3, "queued commit must be durable");
         });
     }
 

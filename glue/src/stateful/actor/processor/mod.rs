@@ -715,10 +715,7 @@ where
                 return Err(PrepareBatchesError::Cancelled);
             };
 
-            if !A::Databases::matches_sync_targets(
-                &merkleized,
-                &A::sync_targets(block.as_ref()),
-            ) {
+            if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(block.as_ref())) {
                 warn!(
                     ?target_digest,
                     block = ?digest,
@@ -789,7 +786,10 @@ where
         // block commitments previously enforced by `Application::verify`.
         let batch = match self.pending.get_mut(&digest) {
             Some(entry) => {
-                assert!(!entry.committing, "finalized digest already staged for commit");
+                assert!(
+                    !entry.committing,
+                    "finalized digest already staged for commit"
+                );
                 entry.committing = true;
                 entry.merkleized.clone()
             }
@@ -859,9 +859,7 @@ where
         commit: Commit<E, A>,
     ) -> Option<Prune<PendingSyncTargets<A, E>>> {
         let timer = self.metrics.finalize_duration.timer(context);
-        let (digest, prune) = commit
-            .apply(context, &mut self.app, &self.databases)
-            .await;
+        let (digest, prune) = commit.apply(context, &mut self.app, &self.databases).await;
         timer.observe(context);
         self.commit_complete(&digest);
         prune
@@ -874,7 +872,10 @@ where
             .pending
             .remove(digest)
             .expect("commit completion for an unknown digest");
-        assert!(entry.committing, "commit completion for a digest that was not staged");
+        assert!(
+            entry.committing,
+            "commit completion for a digest that was not staged"
+        );
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
     }
 
@@ -1036,9 +1037,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        await_or_cancel, fetch_ancestor, PrepareBatchesError, Processor, Prune, Pruning,
-    };
+    use super::{await_or_cancel, fetch_ancestor, PrepareBatchesError, Processor, Prune, Pruning};
     use crate::stateful::{
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
@@ -1922,10 +1921,7 @@ mod tests {
 
             let commit1 = harness
                 .processor
-                .finalize(
-                    harness.context_cell.as_present(),
-                    Arc::new(block1.clone()),
-                )
+                .finalize(harness.context_cell.as_present(), Arc::new(block1.clone()))
                 .await
                 .expect("staging must produce commit work");
             assert!(
@@ -1936,10 +1932,7 @@ mod tests {
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             let commit2 = harness
                 .processor
-                .finalize(
-                    harness.context_cell.as_present(),
-                    Arc::new(block2.clone()),
-                )
+                .finalize(harness.context_cell.as_present(), Arc::new(block2.clone()))
                 .await
                 .expect("staging must produce commit work");
             assert!(
@@ -2150,10 +2143,7 @@ mod tests {
 
             let _commit = harness
                 .processor
-                .finalize(
-                    harness.context_cell.as_present(),
-                    Arc::new(block1.clone()),
-                )
+                .finalize(harness.context_cell.as_present(), Arc::new(block1.clone()))
                 .await
                 .expect("first finalization must produce commit work");
 

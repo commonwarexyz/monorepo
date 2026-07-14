@@ -267,7 +267,8 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    if let Some(commit) = processor.finalize(self.context.as_present(), block).await {
+                    if let Some(commit) = processor.finalize(self.context.as_present(), block).await
+                    {
                         let height = commit.height();
                         let prune = processor.commit(self.context.as_present(), commit).await;
                         if let Some(prune) = prune {
