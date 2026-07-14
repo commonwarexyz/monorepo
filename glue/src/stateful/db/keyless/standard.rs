@@ -152,7 +152,6 @@ where
     }
 }
 
-/// Cloning shares the same underlying merkleized batch and database handle.
 impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,

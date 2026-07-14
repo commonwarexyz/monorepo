@@ -129,10 +129,7 @@ pub trait Unmerkleized: Sized + Send {
 /// The application uses [`root`](Self::root) in block headers, and the wrapper
 /// later finalizes this batch.
 ///
-/// Implementations must be cheap, shareable handles (typically `Arc`-backed):
-/// cloning shares the same underlying batch. The stateful actor relies on this
-/// to retain a forkable pending entry while a clone of the same batch is
-/// committed off the actor loop.
+/// Clones must cheaply share the underlying batch, typically via `Arc`.
 pub trait Merkleized: Sized + Send + Sync + Clone {
     /// The digest type used for the state root.
     type Digest: Digest;

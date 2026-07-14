@@ -5,7 +5,7 @@ use crate::stateful::{
             processing::Processing,
         },
         metrics::Metrics as StatefulMetrics,
-        processor::{FinalizeStatus, Processor},
+        processor::Processor,
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
@@ -267,17 +267,12 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let (status, commit) =
-                        processor.finalize(self.context.as_present(), block).await;
-                    if let Some(commit) = commit {
-                        // No committer is running yet: apply the staged commit
-                        // inline before acknowledging.
+                    if let Some(commit) = processor.finalize(self.context.as_present(), block).await {
+                        let height = commit.height();
                         let prune = processor.commit(self.context.as_present(), commit).await;
                         if let Some(prune) = prune {
                             prune.run(processor.databases_mut(), &self.marshal).await;
                         }
-                    }
-                    if let FinalizeStatus::Staged { height } = status {
                         debug!(
                             height = height.get(),
                             "persisted finalized database batch during sync handoff"

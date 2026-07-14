@@ -2,7 +2,7 @@ use crate::stateful::{
     actor::{
         core::mailbox::Message,
         metrics::Metrics as StatefulMetrics,
-        processor::{Commit, FinalizeStatus, Processor, Prune},
+        processor::{Commit, Processor, Prune},
     },
     db::DatabaseSet,
     Application,
@@ -14,7 +14,7 @@ use commonware_consensus::{
         core::{Mailbox as MarshalMailbox, Variant},
     },
     types::Height,
-    CertifiableBlock, Heightable,
+    Heightable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select_loop;
@@ -96,34 +96,21 @@ where
 {
     /// Apply staged commits until the processing loop drops the channel.
     ///
-    /// Failures are fatal by design: [`DatabaseSet::finalize`] and
-    /// [`DatabaseSet::prune`] panic internally on error, and the runtime
-    /// treats a task panic as fatal to the process.
+    /// Failures are fatal by design: database operations panic internally on
+    /// error, and the runtime treats a task panic as fatal to the process.
     async fn run(mut self, context: E) {
         while let Some((commit, acknowledgement)) = self.commits.recv().await {
-            let Commit {
-                block,
-                batch,
-                prune,
-            } = commit;
+            let height = commit.height();
             let timer = self.metrics.finalize_duration.timer(&context);
-            self.databases.finalize(batch).await;
-            self.app
-                .finalized(
-                    (context.child("finalized"), block.context()),
-                    block.as_ref(),
-                    &self.databases,
-                )
+            let (digest, prune) = commit
+                .apply(&context, &mut self.app, &self.databases)
                 .await;
             // The batch is durable: release the marshal acknowledgement.
             acknowledgement.acknowledge();
             timer.observe(&context);
-            debug!(
-                height = block.height().get(),
-                "persisted finalized database batch"
-            );
+            debug!(height = height.get(), "persisted finalized database batch");
             // Let the actor drop the pending entry retained for this commit.
-            if self.completions.send((block.digest(), prune)).is_err() {
+            if self.completions.send((digest, prune)).is_err() {
                 debug!("processing loop stopped, stopping committer");
                 return;
             }
@@ -160,13 +147,17 @@ where
         };
         // Spawned from the actor's long-lived context so the committer lives
         // exactly as long as the processing loop.
+        // Acquire before spawning so shutdown waits even if the committer has
+        // not yet been polled.
+        let shutdown = self.context.as_present().stopped();
         let committer = self
             .context
             .as_present()
             .child("committer")
-            .spawn(|context| committer.run(context));
-        let mut commit_tx = Some(commit_tx);
-        let mut committer = Some(committer);
+            .spawn(move |context| async move {
+                let _shutdown = shutdown;
+                committer.run(context).await;
+            });
 
         let mut pending_prune = None;
         select_loop! {
@@ -182,12 +173,6 @@ where
             },
             on_stopped => {
                 debug!("shutdown signal received, stopping processing");
-                drop(commit_tx.take());
-                committer
-                    .take()
-                    .expect("committer must be running")
-                    .await
-                    .expect("committer terminated unexpectedly");
             },
             // Biased before the mailbox: completions are cheap map removals
             // that stop the pending map from retaining committed entries.
@@ -257,28 +242,19 @@ where
                                 acknowledgement.acknowledge();
                                 return;
                             }
-                            let (status, commit) =
-                                self.processor.finalize(&self.context, block).await;
-                            if let FinalizeStatus::Staged { height } = status {
-                                debug!(
-                                    height = height.get(),
-                                    "staged finalized database batch for commit"
-                                );
-                            }
-                            match commit {
-                                // The committer releases the acknowledgement
-                                // only after the batch is durably committed.
-                                Some(commit) => {
-                                    if commit_tx
-                                        .as_ref()
-                                        .expect("committer sender must be open")
-                                        .send((commit, acknowledgement))
-                                        .is_err()
-                                    {
-                                        panic!("committer terminated unexpectedly");
-                                    }
-                                }
-                                None => acknowledgement.acknowledge(),
+                            let Some(commit) = self.processor.finalize(&self.context, block).await
+                            else {
+                                acknowledgement.acknowledge();
+                                return;
+                            };
+                            debug!(
+                                height = commit.height().get(),
+                                "staged finalized database batch for commit"
+                            );
+                            // The committer releases the acknowledgement only
+                            // after the batch is durably committed.
+                            if commit_tx.send((commit, acknowledgement)).is_err() {
+                                panic!("committer terminated unexpectedly");
                             }
                         }
                         .instrument(process)
@@ -299,10 +275,8 @@ where
 
         // Mutable storage operations cannot be cancelled safely. Stop accepting
         // new work and let the FIFO committer drain before this actor exits.
-        drop(commit_tx.take());
-        if let Some(committer) = committer.take() {
-            committer.await.expect("committer terminated unexpectedly");
-        }
+        drop(commit_tx);
+        committer.await.expect("committer terminated unexpectedly");
     }
 }
 
@@ -310,14 +284,10 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
     let Some(target) = *skip_until else {
         return false;
     };
-    if height > target {
-        *skip_until = None;
-        return false;
-    }
-    if height == target {
+    if height >= target {
         *skip_until = None;
     }
-    true
+    height <= target
 }
 
 #[cfg(test)]
@@ -362,18 +332,17 @@ mod tests {
         Overlay,
     }
 
-    #[derive(Clone, Copy)]
     struct PacedUnmerkleized {
         origin: ForkOrigin,
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct PacedMerkleized;
 
     #[derive(Default)]
     struct CommitLog {
         started: usize,
-        completed: Vec<std::time::SystemTime>,
+        completed: usize,
     }
 
     impl Unmerkleized for PacedUnmerkleized {
@@ -440,7 +409,7 @@ mod tests {
             // Model the durable commit fsync while the write lock is held.
             self.commits.lock().started += 1;
             self.context.sleep(COMMIT_LATENCY).await;
-            self.commits.lock().completed.push(self.context.current());
+            self.commits.lock().completed += 1;
             Ok(())
         }
 
@@ -533,7 +502,7 @@ mod tests {
         }
     }
 
-    /// Benchmark and regression test for pipelined finalization.
+    /// Regression test for pipelined finalization.
     ///
     /// A finalized block's durable commit costs [`COMMIT_LATENCY`] under the
     /// database write lock. A propose request that arrives 1ms later must not
@@ -663,7 +632,6 @@ mod tests {
                 .current()
                 .duration_since(propose_started)
                 .expect("time is monotonic");
-            println!("propose latency behind in-flight commit: {propose_latency:?}");
             assert!(
                 propose_latency < Duration::from_millis(5),
                 "propose must not queue behind the durable commit: {propose_latency:?}",
@@ -679,8 +647,9 @@ mod tests {
                 (&mut waiter1).now_or_never().is_none(),
                 "acknowledgement fired before the durable commit completed",
             );
-            assert!(
-                commits.lock().completed.is_empty(),
+            assert_eq!(
+                commits.lock().completed,
+                0,
                 "no batch can be durable before the paced fsync elapses",
             );
 
@@ -694,7 +663,6 @@ mod tests {
                 .current()
                 .duration_since(start)
                 .expect("time is monotonic");
-            println!("block1 acknowledgement latency: {ack1_latency:?}");
             assert!(
                 ack1_latency >= COMMIT_LATENCY,
                 "acknowledgement must wait for the durable commit: {ack1_latency:?}",
@@ -709,13 +677,12 @@ mod tests {
                 .current()
                 .duration_since(start)
                 .expect("time is monotonic");
-            println!("block2 acknowledgement latency: {ack2_latency:?}");
             assert!(
                 ack2_latency >= ack1_latency + COMMIT_LATENCY,
                 "commits must be applied in finalization order: {ack2_latency:?}",
             );
             assert_eq!(
-                commits.lock().completed.len(),
+                commits.lock().completed,
                 2,
                 "both batches must be durable"
             );
@@ -734,7 +701,7 @@ mod tests {
             while commits.lock().started < 3 {
                 context.sleep(Duration::from_millis(1)).await;
             }
-            assert_eq!(commits.lock().completed.len(), 2, "third commit must still be in flight");
+            assert_eq!(commits.lock().completed, 2, "third commit must still be in flight");
 
             context
                 .child("stop")
@@ -747,7 +714,7 @@ mod tests {
                 .expect("processing actor must drain the committer");
             waiter3.await.expect("queued commit must be acknowledged");
             assert_eq!(
-                commits.lock().completed.len(),
+                commits.lock().completed,
                 3,
                 "queued commit must be durable"
             );

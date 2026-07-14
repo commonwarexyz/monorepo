@@ -160,7 +160,6 @@ where
     }
 }
 
-/// Cloning shares the same underlying merkleized batch and database handle.
 impl<F, E, K, V, C, H, T, S> Clone for ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,

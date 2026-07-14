@@ -209,7 +209,6 @@ where
     }
 }
 
-/// Cloning shares the same underlying merkleized batch and database handle.
 impl<F, E, C, I, H, U, const N: usize, S> Clone for CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,

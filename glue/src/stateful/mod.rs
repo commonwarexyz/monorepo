@@ -272,10 +272,8 @@ where
     /// a crash after this hook runs but before the marshal acknowledgement is
     /// durable may cause the same block to be reported again after restart.
     ///
-    /// Because durable commits are applied off the actor loop, the wrapper may
-    /// invoke this hook on a clone of the application. Implementations must
-    /// not rely on hook invocations sharing instance-local state with other
-    /// application callbacks (share state behind a handle instead).
+    /// This hook may run on a clone of the application. Share state needed by
+    /// other callbacks behind a handle.
     ///
     /// # Panics
     ///

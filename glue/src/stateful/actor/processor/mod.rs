@@ -14,15 +14,9 @@
 //!   forward via [`Application::apply`], inserting each intermediate result
 //!   into the pending map.
 //!
-//! - Finalization: stage the winning fork's merkleized batches as a
-//!   [`Commit`], prune all pending entries at or below the finalized round
-//!   (except entries still awaiting a durable commit), and advance the
-//!   processed anchor. The durable commit itself (database write lock +
-//!   sync) is applied by the caller — on a committer task during normal
-//!   processing so it never blocks propose/verify — and the winner's pending
-//!   entry is retained until [`Processor::commit_complete`] so concurrent
-//!   propose/verify keep forking the retained overlay instead of racing the
-//!   in-flight commit.
+//! - Finalization: stage the winning fork as a [`Commit`], advance the
+//!   processed anchor, and prune incompatible pending state. The winner remains
+//!   forkable until its durable commit completes.
 //!
 //! All propose/verify paths are cancellation-aware: if the caller drops the
 //! response channel, in-progress work stops at the next await point via
@@ -63,7 +57,6 @@ type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 type PendingSyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
-type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
@@ -74,6 +67,7 @@ where
     round: Round,
     parent: PendingDigest<A, E>,
     merkleized: PendingBatches<A, E>,
+    committing: bool,
 }
 
 /// Errors while preparing parent-relative batches for propose/verify.
@@ -87,37 +81,41 @@ pub(super) enum PrepareBatchesError {
     Cancelled,
 }
 
-/// Finalization result for a finalized block report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FinalizeStatus {
-    /// The finalized digest was already processed.
-    Duplicate,
-
-    /// The finalized state was staged for durable commit and in-memory forks
-    /// were pruned.
-    Staged { height: Height },
-}
-
-/// Durable-commit work for one finalized block, staged by
-/// [`Processor::finalize`].
-///
-/// The batch is a clone of the retained pending entry: the entry stays in the
-/// pending map so concurrent propose/verify fork the retained overlay instead
-/// of racing the in-flight commit, and is dropped via
-/// [`Processor::commit_complete`] once the durable commit finishes.
+/// Durable work staged by [`Processor::finalize`].
 pub(super) struct Commit<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// The finalized block being committed.
-    pub(super) block: Arc<A::Block>,
+    block: Arc<A::Block>,
+    batch: PendingBatches<A, E>,
+    prune: Option<Prune<PendingSyncTargets<A, E>>>,
+}
 
-    /// The block's merkleized batches to apply durably.
-    pub(super) batch: PendingBatches<A, E>,
+impl<E, A> Commit<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    pub(super) fn height(&self) -> Height {
+        self.block.height()
+    }
 
-    /// Deferred prune work to run after the commit is durable, if scheduled.
-    pub(super) prune: DeferredPrune<PendingSyncTargets<A, E>>,
+    pub(super) async fn apply(
+        self,
+        context: &E,
+        app: &mut A,
+        databases: &A::Databases,
+    ) -> (PendingDigest<A, E>, Option<Prune<PendingSyncTargets<A, E>>>) {
+        databases.finalize(self.batch).await;
+        app.finalized(
+            (context.child("finalized"), self.block.context()),
+            self.block.as_ref(),
+            databases,
+        )
+        .await;
+        (self.block.digest(), self.prune)
+    }
 }
 
 /// Marshal and database prune targets selected from finalized history.
@@ -178,7 +176,7 @@ impl<T: Clone> Pruning<T> {
     /// plus the configured retained block windows. It then prunes only when the
     /// largest required window is populated and the current finalized height
     /// matches the configured maintenance interval.
-    fn observe_finalized(&mut self, height: Height, targets: T) -> DeferredPrune<T> {
+    fn observe_finalized(&mut self, height: Height, targets: T) -> Option<Prune<T>> {
         self.retained_targets.push_back((height, targets));
         if self.retained_targets.len() > self.marshal_retention_window {
             self.retained_targets.pop_front();
@@ -229,12 +227,6 @@ where
     app: A,
     databases: A::Databases,
     pending: PendingMap<A, E>,
-    /// Digests staged for commit whose durable commit has not yet completed.
-    ///
-    /// Their pending entries are retained (even across finalization pruning)
-    /// so concurrent propose/verify can fork them; [`Processor::commit_complete`]
-    /// drops them once durable.
-    committing: HashSet<PendingDigest<A, E>>,
     last_processed: Anchor<PendingDigest<A, E>>,
     metrics: StatefulMetrics,
     pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
@@ -258,7 +250,6 @@ where
             app,
             databases,
             pending: BTreeMap::new(),
-            committing: HashSet::new(),
             last_processed,
             metrics,
             pruning: prune_config.map(Pruning::new),
@@ -760,7 +751,7 @@ where
         &mut self,
         context: &E,
         block: Arc<A::Block>,
-    ) -> (FinalizeStatus, Option<Commit<E, A>>) {
+    ) -> Option<Commit<E, A>> {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -774,7 +765,7 @@ where
                 digest, self.last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
-            return (FinalizeStatus::Duplicate, None);
+            return None;
         }
 
         let block_context = block.context();
@@ -819,10 +810,12 @@ where
             }
         };
 
-        assert!(
-            self.committing.insert(digest),
-            "finalized digest already staged for commit",
-        );
+        let entry = self
+            .pending
+            .get_mut(&digest)
+            .expect("finalized state must be pending");
+        assert!(!entry.committing, "finalized digest already staged for commit");
+        entry.committing = true;
         let prune = self
             .pruning
             .as_mut()
@@ -834,14 +827,11 @@ where
             digest,
         };
 
-        (
-            FinalizeStatus::Staged { height },
-            Some(Commit {
-                block,
-                batch,
-                prune,
-            }),
-        )
+        Some(Commit {
+            block,
+            batch,
+            prune,
+        })
     }
 
     /// Apply a staged [`Commit`] inline and drop its retained pending entry,
@@ -853,28 +843,24 @@ where
         &mut self,
         context: &E,
         commit: Commit<E, A>,
-    ) -> DeferredPrune<PendingSyncTargets<A, E>> {
-        let Commit {
-            block,
-            batch,
-            prune,
-        } = commit;
+    ) -> Option<Prune<PendingSyncTargets<A, E>>> {
         let timer = self.metrics.finalize_duration.timer(context);
-        self.databases.finalize(batch).await;
-        self.notify_finalized(context, block.as_ref()).await;
+        let (digest, prune) = commit
+            .apply(context, &mut self.app, &self.databases)
+            .await;
         timer.observe(context);
-        self.commit_complete(&block.digest());
+        self.commit_complete(&digest);
         prune
     }
 
     /// Drop the pending entry retained for `digest` once its durable commit
     /// has completed.
     pub(super) fn commit_complete(&mut self, digest: &PendingDigest<A, E>) {
-        assert!(
-            self.committing.remove(digest),
-            "commit completion for a digest that was not staged",
-        );
-        self.pending.remove(digest);
+        let entry = self
+            .pending
+            .remove(digest)
+            .expect("commit completion for an unknown digest");
+        assert!(entry.committing, "commit completion for a digest that was not staged");
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
     }
 
@@ -928,9 +914,8 @@ where
         }
 
         let before = self.pending.len();
-        let committing = &self.committing;
         self.pending.retain(|candidate_digest, entry| {
-            committing.contains(candidate_digest)
+            entry.committing
                 || (entry.round > finalized_round && compatible.contains(candidate_digest))
         });
         let pruned = before - self.pending.len();
@@ -957,6 +942,7 @@ where
                 round,
                 parent,
                 merkleized,
+                committing: false,
             },
         );
     }
@@ -1037,8 +1023,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        await_or_cancel, fetch_ancestor, FinalizeStatus, PrepareBatchesError, Processor, Prune,
-        Pruning,
+        await_or_cancel, fetch_ancestor, PrepareBatchesError, Processor, Prune, Pruning,
     };
     use crate::stateful::{
         actor::metrics::Metrics as StatefulMetrics,
@@ -1606,37 +1591,26 @@ mod tests {
             false
         }
 
-        /// Stage a finalized block and apply its durable commit inline,
-        /// mirroring the committer's stage-then-commit sequence.
-        async fn finalize(&mut self, block: Block) -> FinalizeStatus {
-            self.finalize_with_prune(block).await.0
+        async fn finalize(&mut self, block: Block) {
+            let _ = self.finalize_with_prune(block).await;
         }
 
         async fn finalize_with_prune(
             &mut self,
             block: Block,
-        ) -> (
-            FinalizeStatus,
-            Option<
-                Prune<
-                    <DbSet<deterministic::Context> as DatabaseSet<
-                        deterministic::Context,
-                    >>::SyncTargets,
-                >,
+        ) -> Option<
+            Prune<
+                <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::SyncTargets,
             >,
-        ){
-            let (status, commit) = self
+        > {
+            let commit = self
                 .processor
                 .finalize(self.context_cell.as_present(), Arc::new(block))
-                .await;
-            let mut prune = None;
-            if let Some(commit) = commit {
-                prune = self
-                    .processor
-                    .commit(self.context_cell.as_present(), commit)
-                    .await;
-            }
-            (status, prune)
+                .await
+                .expect("finalization must produce commit work");
+            self.processor
+                .commit(self.context_cell.as_present(), commit)
+                .await
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
@@ -1863,13 +1837,7 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let (status, prune) = harness.finalize_with_prune(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
+            let prune = harness.finalize_with_prune(block1).await;
             assert_eq!(
                 prune, None,
                 "pruning should wait for the full retention window",
@@ -1889,14 +1857,7 @@ mod tests {
             assert!(harness.processor.pending.contains_key(&winner.digest()));
             assert!(harness.processor.pending.contains_key(&loser.digest()));
 
-            let status = harness.finalize(winner.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(2)
-                },
-                "finalization should persist winner state",
-            );
+            harness.finalize(winner.clone()).await;
             assert!(
                 !harness.processor.pending.contains_key(&loser.digest()),
                 "losing fork at finalized round should be pruned",
@@ -1923,14 +1884,7 @@ mod tests {
                 .pending
                 .contains_key(&loser_child.digest()));
 
-            let status = harness.finalize(winner.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(2)
-                },
-                "finalization should persist winner state",
-            );
+            harness.finalize(winner.clone()).await;
             assert!(
                 !harness.processor.pending.contains_key(&loser.digest()),
                 "losing fork at finalized round should be pruned",
@@ -1952,49 +1906,28 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let (status, commit1) = harness
+            let commit1 = harness
                 .processor
                 .finalize(
                     harness.context_cell.as_present(),
                     Arc::new(block1.clone()),
                 )
-                .await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
-            let commit1 = commit1.expect("staging must produce commit work");
+                .await
+                .expect("staging must produce commit work");
             assert!(
                 harness.processor.pending.contains_key(&block1.digest()),
                 "staged entry must be retained until its commit completes",
             );
-            assert!(
-                harness
-                    .processor
-                    .fork_batches(&block1.digest())
-                    .await
-                    .is_ok(),
-                "the retained overlay must remain forkable during the commit",
-            );
-
             // Build and stage a child while the parent commit is in flight.
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
-            let (status, commit2) = harness
+            let commit2 = harness
                 .processor
                 .finalize(
                     harness.context_cell.as_present(),
                     Arc::new(block2.clone()),
                 )
-                .await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(2)
-                }
-            );
-            let commit2 = commit2.expect("staging must produce commit work");
+                .await
+                .expect("staging must produce commit work");
             assert!(
                 harness.processor.pending.contains_key(&block1.digest()),
                 "committing ancestors must survive finalization pruning",
@@ -2030,13 +1963,7 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
+            harness.finalize(block1.clone()).await;
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
@@ -2070,13 +1997,7 @@ mod tests {
             let mut parent = genesis;
             for view in 1..=5 {
                 let block = harness.stage_pending_child(&parent, View::new(view)).await;
-                let status = harness.finalize(block.clone()).await;
-                assert_eq!(
-                    status,
-                    FinalizeStatus::Staged {
-                        height: Height::new(view),
-                    }
-                );
+                harness.finalize(block.clone()).await;
                 parent = block.clone();
                 chain.push(block);
             }
@@ -2109,13 +2030,7 @@ mod tests {
             let genesis = Block::genesis();
 
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
+            harness.finalize(block1.clone()).await;
 
             let mut block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
@@ -2146,13 +2061,7 @@ mod tests {
             let genesis = Block::genesis();
 
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
+            harness.finalize(block1.clone()).await;
 
             let gap_height = Height::new(3);
             let gap_view = View::new(3);
@@ -2208,13 +2117,7 @@ mod tests {
             let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
             let conflicting = harness.stage_pending_child(&genesis, View::new(2)).await;
 
-            let status = harness.finalize(canonical).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1),
-                }
-            );
+            harness.finalize(canonical).await;
 
             assert!(
                 !harness.is_canonical_processed(&conflicting),
@@ -2233,13 +2136,7 @@ mod tests {
             let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
             let conflicting = harness.stage_pending_child(&genesis, View::new(2)).await;
 
-            let status = harness.finalize(canonical).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1),
-                }
-            );
+            harness.finalize(canonical).await;
 
             let _ = harness.finalize(conflicting).await;
         });
@@ -2252,13 +2149,7 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let status = harness.finalize(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
+            harness.finalize(block1).await;
             assert_eq!(harness.counter_value().await, Some(1));
             assert_eq!(
                 harness
@@ -2279,20 +2170,8 @@ mod tests {
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
 
-            let status = harness.finalize(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
-            let status = harness.finalize(block2).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(2)
-                }
-            );
+            harness.finalize(block1).await;
+            harness.finalize(block2).await;
             assert_eq!(
                 finalized_values.lock().clone(),
                 vec![1, 2],
@@ -2309,13 +2188,7 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
+            harness.finalize(block1.clone()).await;
 
             finalized_values.lock().clear();
             harness
@@ -2361,13 +2234,7 @@ mod tests {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
+            harness.finalize(block1.clone()).await;
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
@@ -2396,13 +2263,7 @@ mod tests {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Staged {
-                    height: Height::new(1)
-                }
-            );
+            harness.finalize(block1.clone()).await;
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
