@@ -160,7 +160,7 @@ pub struct BufferPoolConfig {
     /// Requests smaller than this bypass the pool and use direct aligned
     /// allocation instead. A value of `0` means all eligible requests use the
     /// pool.
-    pub pool_min_size: usize,
+    pool_min_size: usize,
     /// Enabled size classes, keyed by power-of-two size. Sizes absent from the
     /// map are disabled.
     ///
@@ -172,15 +172,15 @@ pub struct BufferPoolConfig {
     /// and parks them in the class-global freelist before the pool is
     /// returned. This moves allocation cost to startup and makes the first
     /// reuse path avoid heap allocation.
-    pub prefill: bool,
+    prefill: bool,
     /// Buffer alignment. Must be a power of two.
-    pub alignment: NonZeroUsize,
+    alignment: NonZeroUsize,
     /// Expected number of threads concurrently accessing the pool.
     ///
     /// This sizes the shared global freelist stripes. It is also used to derive
     /// thread-cache capacity when the thread-cache policy is automatic, using
     /// approximately half of each class limit divided across expected threads.
-    pub parallelism: NonZeroUsize,
+    parallelism: NonZeroUsize,
     /// Policy for sizing the per-thread local cache in each size class.
     ///
     /// By default, thread-cache capacity is derived from [`Self::parallelism`]
@@ -538,6 +538,26 @@ impl BufferPoolConfig {
         self.class_limits
             .iter()
             .map(|(&size, &max_buffers)| BufferPoolClassConfig { size, max_buffers })
+    }
+
+    /// Returns the minimum request size that uses pooled allocation.
+    pub const fn pool_min_size(&self) -> usize {
+        self.pool_min_size
+    }
+
+    /// Returns whether every tracked buffer is created during pool construction.
+    pub const fn prefill(&self) -> bool {
+        self.prefill
+    }
+
+    /// Returns the buffer alignment.
+    pub const fn alignment(&self) -> NonZeroUsize {
+        self.alignment
+    }
+
+    /// Returns the expected number of threads concurrently accessing the pool.
+    pub const fn parallelism(&self) -> NonZeroUsize {
+        self.parallelism
     }
 
     /// Returns the smallest enabled class size.
@@ -1607,6 +1627,7 @@ impl Drop for BufferPoolInner {
         // dropping consecutive duplicates leaves one live handle per unique
         // class and drains each class once.
         self.classes.dedup_by(|a, b| a.token == b.token);
+        assert_eq!(self.classes.len(), self.config.size_classes().len());
         for class in &self.classes {
             class.global.drain();
         }

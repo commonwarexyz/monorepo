@@ -837,14 +837,14 @@ mod tests {
 
         assert_eq!(cfg.worker_threads, 8);
         let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism, NZUsize!(8));
+        assert_eq!(network.parallelism(), NZUsize!(8));
         assert_eq!(
             network.thread_cache_config,
             BufferPoolConfig::for_network().thread_cache_config
         );
 
         let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism, NZUsize!(8));
+        assert_eq!(storage.parallelism(), NZUsize!(8));
         assert_eq!(
             storage.thread_cache_config,
             BufferPoolConfig::for_storage().thread_cache_config
@@ -879,14 +879,14 @@ mod tests {
             );
 
         let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism, NZUsize!(2));
+        assert_eq!(network.parallelism(), NZUsize!(2));
         assert_eq!(
             network.thread_cache_config,
             BufferPoolConfig::for_network().thread_cache_config
         );
 
         let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism, NZUsize!(1));
+        assert_eq!(storage.parallelism(), NZUsize!(1));
         assert_eq!(
             storage.thread_cache_config,
             BufferPoolConfig::for_storage()

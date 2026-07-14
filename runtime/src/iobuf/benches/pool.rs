@@ -66,7 +66,7 @@ pub fn bench(c: &mut Criterion) {
 
     for &size in SIZES {
         let pool = build_pool(size, threads);
-        let alignment = pool.config().alignment.get();
+        let alignment = pool.config().alignment().get();
 
         for threading in threadings {
             for touch in [false, true] {
