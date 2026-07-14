@@ -108,7 +108,8 @@ pub(crate) enum BufferPoolThreadCacheConfig {
     /// disabling thread-local caching so free buffers do not become stranded in
     /// other threads.
     ///
-    /// `Some(n)` uses an exact per-thread cache size for every size class.
+    /// `Some(n)` uses an explicit per-thread cache size, clamped independently
+    /// to each size class's limit.
     Enabled(Option<NonZeroUsize>),
     /// Disable thread-local caching and route all reuse through the shared global freelist.
     Disabled,
@@ -304,6 +305,7 @@ impl BufferPoolConfig {
     /// # Panics
     ///
     /// - `min` or `max` is not a power of two
+    /// - `min` or `max` exceeds `isize::MAX`
     /// - `max < min`
     const fn contiguous_limits(
         min: NonZeroUsize,
@@ -350,6 +352,7 @@ impl BufferPoolConfig {
     /// # Panics
     ///
     /// - `min` or `max` is not a power of two
+    /// - `min` or `max` exceeds `isize::MAX`
     /// - `max < min`
     pub const fn with_size_class_range(
         mut self,
@@ -370,6 +373,7 @@ impl BufferPoolConfig {
     ///
     /// - `classes` is empty
     /// - a class size is not a power of two
+    /// - a class size exceeds `isize::MAX`
     /// - two classes have the same size
     pub fn with_size_classes<I, C>(mut self, classes: I) -> Self
     where
@@ -399,7 +403,8 @@ impl BufferPoolConfig {
     ///
     /// # Panics
     ///
-    /// Panics if `size` is not a power of two.
+    /// - `size` is not a power of two
+    /// - `size` exceeds `isize::MAX`
     pub const fn with_size_class(mut self, size: NonZeroUsize, max_buffers: NonZeroU32) -> Self {
         self.class_limits[Self::class_exponent(size)] = Some(max_buffers);
         self
@@ -413,6 +418,7 @@ impl BufferPoolConfig {
     /// # Panics
     ///
     /// - `size` is not a power of two
+    /// - `size` exceeds `isize::MAX`
     /// - no class with `size` is enabled
     /// - the class is the final enabled class
     pub const fn without_size_class(mut self, size: NonZeroUsize) -> Self {
