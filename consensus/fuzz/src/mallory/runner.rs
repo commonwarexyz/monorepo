@@ -1,25 +1,34 @@
-//! The `Mode::Mallory` OODA episode loop and its two action choosers.
+//! The `Mode::Mallory` OODA episode loop and its action choosers.
 //!
-//! Mallory runs four honest Simplex validators and drives a fixed-length episode
-//! of observe-orient-decide-act steps, perturbing only the network (never node
-//! behavior). Each step observes the honest happens-before fingerprint (the
-//! Q-state) and protocol-state descriptor, decides on an [`action`] under a legal
-//! mask, enacts its [`action::FaultPlan`] against the network, runs one fixed
-//! deterministic-time window, then heals the fault and (for the learned chooser)
-//! applies a temporal-difference update rewarding novel state / happens-before
-//! fingerprints.
+//! Each episode first picks one adversary ENVIRONMENT for the faultable identity
+//! ([`BYZANTINE_IDX`], node 0): honest, or one of six Byzantine profiles
+//! ([`adversary::AdversaryRole`] -- Disrupter, Conflicter, Nuller, Equivocator,
+//! Impersonator, Outdated). It then drives a fixed-length observe-orient-decide-
+//! act loop: each step observes the honest happens-before fingerprint (the
+//! Q-state, keyed by the environment) and a protocol-state descriptor, selects an
+//! [`action`] under a legal mask, enacts its [`action::FaultPlan`] -- a network
+//! (isolation, partition), packet (delay/loss/corrupt/duplicate/reorder), or
+//! lifecycle (crash-stop, durable restart, amnesia restart) fault -- runs one
+//! fixed deterministic-time window, heals the fault, and (for the learned
+//! chooser) applies a temporal-difference update rewarding novel state /
+//! happens-before fingerprints.
 //!
-//! Both [`Chooser`]s share ALL of this infrastructure -- setup, catalog,
-//! parameter sampling, episode length, observation window, healing, state and
-//! reward extraction, and the episode-end oracle. Only action selection differs:
-//! [`Chooser::Learned`] samples a masked softmax over the campaign Q-row and
-//! learns; [`Chooser::Random`] samples a uniform legal action from the runtime
-//! RNG and never touches the campaign, so it neither learns nor pollutes the
-//! shared novelty registries. With real faults (node isolation, network
-//! partition) in the catalog the two genuinely diverge; the split exists so that
-//! divergence measures the policy against a uniform baseline over the same wiring.
+//! Reporter membership and the episode-end oracle follow the environment. Under
+//! `Honest` all four validators are honest [`ManagedValidator`]s. Under a
+//! Byzantine role, node 0 is an unmanaged adversary excluded from the honest set
+//! ([`invariants::check_vote_invariants_with_byzantine`]). A crash-stopped node
+//! is dropped from liveness but kept in safety via its retained reporter; an
+//! amnesiac node (durable restart with fresh storage) is treated as Byzantine.
+//!
+//! Both [`Chooser`]s share ALL of the wiring -- setup, catalog, parameter
+//! sampling, episode length, observation window, healing, state and reward
+//! extraction, and the episode-end oracle. Only selection differs:
+//! [`Chooser::Learned`] uses the campaign-persistent Q-policy (and an adaptive
+//! bandit for the episode's role) and learns; [`Chooser::Random`] samples
+//! uniformly from the runtime RNG and never touches the campaign, so it neither
+//! learns nor pollutes the shared novelty registries -- the controlled baseline.
 
-use super::{action, adversary, lifecycle, log, network, policy, state};
+use super::{action, adversary, lifecycle, log, multiplexer, network, policy, state};
 use crate::{
     build_validator, build_validator_with_reporter, happens_before, invariants,
     simplex::Simplex, sniff_sink, CertCfgOf, CertifyChoice, ManagedValidator, PublicKeyOf,
@@ -135,7 +144,8 @@ fn enactment_of(plan: &action::FaultPlan, matched: bool) -> Enactment {
         | action::FaultPlan::Partition(_)
         | action::FaultPlan::CrashStop
         | action::FaultPlan::CrashRestartDurable
-        | action::FaultPlan::AmnesiaRestart => Enactment::Applied,
+        | action::FaultPlan::AmnesiaRestart
+        | action::FaultPlan::SetRole(_) => Enactment::Applied,
     }
 }
 
@@ -586,14 +596,27 @@ fn run_inner<P: Simplex>(
         let relay = Arc::new(relay::Relay::new());
         let peers: Arc<[PublicKeyOf<P>]> = participants.clone().into();
 
-        // Sample the episode's adversary role ONCE, before the per-node loop, from
-        // the runtime RNG (so a replay reproduces it). A forced role skips the draw,
-        // keeping an Honest-forced episode byte-identical to the no-role baseline.
-        let role = match forced_role {
-            Some(r) => r,
-            None => adversary::AdversaryRole::sample(&mut context),
-        };
+        // Select the episode's adversary role ONCE, before the per-node loop. The
+        // learned chooser draws it from the campaign-persistent role bandit, so the
+        // campaign concentrates episodes on the more productive Byzantine profiles;
+        // every other chooser keeps the campaign-independent uniform sample, which
+        // preserves the Random A/B determinism (the bandit never drives that path).
+        // A forced role overrides both and skips the draw, keeping an Honest-forced
+        // episode byte-identical to the no-role baseline. Both draw from the runtime
+        // RNG, so a replay reproduces the role.
+        let role = forced_role.unwrap_or_else(|| match chooser {
+            Chooser::Learned => adversary::role_bandit().lock().select(&mut context),
+            _ => adversary::AdversaryRole::sample(&mut context),
+        });
         let byz = role.is_byzantine();
+        // The MUTABLE per-step environment role. It starts at the sampled `role` and,
+        // in a byzantine episode, a `SetRole` step swaps it (via the multiplexer) to
+        // another Byzantine profile. It keys the role region of the Q-state every step
+        // (`env_tag(current_role, ..)`), so a switch connects the role regions of the
+        // MDP. `byz`, `ambiguous`, and the role bandit's credit stay pinned to the
+        // INITIAL `role` (all six profiles are Byzantine, so `byz` never changes, and
+        // the bandit learns the role it selected).
+        let mut current_role = role;
         // Under a byzantine role, node 0's forged messages create no honest causal
         // edges, so it is excluded from happens-before sender attribution; the honest
         // nodes 1-3 stay captured. Under the Honest role no node is ambiguous. This is
@@ -628,30 +651,32 @@ fn run_inner<P: Simplex>(
         // NOT managed (it is the unmanaged adversary), so `managed` holds nodes 1-3
         // and `honest_indices[k]` recovers the node index of `managed[k]`.
         let mut managed: Vec<ManagedValidator<P>> = Vec::with_capacity(n);
+        // Under a byzantine role node 0 is owned by the adversary multiplexer, which
+        // spawns the current profile's raw actor and swaps it on a `SetRole` step.
+        // `None` under the Honest environment. Only the byzantine branch sets it.
+        let mut multiplexer: Option<multiplexer::RoleMultiplexer<P>> = None;
         for i in 0..n {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
 
-            // Byzantine role at node 0: spawn the adversary with its RAW channels
-            // (no pump, no SniffingReceiver, no reporter, no ManagedValidator). Single
-            // owner of those single-consumer mailboxes; nothing is pushed to `managed`.
+            // Byzantine role at node 0: hand its RAW channels to the multiplexer (no
+            // pump, no SniffingReceiver, no reporter, no ManagedValidator). The
+            // multiplexer is the single owner of those single-consumer mailboxes and
+            // spawns the INITIAL profile's actor; nothing is pushed to `managed`. The
+            // Equivocator shares the honest nodes' relay and leader schedule (built
+            // internally as `P::Elector::default()`, the same config the honest
+            // validators build with); the other roles ignore both.
             if byz && i == BYZANTINE_IDX {
-                let ctx = context
-                    .child("validator")
-                    .with_attribute("public_key", &validator);
-                // The Equivocator shares the honest nodes' relay and leader
-                // schedule (`P::Elector::default()`, the same config the honest
-                // validators build with) so it equivocates as the elected leader;
-                // the other roles ignore both.
-                adversary::spawn_adversary::<P>(
-                    role,
-                    ctx,
+                multiplexer = Some(multiplexer::RoleMultiplexer::new(
+                    &context,
+                    validator,
                     schemes[i].clone(),
-                    required_containers,
+                    oracle.clone(),
                     relay.clone(),
-                    P::Elector::default(),
+                    required_containers,
+                    role,
                     channels,
-                );
+                ));
                 continue;
             }
 
@@ -764,9 +789,20 @@ fn run_inner<P: Simplex>(
         // The env tag (role plus an amnesia bit) is folded in so Honest, each
         // byzantine role, and a post-amnesia node 0 key distinct Q-rows / novelty (a
         // campaign never merges incompatible environments). Node 0 cannot be amnesiac
-        // yet, so this reduces to the role tag.
-        let mut state = hb_log.summary().fingerprint() ^ env_tag(role, false);
+        // yet, so this reduces to the (initial) role tag.
+        let mut state = hb_log.summary().fingerprint() ^ env_tag(current_role, false);
+        // Summed per-step novelty reward and the executed-step count. The role
+        // bandit's signal (Learned only) is their ratio -- the per-step AVERAGE.
+        // Normalizing matters because a crash-stop ends the episode early, so
+        // episodes have unequal lengths; the raw sum `N - 2*steps` would reward
+        // short unproductive episodes (a 1-step crash: -2) over long productive
+        // ones (a 12-step, mostly-novel episode: -4), making the bandit prefer
+        // whichever role can crash early. The ratio is in [-2, 0] and length-
+        // independent, so roles are ranked by novelty density.
+        let mut episode_reward = 0.0;
+        let mut executed_steps = 0usize;
         for step in 0..steps {
+            executed_steps += 1;
             // (a) Drain queued finalizations to the current frontier.
             while let Ok(v) = monitor.try_recv() {
                 finalized = finalized.max(v.get());
@@ -779,12 +815,18 @@ fn run_inner<P: Simplex>(
             // single Byzantine identity (Running but empty-storage), so the three
             // lifecycle faults are masked out. Under a byzantine role node 0 is the
             // unmanaged adversary (never "crashed"), and the lifecycle faults are
-            // likewise masked -- there is no ManagedValidator at node 0 to crash.
+            // likewise masked -- there is no ManagedValidator at node 0 to crash. A
+            // `SetRole` swap is legal only under a byzantine role and only until the
+            // multiplexer's per-episode switch cap is reached.
             let node0_crashed =
                 !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Crashed);
             let node0_amnesiac =
                 !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Amnesiac);
-            let legal = action::legal_mask(node0_crashed, byz, node0_amnesiac);
+            let role_switches_exhausted = multiplexer
+                .as_ref()
+                .is_some_and(|m| m.switches() >= action::MALLORY_MAX_ROLE_SWITCHES);
+            let legal =
+                action::legal_mask(node0_crashed, byz, node0_amnesiac, role_switches_exhausted);
 
             // (b)/(c)/(d) Current abstract state is `state`; select under the
             // legal mask. Learned consults the campaign; Random does not.
@@ -940,6 +982,20 @@ fn run_inner<P: Simplex>(
                     )
                     .await;
                 }
+                action::FaultPlan::SetRole(new_role) => {
+                    // Swap node 0's active Byzantine profile via the multiplexer:
+                    // abort+await the live actor, re-register node 0's channels, and
+                    // spawn the new profile. `current_role` then keys the role region
+                    // of the Q-state for the rest of the episode (see `next_tag`), so
+                    // this step is the transition that connects the MDP's role regions.
+                    // Only reachable in a byzantine episode (SetRole is masked
+                    // otherwise), so the multiplexer is always present.
+                    let mux = multiplexer
+                        .as_mut()
+                        .expect("SetRole is only legal in a byzantine episode");
+                    mux.set_role(*new_role, &mut context).await;
+                    current_role = mux.current_role();
+                }
             }
 
             // (g) Run the single fixed observation window, measured from the action's
@@ -1000,6 +1056,12 @@ fn run_inner<P: Simplex>(
                     // heal still runs so a restarted node can catch up.
                     ("lifecycle", "n/a".to_string(), Enactment::Applied)
                 }
+                action::FaultPlan::SetRole(_) => {
+                    // A role switch is enacted against the multiplexer and PERSISTS:
+                    // there is no transient fault to heal (the new profile keeps
+                    // running into the next step).
+                    ("role_switch", "n/a".to_string(), Enactment::Applied)
+                }
             };
 
             // The packet-fault settle above may have produced new finalizations;
@@ -1016,7 +1078,11 @@ fn run_inner<P: Simplex>(
                 !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Crashed);
             let node0_amnesiac_next =
                 !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Amnesiac);
-            let next_tag = env_tag(role, node0_amnesiac_next);
+            // The env tag uses the POST-enact `current_role`: a `SetRole` this step has
+            // already swapped it, so `next_tag` (and thus the next `state` and the
+            // reward descriptor) key the NEW role region -- the transition that
+            // connects the role regions of the MDP.
+            let next_tag = env_tag(current_role, node0_amnesiac_next);
 
             // (j) Next abstract state and the reward's protocol-state descriptor, each
             // folded with the env tag so `select`, `reward`, and `learn` all key the
@@ -1041,10 +1107,22 @@ fn run_inner<P: Simplex>(
             // flips the lifecycle faults illegal, does not bootstrap over now-illegal
             // columns (F4). `select` above still used the pre-enact `legal`.
             let reward_log = if matches!(chooser, Chooser::Learned) {
-                let legal_next = action::legal_mask(node0_crashed_next, byz, node0_amnesiac_next);
+                // Recompute the switch-cap flag from the POST-enact switch count so a
+                // `SetRole` that hit the cap this step does not bootstrap over a now-
+                // illegal SetRole column (mirrors the amnesia lifecycle-mask fix).
+                let role_switches_exhausted_next = multiplexer
+                    .as_ref()
+                    .is_some_and(|m| m.switches() >= action::MALLORY_MAX_ROLE_SWITCHES);
+                let legal_next = action::legal_mask(
+                    node0_crashed_next,
+                    byz,
+                    node0_amnesiac_next,
+                    role_switches_exhausted_next,
+                );
                 let campaign = policy::campaign(action::N_ACTIONS);
                 let mut c = campaign.lock();
                 let reward = c.reward(state_fp, hb_fp);
+                episode_reward += reward;
                 if terminal {
                     c.policy.learn_terminal(state, action_id, reward);
                 } else {
@@ -1055,8 +1133,11 @@ fn run_inner<P: Simplex>(
                 "n/a".to_string()
             };
 
-            // (l) Log the full transition. The role is recorded on every decision
-            // line (so a replay reproduces the sampled environment). `generation` is
+            // (l) Log the full transition. The role recorded is the POST-enact
+            // `current_role`, i.e. the profile active during this step's window (a
+            // `SetRole` line shows the arrived-at role, with its target also in
+            // `params`), so a replay reproduces the environment and a role switch is
+            // visible as the `role=` field changing across lines. `generation` is
             // node 0's incarnation counter and `lifecycle0` its lifecycle state, both
             // meaningful only for the Honest faultable identity; under a byzantine
             // role node 0 is an unmanaged adversary (generation 0, "unmanaged").
@@ -1069,7 +1150,7 @@ fn run_inner<P: Simplex>(
             };
             log::push(format!(
                 "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} action={action:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} finalized={finalized} next_state={hb_fp:#018x} state_desc={state_fp:#018x} reward={reward_log} window={MALLORY_WINDOW:?} heal={healed} matched={matched_log}",
-                role.label()
+                current_role.label()
             ));
             state = hb_fp;
 
@@ -1077,6 +1158,16 @@ fn run_inner<P: Simplex>(
             if episode_terminal {
                 break;
             }
+        }
+
+        // Episode end: fold this episode's accumulated novelty into the campaign-
+        // persistent role bandit so the campaign concentrates on the roles that keep
+        // producing novelty. Learned only -- Random / Fixed never touch the bandit,
+        // keeping the A/B baseline campaign-independent. Done before the oracle so a
+        // productive-but-panicking episode still credits its role.
+        if matches!(chooser, Chooser::Learned) {
+            let role_reward = episode_reward / executed_steps.max(1) as f64;
+            adversary::role_bandit().lock().learn(role, role_reward);
         }
 
         // Episode end: reach the synchronous phase. Heal unconditionally so any
@@ -1290,7 +1381,7 @@ mod tests {
         // Both selection paths must respect the legal mask. The masked-softmax
         // path is exercised over a seeded Q-row; the uniform path over the same
         // mask. Pure (no runtime), so this stays in the fast suite.
-        let legal = action::legal_mask(false, false, false);
+        let legal = action::legal_mask(false, false, false, false);
         let mut policy = policy::QPolicy::new(action::N_ACTIONS);
         policy.learn_terminal(0, 0, 5.0);
         let mut rng = FuzzRng::new(vec![0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15]);
@@ -1459,8 +1550,8 @@ mod tests {
         // includes, so the bootstrap max cannot span a now-illegal lifecycle action.
         // (The policy's exclusion of illegal columns from the bootstrap max is proven
         // in `policy::tests::legal_mask_excludes_illegal_from_select_and_bootstrap`.)
-        let running = action::legal_mask(false, false, false);
-        let amnesiac = action::legal_mask(false, false, true);
+        let running = action::legal_mask(false, false, false, false);
+        let amnesiac = action::legal_mask(false, false, true, false);
         for id in [
             action::Action::CrashStop.id(),
             action::Action::CrashRestartDurable.id(),
@@ -1504,6 +1595,7 @@ mod tests {
     #[ignore]
     fn learned_random_ab_baseline() {
         policy::reset_campaign(action::N_ACTIONS);
+        adversary::reset_role_bandit();
         for seed in [1u64, 2, 3] {
             let (learned_ok, learned_log) = mallory_trace(mallory_input(seed), Chooser::Learned);
             assert!(
@@ -1528,12 +1620,16 @@ mod tests {
         }
     }
 
-    /// Smoke: learned episodes complete (liveness + safety oracle pass) and the
-    /// campaign Q-table gains a row.
+    /// Smoke: learned episodes complete (liveness + safety oracle pass), the campaign
+    /// Q-table gains a row, and the episode-level role bandit learns a nonzero arm.
+    /// A nonzero Q-table implies some step scored a non-novel (negative) reward, whose
+    /// episode therefore accumulated a nonzero productivity total for its role -- so a
+    /// learning campaign moves the bandit off its uniform start.
     #[test]
     #[ignore]
     fn run_mallory_smoke_completes_and_learns() {
         policy::reset_campaign(action::N_ACTIONS);
+        adversary::reset_role_bandit();
         for seed in [1u64, 2, 3] {
             run_with::<SimplexId>(mallory_input(seed), Chooser::Learned, TEST_STEPS);
         }
@@ -1543,6 +1639,10 @@ mod tests {
                 .policy
                 .is_empty(),
             "learned episodes must populate the campaign Q-table"
+        );
+        assert!(
+            !adversary::role_bandit().lock().is_empty(),
+            "learned episodes must move the role bandit off its uniform start"
         );
     }
 
@@ -1831,8 +1931,8 @@ mod tests {
                 "every decision line records the {label} role (seed {seed}): {logv:?}"
             );
             assert!(
-                logv.iter().all(|l| l.contains("legal=[true, true, true, true, true, true, true, true, false, false, false]")),
-                "the three lifecycle actions are masked under a byzantine role (seed {seed}): {:?}",
+                logv.iter().all(|l| l.contains("legal=[true, true, true, true, true, true, true, true, false, false, false, true]")),
+                "the three lifecycle actions are masked and SetRole is legal under a byzantine role (seed {seed}): {:?}",
                 logv.first()
             );
         }
@@ -1893,5 +1993,132 @@ mod tests {
     #[ignore]
     fn outdated_role_completes_and_safety_holds() {
         assert_byzantine_role_completes(adversary::AdversaryRole::Outdated, "outdated");
+    }
+
+    /// The distinct `role=<label>` values recorded across a decision log, in first-seen
+    /// order. Used to prove a mid-episode role switch changed node 0's active profile.
+    fn distinct_roles_in_log(logv: &[String]) -> Vec<String> {
+        let mut roles: Vec<String> = Vec::new();
+        for line in logv {
+            let Some(rest) = line.split("role=").nth(1) else {
+                continue;
+            };
+            let label = rest.split(' ').next().unwrap_or("").to_string();
+            if !label.is_empty() && !roles.contains(&label) {
+                roles.push(label);
+            }
+        }
+        roles
+    }
+
+    /// Force [`action::Action::SetRole`] every step in a byzantine episode (initial
+    /// role Disrupter): node 0's multiplexer swaps its active Byzantine profile each
+    /// step, composing faults across views. Acceptance criterion 2: (i) the decision
+    /// log records >= 2 DISTINCT roles for node 0 in the one episode; (ii) the episode
+    /// completes -- the three honest nodes reach `required_containers` and safety holds
+    /// with node 0 excluded; (iii) the per-episode switch cap is respected (SetRole is
+    /// masked once the cap is hit, so the switch count never exceeds it). With
+    /// `TEST_STEPS == MALLORY_MAX_ROLE_SWITCHES` every step is a legal SetRole and the
+    /// episode reaches the cap exactly.
+    #[test]
+    #[ignore]
+    fn set_role_composes_byzantine_faults_across_views() {
+        assert_eq!(
+            TEST_STEPS as u32,
+            action::MALLORY_MAX_ROLE_SWITCHES,
+            "this test forces one SetRole per step up to the switch cap"
+        );
+        for seed in [1u64, 2, 3] {
+            let (ok, logv) = mallory_trace_role(
+                mallory_input(seed),
+                Chooser::Fixed(action::Action::SetRole.id()),
+                adversary::AdversaryRole::Disrupter,
+            );
+            // (ii) The episode completed: liveness over the 3 honest nodes and safety
+            // over the honest-only set (node 0 excluded) both held.
+            assert!(
+                ok,
+                "role-switching episode must complete: the 3 honest nodes reach \
+                 required_containers and safety holds with node 0 excluded (seed {seed})"
+            );
+            assert_eq!(
+                logv.len(),
+                TEST_STEPS,
+                "a role switch is not terminal: the episode runs full length (seed {seed}): {logv:?}"
+            );
+            // (iii) Every step was a SetRole and the count never exceeds the cap.
+            let switches = logv.iter().filter(|l| l.contains("action=SetRole")).count();
+            assert_eq!(
+                switches, TEST_STEPS,
+                "every forced step is a SetRole (seed {seed}): {logv:?}"
+            );
+            assert!(
+                switches as u32 <= action::MALLORY_MAX_ROLE_SWITCHES,
+                "the switch count must respect the cap (seed {seed})"
+            );
+            // (i) The log shows >= 2 distinct roles for node 0 in this one episode --
+            // the mid-episode composition of Byzantine faults across views.
+            let roles = distinct_roles_in_log(&logv);
+            assert!(
+                roles.len() >= 2,
+                "the decision log must record >= 2 distinct node-0 roles in the one \
+                 episode (seed {seed}): saw {roles:?} in {logv:?}"
+            );
+        }
+    }
+
+    /// Acceptance criterion 3 (structural): the role is a MUTABLE Q-state component.
+    /// The runner folds `env_tag(current_role, ..)` into every Q-state / novelty
+    /// fingerprint, and each of the six Byzantine roles has a distinct tag, so a
+    /// SetRole swap changes the role component of the key -- the post-switch steps key
+    /// a distinct role region of the MDP.
+    #[test]
+    fn set_role_changes_the_q_state_role_component() {
+        let byz = [
+            adversary::AdversaryRole::Disrupter,
+            adversary::AdversaryRole::Conflicter,
+            adversary::AdversaryRole::Nuller,
+            adversary::AdversaryRole::Equivocator,
+            adversary::AdversaryRole::Impersonator,
+            adversary::AdversaryRole::Outdated,
+        ];
+        for (i, a) in byz.iter().enumerate() {
+            for b in &byz[i + 1..] {
+                assert_ne!(
+                    env_tag(*a, false),
+                    env_tag(*b, false),
+                    "a {a:?}<->{b:?} switch must change the Q-state role component"
+                );
+            }
+        }
+    }
+
+    /// Acceptance criterion 3 (learned): a learned campaign that runs byzantine
+    /// episodes moves the `SetRole` Q-column off zero, i.e. it learns a NON-ZERO
+    /// Q-value for some `(state, SetRole)` entry. Reuses the smoke seam (run learned
+    /// episodes, then inspect the campaign): with node 0 pinned to a Byzantine role
+    /// SetRole is legal every step, so the softmax selects and learns it, and by the
+    /// later episodes the recurring view-relative fingerprints are non-novel, giving a
+    /// nonzero reward that moves the column.
+    #[test]
+    #[ignore]
+    fn learned_set_role_learns_a_nonzero_qvalue() {
+        policy::reset_campaign(action::N_ACTIONS);
+        adversary::reset_role_bandit();
+        for seed in 1u64..=8 {
+            run_inner::<SimplexId>(
+                mallory_input(seed),
+                Chooser::Learned,
+                MALLORY_EPISODE_STEPS,
+                Some(adversary::AdversaryRole::Disrupter),
+            );
+        }
+        assert!(
+            !policy::campaign(action::N_ACTIONS)
+                .lock()
+                .policy
+                .action_column_is_empty(action::Action::SetRole.id()),
+            "a learned byzantine campaign must learn a nonzero (state, SetRole) Q-value"
+        );
     }
 }

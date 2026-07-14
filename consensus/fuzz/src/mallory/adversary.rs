@@ -35,15 +35,16 @@
 //! certificate and resolver channels (freeing those receivers rather than leaving a
 //! second owner).
 
-use crate::{simplex::Simplex, strategy::StrategyChoice, NetworkChannels, PublicKeyOf};
+use crate::{disrupter::Disrupter, simplex::Simplex, strategy::AnyScope, NetworkChannels, PublicKeyOf};
 use commonware_consensus::{
     simplex::mocks::{conflicter, equivocator, impersonator, nuller, outdated, relay},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
-use commonware_runtime::{deterministic, Supervisor as _};
+use commonware_runtime::{deterministic, Handle, Supervisor as _};
+use commonware_utils::sync::Mutex;
 use rand::{Rng, RngExt as _};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// The Byzantine profile node 0 plays for a whole Mallory episode.
 ///
@@ -77,6 +78,11 @@ pub(crate) enum AdversaryRole {
 }
 
 impl AdversaryRole {
+    /// The number of distinct roles: the [`RoleBandit`] arm count and the width of
+    /// every per-role array. Matches the stable [`index`](Self::index) /
+    /// [`from_index`](Self::from_index) / [`sample`](Self::sample) order.
+    pub(crate) const COUNT: usize = 7;
+
     /// Uniformly sample a role from the runtime RNG. Drawn once at setup, before the
     /// per-node loop, so the whole episode runs under one fixed environment.
     pub(crate) fn sample(rng: &mut impl Rng) -> Self {
@@ -88,6 +94,53 @@ impl AdversaryRole {
             4 => AdversaryRole::Equivocator,
             5 => AdversaryRole::Impersonator,
             _ => AdversaryRole::Outdated,
+        }
+    }
+
+    /// Uniformly sample a BYZANTINE role from the runtime RNG, never
+    /// [`Honest`](Self::Honest). The target of a per-step
+    /// [`SetRole`](super::action::Action::SetRole) role switch: the multiplexer
+    /// only ever hosts one of the six Byzantine profiles, so an
+    /// Honest<->Byzantine transition (which would need an oracle flip) is out of
+    /// scope. Drawn from the runtime RNG so a replay reproduces the target.
+    pub(crate) fn sample_byzantine(rng: &mut impl Rng) -> Self {
+        match rng.random_range(0..6u8) {
+            0 => AdversaryRole::Disrupter,
+            1 => AdversaryRole::Conflicter,
+            2 => AdversaryRole::Nuller,
+            3 => AdversaryRole::Equivocator,
+            4 => AdversaryRole::Impersonator,
+            _ => AdversaryRole::Outdated,
+        }
+    }
+
+    /// The role's 0-based index in the stable catalog order (the inverse of
+    /// [`from_index`](Self::from_index)), matching [`sample`](Self::sample): Honest is
+    /// `0`, then each Byzantine role. Used as the [`RoleBandit`] arm index.
+    pub(crate) fn index(self) -> usize {
+        match self {
+            AdversaryRole::Honest => 0,
+            AdversaryRole::Disrupter => 1,
+            AdversaryRole::Conflicter => 2,
+            AdversaryRole::Nuller => 3,
+            AdversaryRole::Equivocator => 4,
+            AdversaryRole::Impersonator => 5,
+            AdversaryRole::Outdated => 6,
+        }
+    }
+
+    /// The role at 0-based catalog index `i` (the inverse of [`index`](Self::index)).
+    /// Panics for `i >= COUNT`, which is a caller bug.
+    pub(crate) fn from_index(i: usize) -> Self {
+        match i {
+            0 => AdversaryRole::Honest,
+            1 => AdversaryRole::Disrupter,
+            2 => AdversaryRole::Conflicter,
+            3 => AdversaryRole::Nuller,
+            4 => AdversaryRole::Equivocator,
+            5 => AdversaryRole::Impersonator,
+            6 => AdversaryRole::Outdated,
+            _ => panic!("role index out of range: {i}"),
         }
     }
 
@@ -127,15 +180,130 @@ impl AdversaryRole {
     }
 }
 
+/// Running-average learning rate for the [`RoleBandit`]. A constant (non-stationary)
+/// rate, so recent episode productivity outweighs stale credit as campaign novelty
+/// saturates and a once-productive role dries up.
+const ROLE_BANDIT_ALPHA: f64 = 0.1;
+/// Softmax temperature for role selection. `1.0` (plain `exp(q)`) so the bandit
+/// actually concentrates on the productive roles rather than staying near-uniform.
+const ROLE_BANDIT_TEMPERATURE: f64 = 1.0;
+
+/// Campaign-persistent multi-armed bandit over the [`AdversaryRole::COUNT`] roles:
+/// one Q-value per role tracking its recent episode productivity. Selection is a
+/// softmax over those values, so the campaign concentrates episodes on the Byzantine
+/// profiles that keep producing novelty (Mallory-faithful adaptive fault selection).
+///
+/// Persisted for the whole libFuzzer campaign like the per-step
+/// [`Campaign`](super::policy::Campaign), but SEPARATE from it: this picks the
+/// episode's fixed environment (the role), not a per-step action. Only the learned
+/// chooser selects through it and updates it; the random and fixed choosers keep the
+/// campaign-independent uniform [`AdversaryRole::sample`], so the A/B baseline stays
+/// campaign-independent.
+pub(crate) struct RoleBandit {
+    /// Per-role Q-value in [`AdversaryRole::index`] order; all zero by default, which
+    /// makes the initial softmax uniform over the roles.
+    q: [f64; AdversaryRole::COUNT],
+}
+
+impl Default for RoleBandit {
+    fn default() -> Self {
+        Self {
+            q: [0.0; AdversaryRole::COUNT],
+        }
+    }
+}
+
+impl RoleBandit {
+    /// Softmax distribution over the per-role Q-values at [`ROLE_BANDIT_TEMPERATURE`].
+    /// Shifts by the max for numerical stability, so an all-zero row is uniform over
+    /// the roles.
+    fn softmax(&self) -> [f64; AdversaryRole::COUNT] {
+        let max = self.q.iter().copied().fold(f64::MIN, f64::max);
+        let mut probs = [0.0f64; AdversaryRole::COUNT];
+        let mut sum = 0.0;
+        for (p, &q) in probs.iter_mut().zip(self.q.iter()) {
+            let e = ((q - max) / ROLE_BANDIT_TEMPERATURE).exp();
+            *p = e;
+            sum += e;
+        }
+        for p in &mut probs {
+            *p /= sum;
+        }
+        probs
+    }
+
+    /// Select a role by softmax over the per-role Q-values, drawing from the
+    /// caller-supplied RNG (the deterministic runtime context) and sampling by
+    /// inverse-CDF, mirroring [`QPolicy::select`](super::policy::QPolicy::select). An
+    /// all-zero row is uniform over the roles.
+    pub(crate) fn select(&self, rng: &mut impl Rng) -> AdversaryRole {
+        let probs = self.softmax();
+        // Uniform draw in [0, 1) from 53 random bits, then inverse-CDF over `probs`.
+        let draw = ((rng.random::<u64>() >> 11) as f64) / ((1u64 << 53) as f64);
+        let mut cumulative = 0.0;
+        for (i, &p) in probs.iter().enumerate() {
+            cumulative += p;
+            if draw < cumulative {
+                return AdversaryRole::from_index(i);
+            }
+        }
+        // Floating-point guard: the last role.
+        AdversaryRole::from_index(AdversaryRole::COUNT - 1)
+    }
+
+    /// Non-stationary running-average update of the chosen role's Q-value toward the
+    /// episode's productivity `reward` -- the PER-STEP-averaged novelty in `[-2, 0]`
+    /// (`0` = every step reached a novel state and happens-before fingerprint, `-2` =
+    /// none): `q[role] <- (1 - ALPHA) q[role] + ALPHA reward`. Constant-alpha (not
+    /// `1/n`) so the bandit tracks recent productivity as campaign novelty saturates.
+    /// The signal is a per-step average, not a sum, so a short (early crash-stop)
+    /// episode is compared to a full-length one by novelty density, not length.
+    pub(crate) fn learn(&mut self, role: AdversaryRole, reward: f64) {
+        let q = &mut self.q[role.index()];
+        *q = (1.0 - ROLE_BANDIT_ALPHA) * *q + ROLE_BANDIT_ALPHA * reward;
+    }
+
+    /// Whether any arm's Q-value has moved away from zero. Test-only (the smoke test
+    /// asserts a few learned episodes taught the bandit something).
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.q.iter().all(|&q| q == 0.0)
+    }
+}
+
+static ROLE_BANDIT: OnceLock<Mutex<RoleBandit>> = OnceLock::new();
+
+/// Process-global role bandit, initialised empty on first use and persisted across
+/// every libFuzzer input for the rest of the campaign (like
+/// [`campaign`](super::policy::campaign)). Only the learned chooser selects through
+/// it and updates it at episode end; the random and fixed choosers keep the uniform
+/// [`AdversaryRole::sample`], so the A/B baseline stays campaign-independent.
+pub(crate) fn role_bandit() -> &'static Mutex<RoleBandit> {
+    ROLE_BANDIT.get_or_init(|| Mutex::new(RoleBandit::default()))
+}
+
+/// Reset the process-global role bandit to an empty one. Test-only, so ignored
+/// integration tests do not leak learned Q-values into one another.
+#[cfg(test)]
+pub(crate) fn reset_role_bandit() {
+    *role_bandit().lock() = RoleBandit::default();
+}
+
 /// Spawn the Byzantine actor for `role` at node 0 with its RAW registered channels
-/// (no pump, no sniffer, no reporter, no [`ManagedValidator`](crate::ManagedValidator)).
+/// (no pump, no sniffer, no reporter, no [`ManagedValidator`](crate::ManagedValidator))
+/// and return its task [`Handle`].
+///
+/// The returned handle is the single owner of the spawned actor's task: aborting and
+/// awaiting it (as [`RoleMultiplexer::set_role`](super::multiplexer::RoleMultiplexer::set_role)
+/// does on a role switch) drives it to termination, cascading to every sub-task, so no
+/// second incarnation ever coexists. The actor runs as an unmanaged byzantine node and
+/// its equivocation is excluded from the safety oracle via the honest reporters (see
+/// [`crate::mallory::runner`]).
 ///
 /// Single-owner: the Disrupter takes all three channels; the Equivocator takes the
 /// vote and certificate channels (dropping resolver); the Conflicter, Nuller,
 /// Impersonator, and Outdated take only the vote channel and explicitly drop the
-/// certificate and resolver channels. Nothing observable is returned -- the actor
-/// runs as an unmanaged byzantine node and its equivocation is excluded from the
-/// safety oracle via the honest reporters (see [`crate::mallory::runner`]).
+/// certificate and resolver channels.
 ///
 /// `relay` and `elector` are used only by the [`AdversaryRole::Equivocator`], which
 /// broadcasts its conflicting payloads via the shared relay and shares the honest
@@ -152,7 +320,7 @@ pub(crate) fn spawn_adversary<P: Simplex>(
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     elector: P::Elector,
     channels: NetworkChannels<PublicKeyOf<P>>,
-) {
+) -> Handle<()> {
     let (vote_network, certificate_network, resolver_network) = channels;
     match role {
         AdversaryRole::Honest => {
@@ -164,16 +332,17 @@ pub(crate) fn spawn_adversary<P: Simplex>(
             // disrupter draws from the shared runtime RNG while running; this is
             // still deterministic under the single-threaded scheduler but couples
             // the stream to the disrupter's timing (acceptable: the role is fixed
-            // for the episode).
-            crate::start_disrupter::<P>(
+            // for the observation window). Built inline (rather than via
+            // `start_disrupter`) so the actor's `Handle` flows back to the caller;
+            // the AnyScope path is the only strategy the adversary profiles use.
+            let disrupter = Disrupter::new_with_epoch(
                 context.child("adversary_disrupter"),
                 scheme,
-                &StrategyChoice::AnyScope,
+                AnyScope,
                 required_containers,
-                vote_network,
-                certificate_network,
-                resolver_network,
+                Epoch::new(crate::EPOCH),
             );
+            disrupter.start(vote_network, certificate_network, resolver_network)
         }
         AdversaryRole::Conflicter => {
             // Vote-only: drop the certificate and resolver channels so no second
@@ -184,7 +353,7 @@ pub(crate) fn spawn_adversary<P: Simplex>(
                 context.child("adversary_conflicter"),
                 conflicter::Config { scheme },
             );
-            actor.start(vote_network);
+            actor.start(vote_network)
         }
         AdversaryRole::Nuller => {
             drop(certificate_network);
@@ -193,7 +362,7 @@ pub(crate) fn spawn_adversary<P: Simplex>(
                 context.child("adversary_nuller"),
                 nuller::Config { scheme },
             );
-            actor.start(vote_network);
+            actor.start(vote_network)
         }
         AdversaryRole::Equivocator => {
             // Consumes vote + certificate: listens to recovered certificates and
@@ -211,7 +380,7 @@ pub(crate) fn spawn_adversary<P: Simplex>(
                     elector,
                 },
             );
-            actor.start(vote_network, certificate_network);
+            actor.start(vote_network, certificate_network)
         }
         AdversaryRole::Impersonator => {
             // Vote-only (like Conflicter/Nuller): drop the certificate and resolver
@@ -222,7 +391,7 @@ pub(crate) fn spawn_adversary<P: Simplex>(
                 context.child("adversary_impersonator"),
                 impersonator::Config { scheme },
             );
-            actor.start(vote_network);
+            actor.start(vote_network)
         }
         AdversaryRole::Outdated => {
             drop(certificate_network);
@@ -236,7 +405,7 @@ pub(crate) fn spawn_adversary<P: Simplex>(
                     view_delta: ViewDelta::new(1),
                 },
             );
-            actor.start(vote_network);
+            actor.start(vote_network)
         }
     }
 }
@@ -272,6 +441,31 @@ mod tests {
             seen[idx] = true;
         }
         assert!(seen.iter().all(|&s| s), "every role must be sampled: {seen:?}");
+    }
+
+    #[test]
+    fn sample_byzantine_is_deterministic_and_never_honest() {
+        // The SetRole target sampler covers all six Byzantine roles, never Honest,
+        // and a fixed seed reproduces the sequence (replay determinism).
+        let seed = vec![0x24, 0x8b, 0xf1, 0x0e, 0x77, 0x35, 0xac, 0x51];
+        let mut a = FuzzRng::new(seed.clone());
+        let mut b = FuzzRng::new(seed);
+        let mut seen = [false; 6];
+        for _ in 0..256 {
+            let role = AdversaryRole::sample_byzantine(&mut a);
+            assert_eq!(
+                role,
+                AdversaryRole::sample_byzantine(&mut b),
+                "sample_byzantine must be deterministic"
+            );
+            assert!(role.is_byzantine(), "sample_byzantine must never yield Honest");
+            // index 1..=6 are the byzantine roles; map to a 0..6 slot.
+            seen[role.index() - 1] = true;
+        }
+        assert!(
+            seen.iter().all(|&s| s),
+            "every byzantine role must be sampled: {seen:?}"
+        );
     }
 
     #[test]
@@ -318,5 +512,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn index_round_trips_and_matches_sample_order() {
+        // COUNT spans every role, index/from_index are inverse, and the index order
+        // matches the uniform `sample` catalog order (Honest is 0).
+        assert_eq!(AdversaryRole::COUNT, ALL_ROLES.len());
+        assert_eq!(AdversaryRole::Honest.index(), 0);
+        for (i, &role) in ALL_ROLES.iter().enumerate() {
+            assert_eq!(role.index(), i, "{role:?} index must match catalog order");
+            assert_eq!(AdversaryRole::from_index(i), role, "from_index inverts index");
+        }
+    }
+
+    #[test]
+    fn role_bandit_softmax_is_valid_and_uniform_at_zero_q() {
+        // A fresh (all-zero) bandit is a uniform distribution over the roles.
+        let dist = RoleBandit::default().softmax();
+        let sum: f64 = dist.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "distribution must sum to 1");
+        for p in dist {
+            assert!(
+                (p - 1.0 / AdversaryRole::COUNT as f64).abs() < 1e-9,
+                "a zero-q bandit must be uniform"
+            );
+        }
+    }
+
+    #[test]
+    fn role_bandit_ranks_by_novelty_density_not_episode_length() {
+        // Production rewards are the per-step AVERAGE novelty in [-2, 0]. The bug this
+        // guards: a short unproductive episode (a 1-step crash-stop, avg -2) must NOT
+        // outrank a long productive one (12 steps, 20/24 novel -> avg -4/12 = -0.33).
+        // The pre-fix raw sum was -2 vs -4 and wrongly favored the crash.
+        let mut bandit = RoleBandit::default();
+        bandit.learn(AdversaryRole::Honest, -2.0); // short, discovered nothing
+        bandit.learn(AdversaryRole::Disrupter, -4.0 / 12.0); // long, productive
+        let dist = bandit.softmax();
+        assert!(
+            dist[AdversaryRole::Disrupter.index()] > dist[AdversaryRole::Honest.index()],
+            "the higher novelty-per-step role must win: {} vs {}",
+            dist[AdversaryRole::Disrupter.index()],
+            dist[AdversaryRole::Honest.index()],
+        );
+    }
+
+    #[test]
+    fn role_bandit_keeps_untried_roles_optimistic() {
+        // Nonpositive rewards keep an untried role (q = 0) above any explored role, so
+        // the bandit explores all roles before concentrating; among explored roles the
+        // less-negative (more productive) one wins.
+        let mut bandit = RoleBandit::default();
+        bandit.learn(AdversaryRole::Disrupter, -0.3); // explored, productive
+        bandit.learn(AdversaryRole::Nuller, -1.5); // explored, less productive
+        let dist = bandit.softmax();
+        assert!(
+            dist[AdversaryRole::Honest.index()] > dist[AdversaryRole::Disrupter.index()],
+            "an untried role stays optimistic (above any explored role)"
+        );
+        assert!(
+            dist[AdversaryRole::Disrupter.index()] > dist[AdversaryRole::Nuller.index()],
+            "among explored roles the more productive one wins"
+        );
+    }
+
+    #[test]
+    fn role_bandit_select_is_in_range_and_deterministic() {
+        // Every draw is a valid role, and a fixed FuzzRng seed reproduces the sequence.
+        let mut bandit = RoleBandit::default();
+        bandit.learn(AdversaryRole::Equivocator, -0.5);
+        let draw = || {
+            let mut rng = FuzzRng::new(vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+            (0..16).map(|_| bandit.select(&mut rng)).collect::<Vec<_>>()
+        };
+        let first = draw();
+        assert!(
+            first.iter().all(|r| ALL_ROLES.contains(r)),
+            "select must return a valid role"
+        );
+        assert_eq!(first, draw(), "same RNG seed must yield the same roles");
     }
 }

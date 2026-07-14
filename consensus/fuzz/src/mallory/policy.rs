@@ -87,6 +87,19 @@ impl QPolicy {
         self.table.iter().all(|&q| q == 0.0)
     }
 
+    /// Whether every Q value in one action's COLUMN is still zero. Test-only: the
+    /// `SetRole` acceptance test asserts a learned campaign moved the SetRole column
+    /// off zero, i.e. some `(state, SetRole)` entry was learned.
+    #[cfg(test)]
+    pub fn action_column_is_empty(&self, action: ActionId) -> bool {
+        assert!(action < self.n_actions, "action out of range");
+        self.table
+            .iter()
+            .skip(action)
+            .step_by(self.n_actions)
+            .all(|&q| q == 0.0)
+    }
+
     fn slot(state: u64) -> usize {
         (state & (Q_TABLE_SIZE as u64 - 1)) as usize
     }

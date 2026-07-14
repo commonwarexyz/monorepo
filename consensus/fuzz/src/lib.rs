@@ -2772,20 +2772,26 @@ impl FuzzMode for ByzzfuzzQLearn {
 /// **Mallory mode** - a dedicated adaptive-adversary runner over its own action
 /// catalog.
 ///
-/// Runs four honest engines (PR2 injects no faults) and drives a fixed-length
+/// Each episode selects one adversary environment for the faultable identity
+/// (node 0): honest, or one of six Byzantine profiles (Disrupter, Conflicter,
+/// Nuller, Equivocator, Impersonator, Outdated). It then drives a fixed-length
 /// episode of observe-orient-decide-act steps. Each step observes the honest
 /// happens-before fingerprint (the Q-state) and protocol-state descriptor,
 /// selects an action from the stable catalog (`mallory::action`) under a legal
-/// mask, enacts it, runs one FIXED deterministic-time window, then heals the
-/// action and (for the learned chooser) applies a temporal-difference update
+/// mask -- a network (isolation, partition), packet
+/// (delay/loss/corrupt/duplicate/reorder), or lifecycle (crash-stop, durable
+/// restart, amnesia restart) fault -- runs one FIXED deterministic-time window,
+/// heals it, and (for the learned chooser) applies a temporal-difference update
 /// rewarding novel state / happens-before fingerprints via the same
 /// backend-agnostic Q-core as [`ByzzfuzzQLearn`]. Unlike that mode, Mallory does
-/// not reuse the ByzzFuzz fault machinery: it builds its own honest setup from
-/// the shared harness helpers and never samples ByzzFuzz `(c, d, r)`.
+/// not reuse the ByzzFuzz fault machinery: it builds its own setup from the
+/// shared harness helpers and never samples ByzzFuzz `(c, d, r)`.
 ///
-/// The episode-end oracle requires every correct reporter to reach
-/// `required_containers` (liveness) and runs the vote / state-extraction safety
-/// invariants over all four honest reporters. See `mallory::runner::run`.
+/// The episode-end oracle checks liveness (each live correct node must finalize
+/// past its pre-heal frontier) and the vote / state-extraction safety invariants
+/// over the episode's honest reporter set -- excluding an unmanaged Byzantine
+/// node 0, a crash-stopped node from liveness, and an amnesiac node from the
+/// honest set. See `mallory::runner::run`.
 pub struct Mallory;
 impl FuzzMode for Mallory {
     const MODE: Mode = Mode::Mallory;

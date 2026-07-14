@@ -49,6 +49,7 @@ pub(crate) mod action;
 pub(crate) mod adversary;
 pub(crate) mod lifecycle;
 pub(crate) mod log;
+pub(crate) mod multiplexer;
 pub(crate) mod network;
 pub(crate) mod policy;
 pub(crate) mod runner;
