@@ -45,7 +45,9 @@ mod tests {
         marshal::{
             ancestry::BlockProvider,
             config::{Config, Start},
-            core::{cache, Actor, CommitmentFallback, DigestFallback, Mailbox},
+            core::{
+                cache, durability::Durable as _, Actor, CommitmentFallback, DigestFallback, Mailbox,
+            },
             mocks::{
                 application::Application,
                 harness::{
@@ -7182,14 +7184,14 @@ mod tests {
         });
     }
 
-    /// A block admitted via `Proposed` must be broadcast straight from the
-    /// in-memory cache when `Forward` arrives: the `RecordingBuffer` reports
-    /// no `find_by_commitment` hits, so if the forward dispatches a block it
-    /// must have come from the in-memory slot populated by `Proposed`.
-    /// A subsequent `Forward` for the same `(round, commitment)` falls
-    /// through to storage because the slot is consumed.
+    /// A block relayed via `Proposed` must be broadcast straight from the
+    /// message: the `RecordingBuffer` reports no `find_by_commitment` hits, so
+    /// the dispatched block cannot have come from storage. The message then
+    /// persists the block, resolving the sync handle only after the send. A
+    /// subsequent `Forward` for the same `(round, commitment)` serves the
+    /// persisted block from storage.
     #[test_traced("WARN")]
-    fn test_standard_proposed_is_served_from_in_memory_cache() {
+    fn test_standard_proposed_broadcasts_then_persists() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -7213,25 +7215,28 @@ mod tests {
             .await;
             let buffer = buffer.expect("buffer was provided");
 
-            assert!(mailbox.proposed(round, block.clone()).await);
-
             let targets = vec![participants[1].clone()];
-            mailbox.forward(round, digest, Recipients::Some(targets.clone()));
-            wait_until(&context, Duration::from_secs(5), "first forward", || {
+            let (ack, persist) = oneshot::channel();
+            mailbox.proposed(round, block.clone(), Recipients::Some(targets.clone()), ack);
+            wait_until(&context, Duration::from_secs(5), "proposed send", || {
                 !buffer.sends.lock().is_empty()
             })
             .await;
 
             let sends = buffer.sends();
-            assert_eq!(sends.len(), 1, "cached proposal must dispatch exactly once");
+            assert_eq!(sends.len(), 1, "proposal must dispatch exactly once");
             assert_eq!(sends[0].0, round);
             assert_eq!(sends[0].1.digest(), digest);
 
-            // The in-memory slot was consumed; a second forward for the same
-            // commitment must still succeed by falling back to storage (the
-            // block was persisted by `Proposed`, mirroring `Verified`).
+            // The message persists the block after broadcasting it, so the
+            // sync handle must resolve durable.
+            let sync = persist.await.expect("proposed sync handle missing");
+            assert!(sync.durable(round, "proposed").await);
+
+            // A forward for the same commitment must serve the persisted
+            // block from storage.
             mailbox.forward(round, digest, Recipients::Some(targets));
-            wait_until(&context, Duration::from_secs(5), "second forward", || {
+            wait_until(&context, Duration::from_secs(5), "forward send", || {
                 buffer.sends.lock().len() >= 2
             })
             .await;

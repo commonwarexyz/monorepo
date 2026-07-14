@@ -12,7 +12,7 @@ use crate::{
             Coding,
         },
         config::{Config, Start},
-        core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
+        core::{durability::Durable as _, Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -35,7 +35,10 @@ use commonware_cryptography::{
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
 use commonware_macros::select;
-use commonware_p2p::simulated::{self, Link, Network, Oracle};
+use commonware_p2p::{
+    simulated::{self, Link, Network, Oracle},
+    Recipients,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef,
@@ -50,7 +53,9 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{
+    channel::oneshot, test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64,
+};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -211,6 +216,7 @@ pub trait TestHarness: 'static + Sized {
     type TestBlock: Heightable
         + Clone
         + Send
+        + Sync
         + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
 
     /// Additional per-validator state (e.g., shards mailbox for coding).
@@ -269,12 +275,24 @@ pub trait TestHarness: 'static + Sized {
     /// Get the height from a test block.
     fn height(block: &Self::TestBlock) -> Height;
 
-    /// Propose a block (broadcast to network).
+    /// Drive the leader's full proposal flow as consensus would: request the
+    /// broadcast of the proposed block (mirroring [`crate::Relay::broadcast`]
+    /// with a propose plan) and await the durable-sync handle like the
+    /// certification gate does, asserting the block is durable.
     fn propose(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
         block: &Self::TestBlock,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = ()> + Send {
+        async move {
+            let (ack, persist) = oneshot::channel();
+            let block: <Self::Variant as crate::marshal::core::Variant>::Block =
+                block.clone().into();
+            let _ = handle.mailbox.proposed(round, block, Recipients::All, ack);
+            let sync = persist.await.expect("proposed sync handle missing");
+            assert!(sync.durable(round, "proposed").await);
+        }
+    }
 
     /// Mark a block as verified.
     fn verify(
@@ -898,8 +916,9 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: `marshal.proposed(...)=true` means the block survives an
-/// immediate crash and repeated recoveries.
+/// Contract: a durable propose handshake (the relayed proposal's sync handle
+/// resolving durable) means the block survives an immediate crash and
+/// repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -984,7 +1003,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                                 .await
                                 .unwrap_or_else(|| {
                                     panic!(
-                                        "marshal.proposed() returning true must imply \
+                                        "a durable propose handshake must imply \
                                      get_verified(round) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
                                     )
@@ -1972,10 +1991,6 @@ impl TestHarness for StandardHarness {
         block.height()
     }
 
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2222,18 +2237,6 @@ impl TestHarness for InlineHarness {
         StandardHarness::height(block)
     }
 
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        StandardHarness::propose(
-            &mut ValidatorHandle::<StandardHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2424,18 +2427,6 @@ impl TestHarness for DeferredHarness {
 
     fn height(block: &Self::TestBlock) -> Height {
         InlineHarness::height(block)
-    }
-
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        InlineHarness::propose(
-            &mut ValidatorHandle::<InlineHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
     }
 
     async fn verify(
@@ -2815,14 +2806,6 @@ impl TestHarness for CodingHarness {
 
     fn height(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Height {
         block.height()
-    }
-
-    async fn propose(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
-    ) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(

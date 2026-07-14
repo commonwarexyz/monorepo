@@ -142,7 +142,7 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    gates: Gates<B::Digest>,
+    gates: Gates<B::Digest, B>,
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
@@ -229,7 +229,8 @@ where
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
     /// Proposal runs in a spawned task and returns a receiver for the resulting digest. The
-    /// block's persistence is enqueued before the digest is delivered, and the resulting sync
+    /// block is staged before the digest is delivered and handed to marshal when consensus
+    /// requests the relay broadcast, which persists it after the send. The resulting sync
     /// handle is awaited only at certification so it overlaps consensus voting. The digest does
     /// not imply durability on its own; [`CertifiableAutomaton::certify`] awaits the registered
     /// certification gate before the finalize vote.
@@ -261,8 +262,9 @@ where
         context.spawn(move |runtime_context| {
             async move {
                 // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted by a pre-crash propose whose
-                // notarize vote never reached the journal).
+                // for this round (persisted by a pre-crash propose that reached
+                // its relay broadcast while the notarize vote never reached the
+                // journal).
                 //
                 // The parent context recovered by simplex may differ from the one
                 // the cached block was built against, so the stored block is not
@@ -325,13 +327,12 @@ where
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
 
-                    let persist = marshal.verified_deferred(consensus_context.round, parent);
                     gates
-                        .persist_and_defer(
+                        .stage_and_defer(
                             consensus_context.round,
                             digest,
+                            parent,
                             tx,
-                            persist,
                             "re-proposed boundary block",
                         )
                         .await;
@@ -380,13 +381,12 @@ where
 
                 let digest = built_block.digest();
 
-                let persist = marshal.proposed_deferred(consensus_context.round, built_block);
                 gates
-                    .persist_and_defer(
+                    .stage_and_defer(
                         consensus_context.round,
                         digest,
+                        Arc::new(built_block),
                         tx,
-                        persist,
                         "proposed block",
                     )
                     .await;
@@ -574,6 +574,13 @@ where
         // instead of freezing certify with a fresh fsync.
         let task = self.gates.take(round, digest);
 
+        // A staged proposal whose broadcast was never requested cannot resolve
+        // its gate. Certification now demands durability, so persist it
+        // (without broadcasting) to complete the handshake.
+        if let Some((block, ack)) = self.gates.take_staged(round, digest) {
+            self.marshal.verified_deferred(round, block, ack);
+        }
+
         // `verify()` waits only on local broadcast delivery, so nudge a
         // round-bound notarized fetch that can unblock the existing waiter
         // if local broadcast never arrives. For the standard variant, the
@@ -648,11 +655,23 @@ where
     type Plan = Plan<S::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
-        let (round, recipients) = match plan {
-            Plan::Propose { round } => (round, Recipients::All),
-            Plan::Forward { round, recipients } => (round, recipients),
-        };
-        self.marshal.forward(round, commitment, recipients)
+        match plan {
+            // The propose plan relays the staged proposal: it is broadcast
+            // before it is persisted, and its ack completes the propose
+            // durability handshake. Every propose path stages its block, so a
+            // missing entry means the round was already pruned by finalization
+            // and there is nothing to relay.
+            Plan::Propose { round } => {
+                let Some((block, ack)) = self.gates.take_staged(round, commitment) else {
+                    debug!(%round, %commitment, "no staged proposal to relay");
+                    return Feedback::Ok;
+                };
+                self.marshal.proposed(round, block, Recipients::All, ack)
+            }
+            Plan::Forward { round, recipients } => {
+                self.marshal.forward(round, commitment, recipients)
+            }
+        }
     }
 }
 
@@ -1228,7 +1247,7 @@ mod tests {
             // block subscription is still pending.
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(marshal.proposed(round, block).await);
+            assert!(marshal.verified(round, block).await);
             let certify_rx = inline.certify(round, digest).await;
             select! {
                 result = certify_rx => {
