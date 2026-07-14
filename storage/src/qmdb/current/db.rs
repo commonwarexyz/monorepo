@@ -33,9 +33,12 @@ use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::telemetry::metrics::{
-    histogram::{ScopedTimer, Timed},
-    Counter, Gauge, GaugeExt as _, MetricsExt as _,
+use commonware_runtime::{
+    telemetry::metrics::{
+        histogram::{ScopedTimer, Timed},
+        Counter, Gauge, GaugeExt as _, MetricsExt as _,
+    },
+    Handle,
 };
 use commonware_utils::{
     bitmap::{self, Readable as _},
@@ -746,6 +749,17 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
+    /// Bitmap metadata is only persisted by [Self::sync]. At most one commit is in flight at a
+    /// time. Failures of the deferred durability work surface on the returned handle and again
+    /// on the next durability operation.
+    #[tracing::instrument(name = "qmdb.current.db.start_commit", level = "info", skip_all)]
+    pub async fn start_commit(&mut self) -> Result<Handle<()>, Error<F>> {
+        self.any.start_commit().await
+    }
+
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
@@ -1391,6 +1405,44 @@ mod tests {
         let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
+    }
+
+    /// State committed via an awaited start_commit handle is recovered on reopen, including the
+    /// grafted bitmap contribution to the root.
+    #[test_traced]
+    fn test_start_commit_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let mut db = MmrDb::init(
+                ctx.child("first"),
+                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+            )
+            .await
+            .unwrap();
+            let key = Sha256::hash(&0u64.to_be_bytes());
+            let value = Sha256::hash(&1u64.to_be_bytes());
+            let merkleized = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let handle = db.start_commit().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = MmrDb::init(
+                ctx.child("second"),
+                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]

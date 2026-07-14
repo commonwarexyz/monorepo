@@ -7,7 +7,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs},
-    reschedule, Blob as _, Handle, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+    reschedule, Blob as _, Runner as _, Spawner as _, Storage as _, Supervisor as _,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{future::BoxFuture, FutureExt as _, StreamExt};
@@ -1296,34 +1296,18 @@ where
     journal.destroy().await.unwrap();
 }
 
-trait CommitHandle: Mutable<Item = u64> {
-    fn commit_handle(&mut self) -> impl Future<Output = Handle<()>> + Send;
-}
-
-impl<E: crate::Context> CommitHandle for fixed::Journal<E, u64> {
-    fn commit_handle(&mut self) -> impl Future<Output = Handle<()>> + Send {
-        Self::start_commit(self)
-    }
-}
-
-impl<E: crate::Context> CommitHandle for variable::Journal<E, u64> {
-    fn commit_handle(&mut self) -> impl Future<Output = Handle<()>> + Send {
-        Self::start_commit(self)
-    }
-}
-
 #[boxed]
-async fn test_commit_handle_durability<F, Fut, J>(factory: F)
+async fn test_start_commit_durability<F, Fut, J>(factory: F)
 where
     F: Fn(&'static str) -> Fut,
     Fut: Future<Output = Result<J, Error>>,
-    J: CommitHandle,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("a").await.unwrap();
     for i in 0..7u64 {
         journal.append(&(i * 10)).await.unwrap();
     }
-    let handle = journal.commit_handle().await;
+    let handle = journal.start_commit().await.unwrap();
     handle.await.unwrap();
     let size = journal.bounds().end;
     drop(journal);
@@ -1337,16 +1321,16 @@ where
 }
 
 #[test]
-fn test_fixed_commit_handle_durability() {
+fn test_fixed_start_commit_durability() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = fixed::Config {
-            partition: "fixed-commit-handle".into(),
+            partition: "fixed-start-commit".into(),
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
         };
-        test_commit_handle_durability(|label| {
+        test_start_commit_durability(|label| {
             let cfg = cfg.clone();
             fixed::Journal::<_, u64>::init(context.child(label), cfg)
         })
@@ -1355,18 +1339,18 @@ fn test_fixed_commit_handle_durability() {
 }
 
 #[test]
-fn test_variable_commit_handle_durability() {
+fn test_variable_start_commit_durability() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = variable::Config {
-            partition: "variable-commit-handle".into(),
+            partition: "variable-start-commit".into(),
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
         };
-        test_commit_handle_durability(|label| {
+        test_start_commit_durability(|label| {
             let cfg = cfg.clone();
             variable::Journal::<_, u64>::init(context.child(label), cfg)
         })
@@ -1376,14 +1360,14 @@ fn test_variable_commit_handle_durability() {
 
 /// A commit handle must not block journal use while backend sync is pending.
 #[boxed]
-async fn test_commit_handle_overlaps_work<F, Fut, J>(
+async fn test_start_commit_overlaps_work<F, Fut, J>(
     context: deterministic::Context,
     pending: PendingSyncs,
     make: F,
 ) where
     F: Fn(DelayedSyncContext<deterministic::Context>) -> Fut,
     Fut: Future<Output = Result<J, Error>>,
-    J: CommitHandle,
+    J: Mutable<Item = u64>,
 {
     let mut journal = make(DelayedSyncContext {
         inner: context.child("a"),
@@ -1395,7 +1379,7 @@ async fn test_commit_handle_overlaps_work<F, Fut, J>(
         journal.append(&i).await.unwrap();
     }
 
-    let handle = journal.commit_handle().await;
+    let handle = journal.start_commit().await.unwrap();
     assert!(pending.starts() >= 1);
     assert_eq!(pending.completions(), 0);
 
@@ -1421,7 +1405,7 @@ async fn test_commit_handle_overlaps_work<F, Fut, J>(
     assert!(pending.completions() >= 1);
 
     // Mid-sync append is durable after the next commit.
-    let handle = journal.commit_handle().await;
+    let handle = journal.start_commit().await.unwrap();
     handle.await.unwrap();
     drop(journal);
 
@@ -1442,14 +1426,14 @@ async fn test_commit_handle_overlaps_work<F, Fut, J>(
 /// A commit handle completes only once both the tail sync and the predecessor's rollover sync
 /// are durable.
 #[boxed]
-async fn test_commit_handle_overlaps_predecessor_and_tail<F, Fut, J>(
+async fn test_start_commit_overlaps_predecessor_and_tail<F, Fut, J>(
     context: deterministic::Context,
     pending: PendingSyncs,
     make: F,
 ) where
     F: FnOnce(DelayedSyncContext<deterministic::Context>) -> Fut,
     Fut: Future<Output = Result<J, Error>>,
-    J: CommitHandle + 'static,
+    J: Mutable<Item = u64> + 'static,
 {
     let mut journal = make(DelayedSyncContext {
         inner: context.child("a"),
@@ -1463,7 +1447,7 @@ async fn test_commit_handle_overlaps_predecessor_and_tail<F, Fut, J>(
     let starts_before = pending.starts();
     assert!(starts_before > 0);
 
-    let handle = journal.commit_handle().await;
+    let handle = journal.start_commit().await.unwrap();
     assert!(
         pending.starts() > starts_before,
         "tail sync was not started while predecessor was in flight"
@@ -1495,14 +1479,14 @@ async fn test_commit_handle_overlaps_predecessor_and_tail<F, Fut, J>(
 /// A commit whose in-flight sync fails surfaces the error through both the returned handle and the
 /// next durability operation.
 #[boxed]
-async fn test_commit_handle_failure_propagates<F, Fut, J>(
+async fn test_start_commit_failure_propagates<F, Fut, J>(
     context: deterministic::Context,
     pending: PendingSyncs,
     make: F,
 ) where
     F: FnOnce(DelayedSyncContext<deterministic::Context>) -> Fut,
     Fut: Future<Output = Result<J, Error>>,
-    J: CommitHandle,
+    J: Mutable<Item = u64>,
 {
     let mut journal = make(DelayedSyncContext {
         inner: context.child("a"),
@@ -1518,14 +1502,20 @@ async fn test_commit_handle_failure_propagates<F, Fut, J>(
     pending.arm_fail();
     pending.unblock();
 
-    let handle = journal.commit_handle().await;
+    let handle = journal.start_commit().await.unwrap();
     assert!(
         handle.await.is_err(),
         "the commit handle surfaces the failure"
     );
+    let starts_before = pending.starts();
     assert!(
         matches!(Mutable::commit(&mut journal).await, Err(Error::Runtime(_))),
         "the next durability op surfaces the failed in-flight sync"
+    );
+    assert_eq!(
+        pending.starts(),
+        starts_before,
+        "the surfaced error is the retained failure, not a fresh sync's"
     );
 
     // A mutable method returned an error, so the journal is unusable per the failures-are-fatal
@@ -1554,17 +1544,17 @@ fn variable_overlap_cfg(context: &deterministic::Context, partition: &str) -> va
 }
 
 #[test]
-fn test_fixed_commit_handle_overlaps_predecessor_and_tail() {
+fn test_fixed_start_commit_overlaps_predecessor_and_tail() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
         let cfg = fixed::Config {
-            partition: "fixed-commit-handle-predecessor".into(),
+            partition: "fixed-start-commit-predecessor".into(),
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
         };
-        test_commit_handle_overlaps_predecessor_and_tail(context, pending, move |ctx| {
+        test_start_commit_overlaps_predecessor_and_tail(context, pending, move |ctx| {
             fixed::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;
@@ -1572,19 +1562,19 @@ fn test_fixed_commit_handle_overlaps_predecessor_and_tail() {
 }
 
 #[test]
-fn test_variable_commit_handle_overlaps_predecessor_and_tail() {
+fn test_variable_start_commit_overlaps_predecessor_and_tail() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
         let cfg = variable::Config {
-            partition: "variable-commit-handle-predecessor".into(),
+            partition: "variable-start-commit-predecessor".into(),
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
         };
-        test_commit_handle_overlaps_predecessor_and_tail(context, pending, move |ctx| {
+        test_start_commit_overlaps_predecessor_and_tail(context, pending, move |ctx| {
             variable::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;
@@ -1592,12 +1582,12 @@ fn test_variable_commit_handle_overlaps_predecessor_and_tail() {
 }
 
 #[test]
-fn test_fixed_commit_handle_overlaps_work() {
+fn test_fixed_start_commit_overlaps_work() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = fixed_overlap_cfg(&context, "fixed-commit-handle-overlap");
-        test_commit_handle_overlaps_work(context, pending, move |ctx| {
+        let cfg = fixed_overlap_cfg(&context, "fixed-start-commit-overlap");
+        test_start_commit_overlaps_work(context, pending, move |ctx| {
             let cfg = cfg.clone();
             fixed::Journal::<_, u64>::init(ctx, cfg)
         })
@@ -1606,12 +1596,12 @@ fn test_fixed_commit_handle_overlaps_work() {
 }
 
 #[test]
-fn test_variable_commit_handle_overlaps_work() {
+fn test_variable_start_commit_overlaps_work() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = variable_overlap_cfg(&context, "variable-commit-handle-overlap");
-        test_commit_handle_overlaps_work(context, pending, move |ctx| {
+        let cfg = variable_overlap_cfg(&context, "variable-start-commit-overlap");
+        test_start_commit_overlaps_work(context, pending, move |ctx| {
             let cfg = cfg.clone();
             variable::Journal::<_, u64>::init(ctx, cfg)
         })
@@ -1620,12 +1610,12 @@ fn test_variable_commit_handle_overlaps_work() {
 }
 
 #[test]
-fn test_fixed_commit_handle_failure_propagates() {
+fn test_fixed_start_commit_failure_propagates() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = fixed_overlap_cfg(&context, "fixed-commit-handle-fail");
-        test_commit_handle_failure_propagates(context, pending, move |ctx| {
+        let cfg = fixed_overlap_cfg(&context, "fixed-start-commit-fail");
+        test_start_commit_failure_propagates(context, pending, move |ctx| {
             fixed::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;
@@ -1633,12 +1623,12 @@ fn test_fixed_commit_handle_failure_propagates() {
 }
 
 #[test]
-fn test_variable_commit_handle_failure_propagates() {
+fn test_variable_start_commit_failure_propagates() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = variable_overlap_cfg(&context, "variable-commit-handle-fail");
-        test_commit_handle_failure_propagates(context, pending, move |ctx| {
+        let cfg = variable_overlap_cfg(&context, "variable-start-commit-fail");
+        test_start_commit_failure_propagates(context, pending, move |ctx| {
             variable::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;

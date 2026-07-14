@@ -1589,8 +1589,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// the previous `sync()`.
     ///
     /// At most one commit is in flight at a time: if a prior commit's sync is still pending, this
-    /// call waits for it before starting a new one. Appends and reads proceed while the returned
-    /// handle is pending.
+    /// call waits for it before starting a new one. Reads proceed while the handle is pending;
+    /// appends do too until they must write to storage (a filled write buffer or a blob rollover
+    /// waits for the in-flight commit).
     pub async fn start_commit(&mut self) -> Handle<()> {
         self.metrics.commit_calls.inc();
         self.blobs.start_sync().await
@@ -2148,6 +2149,10 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         Self::rewind(self, size).await
+    }
+
+    async fn start_commit(&mut self) -> Result<Handle<()>, Error> {
+        Ok(Self::start_commit(self).await)
     }
 
     async fn commit(&mut self) -> Result<(), Error> {

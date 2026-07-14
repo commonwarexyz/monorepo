@@ -11,6 +11,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
+use futures::FutureExt as _;
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand::{TryCryptoRng, TryRng};
 use std::{future::Future, mem, sync::Arc};
@@ -679,6 +680,22 @@ pub fn release_next_pending_syncs(pending: &PendingSyncs, count: usize) {
 pub fn release_pending_syncs(pending: &PendingSyncs) {
     for sync in mem::take(&mut *pending.lock()) {
         let _ = sync.release.send(Ok(()));
+    }
+}
+
+/// Drive `fut` to completion, releasing every sync parked on `pending` as it appears.
+///
+/// Opening storage under [DelayedSyncContext] can otherwise hang: initialization durably
+/// persists recovered state, and those syncs park before the caller can observe or release
+/// them.
+pub async fn drive_pending_syncs<T>(pending: &PendingSyncs, fut: impl Future<Output = T>) -> T {
+    let mut fut = std::pin::pin!(fut);
+    loop {
+        if let Some(out) = fut.as_mut().now_or_never() {
+            break out;
+        }
+        release_pending_syncs(pending);
+        crate::reschedule().await;
     }
 }
 

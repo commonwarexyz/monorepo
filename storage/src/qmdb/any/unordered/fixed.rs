@@ -138,14 +138,17 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
+        mocks::{drive_pending_syncs, DelayedSyncContext, PendingSyncs},
+        reschedule, Clock as _, Metrics as _, Runner as _, Spawner as _, Strategizer as _,
+        Supervisor as _,
     };
-    use commonware_utils::{NZUsize, TestRng, NZU64};
+    use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
     use core::num::NonZeroUsize;
     use futures::FutureExt as _;
     use rand::Rng;
-    use std::{collections::HashMap, time::Duration};
+    use std::{collections::HashMap, future::Future, time::Duration};
 
     /// A generic type alias for an Any database parameterized by merkle family.
     type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
@@ -177,6 +180,185 @@ pub(crate) mod test {
         let seed = context.next_u64();
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
         AnyTest::init(context, cfg).await.unwrap()
+    }
+
+    /// A [Db] over a delayed-sync storage backend.
+    type DelayedTest = Db<
+        mmr::Family,
+        DelayedSyncContext<deterministic::Context>,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        Sequential,
+    >;
+
+    /// Open a [DelayedTest] whose blob syncs park on `pending`.
+    ///
+    /// Init durably persists the recovered database, so while syncs park the returned future
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The log journal
+    /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
+    /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
+    fn open_delayed_db(
+        context: &Context,
+        label: &'static str,
+        suffix: &str,
+        pending: &PendingSyncs,
+    ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
+        let mut cfg = fixed_db_config::<TwoCap>(suffix, context);
+        cfg.journal_config.items_per_blob = NZU64!(1000);
+        cfg.journal_config.page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        DelayedTest::init(
+            DelayedSyncContext {
+                inner: context.child(label),
+                pending: pending.clone(),
+            },
+            cfg,
+        )
+    }
+
+    /// Apply a single-key batch writing `key -> value`.
+    async fn apply_write(db: &mut DelayedTest, key: Digest, value: Digest) {
+        let merkleized = db
+            .new_batch()
+            .write(key, Some(value))
+            .merkleize(db, None)
+            .await
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+    }
+
+    /// A commit handle must not block database use while the backend sync is pending.
+    #[test_traced]
+    fn test_start_commit_overlaps_work() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&context, "delayed", "start_commit_overlap", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let key0 = Sha256::hash(&0u64.to_be_bytes());
+            let value0 = Sha256::hash(&100u64.to_be_bytes());
+            apply_write(&mut db, key0, value0).await;
+
+            let starts_before = pending.starts();
+            let entered_before = pending.entered();
+            let completions_before = pending.completions();
+            let handle = db.start_commit().await.unwrap();
+            assert!(pending.starts() > starts_before);
+            assert_eq!(pending.completions(), completions_before);
+
+            // Observe the sync while the database keeps working.
+            let waiter = context
+                .child("await_sync")
+                .spawn(|_| async move { handle.await.unwrap() });
+            while pending.entered() == entered_before {
+                reschedule().await;
+            }
+
+            // Reads and applies complete before the sync does.
+            assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+            let key1 = Sha256::hash(&1u64.to_be_bytes());
+            let value1 = Sha256::hash(&200u64.to_be_bytes());
+            apply_write(&mut db, key1, value1).await;
+            assert_eq!(
+                pending.completions(),
+                completions_before,
+                "the database made progress while the sync was still in flight"
+            );
+
+            pending.unblock();
+            waiter.await.unwrap();
+
+            // The mid-sync batch is durable after the next commit.
+            let handle = db.start_commit().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            let size = db.bounds().end;
+            drop(db);
+
+            let db = open_delayed_db(&context, "reopen", "start_commit_overlap", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.bounds().end, size);
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A commit whose in-flight sync fails surfaces the error through both the returned handle
+    /// and the next durability operation.
+    #[test_traced]
+    fn test_start_commit_failure_propagates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Pass syncs through so opening the database doesn't park.
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&context, "delayed", "start_commit_fail", &pending)
+                .await
+                .unwrap();
+            let key0 = Sha256::hash(&0u64.to_be_bytes());
+            let value0 = Sha256::hash(&100u64.to_be_bytes());
+            apply_write(&mut db, key0, value0).await;
+
+            // Arm all future syncs to resolve to an injected error.
+            pending.arm_fail();
+
+            let handle = db.start_commit().await.unwrap();
+            assert!(
+                handle.await.is_err(),
+                "the commit handle surfaces the failure"
+            );
+            let starts_before = pending.starts();
+            assert!(
+                matches!(
+                    db.commit().await,
+                    Err(crate::qmdb::Error::Journal(crate::journal::Error::Runtime(
+                        _
+                    )))
+                ),
+                "the next durability op surfaces the failed in-flight sync"
+            );
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "the surfaced error is the retained failure, not a fresh sync's"
+            );
+
+            // A mutable method returned an error, so the database is unusable per the
+            // failures-are-fatal contract; just drop it.
+            drop(db);
+        });
+    }
+
+    /// Pruning drains the in-flight commit before mutating storage.
+    #[test_traced]
+    fn test_start_commit_prune_waits() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&context, "delayed", "start_commit_prune", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let key0 = Sha256::hash(&0u64.to_be_bytes());
+            let value0 = Sha256::hash(&100u64.to_be_bytes());
+            apply_write(&mut db, key0, value0).await;
+
+            let handle = db.start_commit().await.unwrap();
+            let floor = db.inactivity_floor_loc();
+            {
+                let mut prune = std::pin::pin!(db.prune(floor));
+                assert!(
+                    prune.as_mut().now_or_never().is_none(),
+                    "prune proceeded while the commit sync was pending"
+                );
+
+                pending.unblock();
+                prune.await.unwrap();
+            }
+            handle.await.unwrap();
+            db.destroy().await.unwrap();
+        });
     }
 
     /// `get_many` over a batch large enough for the fused sharded path matches per-key `get`.

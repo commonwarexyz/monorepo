@@ -8,6 +8,7 @@
 //! leave its in-memory state inconsistent with the underlying storage.
 
 use super::Error;
+use commonware_runtime::Handle;
 use futures::{stream, Stream, StreamExt as _};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
@@ -295,6 +296,23 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// if it precedes the pruning boundary. Returns an error if the underlying storage operation
     /// fails.
     fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+
+    /// Begin durably persisting the current state of the journal.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit];
+    /// use [Self::sync] to also guarantee that no recovery will be needed on startup.
+    ///
+    /// At most one commit is in flight at a time. Reads proceed while the handle is pending;
+    /// appends do too until they must write to storage (a filled write buffer or a blob rollover
+    /// waits for the in-flight commit).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if preparing the commit fails; failures of the deferred durability work
+    /// surface on the returned handle and again on the next durability operation.
+    fn start_commit(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<Handle<()>, Error>> + Send;
 
     /// Durably persist the journal, guaranteeing the current state will survive a crash.
     ///

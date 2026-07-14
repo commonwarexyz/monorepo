@@ -40,9 +40,9 @@ pub(crate) struct Metrics<E: Clock> {
     get_many_duration: Timed,
     /// Lookups requested by read paths, whether or not they are found.
     pub lookups_requested: Counter,
-    /// Durable commit calls.
+    /// Durable commit operations begun via `commit` or `start_commit`.
     pub commit_calls: Counter,
-    /// Duration of commit calls.
+    /// Duration of `commit` calls; commits begun via `start_commit` alone are not timed.
     commit_duration: Timed,
     /// Full sync calls.
     pub sync_calls: Counter,

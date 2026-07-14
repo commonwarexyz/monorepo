@@ -6,6 +6,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
+use commonware_runtime::Handle;
 use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
 
@@ -102,6 +103,14 @@ pub trait DbAny<F: Family>:
 
     /// Prune historical operations prior to `loc`.
     fn prune(&mut self, loc: Location<F>) -> impl Future<Output = Result<(), Error<F>>> + Send;
+
+    /// Begin durably persisting the database.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit];
+    /// use [Self::sync] to also eliminate recovery on startup. At most one commit is in flight at
+    /// a time. Failures of the deferred durability work surface on the returned handle and again
+    /// on the next durability operation.
+    fn start_commit(&mut self) -> impl Future<Output = Result<Handle<()>, Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash.
     ///
@@ -207,6 +216,13 @@ macro_rules! impl_db_any {
                 loc: $crate::merkle::Location<$fam>,
             ) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
                 <$ty>::prune(self, loc).await
+            }
+
+            async fn start_commit(
+                &mut self,
+            ) -> ::core::result::Result<::commonware_runtime::Handle<()>, $crate::qmdb::Error<$fam>>
+            {
+                <$ty>::start_commit(self).await
             }
 
             async fn commit(&mut self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {

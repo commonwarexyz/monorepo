@@ -21,6 +21,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -819,6 +820,34 @@ where
         Ok(())
     }
 
+    /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
+    /// the Merkle state is not durably persisted, so recovery may be required on startup in the
+    /// event of a crash (use [Self::sync] for the stronger guarantee). At most one commit is in
+    /// flight at a time. Reads proceed while the handle is pending; applies do too until the log
+    /// must write to storage (a filled write buffer or a blob rollover waits for the in-flight
+    /// commit).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if preparing the commit fails; failures of the deferred durability work
+    /// surface on the returned handle and again on the next durability operation.
+    #[tracing::instrument(
+        name = "qmdb.any.db.start_commit",
+        level = "info",
+        skip_all,
+        fields(
+            db_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
+    pub async fn start_commit(&mut self) -> Result<Handle<()>, crate::qmdb::Error<F>> {
+        self.metrics.commit_calls.inc();
+        Ok(self.log.start_commit().await?)
+    }
+
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     #[tracing::instrument(
@@ -832,6 +861,8 @@ where
         ),
     )]
     pub async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
+        // Runs the log's commit rather than awaiting a start_commit handle so journal-level
+        // commit-duration metrics keep covering this path.
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         self.log.commit().await?;
