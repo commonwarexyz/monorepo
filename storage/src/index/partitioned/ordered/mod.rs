@@ -23,12 +23,14 @@
 //!   effectively unreachable under honest load).
 //!
 //! A partition also fills when a single key collects many values -- keys that collide on the full
-//! prefix, or repeated inserts of one key. The spill covers this too: it triggers on the total
-//! value count, so these inserts stay as cheap as any other. What it cannot bound is how many
-//! values one key holds, and a lookup must scan all of them -- a key with `M` values costs O(M) per
-//! lookup. Every index that resolves collisions pays this (the flat `crate::index::ordered::Index`
-//! included); `M` stays near 1 only when the indexed `P + N`-byte prefix is well-distributed, so
-//! use enough prefix bytes and high-entropy keys.
+//! prefix, or repeated inserts of one key. Values append to the end of a key's run. In the
+//! single-key case this makes inline inserts append-only, and after spilling they remain
+//! append-only in the run's `Vec`. Other inline inserts may shift later key runs, but the spill
+//! threshold bounds this cost. What spilling cannot bound is how many values one key holds, and a
+//! lookup must scan all of them -- a key with `M` values costs O(M) per lookup. Every index that
+//! resolves collisions pays this (the flat `crate::index::ordered::Index` included); `M` stays near
+//! 1 only when the indexed `P + N`-byte prefix is well-distributed, so use enough prefix bytes and
+//! high-entropy keys.
 
 mod cursor;
 mod partition;
@@ -71,8 +73,8 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     partitions: Box<[Partition<T::Key, V>]>,
 
     /// Partitions that have spilled out of their sorted arrays (reached `SPILL_THRESHOLD` entries),
-    /// keyed by partition index; each maps translated keys to their values newest-first. Empty until
-    /// a partition fills, whether from honest growth at low `P` or adversarial grinding.
+    /// keyed by partition index; each maps translated keys to their value runs. Empty until a
+    /// partition fills, whether from honest growth at low `P` or adversarial grinding.
     spilled: HashMap<usize, BTreeMap<T::Key, Vec<V>>>,
 
     /// Sorted-array length at which a partition spills to `spilled`; [SPILL_THRESHOLD] in
@@ -300,7 +302,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
                     &self.pruned,
                 ));
             }
-            self.partitions[i].insert_at(run.start, k, value);
+            self.partitions[i].insert_at(run.end, k, value);
             self.keys.inc();
             self.items.inc();
             self.maybe_spill(i);
@@ -341,7 +343,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);
             let new_key = run.is_empty();
-            self.partitions[i].insert_at(run.start, k, value);
+            self.partitions[i].insert_at(run.end, k, value);
             self.items.inc();
             if new_key {
                 self.keys.inc();
@@ -354,7 +356,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         if !self.spilled.is_empty() {
             if let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i) {
                 match partition.get_mut().entry(k) {
-                    btree_map::Entry::Occupied(mut run) => run.get_mut().insert(0, value),
+                    btree_map::Entry::Occupied(mut run) => run.get_mut().push(value),
                     btree_map::Entry::Vacant(run) => {
                         run.insert(vec![value]);
                         self.keys.inc();
@@ -632,7 +634,7 @@ mod tests {
             assert_eq!(index.keys(), 3);
             assert_eq!(index.items(), 3);
 
-            // Values are served correctly from the spilled representation, newest-first.
+            // Values are served correctly from the spilled representation in append order.
             assert_eq!(
                 index.get(&[0x10, 0x01]).copied().collect::<Vec<_>>(),
                 vec![1]
@@ -640,7 +642,7 @@ mod tests {
             index.insert(&[0x10, 0x02], 22);
             assert_eq!(
                 index.get(&[0x10, 0x02]).copied().collect::<Vec<_>>(),
-                vec![22, 2]
+                vec![2, 22]
             );
             assert_eq!(index.items(), 4);
 
@@ -846,20 +848,20 @@ mod tests {
             index.insert(key, 3);
             assert_eq!(index.keys(), 1);
             assert_eq!(index.items(), 3);
-            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![3, 2, 1]);
+            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 2, 3]);
 
             {
                 let mut cursor = index.get_mut(key).unwrap();
-                assert_eq!(*cursor.next().unwrap(), 3);
-                assert_eq!(*cursor.next().unwrap(), 2);
                 assert_eq!(*cursor.next().unwrap(), 1);
+                assert_eq!(*cursor.next().unwrap(), 2);
+                assert_eq!(*cursor.next().unwrap(), 3);
                 assert!(cursor.next().is_none());
             }
 
             index.insert(key, 3);
             index.insert(key, 4);
             index.retain(key, |i| *i != 3);
-            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![4, 2, 1]);
+            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 2, 4]);
 
             index.retain(key, |_| false);
             assert_eq!(
@@ -923,7 +925,7 @@ mod tests {
             index.get_many(&keys, |key_idx, value| visits[key_idx].push(*value));
             assert_eq!(visits[0], vec![4]);
             assert!(visits[1].is_empty());
-            assert_eq!(visits[2], vec![3, 2, 1]);
+            assert_eq!(visits[2], vec![1, 2, 3]);
             assert_eq!(visits[3], vec![4]);
         });
     }
@@ -932,7 +934,7 @@ mod tests {
     fn test_soa_insert_and_retain() {
         deterministic::Runner::default().start(|context| async move {
             let mut index = new_index(context);
-            // Keep both: new value joins as oldest.
+            // Keep both: new value appends to the run.
             index.insert(b"k", 1u64);
             index.insert_and_retain(b"k", 2, |_| true);
             assert_eq!(index.get(b"k").copied().collect::<Vec<_>>(), vec![1, 2]);
@@ -1004,11 +1006,11 @@ mod tests {
             assert_eq!(it.next(), Some(&1));
             assert_eq!(it.next(), None);
 
-            // From k1's bucket: jumps partitions to k2's collision run (newest first).
+            // From k1's bucket: jumps partitions to k2's collision run.
             let (mut it, wrapped) = index.next_translated_key(&hex!("0x0b02F2")).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&22));
             assert_eq!(it.next(), Some(&21));
+            assert_eq!(it.next(), Some(&22));
             assert_eq!(it.next(), None);
 
             // From the last key: cycles to the first.
@@ -1024,8 +1026,8 @@ mod tests {
             // Previous bucket below 1d is 1c's collision run.
             let (mut it, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&22));
             assert_eq!(it.next(), Some(&21));
+            assert_eq!(it.next(), Some(&22));
             assert_eq!(it.next(), None);
         });
     }
