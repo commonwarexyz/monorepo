@@ -259,10 +259,7 @@ impl BufferPoolConfig {
         assert!(max >= min, "max size must be >= min size");
 
         (min.get().trailing_zeros()..=max.get().trailing_zeros())
-            .map(|exponent| {
-                let size = NonZeroUsize::new(1 << exponent).expect("class size is non-zero");
-                (size, max_buffers)
-            })
+            .map(|exponent| (NZUsize!(1 << exponent), max_buffers))
             .collect()
     }
 
@@ -353,14 +350,13 @@ impl BufferPoolConfig {
     pub fn without_size_class(mut self, size: NonZeroUsize) -> Self {
         Self::validate_class_size(size);
         assert!(
-            self.class_limits.contains_key(&size),
+            self.class_limits.remove(&size).is_some(),
             "cannot remove a class that is not enabled"
         );
         assert!(
-            self.class_limits.len() > 1,
+            !self.class_limits.is_empty(),
             "cannot remove the final enabled class"
         );
-        self.class_limits.remove(&size);
         self
     }
 
@@ -389,8 +385,7 @@ impl BufferPoolConfig {
                 count <= u32::MAX as usize,
                 "per-class byte weight derives a limit above u32::MAX"
             );
-            let count = u32::try_from(count.max(1)).expect("count fits u32");
-            *limit = NonZeroU32::new(count).expect("count is at least one");
+            *limit = NonZeroU32::new(count.max(1) as u32).expect("count is at least one");
         }
         self
     }
@@ -458,15 +453,14 @@ impl BufferPoolConfig {
     /// - `budget` is smaller than one buffer from every enabled class
     /// - the budget would require scaling a limit above `u32::MAX`
     pub fn with_budget_bytes(mut self, budget: NonZeroUsize) -> Self {
-        // Snapshot the current shape.
-        let shape: Vec<(usize, u32)> = self
-            .size_classes()
-            .map(|class| (class.size.get(), class.max_buffers.get()))
-            .collect();
         let budget = budget.get() as u128;
 
         // The smallest expressible footprint keeps one buffer per class.
-        let minimum: u128 = shape.iter().map(|&(size, _)| size as u128).sum();
+        let minimum: u128 = self
+            .class_limits
+            .keys()
+            .map(|size| size.get() as u128)
+            .sum();
         assert!(
             budget >= minimum,
             "budget must cover at least one buffer from every enabled class"
@@ -480,33 +474,31 @@ impl BufferPoolConfig {
         // optimal count vector.
         const FRACTION_BITS: u32 = 64;
 
-        // Scaled limits for a given scale. The u32 slot-identifier bound is
-        // enforced by `feasible` and the post-search assert below. Saturating
+        // Scaled limit for one class. The u32 slot-identifier bound is
+        // enforced by `evaluate` and the post-search assert below. Saturating
         // math keeps the evaluation monotonic for scales beyond that bound
         // instead of overflowing.
-        let scaled = |scale: u128| -> Vec<u128> {
-            shape
-                .iter()
-                .map(|&(_, limit)| {
-                    let count = (limit as u128).saturating_mul(scale) >> FRACTION_BITS;
-                    count.max(1)
-                })
-                .collect()
+        let scaled = |limit: NonZeroU32, scale: u128| -> u128 {
+            ((limit.get() as u128).saturating_mul(scale) >> FRACTION_BITS).max(1)
         };
-        let total = |counts: &[u128]| -> u128 {
-            counts
-                .iter()
-                .zip(shape.iter())
-                .map(|(&count, &(size, _))| count.saturating_mul(size as u128))
-                .fold(0u128, u128::saturating_add)
-        };
-        // A scale is feasible when the total fits the budget and every scaled
+        // Saturating total tracked bytes at a scale, and whether every scaled
         // limit still fits u32 slot identifiers. Both constraints are
         // monotonically violated as the scale grows, so feasibility is a
         // prefix of the scale axis and binary search applies.
+        let evaluate = |scale: u128| -> (u128, bool) {
+            self.class_limits
+                .iter()
+                .fold((0u128, true), |(total, fits), (&size, &limit)| {
+                    let count = scaled(limit, scale);
+                    (
+                        total.saturating_add(count.saturating_mul(size.get() as u128)),
+                        fits && count <= u32::MAX as u128,
+                    )
+                })
+        };
         let feasible = |scale: u128| -> bool {
-            let counts = scaled(scale);
-            total(&counts) <= budget && counts.iter().all(|&count| count <= u32::MAX as u128)
+            let (total, fits) = evaluate(scale);
+            total <= budget && fits
         };
 
         // Scale zero floors every class at one buffer, which the minimum
@@ -528,17 +520,15 @@ impl BufferPoolConfig {
         // The next representable scale is infeasible. If its total would
         // still fit the budget, the binding constraint is the u32 limit
         // bound, which the caller must resolve instead of silently capping.
-        let next = scaled(lo + 1);
+        let (next_total, _) = evaluate(lo + 1);
         assert!(
-            total(&next) > budget,
+            next_total > budget,
             "budget requires scaling a class limit above u32::MAX"
         );
 
-        // Write the optimal counts back in ascending class order, matching
-        // the order the shape snapshot above was collected in.
-        let counts = scaled(lo);
-        for (limit, &count) in self.class_limits.values_mut().zip(counts.iter()) {
-            let count = u32::try_from(count).expect("feasible count fits u32");
+        // Rescale each limit in place at the optimal feasible scale.
+        for limit in self.class_limits.values_mut() {
+            let count = u32::try_from(scaled(*limit, lo)).expect("feasible count fits u32");
             *limit = NonZeroU32::new(count).expect("count is at least one");
         }
         self
@@ -588,15 +578,10 @@ impl BufferPoolConfig {
     ///
     /// # Panics
     ///
-    /// - no class is enabled
     /// - `alignment` is not a power of two
     /// - the smallest enabled class is smaller than `alignment`
     /// - `pool_min_size` is larger than the smallest enabled class
     fn validate(&self) {
-        assert!(
-            !self.class_limits.is_empty(),
-            "class layout must enable at least one class"
-        );
         assert!(
             self.alignment.is_power_of_two(),
             "alignment must be a power of two"
@@ -1620,13 +1605,10 @@ impl Drop for BufferPoolInner {
         // the class alive.
         //
         // Routing entries alias the next enabled class in contiguous runs, so
-        // comparing against the previous token drains each unique class once.
-        let mut previous: Option<SizeClassToken> = None;
+        // dropping consecutive duplicates leaves one live handle per unique
+        // class and drains each class once.
+        self.classes.dedup_by(|a, b| a.token == b.token);
         for class in &self.classes {
-            if previous == Some(class.token) {
-                continue;
-            }
-            previous = Some(class.token);
             class.global.drain();
         }
     }
@@ -1745,40 +1727,26 @@ impl BufferPool {
         let min_exponent = min_size.trailing_zeros() as usize;
         let max_exponent = max_size.trailing_zeros() as usize;
 
-        // Create one allocator per enabled class. Prefill happens here, once
-        // per unique class, before any routing aliases are cloned.
-        let enabled: Vec<(usize, SizeClassHandle)> = config
-            .size_classes()
-            .map(|class_config| {
-                let class_id = NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed);
-                let handle = SizeClassHandle::new(
-                    class_id,
-                    class_config.size.get(),
-                    config.alignment.get(),
-                    class_config.max_buffers,
-                    config.parallelism,
-                    config.resolve_thread_cache_capacity(class_config.max_buffers),
-                    config.prefill,
-                );
-                (class_config.size.get().trailing_zeros() as usize, handle)
-            })
-            .collect();
-
-        // Expand into the exponent-indexed routing vector. Every exponent in
-        // the enabled span resolves to the smallest enabled class at or above
-        // it, so disabled exponents alias the next enabled class.
+        // Create one allocator per enabled class and expand the exponent-indexed
+        // routing vector up to it. Every exponent in the enabled span resolves
+        // to the smallest enabled class at or above it, so the gap entries
+        // `resize` fills below each class alias that class. Prefill happens
+        // inside `SizeClassHandle::new`, once per unique class.
         let mut classes = Vec::with_capacity(max_exponent - min_exponent + 1);
-        let mut next_enabled = 0;
-        for exponent in min_exponent..=max_exponent {
-            if exponent > enabled[next_enabled].0 {
-                next_enabled += 1;
-            }
-            classes.push(enabled[next_enabled].1.clone());
-        }
+        for class_config in config.size_classes() {
+            let class_id = NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed);
+            let handle = SizeClassHandle::new(
+                class_id,
+                class_config.size.get(),
+                config.alignment.get(),
+                class_config.max_buffers,
+                config.parallelism,
+                config.resolve_thread_cache_capacity(class_config.max_buffers),
+                config.prefill,
+            );
 
-        // Initialize created metrics after constructor prefill.
-        if config.prefill {
-            for class_config in config.size_classes() {
+            // Initialize created metrics after constructor prefill.
+            if config.prefill {
                 let label = SizeClassLabel {
                     size_class: class_config.size.get() as u64,
                 };
@@ -1787,6 +1755,9 @@ impl BufferPool {
                     .get_or_create(&label)
                     .set(class_config.max_buffers.get() as i64);
             }
+
+            let index = class_config.size.get().trailing_zeros() as usize - min_exponent;
+            classes.resize(index + 1, handle);
         }
 
         Self {
@@ -2051,6 +2022,18 @@ mod tests {
                 NZUsize!(min_size),
                 NZUsize!(max_size),
                 NZU32!(max_per_class),
+            )
+            .with_alignment(NZUsize!(page_size()))
+    }
+
+    /// Creates a page-aligned test config with exactly the given classes.
+    fn sparse_config(classes: impl IntoIterator<Item = (usize, u32)>) -> BufferPoolConfig {
+        BufferPoolConfig::for_network()
+            .with_pool_min_size(0)
+            .with_size_classes(
+                classes
+                    .into_iter()
+                    .map(|(size, max_buffers)| (NZUsize!(size), NZU32!(max_buffers))),
             )
             .with_alignment(NZUsize!(page_size()))
     }
@@ -2321,12 +2304,7 @@ mod tests {
         // Classes `page` and `8 * page` with the two exponents between them
         // disabled: requests in the gap route forward to the larger class.
         let page = page_size();
-        let pool = test_pool(
-            BufferPoolConfig::for_network()
-                .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(page), NZU32!(4)), (NZUsize!(page * 8), NZU32!(4))])
-                .with_alignment(NZUsize!(page)),
-        );
+        let pool = test_pool(sparse_config([(page, 4), (page * 8, 4)]));
 
         // Below the first class routes to it.
         let buf = pool.try_alloc(1).unwrap();
@@ -2358,12 +2336,7 @@ mod tests {
     #[test]
     fn test_sparse_routing_exhaustion_does_not_cascade() {
         let page = page_size();
-        let pool = test_pool(
-            BufferPoolConfig::for_network()
-                .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(page), NZU32!(1)), (NZUsize!(page * 8), NZU32!(1))])
-                .with_alignment(NZUsize!(page)),
-        );
+        let pool = test_pool(sparse_config([(page, 1), (page * 8, 1)]));
 
         // Exhaust the small class. A page-sized request must report
         // exhaustion even though the larger class still has capacity.
@@ -2387,13 +2360,7 @@ mod tests {
         // a request routed through a gap lands on the larger class's label.
         let page = page_size();
         let mut registry = Registry::default();
-        let pool = BufferPool::new(
-            BufferPoolConfig::for_network()
-                .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(page), NZU32!(1)), (NZUsize!(page * 8), NZU32!(1))])
-                .with_alignment(NZUsize!(page)),
-            &mut registry,
-        );
+        let pool = BufferPool::new(sparse_config([(page, 1), (page * 8, 1)]), &mut registry);
 
         // Allocate through the gap, then exhaust the routed class through it.
         let _held = pool.try_alloc(page * 2).unwrap();
@@ -2433,12 +2400,7 @@ mod tests {
         // Requests routed through a gap and requests hitting the class
         // directly must share the same allocator, TLS cache, and metrics.
         let page = page_size();
-        let pool = test_pool(
-            BufferPoolConfig::for_network()
-                .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(page), NZU32!(4)), (NZUsize!(page * 8), NZU32!(4))])
-                .with_alignment(NZUsize!(page)),
-        );
+        let pool = test_pool(sparse_config([(page, 4), (page * 8, 4)]));
 
         // All gap exponents alias the same class as the direct exponent.
         let direct = pool.class_index(page * 8).unwrap();
@@ -2447,10 +2409,6 @@ mod tests {
             assert_eq!(
                 pool.inner.classes[index].token, pool.inner.classes[direct].token,
                 "size {size} must alias the largest class"
-            );
-            assert_eq!(
-                pool.inner.classes[index].class_id,
-                pool.inner.classes[direct].class_id
             );
         }
 
@@ -2469,22 +2427,13 @@ mod tests {
         // as the contiguous pool does, draining each unique class once even
         // though several routing entries alias it.
         let page = page_size();
-        let pool = test_pool(
-            BufferPoolConfig::for_network()
-                .with_pool_min_size(0)
-                .with_size_classes([
-                    (NZUsize!(page), NZU32!(2)),
-                    (NZUsize!(page * 16), NZU32!(2)),
-                ])
-                .with_alignment(NZUsize!(page))
-                .with_thread_cache_disabled(),
-        );
+        let pool =
+            test_pool(sparse_config([(page, 2), (page * 16, 2)]).with_thread_cache_disabled());
 
         let class_index = pool.class_index(page * 16).unwrap();
-        let class = &pool.inner.classes[class_index];
-        // SAFETY: `class` owns one strong reference for `class.token`.
-        unsafe { class.token.retain() };
-        let class = SizeClassHandle { token: class.token };
+        // Keep a test-owned handle so the class remains inspectable after
+        // the pool is dropped below.
+        let class = pool.inner.classes[class_index].clone();
 
         // Park one buffer allocated through the gap in the global freelist.
         let buf = pool.try_alloc(page * 2).unwrap();
@@ -2499,15 +2448,7 @@ mod tests {
     #[test]
     fn test_sparse_pool_debug_reports_unique_classes() {
         let page = page_size();
-        let pool = test_pool(
-            BufferPoolConfig::for_network()
-                .with_pool_min_size(0)
-                .with_size_classes([
-                    (NZUsize!(page), NZU32!(2)),
-                    (NZUsize!(page * 16), NZU32!(2)),
-                ])
-                .with_alignment(NZUsize!(page)),
-        );
+        let pool = test_pool(sparse_config([(page, 2), (page * 16, 2)]));
         // Two enabled classes span five exponents, Debug must report two.
         assert_eq!(pool.inner.classes.len(), 5);
         let debug = format!("{pool:?}");
@@ -2517,13 +2458,7 @@ mod tests {
     #[test]
     fn test_sparse_prefill_creates_per_class_limits() {
         let page = page_size();
-        let pool = test_pool(
-            BufferPoolConfig::for_network()
-                .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(page), NZU32!(3)), (NZUsize!(page * 4), NZU32!(1))])
-                .with_alignment(NZUsize!(page))
-                .with_prefill(true),
-        );
+        let pool = test_pool(sparse_config([(page, 3), (page * 4, 1)]).with_prefill(true));
 
         // Each unique class prefilled exactly its own limit, aliases add none.
         let small = &pool.inner.classes[pool.class_index(page).unwrap()];
@@ -2972,15 +2907,13 @@ mod tests {
         // Scaling preserves a nonuniform shape proportionally: limits (4, 1)
         // over sizes (4, 16) cost 32 per round, so budget 96 affords a 3x
         // scale of the whole shape.
-        let shaped = BufferPoolConfig::for_network()
-            .with_size_classes([(NZUsize!(4), NZU32!(4)), (NZUsize!(16), NZU32!(1))])
-            .with_budget_bytes(NZUsize!(96));
+        let shaped_base = BufferPoolConfig::for_network()
+            .with_size_classes([(NZUsize!(4), NZU32!(4)), (NZUsize!(16), NZU32!(1))]);
+        let shaped = shaped_base.clone().with_budget_bytes(NZUsize!(96));
         assert_eq!(classes_of(&shaped), vec![(4, 12), (16, 3)]);
 
         // Scaling can also shrink an existing shape.
-        let shrunk = BufferPoolConfig::for_network()
-            .with_size_classes([(NZUsize!(4), NZU32!(4)), (NZUsize!(16), NZU32!(1))])
-            .with_budget_bytes(NZUsize!(20));
+        let shrunk = shaped_base.with_budget_bytes(NZUsize!(20));
         assert_eq!(classes_of(&shrunk), vec![(4, 1), (16, 1)]);
 
         // Rounding never disables a class, so an uneven budget leaves an
@@ -3085,16 +3018,11 @@ mod tests {
                 .zip(shape.iter())
                 .map(|(&count, &(size, _))| count * size as u128)
                 .sum();
+            // Candidate vectors are componentwise ordered along the scale
+            // axis, so the maximal fitting total identifies a unique vector.
             if total <= budget && total >= best_total {
-                let candidate: Vec<u32> = counts.iter().map(|&count| count as u32).collect();
-                // Among equal totals prefer the componentwise-largest vector.
-                if best
-                    .as_ref()
-                    .is_none_or(|current| candidate.iter().zip(current.iter()).all(|(n, o)| n >= o))
-                {
-                    best_total = total;
-                    best = Some(candidate);
-                }
+                best_total = total;
+                best = Some(counts.iter().map(|&count| count as u32).collect());
             }
         }
         best.expect("budget covers one buffer per class")
