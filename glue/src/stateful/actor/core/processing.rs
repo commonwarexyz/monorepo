@@ -28,7 +28,6 @@ use futures::future::{pending, ready, Either};
 use rand_core::Rng;
 use tracing::{debug, info_span, Instrument as _};
 
-/// Digest of an application block.
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type SyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type CommitCompletion<A, E> = (BlockDigest<A, E>, Option<Prune<SyncTargets<A, E>>>);
