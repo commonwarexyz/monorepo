@@ -808,7 +808,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// call waits for it before starting a new one. Appends and reads proceed while the returned
     /// handle is pending.
     pub async fn start_commit(&mut self) -> Handle<()> {
-        self.metrics.commit_calls.inc();
+        self.metrics.start_commit_calls.inc();
         self.blobs.start_sync().await
     }
 
@@ -819,7 +819,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// crash after this call doesn't require any recovery.
     pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
-        let handle = self.start_commit().await;
+        self.metrics.commit_calls.inc();
+        let handle = self.blobs.start_sync().await;
         handle.await?;
         Ok(())
     }
@@ -831,7 +832,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        let handle = self.start_commit().await;
+        let handle = self.blobs.start_sync().await;
         handle.await?;
         self.checkpoint
             .persist(
@@ -5071,6 +5072,7 @@ mod tests {
             journal.append(&test_digest(5)).await.unwrap();
             journal.commit().await.unwrap();
             journal.sync().await.unwrap();
+            journal.start_commit().await.await.unwrap();
             journal.snapshot().await.unwrap().read(0).await.unwrap();
             journal.snapshot().await.unwrap().try_read_sync(0).unwrap();
             journal
@@ -5094,7 +5096,8 @@ mod tests {
                 "fixed_metrics_read_calls_total 1",
                 "fixed_metrics_read_many_calls_total 1",
                 "fixed_metrics_items_read_total 5",
-                "fixed_metrics_commit_calls_total 2",
+                "fixed_metrics_start_commit_calls_total 1",
+                "fixed_metrics_commit_calls_total 1",
                 "fixed_metrics_sync_calls_total 1",
                 "fixed_metrics_append_duration_count 1",
                 "fixed_metrics_append_many_duration_count 1",
