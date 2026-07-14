@@ -11,7 +11,7 @@ use super::partition::Partition;
 use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
 use std::{
-    collections::{btree_map, hash_map, BTreeMap, HashMap},
+    collections::{btree_map, hash_map, BTreeMap, HashMap, VecDeque},
     ops::Range,
 };
 
@@ -45,7 +45,7 @@ enum Backing<'a, K: Ord + Copy, V> {
     /// Spilled partition: the key's values live in the side-table's `BTreeMap`, re-resolved on each
     /// access (spilling is the rare case, so the extra descent is off the hot path).
     Spilled {
-        spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
+        spilled: &'a mut HashMap<usize, BTreeMap<K, VecDeque<V>>>,
         partition: usize,
         key: K,
     },
@@ -63,7 +63,7 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
             } => spilled
                 .get(partition)
                 .and_then(|inner| inner.get(key))
-                .map_or(0, Vec::len),
+                .map_or(0, VecDeque::len),
         }
     }
 
@@ -123,7 +123,7 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                     false
                 }
                 btree_map::Entry::Vacant(run) => {
-                    run.insert(vec![value]);
+                    run.insert(VecDeque::from([value]));
                     true
                 }
             },
@@ -150,7 +150,9 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 let btree_map::Entry::Occupied(mut run) = part.get_mut().entry(*key) else {
                     unreachable!("active cursor must reference a present key")
                 };
-                run.get_mut().remove(off);
+                run.get_mut()
+                    .remove(off)
+                    .expect("active cursor offset must be within the run");
                 if !run.get().is_empty() {
                     return false;
                 }
@@ -204,7 +206,7 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
 
     /// A cursor over a key's values held in a spilled partition's `BTreeMap`.
     pub(super) const fn spilled(
-        spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
+        spilled: &'a mut HashMap<usize, BTreeMap<K, VecDeque<V>>>,
         partition: usize,
         key: K,
         keys: &'a Gauge,
