@@ -772,9 +772,9 @@ where
     /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// Bitmap metadata is only persisted by [Self::sync]. At most one commit is in flight at a
-    /// time. Failures of the deferred durability work surface on the returned handle and again
-    /// on the next durability operation.
+    /// This call does not persist bitmap metadata. A new commit waits for the prior commit's
+    /// sync before starting. Failures of the deferred durability work surface on the returned
+    /// handle and again on the next durability operation.
     pub async fn start_commit(&mut self) -> Result<Handle<()>, Error<F>> {
         self.any.start_commit().await
     }

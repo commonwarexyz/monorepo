@@ -805,9 +805,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// crash after this call doesn't require any recovery.
     ///
     /// At most one commit is in flight at a time: if a prior commit's sync is still pending, this
-    /// call waits for it before starting a new one. Reads proceed while the handle is pending;
-    /// appends do too until they must write to storage (a filled write buffer or a blob rollover
-    /// waits for the in-flight commit).
+    /// call waits for it before starting a new one. Appends and reads proceed while the returned
+    /// handle is pending.
     pub async fn start_commit(&mut self) -> Handle<()> {
         self.metrics.commit_calls.inc();
         self.blobs.start_sync().await

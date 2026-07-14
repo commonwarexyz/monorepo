@@ -196,7 +196,7 @@ pub(crate) mod test {
     /// Open a [DelayedTest] whose blob syncs park on `pending`.
     ///
     /// Init durably persists the recovered database, so while syncs park the returned future
-    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The log journal
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The journal
     /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
     /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
     fn open_delayed_db(
@@ -368,6 +368,28 @@ pub(crate) mod test {
                     pending.starts(),
                     starts_before + 2,
                     "prune started the merkle journal sync before blocking"
+                );
+
+                // Release only the merkle sync (parked last): prune must still wait on the
+                // in-flight commit's sync before mutating the log.
+                {
+                    let mut parked = pending.lock();
+                    assert_eq!(
+                        parked.len(),
+                        2,
+                        "expected the commit and merkle syncs parked"
+                    );
+                    let merkle_sync = parked.pop().unwrap();
+                    merkle_sync.release.send(Ok(())).unwrap();
+                }
+                assert!(
+                    prune.as_mut().now_or_never().is_none(),
+                    "prune proceeded while the commit sync was pending"
+                );
+                assert_eq!(
+                    pending.lock().len(),
+                    1,
+                    "prune is blocked on the commit sync, not a new sync of its own"
                 );
 
                 pending.unblock();
@@ -644,6 +666,7 @@ pub(crate) mod test {
             assert_eq!(db.get(&k).await.unwrap(), Some(v));
             assert_eq!(db.get_many(&[&k]).await.unwrap(), vec![Some(v)]);
             db.commit().await.unwrap();
+            db.start_commit().await.unwrap().await.unwrap();
             db.sync().await.unwrap();
             db.prune(Location::new(0)).await.unwrap();
 
@@ -660,6 +683,7 @@ pub(crate) mod test {
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 3",
                 "db_commit_calls_total 1",
+                "db_start_commit_calls_total 1",
                 "db_sync_calls_total 1",
                 "db_prune_calls_total 1",
                 "db_get_duration_count 1",

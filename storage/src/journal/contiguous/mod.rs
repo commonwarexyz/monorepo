@@ -288,7 +288,8 @@ pub trait Mutable: Contiguous + Send + Sync {
     ///
     /// # Warnings
     ///
-    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    /// - This operation is not guaranteed to survive restarts until the next commit or sync
+    ///   completes.
     ///
     /// # Errors
     ///
@@ -301,10 +302,6 @@ pub trait Mutable: Contiguous + Send + Sync {
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit];
     /// use [Self::sync] to also guarantee that no recovery will be needed on startup.
-    ///
-    /// At most one commit is in flight at a time. Reads proceed while the handle is pending;
-    /// appends do too until they must write to storage (a filled write buffer or a blob rollover
-    /// waits for the in-flight commit).
     ///
     /// # Errors
     ///
@@ -344,7 +341,8 @@ pub trait Mutable: Contiguous + Send + Sync {
     ///
     /// # Warnings
     ///
-    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    /// - This operation is not guaranteed to survive restarts until the next commit or sync
+    ///   completes.
     fn rewind_to<'a, P>(
         &'a mut self,
         mut predicate: P,

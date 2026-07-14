@@ -357,10 +357,7 @@ where
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
     /// the Merkle structure is not durably persisted, so recovery may be required on startup in
-    /// the event of a crash (use [Self::sync] for the stronger guarantee). At most one commit is
-    /// in flight at a time. Reads proceed while the handle is pending; appends do too until they
-    /// must write to storage (a filled write buffer or a blob rollover waits for the in-flight
-    /// commit).
+    /// the event of a crash (use [Self::sync] for the stronger guarantee).
     ///
     /// # Errors
     ///
