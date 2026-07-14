@@ -30,11 +30,13 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// location. When false, staged deletes fall back to normal mutations.
     const STAGES_DELETES: bool;
 
-    /// Cached payload attached to a staged read that resolved in an uncommitted ancestor's
-    /// diff, or `None` when such reads cannot be staged and must fall back to normal
-    /// mutations at merkleize. The ordered kind returns `None`: its cached payload is the
-    /// resolved op's next-key pointer, which a diff entry does not carry.
-    fn ancestor_cached() -> Option<Self::Cached>;
+    /// Whether merkleize may stage a read that resolved in an uncommitted ancestor's diff,
+    /// expressed as the cached payload such a staged read carries. `None` means ancestor
+    /// resolutions cannot be staged and fall back to normal mutations. Staging requires a
+    /// payload, so the capability is the payload itself rather than a `bool`: the ordered
+    /// kind is `None` because its cached payload is the resolved op's next-key pointer,
+    /// which a diff entry does not carry.
+    const STAGES_ANCESTORS: Option<Self::Cached>;
 
     /// The updated key.
     fn key(&self) -> &Self::Key;

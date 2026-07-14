@@ -50,9 +50,7 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
 
     /// An ordered staged read caches the resolved op's next-key pointer, which an ancestor
     /// diff entry does not carry, so ancestor resolutions fall back to normal mutations.
-    fn ancestor_cached() -> Option<K> {
-        None
-    }
+    const STAGES_ANCESTORS: Option<K> = None;
 
     fn key(&self) -> &K {
         &self.key

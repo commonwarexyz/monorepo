@@ -298,7 +298,7 @@ pub(crate) type StagedUpdates<F, U> = Vec<StagedUpdate<F, U>>;
 /// A staged read slot's resolution: the location and cached payload the read resolved to,
 /// or `None` when it resolved from batch mutations (or missed). Ancestor-diff resolutions
 /// are recorded only when the update kind stages them (see
-/// [`update::Update::ancestor_cached`]); otherwise those slots stay `None` and fall back to
+/// [`update::Update::STAGES_ANCESTORS`]); otherwise those slots stay `None` and fall back to
 /// normal mutations.
 type StagedResolution<F, U> = Option<(StagedLoc<F>, <U as update::Update>::Cached)>;
 
@@ -1437,7 +1437,7 @@ where
     /// `write` semantics and wins.
     ///
     /// Location-resolved updates (committed, or ancestor-diff when the update kind stages
-    /// those -- see [`update::Update::ancestor_cached`]) reuse the staged location. Resolved
+    /// those -- see [`update::Update::STAGES_ANCESTORS`]) reuse the staged location. Resolved
     /// deletes reuse it only when [`update::Update::STAGES_DELETES`] is set (the unordered
     /// kind). Unresolved keys (missing from committed state, resolved through this batch's
     /// own mutations, or ancestor-resolved for a kind that does not stage those) always fall
@@ -1838,7 +1838,7 @@ where
         // per-key ancestor re-resolution -- otherwise grows with ancestor overlap).
         let (mut results, unresolved) =
             self.resolve_uncommitted_reads(keys, db.strategy(), |slot, entry| {
-                let Some(cached) = U::ancestor_cached() else {
+                let Some(cached) = U::STAGES_ANCESTORS else {
                     return;
                 };
                 if let DiffEntry::Active {
