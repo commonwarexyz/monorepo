@@ -19,14 +19,6 @@
 //!
 //! The shared [`Threading`] presets and timing harness come from [`super::utils`].
 //!
-//! # Sparse Layouts
-//!
-//! `layout=sparse` cases use a pool whose class layout skips the exponents
-//! between a small minimum class and the target class, and request a size
-//! whose natural exponent is disabled. Allocation routes through the aliased
-//! routing entries to the target class, exercising the same steady-state
-//! paths as the contiguous cases over a sparse routing vector.
-//!
 //! # Why Touch Pages?
 //!
 //! Large allocations may be backed by lazily materialized virtual memory once
@@ -63,14 +55,6 @@ impl Allocation {
     }
 }
 
-/// Smallest class enabled in the sparse layouts.
-///
-/// Sparse cases request half the target size, whose exponent is disabled, so
-/// allocation routes through aliased gap entries to the target class. This
-/// exercises the same steady-state allocation and return paths as the
-/// contiguous cases with a sparse routing vector.
-const SPARSE_MIN_CLASS: usize = 256;
-
 pub fn bench(c: &mut Criterion) {
     let page_size = page_size();
     let threadings = Threading::standard();
@@ -92,7 +76,6 @@ pub fn bench(c: &mut Criterion) {
                     size,
                     threading,
                     touch,
-                    None,
                     || IoBufMut::with_alignment(size, NonZeroUsize::new(alignment).unwrap()),
                     page_size,
                 );
@@ -102,7 +85,6 @@ pub fn bench(c: &mut Criterion) {
                     size,
                     threading,
                     touch,
-                    None,
                     {
                         let pool = pool.clone();
                         move || {
@@ -115,49 +97,18 @@ pub fn bench(c: &mut Criterion) {
             }
         }
     }
-
-    // Sparse layouts need a disabled exponent between the minimum class and
-    // the target class, so the smallest sizes are skipped.
-    for &size in SIZES {
-        let request = size / 2;
-        if request <= SPARSE_MIN_CLASS {
-            continue;
-        }
-        let pool = build_sparse_pool(size, threads);
-
-        for threading in threadings {
-            bench_case(
-                c,
-                Allocation::Pooled,
-                size,
-                threading,
-                false,
-                Some("sparse"),
-                {
-                    let pool = pool.clone();
-                    move || {
-                        pool.try_alloc(request)
-                            .expect("buffer pool exhausted during benchmark")
-                    }
-                },
-                page_size,
-            );
-        }
-    }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn bench_case(
     c: &mut Criterion,
     allocation: Allocation,
     size: usize,
     threading: Threading,
     touch: bool,
-    layout: Option<&str>,
     alloc: impl Fn() -> IoBufMut + Sync,
     page_size: usize,
 ) {
-    let name = bench_name(allocation, touch, size, threading, layout);
+    let name = bench_name(allocation, touch, size, threading);
     match touch {
         false => {
             c.bench_function(&name, |b| {
@@ -222,13 +173,7 @@ fn touch_pages(ptr: *mut u8, size: usize, page_size: usize) {
     }
 }
 
-fn bench_name(
-    allocation: Allocation,
-    touch: bool,
-    size: usize,
-    threading: Threading,
-    layout: Option<&str>,
-) -> String {
+fn bench_name(allocation: Allocation, touch: bool, size: usize, threading: Threading) -> String {
     let threads = threading.threads();
     let mut name = format!(
         "{}/allocation={} touch={} size={size} threads={threads}",
@@ -239,43 +184,21 @@ fn bench_name(
     if let Threading::Multi { pattern, .. } = threading {
         name.push_str(&format!(" pattern={}", pattern.as_str()));
     }
-    if let Some(layout) = layout {
-        name.push_str(&format!(" layout={layout}"));
-    }
     name
-}
-
-fn start_pool(cfg: BufferPoolConfig) -> BufferPool {
-    let runner_cfg = tokio::Config::default()
-        .with_worker_threads(1)
-        .with_network_buffer_pool_config(cfg);
-
-    tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
 }
 
 fn build_pool(size: usize, threads: usize) -> BufferPool {
     let max_per_class =
         u32::try_from(threads * 4).expect("bench capacity must fit in u32 slot ids");
-    start_pool(
-        BufferPoolConfig::for_network()
-            .with_pool_min_size(0)
-            .with_size_class_range(NZUsize!(size), NZUsize!(size), NZU32!(max_per_class))
-            .with_parallelism(NZUsize!(threads))
-            .with_prefill(true),
-    )
-}
+    let cfg = BufferPoolConfig::for_network()
+        .with_pool_min_size(0)
+        .with_size_class_range(NZUsize!(size), NZUsize!(size), NZU32!(max_per_class))
+        .with_parallelism(NZUsize!(threads))
+        .with_prefill(true);
 
-fn build_sparse_pool(size: usize, threads: usize) -> BufferPool {
-    let max_per_class =
-        u32::try_from(threads * 4).expect("bench capacity must fit in u32 slot ids");
-    start_pool(
-        BufferPoolConfig::for_network()
-            .with_pool_min_size(0)
-            .with_size_classes([
-                (NZUsize!(SPARSE_MIN_CLASS), NZU32!(max_per_class)),
-                (NZUsize!(size), NZU32!(max_per_class)),
-            ])
-            .with_parallelism(NZUsize!(threads))
-            .with_prefill(true),
-    )
+    let runner_cfg = tokio::Config::default()
+        .with_worker_threads(1)
+        .with_network_buffer_pool_config(cfg);
+
+    tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
 }
