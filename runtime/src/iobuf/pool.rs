@@ -153,7 +153,7 @@ impl From<(NonZeroUsize, NonZeroU32)> for BufferPoolClassConfig {
 /// ([`Self::with_max_per_class`], [`Self::with_bytes_per_class`]) overwrite
 /// every enabled limit, and [`Self::with_budget_bytes`] snapshots and rescales
 /// the shape that exists at that call.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BufferPoolConfig {
     /// Minimum request size that should use pooled allocation.
     ///
@@ -188,25 +188,6 @@ pub struct BufferPoolConfig {
     /// explicit per-thread cache size clamped to each class limit.
     /// [`Self::with_thread_cache_disabled`] bypasses thread-local caches.
     pub(crate) thread_cache_config: BufferPoolThreadCacheConfig,
-}
-
-impl std::fmt::Debug for BufferPoolConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BufferPoolConfig")
-            .field("pool_min_size", &self.pool_min_size)
-            .field(
-                "classes",
-                &self
-                    .size_classes()
-                    .map(|class| (class.size.get(), class.max_buffers.get()))
-                    .collect::<Vec<_>>(),
-            )
-            .field("prefill", &self.prefill)
-            .field("alignment", &self.alignment)
-            .field("parallelism", &self.parallelism)
-            .field("thread_cache_config", &self.thread_cache_config)
-            .finish()
-    }
 }
 
 impl BufferPoolConfig {
