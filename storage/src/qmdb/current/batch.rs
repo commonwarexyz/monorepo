@@ -518,10 +518,9 @@ where
             bitmap_parent,
         } = self;
 
-        // Overlap the update resolution with a committed-prefix candidate prefetch, as in
-        // the any-variant staged merkleize. Candidates come from the speculative
-        // `bitmap_parent` (the same source the floor raise scans below), clamped to the
-        // committed prefix inside the helper.
+        // Overlap the update resolution with a committed-prefix candidate prefetch.
+        // Candidates come from the speculative `bitmap_parent` (the same source the floor
+        // raise scans below), clamped to the committed prefix inside the helper.
         let (inner, staged_updates, prefetched) = inner
             .resolve_updates_prefetched(updates, upserts, &db.any, |floor, tip, limit, out| {
                 fill_candidates(&bitmap_parent, floor, tip, limit, out)
