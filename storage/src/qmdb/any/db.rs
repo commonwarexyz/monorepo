@@ -833,16 +833,6 @@ where
     ///
     /// Returns an error if preparing the commit fails; failures of the deferred durability work
     /// surface on the returned handle and again on the next durability operation.
-    #[tracing::instrument(
-        name = "qmdb.any.db.start_commit",
-        level = "info",
-        skip_all,
-        fields(
-            db_size = *self.last_commit_loc + 1,
-            inactivity_floor = *self.inactivity_floor_loc,
-            active_keys = self.active_keys as u64,
-        ),
-    )]
     pub async fn start_commit(&mut self) -> Result<Handle<()>, crate::qmdb::Error<F>> {
         self.metrics.commit_calls.inc();
         Ok(self.log.start_commit().await?)

@@ -755,7 +755,6 @@ where
     /// Bitmap metadata is only persisted by [Self::sync]. At most one commit is in flight at a
     /// time. Failures of the deferred durability work surface on the returned handle and again
     /// on the next durability operation.
-    #[tracing::instrument(name = "qmdb.current.db.start_commit", level = "info", skip_all)]
     pub async fn start_commit(&mut self) -> Result<Handle<()>, Error<F>> {
         self.any.start_commit().await
     }

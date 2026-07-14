@@ -368,11 +368,13 @@ where
     /// surface on the returned handle and again on the next durability operation.
     pub async fn start_commit(&mut self) -> Result<Handle<()>, Error<F>> {
         // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
-        // limit memory bloat. Flushing before starting the commit keeps the returned handle from
-        // being lost to a flush error after the journal's sync already began.
-        self.merkle.flush().await?;
+        // limit memory bloat.
+        let (handle, ()) = try_join!(
+            self.journal.start_commit().map_err(Error::Journal),
+            self.merkle.flush().map_err(Error::Merkle)
+        )?;
 
-        Ok(self.journal.start_commit().await?)
+        Ok(handle)
     }
 
     /// Durably persist the journal. This is faster than `sync()` but does not guarantee that the
