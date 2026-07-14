@@ -863,11 +863,6 @@ where
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
         match plan {
-            // The propose plan relays the staged proposal: it is broadcast
-            // before it is persisted, and its ack completes the propose
-            // durability handshake. Every propose path stages its block
-            // (including leader recovery), so a missing entry means the round
-            // was already pruned by finalization and there is nothing to relay.
             Plan::Propose { round } => {
                 let Some((block, ack)) = self.gates.take_staged(round, commitment) else {
                     debug!(%round, %commitment, "no staged proposal to relay");

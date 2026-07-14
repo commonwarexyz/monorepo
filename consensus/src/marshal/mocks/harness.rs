@@ -996,18 +996,9 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered =
-                            restarted
-                                .mailbox
-                                .get_verified(round)
-                                .await
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "a durable propose handshake must imply \
-                                     get_verified(round) recovers the block after restart \
-                                     (seed={seed}, cycle={cycle})"
-                                    )
-                                });
+                        let recovered = restarted.mailbox.get_verified(round).await.unwrap_or_else(
+                            || panic!("durable proposal lost after restart (seed={seed}, cycle={cycle})"),
+                        );
                         assert_eq!(
                             recovered.digest(),
                             digest,

@@ -879,10 +879,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Notifies the actor that a block should be durably persisted at `round`,
     /// delivering its durable-sync handle through `ack` without awaiting it.
     ///
-    /// Used by certification to persist a staged proposal whose broadcast was
-    /// never requested (completing the propose durability handshake), and by the
-    /// blocking [Self::verified]. A dropped `ack` (the mailbox is closed)
-    /// abandons the handshake.
+    /// Takes a sender rather than returning a receiver so certification can
+    /// deliver the handle into a handshake staged at propose time. A dropped
+    /// `ack` (the mailbox is closed) abandons the handshake.
     pub fn verified_deferred(
         &self,
         round: Round,

@@ -1146,11 +1146,6 @@ where
             return Feedback::Ok;
         };
 
-        // The propose plan relays the staged proposal: its shards are
-        // broadcast before the block is persisted, and its ack completes the
-        // propose durability handshake. Every propose path stages its block
-        // (including leader recovery), so a missing entry means the round was
-        // already pruned by finalization and there is nothing to relay.
         let Some((block, ack)) = self.gates.take_staged(round, commitment) else {
             debug!(%round, %commitment, "no staged proposal to relay");
             return Feedback::Ok;
