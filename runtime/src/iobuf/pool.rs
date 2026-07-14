@@ -2215,11 +2215,10 @@ mod tests {
         );
 
         // BufferPoolClassConfig values work as inputs too.
-        let explicit = BufferPoolConfig::for_network()
-            .with_size_classes([BufferPoolClassConfig {
-                size: NZUsize!(512),
-                max_buffers: NZU32!(2),
-            }]);
+        let explicit = BufferPoolConfig::for_network().with_size_classes([BufferPoolClassConfig {
+            size: NZUsize!(512),
+            max_buffers: NZU32!(2),
+        }]);
         assert_eq!(classes_of(&explicit), vec![(512, 2)]);
     }
 
