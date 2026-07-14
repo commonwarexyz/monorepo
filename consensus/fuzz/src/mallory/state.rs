@@ -27,12 +27,8 @@ use std::collections::BTreeSet;
 
 /// The honest-reporter type the descriptor reads: the shared mock reporter over
 /// the deterministic runtime, a backend's scheme, and its elector.
-type HonestReporter<P> = Reporter<
-    deterministic::Context,
-    <P as Simplex>::Scheme,
-    <P as Simplex>::Elector,
-    Sha256Digest,
->;
+type HonestReporter<P> =
+    Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
 
 /// View-relative protocol-state descriptor of the honest reporters: a compact
 /// fingerprint of their agreement state as offsets, spreads, and counts relative

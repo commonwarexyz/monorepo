@@ -1,4 +1,4 @@
-//! Episode-level Byzantine adversary profiles for `Mode::Mallory`.
+//! Episode-level Byzantine adversary profiles for Mallory.
 //!
 //! Where [`action`](super::action) perturbs only the network, an adversary *role*
 //! replaces the single faultable identity ([`crate::BYZANTINE_IDX`]) with an
@@ -35,7 +35,9 @@
 //! certificate and resolver channels (freeing those receivers rather than leaving a
 //! second owner).
 
-use crate::{disrupter::Disrupter, simplex::Simplex, strategy::AnyScope, NetworkChannels, PublicKeyOf};
+use crate::{
+    disrupter::Disrupter, simplex::Simplex, strategy::AnyScope, NetworkChannels, PublicKeyOf,
+};
 use commonware_consensus::{
     simplex::mocks::{conflicter, equivocator, impersonator, nuller, outdated, relay},
     types::{Epoch, ViewDelta},
@@ -57,7 +59,7 @@ pub(crate) enum AdversaryRole {
     /// Node 0 is an honest [`ManagedValidator`](crate::ManagedValidator) like the
     /// other three (the pre-adversary environment).
     Honest,
-    /// Node 0 is a [`Disrupter`](crate::disrupter::Disrupter) emitting on all three
+    /// Node 0 is a [`Disrupter`] emitting on all three
     /// consensus channels.
     Disrupter,
     /// Node 0 is a conflicter emitting conflicting notarize/finalize pairs on the
@@ -436,11 +438,18 @@ mod tests {
         let mut seen = [false; 7];
         for _ in 0..256 {
             let role = AdversaryRole::sample(&mut a);
-            assert_eq!(role, AdversaryRole::sample(&mut b), "sample must be deterministic");
+            assert_eq!(
+                role,
+                AdversaryRole::sample(&mut b),
+                "sample must be deterministic"
+            );
             let idx = ALL_ROLES.iter().position(|&r| r == role).unwrap();
             seen[idx] = true;
         }
-        assert!(seen.iter().all(|&s| s), "every role must be sampled: {seen:?}");
+        assert!(
+            seen.iter().all(|&s| s),
+            "every role must be sampled: {seen:?}"
+        );
     }
 
     #[test]
@@ -458,7 +467,10 @@ mod tests {
                 AdversaryRole::sample_byzantine(&mut b),
                 "sample_byzantine must be deterministic"
             );
-            assert!(role.is_byzantine(), "sample_byzantine must never yield Honest");
+            assert!(
+                role.is_byzantine(),
+                "sample_byzantine must never yield Honest"
+            );
             // index 1..=6 are the byzantine roles; map to a 0..6 slot.
             seen[role.index() - 1] = true;
         }
@@ -471,7 +483,10 @@ mod tests {
     #[test]
     fn is_byzantine_only_false_for_honest() {
         assert!(!AdversaryRole::Honest.is_byzantine());
-        for role in ALL_ROLES.into_iter().filter(|r| *r != AdversaryRole::Honest) {
+        for role in ALL_ROLES
+            .into_iter()
+            .filter(|r| *r != AdversaryRole::Honest)
+        {
             assert!(role.is_byzantine(), "{role:?} must be byzantine");
         }
     }
@@ -501,7 +516,11 @@ mod tests {
         // `env_tag_separates_post_amnesia_from_every_other_environment` test, where
         // that constant is in scope.)
         let fp = 0x0123_4567_89ab_cdefu64;
-        assert_eq!(AdversaryRole::Honest.tag(), 0, "honest tag must be the identity");
+        assert_eq!(
+            AdversaryRole::Honest.tag(),
+            0,
+            "honest tag must be the identity"
+        );
         assert_eq!(fp ^ AdversaryRole::Honest.tag(), fp);
         for (i, a) in ALL_ROLES.iter().enumerate() {
             for b in &ALL_ROLES[i + 1..] {
@@ -522,7 +541,11 @@ mod tests {
         assert_eq!(AdversaryRole::Honest.index(), 0);
         for (i, &role) in ALL_ROLES.iter().enumerate() {
             assert_eq!(role.index(), i, "{role:?} index must match catalog order");
-            assert_eq!(AdversaryRole::from_index(i), role, "from_index inverts index");
+            assert_eq!(
+                AdversaryRole::from_index(i),
+                role,
+                "from_index inverts index"
+            );
         }
     }
 

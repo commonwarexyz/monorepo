@@ -442,15 +442,29 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_mallory"
-path = "fuzz_targets/simplex_id_mallory.rs"
+name = "simplex_id_mallory_time"
+path = "fuzz_targets/simplex_id_mallory_time.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_cert_mock_mallory"
-path = "fuzz_targets/simplex_cert_mock_mallory.rs"
+name = "simplex_id_mallory_container"
+path = "fuzz_targets/simplex_id_mallory_container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_mallory_time"
+path = "fuzz_targets/simplex_cert_mock_mallory_time.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_mallory_container"
+path = "fuzz_targets/simplex_cert_mock_mallory_container.rs"
 test = false
 doc = false
 bench = false

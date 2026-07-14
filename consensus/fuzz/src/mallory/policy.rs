@@ -396,7 +396,10 @@ mod tests {
         let before = policy.row(probe)[3];
         policy.learn_terminal(probe, 3, 1.0);
         let after = policy.row(probe)[3];
-        assert!(after > before, "any state must still learn after saturation");
+        assert!(
+            after > before,
+            "any state must still learn after saturation"
+        );
     }
 
     #[test]

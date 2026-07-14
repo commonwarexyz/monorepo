@@ -1,4 +1,4 @@
-//! The `Mode::Mallory` OODA episode loop and its action choosers.
+//! The Mallory OODA episode loop and its action choosers.
 //!
 //! Each episode first picks one adversary ENVIRONMENT for the faultable identity
 //! ([`BYZANTINE_IDX`], node 0): honest, or one of six Byzantine profiles
@@ -30,9 +30,9 @@
 
 use super::{action, adversary, lifecycle, log, multiplexer, network, policy, state};
 use crate::{
-    build_validator, build_validator_with_reporter, happens_before, invariants,
-    simplex::Simplex, sniff_sink, CertCfgOf, CertifyChoice, ManagedValidator, PublicKeyOf,
-    SniffChannel, SniffingReceiver, ValidatorLifecycle, BYZANTINE_IDX, N4F0C4, POST_GST_WINDOW,
+    build_validator, build_validator_with_reporter, happens_before, invariants, simplex::Simplex,
+    sniff_sink, CertCfgOf, CertifyChoice, ManagedValidator, PublicKeyOf, SniffChannel,
+    SniffingReceiver, ValidatorLifecycle, BYZANTINE_IDX, N4F0C4, POST_GST_WINDOW,
 };
 use commonware_consensus::{
     simplex::mocks::{relay, reporter::Reporter},
@@ -173,6 +173,39 @@ pub(crate) enum Chooser {
     /// observe the non-terminal property (unlike a crash-stop).
     #[cfg(test)]
     FixedFirst(policy::ActionId),
+    /// Force [`action::Action::SetRole`] every step with a DETERMINISTIC target that
+    /// cycles through the byzantine roles by step (not the RNG-sampled target), so the
+    /// multiplexer provably hosts distinct profiles across views. A test-only seam:
+    /// asserting >= 2 distinct roles on the RNG-sampled target is a coincidence of the
+    /// input's RNG phase, so the demonstration forces the targets instead.
+    #[cfg(test)]
+    FixedSetRole,
+}
+
+/// How each step's observation window ends.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum WindowMode {
+    /// Observe a fixed [`MALLORY_WINDOW`] of deterministic time every step,
+    /// measured from the action's start so an in-enact restart downtime counts
+    /// toward it (F6). Bounded and RNG-independent.
+    Time,
+    /// Observe until the honest finalized frontier advances by the input's
+    /// `required_containers` past its value at the window's start, capped at
+    /// [`MALLORY_WINDOW`] so a fault that stalls quorum cannot hang the runtime.
+    /// A fast-finalizing step ends as soon as the container goal is met, so an
+    /// episode's wall-clock cost scales with the virtual time actually consumed
+    /// rather than a fixed window per step.
+    Container,
+}
+
+impl WindowMode {
+    /// Short label for the decision log's `window=` field.
+    fn label(self) -> &'static str {
+        match self {
+            WindowMode::Time => "time",
+            WindowMode::Container => "container",
+        }
+    }
 }
 
 /// Uniformly sample a LEGAL action id from the runtime RNG. The [`Chooser::Random`]
@@ -225,14 +258,15 @@ fn spawn_packet_pump<P: Simplex>(
 /// immediately. A dropped receiver or a failed send (the pump stopped) is ignored --
 /// there is nothing to drain from a stopped pump.
 async fn flush_pump_and_wait(
-    senders: &[(usize, SniffChannel, mpsc::UnboundedSender<network::FlushAck>)],
+    senders: &[(
+        usize,
+        SniffChannel,
+        mpsc::UnboundedSender<network::FlushAck>,
+    )],
     node: usize,
     channel: SniffChannel,
 ) {
-    if let Some((_, _, tx)) = senders
-        .iter()
-        .find(|(n, c, _)| *n == node && *c == channel)
-    {
+    if let Some((_, _, tx)) = senders.iter().find(|(n, c, _)| *n == node && *c == channel) {
         let (ack_tx, ack_rx) = oneshot::channel();
         if tx.send(ack_tx).is_ok() {
             let _ = ack_rx.await;
@@ -244,7 +278,10 @@ async fn flush_pump_and_wait(
 /// original simulated sender paired with the sniffer-over-pump receiver, plus the
 /// pump's heal-time flush sender.
 type WrappedReceive<P, S> = (
-    (S, SniffingReceiver<P, network::PacketFaultReceiver<PublicKeyOf<P>>>),
+    (
+        S,
+        SniffingReceiver<P, network::PacketFaultReceiver<PublicKeyOf<P>>>,
+    ),
     mpsc::UnboundedSender<network::FlushAck>,
 );
 
@@ -279,7 +316,7 @@ fn wrap_receive<P: Simplex, S>(
     )
 }
 
-/// Restart the crashed faultable identity in place (`Mode::Mallory`), either
+/// Restart the crashed faultable identity in place (Mallory), either
 /// DURABLY on its existing storage or with AMNESIA on a fresh (empty) storage
 /// partition. Shared body for [`restart_durable`] and [`restart_amnesia`]; the
 /// `amnesia` flag selects the two differences (see below).
@@ -314,7 +351,11 @@ async fn restart<P: Simplex>(
     peers: &Arc<[PublicKeyOf<P>]>,
     ambiguous: &Arc<[u32]>,
     packet_cell: &network::PacketFaultCell,
-    flush_senders: &mut Vec<(usize, SniffChannel, mpsc::UnboundedSender<network::FlushAck>)>,
+    flush_senders: &mut Vec<(
+        usize,
+        SniffChannel,
+        mpsc::UnboundedSender<network::FlushAck>,
+    )>,
     input: &crate::FuzzInput,
     amnesia: bool,
 ) where
@@ -446,7 +487,11 @@ async fn restart_durable<P: Simplex>(
     peers: &Arc<[PublicKeyOf<P>]>,
     ambiguous: &Arc<[u32]>,
     packet_cell: &network::PacketFaultCell,
-    flush_senders: &mut Vec<(usize, SniffChannel, mpsc::UnboundedSender<network::FlushAck>)>,
+    flush_senders: &mut Vec<(
+        usize,
+        SniffChannel,
+        mpsc::UnboundedSender<network::FlushAck>,
+    )>,
     input: &crate::FuzzInput,
 ) where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
@@ -484,7 +529,11 @@ async fn restart_amnesia<P: Simplex>(
     peers: &Arc<[PublicKeyOf<P>]>,
     ambiguous: &Arc<[u32]>,
     packet_cell: &network::PacketFaultCell,
-    flush_senders: &mut Vec<(usize, SniffChannel, mpsc::UnboundedSender<network::FlushAck>)>,
+    flush_senders: &mut Vec<(
+        usize,
+        SniffChannel,
+        mpsc::UnboundedSender<network::FlushAck>,
+    )>,
     input: &crate::FuzzInput,
 ) where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
@@ -507,7 +556,7 @@ async fn restart_amnesia<P: Simplex>(
     .await;
 }
 
-/// Run one Mallory episode (`Mode::Mallory`).
+/// Run one Mallory episode under the given [`WindowMode`].
 ///
 /// Builds its OWN setup by reusing the shared harness helpers directly
 /// ([`crate::setup_network`], [`build_validator`], the [`SniffingReceiver`]
@@ -532,24 +581,24 @@ async fn restart_amnesia<P: Simplex>(
 /// Disrupter role additionally draws from the shared RNG while running, coupling
 /// the stream to its timing -- still deterministic under the single-threaded
 /// scheduler since the role is fixed for the episode.
-pub fn run<P: Simplex>(input: crate::FuzzInput, chooser: Chooser)
+pub fn run<P: Simplex>(input: crate::FuzzInput, chooser: Chooser, window: WindowMode)
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
 {
-    run_with::<P>(input, chooser, MALLORY_EPISODE_STEPS);
+    run_with::<P>(input, chooser, MALLORY_EPISODE_STEPS, window);
 }
 
 /// [`run`] with an explicit episode length, sampling the adversary role from the
 /// runtime RNG. Production runs [`MALLORY_EPISODE_STEPS`]; the ignored integration
 /// tests pass a short count so a full deterministic episode (runtime + window +
 /// liveness + invariants) finishes in seconds while exercising the same code paths.
-fn run_with<P: Simplex>(input: crate::FuzzInput, chooser: Chooser, steps: usize)
+fn run_with<P: Simplex>(input: crate::FuzzInput, chooser: Chooser, steps: usize, window: WindowMode)
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
 {
-    run_inner::<P>(input, chooser, steps, None);
+    run_inner::<P>(input, chooser, steps, None, window);
 }
 
 /// [`run_with`] with an optional forced adversary role. `forced_role` is
@@ -562,6 +611,7 @@ fn run_inner<P: Simplex>(
     chooser: Chooser,
     steps: usize,
     forced_role: Option<adversary::AdversaryRole>,
+    window: WindowMode,
 ) where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
@@ -588,7 +638,13 @@ fn run_inner<P: Simplex>(
         // oracle and rebuilds an engine over the participant set.
         let (mut oracle, participants, schemes, mut registrations) =
             crate::setup_network::<P>(&mut context, &input).await;
-        crate::print_fuzz_input(crate::Mode::Mallory, &input);
+        crate::print_fuzz_input(
+            match window {
+                WindowMode::Time => crate::Mode::MalloryTime,
+                WindowMode::Container => crate::Mode::MalloryContainer,
+            },
+            &input,
+        );
 
         let config = input.configuration;
         let n = config.n as usize;
@@ -851,6 +907,12 @@ fn run_inner<P: Simplex>(
                     assert!(legal[want], "forced action must be legal");
                     want
                 }
+                #[cfg(test)]
+                Chooser::FixedSetRole => {
+                    let id = action::Action::SetRole.id();
+                    assert!(legal[id], "forced SetRole must be legal");
+                    id
+                }
             };
             let action = action::Action::from_id(action_id);
             // The stable-order contract: the resolved action must project back to
@@ -872,6 +934,17 @@ fn run_inner<P: Simplex>(
             // (F6) rather than a restart observing downtime + window.
             let step_start = context.current();
             let plan = action.sample(&mut context, byz);
+            // A `FixedSetRole` episode overrides the RNG-sampled target with a
+            // deterministic per-step cycle over the byzantine roles, so the switch
+            // provably reaches distinct profiles across views. Runs after `sample` so
+            // the RNG bookkeeping is identical to a real SetRole step.
+            #[cfg(test)]
+            let plan = match chooser {
+                Chooser::FixedSetRole => action::FaultPlan::SetRole(
+                    adversary::AdversaryRole::from_index(1 + step % 6),
+                ),
+                _ => plan,
+            };
             let params = plan.describe();
             match &plan {
                 action::FaultPlan::None => {}
@@ -998,16 +1071,51 @@ fn run_inner<P: Simplex>(
                 }
             }
 
-            // (g) Run the single fixed observation window, measured from the action's
-            // start so a restart's in-enact downtime counts toward it (F6). A step
-            // whose enact already exceeded the window observes for zero more time.
-            let elapsed = context
-                .current()
-                .duration_since(step_start)
-                .unwrap_or_default();
-            context
-                .sleep(observe_remaining(MALLORY_WINDOW, elapsed))
-                .await;
+            // (g) Run the observation window, measured from the action's start so a
+            // restart's in-enact downtime counts toward it (F6). Both modes cap the
+            // window at MALLORY_WINDOW from `step_start`, so a step never runs longer
+            // than the time-based window and a fault that stalls quorum cannot hang.
+            match window {
+                // A fixed MALLORY_WINDOW of deterministic time. A step whose enact
+                // already exceeded the window observes for zero more time.
+                WindowMode::Time => {
+                    let elapsed = context
+                        .current()
+                        .duration_since(step_start)
+                        .unwrap_or_default();
+                    context
+                        .sleep(observe_remaining(MALLORY_WINDOW, elapsed))
+                        .await;
+                }
+                // Observe until the honest frontier advances by `required_containers`
+                // past its value at the window's start, then stop early. `finalized`
+                // here is the frontier as of the step-start drain (h is below), so
+                // `goal` counts containers finalized across enact + observation. The
+                // MALLORY_WINDOW deadline (from `step_start`) is the safety cap.
+                WindowMode::Container => {
+                    let goal = finalized.saturating_add(required_containers);
+                    let deadline = step_start + MALLORY_WINDOW;
+                    while finalized < goal {
+                        // `duration_since` errors once the current time reaches the
+                        // deadline (the cap), which ends the observation.
+                        let Ok(remaining) = deadline.duration_since(context.current()) else {
+                            break;
+                        };
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        select! {
+                            next = monitor.recv() => match next {
+                                Some(v) => finalized = finalized.max(v.get()),
+                                // The honest drain-clock reporter is gone: stop
+                                // observing (the episode-end oracle still runs).
+                                None => break,
+                            },
+                            _ = context.sleep(remaining) => break,
+                        }
+                    }
+                }
+            }
 
             // (h) Settle ready work queued during the window.
             while let Ok(v) = monitor.try_recv() {
@@ -1149,8 +1257,9 @@ fn run_inner<P: Simplex>(
                 format!("{:?}", managed[0].lifecycle())
             };
             log::push(format!(
-                "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} action={action:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} finalized={finalized} next_state={hb_fp:#018x} state_desc={state_fp:#018x} reward={reward_log} window={MALLORY_WINDOW:?} heal={healed} matched={matched_log}",
-                current_role.label()
+                "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} action={action:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} finalized={finalized} next_state={hb_fp:#018x} state_desc={state_fp:#018x} reward={reward_log} window={} heal={healed} matched={matched_log}",
+                current_role.label(),
+                window.label()
             ));
             state = hb_fp;
 
@@ -1344,9 +1453,13 @@ mod tests {
 
     /// Run a short episode with the role SAMPLED from the RNG, tolerating a panic so
     /// a same-seed outcome is captured identically, and drain the decision log.
-    fn mallory_trace(input: FuzzInput, chooser: Chooser) -> (bool, Vec<String>) {
+    fn mallory_trace(
+        input: FuzzInput,
+        chooser: Chooser,
+        window: WindowMode,
+    ) -> (bool, Vec<String>) {
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_with::<SimplexId>(input, chooser, TEST_STEPS);
+            run_with::<SimplexId>(input, chooser, TEST_STEPS, window);
         }))
         .is_ok();
         (ok, log::take())
@@ -1361,7 +1474,7 @@ mod tests {
         role: adversary::AdversaryRole,
     ) -> (bool, Vec<String>) {
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_inner::<SimplexId>(input, chooser, TEST_STEPS, Some(role));
+            run_inner::<SimplexId>(input, chooser, TEST_STEPS, Some(role), WindowMode::Time);
         }))
         .is_ok();
         (ok, log::take())
@@ -1373,7 +1486,13 @@ mod tests {
     /// keeps the schedule byte-identical to the pre-role baseline (a forced role
     /// skips the RNG draw).
     fn run_honest(input: FuzzInput, chooser: Chooser) {
-        run_inner::<SimplexId>(input, chooser, TEST_STEPS, Some(adversary::AdversaryRole::Honest));
+        run_inner::<SimplexId>(
+            input,
+            chooser,
+            TEST_STEPS,
+            Some(adversary::AdversaryRole::Honest),
+            WindowMode::Time,
+        );
     }
 
     #[test]
@@ -1438,7 +1557,10 @@ mod tests {
                 .await;
             let plain_span = context.current().duration_since(plain_start).unwrap();
 
-            assert_eq!(restart_span, MALLORY_WINDOW, "a restart step spans one window");
+            assert_eq!(
+                restart_span, MALLORY_WINDOW,
+                "a restart step spans one window"
+            );
             assert_eq!(plain_span, MALLORY_WINDOW, "a plain step spans one window");
             assert_eq!(
                 restart_span, plain_span,
@@ -1454,7 +1576,11 @@ mod tests {
         // frontier; it never drops below required_containers, and stays there on
         // overflow.
         assert_eq!(liveness_target(2, 10), 11, "one view past the frontier");
-        assert_eq!(liveness_target(20, 10), 20, "never below required_containers");
+        assert_eq!(
+            liveness_target(20, 10),
+            20,
+            "never below required_containers"
+        );
         assert_eq!(
             liveness_target(2, u64::MAX),
             2,
@@ -1498,7 +1624,11 @@ mod tests {
             );
             // Equivalently, every role tag is distinct from AMNESIA_TAG, so no role
             // environment collides with the post-amnesia environment as a Q-state key.
-            assert_ne!(role.tag(), AMNESIA_TAG, "{role:?} tag must differ from AMNESIA_TAG");
+            assert_ne!(
+                role.tag(),
+                AMNESIA_TAG,
+                "{role:?} tag must differ from AMNESIA_TAG"
+            );
         }
     }
 
@@ -1557,7 +1687,10 @@ mod tests {
             action::Action::CrashRestartDurable.id(),
             action::Action::AmnesiaRestart.id(),
         ] {
-            assert!(running[id], "lifecycle columns are legal pre-enact (running)");
+            assert!(
+                running[id],
+                "lifecycle columns are legal pre-enact (running)"
+            );
             assert!(
                 !amnesiac[id],
                 "lifecycle columns must be excluded from the post-amnesia bootstrap mask"
@@ -1597,7 +1730,8 @@ mod tests {
         policy::reset_campaign(action::N_ACTIONS);
         adversary::reset_role_bandit();
         for seed in [1u64, 2, 3] {
-            let (learned_ok, learned_log) = mallory_trace(mallory_input(seed), Chooser::Learned);
+            let (learned_ok, learned_log) =
+                mallory_trace(mallory_input(seed), Chooser::Learned, WindowMode::Time);
             assert!(
                 learned_ok,
                 "learned chooser must complete and hold invariants (seed {seed})"
@@ -1607,8 +1741,10 @@ mod tests {
                 "the decision log must record the learned episode (seed {seed})"
             );
 
-            let (random_ok_a, random_log_a) = mallory_trace(mallory_input(seed), Chooser::Random);
-            let (random_ok_b, random_log_b) = mallory_trace(mallory_input(seed), Chooser::Random);
+            let (random_ok_a, random_log_a) =
+                mallory_trace(mallory_input(seed), Chooser::Random, WindowMode::Time);
+            let (random_ok_b, random_log_b) =
+                mallory_trace(mallory_input(seed), Chooser::Random, WindowMode::Time);
             assert!(
                 random_ok_a && random_ok_b,
                 "random chooser must complete and hold invariants (seed {seed})"
@@ -1616,6 +1752,37 @@ mod tests {
             assert_eq!(
                 random_log_a, random_log_b,
                 "random chooser: a fixed seed must produce a byte-identical decision log (seed {seed})"
+            );
+        }
+    }
+
+    /// The container observation window is a drop-in alternative to the time window:
+    /// the same seed completes and holds the SAME liveness/safety oracle under both,
+    /// and each mode records its own window in the decision log. The container window
+    /// stops each step early once `required_containers` finalize (capped at
+    /// MALLORY_WINDOW), which the time window never does. Uses the campaign-independent
+    /// [`Chooser::Random`] so the test is hermetic (no Q-table mutation) and isolates
+    /// the window from the chooser.
+    #[test]
+    #[ignore]
+    fn container_window_completes_and_holds_the_oracle() {
+        for seed in [1u64, 2, 3] {
+            let (time_ok, time_log) =
+                mallory_trace(mallory_input(seed), Chooser::Random, WindowMode::Time);
+            let (container_ok, container_log) =
+                mallory_trace(mallory_input(seed), Chooser::Random, WindowMode::Container);
+            assert!(
+                time_ok && container_ok,
+                "both windows must complete and hold the oracle (seed {seed})"
+            );
+            assert!(
+                !container_log.is_empty()
+                    && container_log.iter().all(|l| l.contains("window=container")),
+                "container mode must record the container window every step (seed {seed}): {container_log:?}"
+            );
+            assert!(
+                time_log.iter().all(|l| l.contains("window=time")),
+                "time mode must record the time window every step (seed {seed})"
             );
         }
     }
@@ -1631,13 +1798,15 @@ mod tests {
         policy::reset_campaign(action::N_ACTIONS);
         adversary::reset_role_bandit();
         for seed in [1u64, 2, 3] {
-            run_with::<SimplexId>(mallory_input(seed), Chooser::Learned, TEST_STEPS);
+            run_with::<SimplexId>(
+                mallory_input(seed),
+                Chooser::Learned,
+                TEST_STEPS,
+                WindowMode::Time,
+            );
         }
         assert!(
-            !policy::campaign(action::N_ACTIONS)
-                .lock()
-                .policy
-                .is_empty(),
+            !policy::campaign(action::N_ACTIONS).lock().policy.is_empty(),
             "learned episodes must populate the campaign Q-table"
         );
         assert!(
@@ -2013,13 +2182,16 @@ mod tests {
 
     /// Force [`action::Action::SetRole`] every step in a byzantine episode (initial
     /// role Disrupter): node 0's multiplexer swaps its active Byzantine profile each
-    /// step, composing faults across views. Acceptance criterion 2: (i) the decision
-    /// log records >= 2 DISTINCT roles for node 0 in the one episode; (ii) the episode
-    /// completes -- the three honest nodes reach `required_containers` and safety holds
-    /// with node 0 excluded; (iii) the per-episode switch cap is respected (SetRole is
-    /// masked once the cap is hit, so the switch count never exceeds it). With
-    /// `TEST_STEPS == MALLORY_MAX_ROLE_SWITCHES` every step is a legal SetRole and the
-    /// episode reaches the cap exactly.
+    /// step, composing faults across views. The target cycles DETERMINISTICALLY over
+    /// the byzantine roles by step (via [`Chooser::FixedSetRole`]) rather than the
+    /// RNG-sampled target -- whether a sampled target reaches >= 2 distinct roles is a
+    /// coincidence of the input's RNG phase, so the demonstration forces them. Acceptance
+    /// criterion 2: (i) the decision log records >= 2 DISTINCT roles for node 0 in the
+    /// one episode; (ii) the episode completes -- the three honest nodes reach
+    /// `required_containers` and safety holds with node 0 excluded; (iii) the per-episode
+    /// switch cap is respected (SetRole is masked once the cap is hit, so the switch
+    /// count never exceeds it). With `TEST_STEPS == MALLORY_MAX_ROLE_SWITCHES` every step
+    /// is a legal SetRole and the episode reaches the cap exactly.
     #[test]
     #[ignore]
     fn set_role_composes_byzantine_faults_across_views() {
@@ -2031,7 +2203,7 @@ mod tests {
         for seed in [1u64, 2, 3] {
             let (ok, logv) = mallory_trace_role(
                 mallory_input(seed),
-                Chooser::Fixed(action::Action::SetRole.id()),
+                Chooser::FixedSetRole,
                 adversary::AdversaryRole::Disrupter,
             );
             // (ii) The episode completed: liveness over the 3 honest nodes and safety
@@ -2111,6 +2283,7 @@ mod tests {
                 Chooser::Learned,
                 MALLORY_EPISODE_STEPS,
                 Some(adversary::AdversaryRole::Disrupter),
+                WindowMode::Time,
             );
         }
         assert!(

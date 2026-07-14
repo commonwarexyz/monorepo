@@ -83,7 +83,10 @@ impl<P: Simplex> RoleMultiplexer<P> {
         role: AdversaryRole,
         channels: NetworkChannels<PublicKeyOf<P>>,
     ) -> Self {
-        debug_assert!(role.is_byzantine(), "the multiplexer only hosts byzantine roles");
+        debug_assert!(
+            role.is_byzantine(),
+            "the multiplexer only hosts byzantine roles"
+        );
         let ctx = context
             .child("validator")
             .with_attribute("public_key", &node0);

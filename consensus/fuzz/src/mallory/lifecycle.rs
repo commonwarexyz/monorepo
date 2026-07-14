@@ -1,6 +1,6 @@
 //! Mallory's managed-validator crash/restart mechanics.
 //!
-//! `Mode::Mallory` may fault the single faultable identity ([`crate::BYZANTINE_IDX`])
+//! Mallory may fault the single faultable identity ([`crate::BYZANTINE_IDX`])
 //! at the process level, not just over the network. This module owns the two
 //! primitives the runner drives against a [`ManagedValidator`]:
 //!

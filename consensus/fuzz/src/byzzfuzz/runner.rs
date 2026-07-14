@@ -19,8 +19,7 @@ use crate::{
         scope::{self, MessageScope},
         ByzzFuzz,
     },
-    happens_before, invariants,
-    mallory,
+    happens_before, invariants, mallory,
     simplex::Simplex,
     sniff_sink, spawn_honest_validator,
     utils::Partition,
@@ -908,6 +907,9 @@ mod tests {
             first, second,
             "same seed must produce a byte-identical ByzzFuzz schedule"
         );
-        assert!(!first.is_empty(), "the decision log must record the schedule");
+        assert!(
+            !first.is_empty(),
+            "the decision log must record the schedule"
+        );
     }
 }

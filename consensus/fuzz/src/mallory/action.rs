@@ -530,7 +530,10 @@ mod tests {
         // can be selected or bootstrapped.
         let mask = legal_mask(true, false, false, false);
         assert_eq!(mask.len(), N_ACTIONS);
-        assert!(mask[Action::NoFault.id()], "NoFault stays legal when crashed");
+        assert!(
+            mask[Action::NoFault.id()],
+            "NoFault stays legal when crashed"
+        );
         for &action in CATALOG.iter().filter(|&&a| a != Action::NoFault) {
             assert!(
                 !mask[action.id()],
@@ -550,10 +553,7 @@ mod tests {
             !mask[Action::CrashRestartDurable.id()],
             "CrashRestartDurable masked"
         );
-        assert!(
-            !mask[Action::AmnesiaRestart.id()],
-            "AmnesiaRestart masked"
-        );
+        assert!(!mask[Action::AmnesiaRestart.id()], "AmnesiaRestart masked");
         for action in [
             Action::NoFault,
             Action::IsolateNodeWindow,
@@ -673,11 +673,16 @@ mod tests {
             assert!(
                 matches!(
                     plan,
-                    FaultPlan::CrashStop | FaultPlan::CrashRestartDurable | FaultPlan::AmnesiaRestart
+                    FaultPlan::CrashStop
+                        | FaultPlan::CrashRestartDurable
+                        | FaultPlan::AmnesiaRestart
                 ),
                 "a lifecycle action samples a lifecycle plan, got {plan:?}"
             );
-            assert!(!plan.is_active(), "a lifecycle fault is not a network/packet fault");
+            assert!(
+                !plan.is_active(),
+                "a lifecycle fault is not a network/packet fault"
+            );
             assert_eq!(
                 consumed.random_range(0u64..u64::MAX),
                 untouched.random_range(0u64..u64::MAX),
@@ -698,12 +703,21 @@ mod tests {
             let FaultPlan::SetRole(role) = Action::SetRole.sample(&mut rng, true) else {
                 panic!("SetRole must sample a SetRole plan");
             };
-            assert!(role.is_byzantine(), "SetRole target must be byzantine, got {role:?}");
-            assert!(!FaultPlan::SetRole(role).is_active(), "SetRole persists, not a transient");
+            assert!(
+                role.is_byzantine(),
+                "SetRole target must be byzantine, got {role:?}"
+            );
+            assert!(
+                !FaultPlan::SetRole(role).is_active(),
+                "SetRole persists, not a transient"
+            );
             seen_disrupter |= role == AdversaryRole::Disrupter;
             seen_other |= role != AdversaryRole::Disrupter;
         }
-        assert!(seen_disrupter && seen_other, "SetRole must reach multiple byzantine roles");
+        assert!(
+            seen_disrupter && seen_other,
+            "SetRole must reach multiple byzantine roles"
+        );
     }
 
     #[test]
@@ -744,7 +758,8 @@ mod tests {
     #[test]
     fn partition_window_only_yields_2_2_splits() {
         let mut rng = FuzzRng::new(vec![0x5a, 0xa5, 0x0f, 0xf0, 0x33, 0xcc, 0x11, 0xee]);
-        let allowed: Vec<SetPartition> = PARTITION_2_2.iter().map(|&i| SetPartition::n4(i)).collect();
+        let allowed: Vec<SetPartition> =
+            PARTITION_2_2.iter().map(|&i| SetPartition::n4(i)).collect();
         for _ in 0..256 {
             let FaultPlan::Partition(sp) = Action::PartitionWindow.sample(&mut rng, false) else {
                 panic!("PartitionWindow must sample a Partition plan");
@@ -763,8 +778,12 @@ mod tests {
     #[test]
     fn packet_actions_sample_valid_targets_and_bounded_params() {
         let mut rng = FuzzRng::new(vec![0x13, 0x37, 0xbe, 0xef, 0xca, 0xfe, 0x00, 0x99]);
-        let is_channel =
-            |c: SniffChannel| matches!(c, SniffChannel::Vote | SniffChannel::Certificate | SniffChannel::Resolver);
+        let is_channel = |c: SniffChannel| {
+            matches!(
+                c,
+                SniffChannel::Vote | SniffChannel::Certificate | SniffChannel::Resolver
+            )
+        };
         for _ in 0..256 {
             let delay = Action::PacketDelay.sample(&mut rng, false);
             assert!(delay.is_active(), "PacketDelay installs a transient fault");
@@ -802,7 +821,10 @@ mod tests {
             );
 
             let corrupt = Action::PacketCorrupt.sample(&mut rng, false);
-            assert!(corrupt.is_active(), "PacketCorrupt installs a transient fault");
+            assert!(
+                corrupt.is_active(),
+                "PacketCorrupt installs a transient fault"
+            );
             let FaultPlan::PacketCorrupt {
                 node,
                 channel,
@@ -813,17 +835,29 @@ mod tests {
             else {
                 panic!("PacketCorrupt must sample a PacketCorrupt plan, got {corrupt:?}");
             };
-            assert!(node < MALLORY_N, "corrupt must target a valid receiving node");
+            assert!(
+                node < MALLORY_N,
+                "corrupt must target a valid receiving node"
+            );
             assert!(is_channel(channel));
             assert!(
                 (PACKET_CORRUPT_MIN..=PACKET_CORRUPT_MAX).contains(&count),
                 "corrupt count {count} out of bounds"
             );
-            assert!(offset < PACKET_CORRUPT_OFFSET_MAX, "corrupt offset out of bounds");
-            assert!(mask != 0, "corrupt mask must be nonzero so a byte always changes");
+            assert!(
+                offset < PACKET_CORRUPT_OFFSET_MAX,
+                "corrupt offset out of bounds"
+            );
+            assert!(
+                mask != 0,
+                "corrupt mask must be nonzero so a byte always changes"
+            );
 
             let duplicate = Action::PacketDuplicate.sample(&mut rng, false);
-            assert!(duplicate.is_active(), "PacketDuplicate installs a transient fault");
+            assert!(
+                duplicate.is_active(),
+                "PacketDuplicate installs a transient fault"
+            );
             let FaultPlan::PacketDuplicate {
                 node,
                 channel,
@@ -832,7 +866,10 @@ mod tests {
             else {
                 panic!("PacketDuplicate must sample a PacketDuplicate plan, got {duplicate:?}");
             };
-            assert!(node < MALLORY_N, "duplicate must target a valid receiving node");
+            assert!(
+                node < MALLORY_N,
+                "duplicate must target a valid receiving node"
+            );
             assert!(is_channel(channel));
             assert!(
                 (PACKET_DUPLICATE_MIN..=PACKET_DUPLICATE_MAX).contains(&extra),
@@ -840,7 +877,10 @@ mod tests {
             );
 
             let reorder = Action::PacketReorder.sample(&mut rng, false);
-            assert!(reorder.is_active(), "PacketReorder installs a transient fault");
+            assert!(
+                reorder.is_active(),
+                "PacketReorder installs a transient fault"
+            );
             let FaultPlan::PacketReorder {
                 node,
                 channel,
@@ -849,7 +889,10 @@ mod tests {
             else {
                 panic!("PacketReorder must sample a PacketReorder plan, got {reorder:?}");
             };
-            assert!(node < MALLORY_N, "reorder must target a valid receiving node");
+            assert!(
+                node < MALLORY_N,
+                "reorder must target a valid receiving node"
+            );
             assert!(is_channel(channel));
             assert!(
                 (PACKET_REORDER_MIN..=PACKET_REORDER_MAX).contains(&buffer),

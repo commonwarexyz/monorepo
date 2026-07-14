@@ -9,7 +9,7 @@
 //! drive it. PR1 wires only the existing ByzzFuzz backend onto it (see
 //! `crate::byzzfuzz::run_qlearn`).
 //!
-//! The `Mode::Mallory` runner ([`runner`]) drives the episode loop over a stable
+//! The Mallory runner ([`runner`]) drives the episode loop over a stable
 //! action catalog ([`action`]) under the backend-agnostic Q-core. The catalog
 //! covers the NoFault, network-topology (isolate / partition), packet (delay /
 //! loss / corrupt / duplicate / reorder), and managed-validator lifecycle

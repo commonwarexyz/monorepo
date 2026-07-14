@@ -2,7 +2,7 @@
 //! and the packet-fault layer ([`PacketFaultCell`] / [`pump`] /
 //! [`PacketFaultReceiver`]).
 //!
-//! [`Topology`] is the ONLY place `Mode::Mallory` mutates the simulated network
+//! [`Topology`] is the ONLY place Mallory mutates the simulated network
 //! topology (link set). It owns a clone of the setup [`Oracle`] and drives every
 //! partition through [`crate::utils::apply_partition`]. Each transient partition
 //! is applied for one observation window and then [`Topology::heal`]ed back to a
@@ -226,7 +226,9 @@ impl PacketFaultCell {
         };
         self.inner.matched.store(false, Ordering::Relaxed);
         self.inner.remaining_drops.store(drops, Ordering::Relaxed);
-        self.inner.remaining_corrupts.store(corrupts, Ordering::Relaxed);
+        self.inner
+            .remaining_corrupts
+            .store(corrupts, Ordering::Relaxed);
         *self.inner.active.lock() = Some(fault);
     }
 
@@ -648,8 +650,15 @@ mod tests {
             kind: PacketFaultKind::Loss { drop_count: 2 },
         };
         let (got, matched) = drive(Some(fault), SniffChannel::Vote, &[1, 2, 3, 4, 5]);
-        assert!(matched, "a forced loss must record that it dropped a packet");
-        assert_eq!(got, vec![3, 4, 5], "the first two matching packets are dropped");
+        assert!(
+            matched,
+            "a forced loss must record that it dropped a packet"
+        );
+        assert_eq!(
+            got,
+            vec![3, 4, 5],
+            "the first two matching packets are dropped"
+        );
     }
 
     #[test]
@@ -663,7 +672,11 @@ mod tests {
         };
         let (got, matched) = drive(Some(fault), SniffChannel::Vote, &[1, 2, 3]);
         assert!(!matched, "a non-matching channel must not act");
-        assert_eq!(got, vec![1, 2, 3], "a non-matching channel forwards everything");
+        assert_eq!(
+            got,
+            vec![1, 2, 3],
+            "a non-matching channel forwards everything"
+        );
     }
 
     #[test]
@@ -677,7 +690,10 @@ mod tests {
         };
         let (got, matched) = drive(Some(fault), SniffChannel::Resolver, &[1, 2, 3]);
         assert!(matched);
-        assert!(got.is_empty(), "all three packets fit within the drop budget");
+        assert!(
+            got.is_empty(),
+            "all three packets fit within the drop budget"
+        );
     }
 
     #[test]
@@ -735,7 +751,11 @@ mod tests {
         };
         let (got, matched) = drive(Some(fault), SniffChannel::Vote, &[1, 2, 3]);
         assert!(!matched, "a non-matching channel must not act");
-        assert_eq!(got, vec![1, 2, 3], "a non-matching channel forwards unchanged");
+        assert_eq!(
+            got,
+            vec![1, 2, 3],
+            "a non-matching channel forwards unchanged"
+        );
     }
 
     #[test]
@@ -774,9 +794,17 @@ mod tests {
                 "the reorder buffer never grows past its capacity"
             );
         }
-        assert_eq!(released, vec![2, 4], "newest-on-alternating-packet is released early");
+        assert_eq!(
+            released,
+            vec![2, 4],
+            "newest-on-alternating-packet is released early"
+        );
         let held: Vec<u8> = buffer.iter().map(tag_of).collect();
-        assert_eq!(held, vec![1, 3, 5], "held packets stay in arrival order for the flush");
+        assert_eq!(
+            held,
+            vec![1, 3, 5],
+            "held packets stay in arrival order for the flush"
+        );
     }
 
     #[test]
@@ -808,10 +836,18 @@ mod tests {
         // arrive first, then the heal-time flush drains the held 1, 3, 5 in order,
         // so the stream is reordered but no packet is lost (liveness).
         let got = drive_reorder_flushed(3, SniffChannel::Vote, &[1, 2, 3, 4, 5]);
-        assert_eq!(got, vec![2, 4, 1, 3, 5], "flush drains the held buffer in order");
+        assert_eq!(
+            got,
+            vec![2, 4, 1, 3, 5],
+            "flush drains the held buffer in order"
+        );
         let mut sorted = got.clone();
         sorted.sort_unstable();
-        assert_eq!(sorted, vec![1, 2, 3, 4, 5], "the flush delivers every packet exactly once");
+        assert_eq!(
+            sorted,
+            vec![1, 2, 3, 4, 5],
+            "the flush delivers every packet exactly once"
+        );
     }
 
     #[test]
