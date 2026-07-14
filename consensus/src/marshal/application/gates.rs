@@ -13,8 +13,12 @@ use tracing::debug;
 /// delivers its durable-sync handle once marshal persists it.
 type Staged<B> = (Arc<B>, oneshot::Sender<Handle<()>>);
 
+/// The registries behind [`Gates`], sharing one lock.
 struct Inner<D: Digest, B> {
+    /// In-flight certification gate tasks, consumed by certification.
     tasks: HashMap<(Round, D), oneshot::Receiver<bool>>,
+    /// Proposals staged for their relay broadcast, consumed by the relay (or
+    /// by certification when no broadcast was requested).
     staged: HashMap<(Round, D), Staged<B>>,
 }
 
