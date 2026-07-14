@@ -406,7 +406,12 @@ pub(crate) mod test {
     fn unordered_variable_staged_ancestor_alive_through_apply() {
         deterministic::Runner::default().start(|context| async move {
             for apply_ancestors_first in [false, true] {
-                let mut db = create_test_db(context.child("staged_ancestor_alive")).await;
+                let label = if apply_ancestors_first {
+                    "staged_ancestor_alive_separate"
+                } else {
+                    "staged_ancestor_alive_combined"
+                };
+                let mut db = create_test_db(context.child(label)).await;
 
                 let key = |i: u64| Sha256::hash(&i.to_be_bytes());
 

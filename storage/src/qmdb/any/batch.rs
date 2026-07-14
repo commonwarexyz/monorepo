@@ -1903,8 +1903,8 @@ where
     }
 
     /// Read keys through this batch and return the values plus one owned key and resolution per
-    /// staged slot. Committed-resolved slots carry the location and cached payload they resolved
-    /// to.
+    /// staged slot. Location-resolved slots (committed, or ancestor-diff when the update kind
+    /// stages those) carry the location and cached payload they resolved to.
     #[allow(clippy::type_complexity)]
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
