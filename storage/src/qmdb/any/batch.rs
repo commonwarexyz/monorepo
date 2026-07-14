@@ -331,8 +331,10 @@ fn assign_key_ids<K: Clone + Eq + core::hash::Hash>(
     ids: &mut Vec<u32>,
     keys: &[K],
 ) {
+    // `ids` grows 1:1 with staged slots and `map.len() <= ids.len()`, so this bounds both
+    // the distinct-key id space and the slot indices `resolve_updates` narrows to u32.
     assert!(
-        map.len() + keys.len() <= u32::MAX as usize,
+        ids.len() + keys.len() <= u32::MAX as usize,
         "staged read count overflows key id space"
     );
     ids.reserve(keys.len());
@@ -802,6 +804,13 @@ where
         None
     }
 
+    /// Whether `locations` is strictly ascending and entirely within the committed region,
+    /// the shape a single batched reader call serves with no in-memory resolution.
+    fn all_committed_ascending(&self, locations: &[Location<F>]) -> bool {
+        locations.is_sorted_by(|a, b| a < b)
+            && locations.last().is_some_and(|last| **last < self.db_size)
+    }
+
     /// Read multiple operations by location, preserving the caller's order and permitting
     /// duplicates.
     ///
@@ -818,9 +827,7 @@ where
         // in-memory resolution, reordering, or per-location bookkeeping, so the positions can
         // be handed to the reader directly. Floor-raise candidates (always committed, always
         // ascending) and depth-0 mutation reads take this path every batch.
-        if locations.is_sorted_by(|a, b| a < b)
-            && locations.last().is_some_and(|last| **last < self.db_size)
-        {
+        if self.all_committed_ascending(locations) {
             let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
             return Ok(reader.read_many(&positions).await?);
         }
@@ -851,12 +858,6 @@ where
             positions.dedup();
         }
         let read = reader.read_many(&positions).await?;
-
-        // A presorted input with nothing resolved in memory was read in caller order
-        // already, so the merge below would only re-clone every operation.
-        if presorted && positions.len() == locations.len() {
-            return Ok(read);
-        }
 
         // Merge read results back in order.
         for (idx, loc) in committed {
@@ -891,9 +892,7 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         Operation<F, U>: CodecShared,
     {
-        if locations.is_sorted_by(|a, b| a < b)
-            && locations.last().is_some_and(|last| **last < self.db_size)
-        {
+        if self.all_committed_ascending(locations) {
             let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
             return Ok(reader.read_many_sharded(&positions).await?);
         }
@@ -1265,7 +1264,7 @@ where
                 let mut floor_diff = floor_diff;
                 strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
                 let diff = merge_sorted_diffs(diff, floor_diff);
-                debug_assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
+                assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
                 diff
             }));
             diff = Vec::new();
