@@ -7283,16 +7283,18 @@ mod tests {
             // does when certification wins the race against the relay.
             let gates = Gates::new();
             let (tx, rx) = oneshot::channel();
-            let staged = gates.clone();
-            let staged_block = block.clone();
-            context.child("stager").spawn(move |_| async move {
-                staged
-                    .wait(round, digest, Arc::new(staged_block), tx, "test")
-                    .await;
+            context.child("stager").spawn({
+                let gates = gates.clone();
+                let block = block.clone();
+                move |_| async move {
+                    gates
+                        .stage(round, digest, Arc::new(block), tx, "test")
+                        .await;
+                }
             });
             assert_eq!(rx.await.expect("id published"), digest);
             let gate = gates.take(round, digest).expect("gate registered");
-            gates.flush(&mailbox, round, digest);
+            gates.flush_unrelayed(&mailbox, round, digest);
             assert!(
                 gate.await.expect("gate resolved"),
                 "certify flush must resolve the gate durably"
@@ -7347,12 +7349,14 @@ mod tests {
             // Stage the proposal as propose would.
             let gates = Gates::new();
             let (tx, rx) = oneshot::channel();
-            let staged = gates.clone();
-            let staged_block = block.clone();
-            context.child("stager").spawn(move |_| async move {
-                staged
-                    .wait(round, digest, Arc::new(staged_block), tx, "test")
-                    .await;
+            context.child("stager").spawn({
+                let gates = gates.clone();
+                let block = block.clone();
+                move |_| async move {
+                    gates
+                        .stage(round, digest, Arc::new(block), tx, "test")
+                        .await;
+                }
             });
             assert_eq!(rx.await.expect("id published"), digest);
             let gate = gates.take(round, digest).expect("gate registered");

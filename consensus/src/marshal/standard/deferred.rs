@@ -299,7 +299,7 @@ where
                 // Publish only when the block is both valid and durable. App-invalid
                 // candidates may already be in the cache from the concurrent store above,
                 // so the gate verdict is the authority for consensus progress.
-                if let Some(application_valid) = gates::handle(verdict, durable) {
+                if let Some(application_valid) = gates::resolve(verdict, durable) {
                     tx.send_lossy(application_valid);
                 }
             }
@@ -549,7 +549,7 @@ where
                         "reusing verified block from marshal on leader recovery"
                     );
                     gates
-                        .wait(
+                        .stage(
                             consensus_context.round,
                             digest,
                             Arc::new(block),
@@ -605,7 +605,7 @@ where
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
                     gates
-                        .wait(
+                        .stage(
                             consensus_context.round,
                             digest,
                             parent,
@@ -658,7 +658,7 @@ where
 
                 let digest = built_block.digest();
                 gates
-                    .wait(
+                    .stage(
                         consensus_context.round,
                         digest,
                         Arc::new(built_block),
@@ -830,7 +830,7 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        self.gates.flush(&self.marshal, round, digest);
+        self.gates.flush_unrelayed(&self.marshal, round, digest);
 
         // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.gates.take(round, digest);

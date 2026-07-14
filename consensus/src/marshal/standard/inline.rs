@@ -327,7 +327,7 @@ where
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
                     gates
-                        .wait(
+                        .stage(
                             consensus_context.round,
                             digest,
                             parent,
@@ -380,7 +380,7 @@ where
 
                 let digest = built_block.digest();
                 gates
-                    .wait(
+                    .stage(
                         consensus_context.round,
                         digest,
                         Arc::new(built_block),
@@ -543,7 +543,7 @@ where
                     valid
                 };
                 let (verdict, durable) = futures::join!(verify_then_vote, store);
-                if let Some(valid) = gates::handle(verdict, durable) {
+                if let Some(valid) = gates::resolve(verdict, durable) {
                     durable_tx.send_lossy(valid);
                 }
             }
@@ -566,7 +566,7 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        self.gates.flush(&self.marshal, round, digest);
+        self.gates.flush_unrelayed(&self.marshal, round, digest);
 
         // `propose`/`verify` register an in-flight certification gate whose result resolves
         // once the block's sync handle completes. Awaiting it here is the durability barrier

@@ -95,7 +95,7 @@ impl<D: Digest, B> Gates<D, B> {
     /// block is flushed to `marshal` for persistence, which delivers the
     /// durable-sync handle through the staged ack. Does nothing when no
     /// proposal is staged (the relay broadcast already took it).
-    pub(crate) fn flush<S, V>(&self, marshal: &Mailbox<S, V>, round: Round, id: D)
+    pub(crate) fn flush_unrelayed<S, V>(&self, marshal: &Mailbox<S, V>, round: Round, id: D)
     where
         S: Scheme,
         V: Variant<Block = B>,
@@ -135,7 +135,7 @@ impl<D: Digest, B> Gates<D, B> {
     /// dropped ack means the marshal actor is gone or the staged entry was
     /// pruned without ever being taken, so the gate is left unresolved and
     /// `certify` falls back to its recovery fetch.
-    pub(crate) async fn wait(
+    pub(crate) async fn stage(
         &self,
         round: Round,
         id: D,
@@ -170,7 +170,7 @@ impl<D: Digest, B> Gates<D, B> {
 /// `durable` is false only when the marshal actor is gone at shutdown (a real sync failure panics
 /// at its source), so a true-but-not-durable result abandons the gate. Returns the verdict to
 /// publish, or `None` to leave the gate unresolved.
-pub(crate) const fn handle(verdict: Option<bool>, durable: bool) -> Option<bool> {
+pub(crate) const fn resolve(verdict: Option<bool>, durable: bool) -> Option<bool> {
     match verdict {
         Some(true) if !durable => None,
         other => other,
@@ -339,29 +339,31 @@ mod tests {
     }
 
     #[test]
-    fn test_handle() {
+    fn test_resolve() {
         // Verification stopped early: nothing to publish regardless of durability.
-        assert_eq!(handle(None, true), None);
-        assert_eq!(handle(None, false), None);
+        assert_eq!(resolve(None, true), None);
+        assert_eq!(resolve(None, false), None);
         // A false app verdict is a live rejection that needs no durability.
-        assert_eq!(handle(Some(false), false), Some(false));
-        assert_eq!(handle(Some(false), true), Some(false));
+        assert_eq!(resolve(Some(false), false), Some(false));
+        assert_eq!(resolve(Some(false), true), Some(false));
         // A true verdict publishes only once the store is durable.
-        assert_eq!(handle(Some(true), true), Some(true));
-        assert_eq!(handle(Some(true), false), None);
+        assert_eq!(resolve(Some(true), true), Some(true));
+        assert_eq!(resolve(Some(true), false), None);
     }
 
     #[test]
-    fn test_wait_handshake() {
+    fn test_stage_handshake() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let gates = TestGates::new();
             let digest = Sha256::hash(b"block");
             let (tx, rx) = oneshot::channel();
 
-            let staged = gates.clone();
-            context.spawn(move |_| async move {
-                staged.wait(round(1), digest, Arc::new(7), tx, "test").await;
+            context.spawn({
+                let gates = gates.clone();
+                move |_| async move {
+                    gates.stage(round(1), digest, Arc::new(7), tx, "test").await;
+                }
             });
 
             // The id is published only after the gate and staged block are registered.
@@ -388,9 +390,11 @@ mod tests {
             let digest = Sha256::hash(b"block");
             let (tx, rx) = oneshot::channel();
 
-            let staged = gates.clone();
-            context.spawn(move |_| async move {
-                staged.wait(round(1), digest, Arc::new(7), tx, "test").await;
+            context.spawn({
+                let gates = gates.clone();
+                move |_| async move {
+                    gates.stage(round(1), digest, Arc::new(7), tx, "test").await;
+                }
             });
             assert_eq!(rx.await.expect("id published"), digest);
 

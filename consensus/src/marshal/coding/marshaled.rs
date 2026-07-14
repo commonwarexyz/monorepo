@@ -471,7 +471,7 @@ where
                 // Publish only when the block is both valid and durable. App-invalid
                 // candidates may already be in the cache from the concurrent store above,
                 // so the gate verdict is the authority for consensus progress.
-                if let Some(application_valid) = gates::handle(verdict, durable) {
+                if let Some(application_valid) = gates::resolve(verdict, durable) {
                     tx.send_lossy(application_valid);
                 }
             }
@@ -752,7 +752,7 @@ where
                         "reusing verified block from marshal on leader recovery"
                     );
                     gates
-                        .wait(round, commitment, Arc::new(block), tx, "recovered block")
+                        .stage(round, commitment, Arc::new(block), tx, "recovered block")
                         .await;
                     return;
                 }
@@ -804,7 +804,7 @@ where
                     let round = consensus_context.round;
 
                     gates
-                        .wait(round, commitment, parent, tx, "re-proposed boundary block")
+                        .stage(round, commitment, parent, tx, "re-proposed boundary block")
                         .await;
                     return;
                 }
@@ -857,7 +857,7 @@ where
                 let round = consensus_context.round;
 
                 gates
-                    .wait(
+                    .stage(
                         round,
                         commitment,
                         Arc::new(coded_block),
@@ -1099,7 +1099,7 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        self.gates.flush(&self.marshal, round, payload);
+        self.gates.flush_unrelayed(&self.marshal, round, payload);
 
         // First, check for an in-progress certification gate task.
         let task = self.gates.take(round, payload);
