@@ -199,31 +199,32 @@ impl BufferPoolConfig {
     pub fn for_network() -> Self {
         Self {
             pool_min_size: 0,
-            class_limits: Self::contiguous_limits(
-                NZUsize!(1024),
-                NZUsize!(128 * 1024),
-                NZU32!(4096),
-            ),
+            class_limits: BTreeMap::new(),
             prefill: false,
             alignment: NZUsize!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
         }
+        .with_size_class_range(NZUsize!(1024), NZUsize!(128 * 1024), NZU32!(4096))
     }
 
     /// Storage I/O preset: `page_size` (usually 4KB) to 8MB buffers, 64 per class,
     /// not prefilled.
     pub fn for_storage() -> Self {
-        let page = NZUsize!(page_size());
         Self {
             pool_min_size: 0,
-            class_limits: Self::contiguous_limits(page, NZUsize!(8 * 1024 * 1024), NZU32!(64)),
+            class_limits: BTreeMap::new(),
             prefill: false,
             // TODO (#2960): this needs to be page/block aligned for O_DIRECT
             alignment: NZUsize!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
         }
+        .with_size_class_range(
+            NZUsize!(page_size()),
+            NZUsize!(8 * 1024 * 1024),
+            NZU32!(64),
+        )
     }
 
     /// Validates a class size, panicking on invalid values.
@@ -240,27 +241,6 @@ impl BufferPoolConfig {
             size.get() <= isize::MAX as usize,
             "class size must not exceed isize::MAX"
         );
-    }
-
-    /// Builds a class-limit table for an inclusive, contiguous range.
-    ///
-    /// # Panics
-    ///
-    /// - `min` or `max` is not a power of two
-    /// - `min` or `max` exceeds `isize::MAX`
-    /// - `max < min`
-    fn contiguous_limits(
-        min: NonZeroUsize,
-        max: NonZeroUsize,
-        max_buffers: NonZeroU32,
-    ) -> BTreeMap<NonZeroUsize, NonZeroU32> {
-        Self::validate_class_size(min);
-        Self::validate_class_size(max);
-        assert!(max >= min, "max size must be >= min size");
-
-        (min.get().trailing_zeros()..=max.get().trailing_zeros())
-            .map(|exponent| (NZUsize!(1 << exponent), max_buffers))
-            .collect()
     }
 
     /// Returns a copy of this config with a new minimum request size that uses pooling.
@@ -285,7 +265,13 @@ impl BufferPoolConfig {
         max: NonZeroUsize,
         max_buffers: NonZeroU32,
     ) -> Self {
-        self.class_limits = Self::contiguous_limits(min, max, max_buffers);
+        Self::validate_class_size(min);
+        Self::validate_class_size(max);
+        assert!(max >= min, "max size must be >= min size");
+
+        self.class_limits = (min.get().trailing_zeros()..=max.get().trailing_zeros())
+            .map(|exponent| (NZUsize!(1 << exponent), max_buffers))
+            .collect();
         self
     }
 
