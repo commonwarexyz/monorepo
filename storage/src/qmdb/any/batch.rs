@@ -104,13 +104,6 @@ impl<F: Family> StagedLoc<F> {
         }
     }
 
-    /// The key's committed snapshot location superseded by this staged write.
-    const fn base_old_loc(&self) -> Option<Location<F>> {
-        match self {
-            Self::Committed(loc) => Some(*loc),
-            Self::Ancestor { base_old_loc, .. } => *base_old_loc,
-        }
-    }
 }
 
 /// Staged update entry: key, resolved location, cached payload from the old update, and
@@ -2012,12 +2005,10 @@ where
         // produce. Resolutions whose ancestor is still alive keep their recorded base. If
         // that ancestor commits before this batch is applied, `apply_batch` resolves the
         // key in the ancestor's traveling diff and supersedes its entry's location instead.
-        let staged_base_old_loc = |sloc: StagedLoc<F>| {
-            if *sloc.loc() < m.db_size {
-                Some(sloc.loc())
-            } else {
-                sloc.base_old_loc()
-            }
+        let staged_base_old_loc = |sloc: StagedLoc<F>| match sloc {
+            StagedLoc::Committed(loc) => Some(loc),
+            StagedLoc::Ancestor { loc, .. } if *loc < m.db_size => Some(loc),
+            StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
         };
         let mut cached = staged_updates.into_iter().peekable();
         for (op, &old_loc) in results.iter().zip(&locations) {
