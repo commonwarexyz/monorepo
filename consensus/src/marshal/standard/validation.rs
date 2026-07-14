@@ -3,11 +3,11 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
         },
-        core::{CommitmentFallback, Mailbox},
+        core::Mailbox,
         standard::Standard,
     },
     simplex::types::Context,
-    types::{Epocher, Round},
+    types::Epocher,
     Application, Block, Epochable,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -17,7 +17,7 @@ use commonware_runtime::{
     Clock, Metrics, Spawner,
 };
 use commonware_utils::channel::oneshot;
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, info_span, Instrument as _};
 
@@ -73,8 +73,8 @@ pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
     marshal: &Mailbox<S, Standard<B>>,
     context: &Context<B::Digest, S::PublicKey>,
     digest: B::Digest,
-    block: B,
-) -> Option<Decision<B>>
+    block: Arc<B>,
+) -> Option<Decision<Arc<B>>>
 where
     ES: Epocher,
     S: Scheme,
@@ -111,37 +111,34 @@ where
     Some(Decision::Continue(block))
 }
 
-/// Outcome of fetching the parent and validating structural ancestry invariants.
+/// Outcome of awaiting the parent and validating structural ancestry invariants.
 pub(super) enum ParentCheck<B> {
-    /// Structurally valid; carries the fetched parent for application verification.
+    /// Structurally valid. Carries the parent for application verification.
     Valid(B),
     /// Structurally invalid (bad parent linkage or non-contiguous height); the verdict is
     /// `false` and the block must not be stored.
     Invalid,
 }
 
-/// Fetches the expected parent and validates standard ancestry invariants (parent linkage
-/// and contiguous height).
+/// Awaits the parent subscription and validates standard ancestry invariants (parent linkage
+/// and contiguous height) against `parent_commitment`, the expected parent commitment from
+/// the context the block is verified under.
+///
+/// The `parent_request` must be a subscription to `parent_commitment` started by the caller,
+/// so the parent fetch can overlap earlier work (e.g., waiting for the candidate block to
+/// become available).
 ///
 /// Returns `None` when work should stop early (receiver dropped or parent unavailable).
 #[inline]
-pub(super) async fn fetch_and_validate_parent<S, B>(
-    context: &Context<B::Digest, S::PublicKey>,
+pub(super) async fn await_and_validate_parent<B>(
+    parent_commitment: B::Digest,
     block: &B,
-    marshal: &Mailbox<S, Standard<B>>,
+    parent_request: oneshot::Receiver<Arc<B>>,
     tx: &mut oneshot::Sender<bool>,
-) -> Option<ParentCheck<B>>
+) -> Option<ParentCheck<Arc<B>>>
 where
-    S: Scheme,
-    B: Block + Clone,
+    B: Block,
 {
-    let (parent_view, parent_commitment) = context.parent;
-    let parent_request = marshal.subscribe_by_commitment(
-        parent_commitment,
-        CommitmentFallback::FetchByRound {
-            round: Round::new(context.epoch(), parent_view),
-        },
-    );
     // If consensus drops the receiver, we can stop work early.
     let parent = select! {
         _ = tx.closed() => {
@@ -182,7 +179,7 @@ where
 
 /// Runs application verification over the two-block ancestry prefix.
 ///
-/// The block must already have passed [`fetch_and_validate_parent`]. Returns `None` when
+/// The block must already have passed [`await_and_validate_parent`]. Returns `None` when
 /// work should stop early (receiver dropped). The store is intentionally separate so callers
 /// can run it concurrently with this verification (durability is independent of validity).
 #[inline]
@@ -190,8 +187,8 @@ where
 pub(super) async fn run_app_verify<E, S, A, B>(
     runtime_context: E,
     context: Context<B::Digest, S::PublicKey>,
-    block: &B,
-    parent: B,
+    block: Arc<B>,
+    parent: Arc<B>,
     application: &mut A,
     marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<bool>,
@@ -206,7 +203,7 @@ where
     let (parent_view, parent_commitment) = context.parent;
     let ancestry_stream = marshal.ancestor_stream(
         Arc::new(runtime_context.child("ancestor_stream")),
-        [block.clone(), parent],
+        [Arc::clone(&block), parent],
         ancestor_fetch_duration,
     );
     let validity_request = application

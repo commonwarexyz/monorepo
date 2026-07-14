@@ -34,7 +34,7 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::{
-    histogram::{duration_histogram, ScopedTimer, Timed},
+    histogram::{ScopedTimer, Timed},
     Counter, Gauge, GaugeExt as _, MetricsExt as _,
 };
 use commonware_utils::{
@@ -54,8 +54,6 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 /// Metrics for the Current layer.
 pub(crate) struct Metrics<E: Context> {
-    /// Clock used for duration timers.
-    clock: Arc<E>,
     /// Pruned bitmap chunks.
     pruned_chunks: Gauge,
     /// Most recent safe sync/prune boundary location.
@@ -72,37 +70,28 @@ pub(crate) struct Metrics<E: Context> {
     pub prune_calls: Counter,
     /// Duration of Current-layer prune calls.
     prune_duration: Timed,
+    /// Clock used by the duration timers.
+    clock: Arc<E>,
 }
 
 impl<E: Context> Metrics<E> {
-    /// Create and register metrics.
+    /// Register the full metric set under `context`, retaining it as the timers' clock.
     pub fn new(context: E) -> Self {
-        let pruned_chunks = context.gauge("pruned_chunks", "Number of pruned bitmap chunks");
-        let sync_boundary =
-            context.gauge("sync_boundary", "Most recent safe sync boundary location");
-        let apply_batch_calls = context.counter("apply_batch_calls", "Number of apply-batch calls");
-        let apply_batch_duration = duration_histogram(
-            &context,
-            "apply_batch_duration",
-            "Duration of apply-batch calls",
-        );
-        let sync_calls = context.counter("sync_calls", "Number of sync calls");
-        let sync_duration = duration_histogram(&context, "sync_duration", "Duration of sync calls");
-        let prune_calls = context.counter("prune_calls", "Number of prune calls");
-        let prune_duration =
-            duration_histogram(&context, "prune_duration", "Duration of prune calls");
-        let clock = Arc::new(context);
-
         Self {
-            clock,
-            pruned_chunks,
-            sync_boundary,
-            apply_batch_calls,
-            apply_batch_duration: Timed::new(apply_batch_duration),
-            sync_calls,
-            sync_duration: Timed::new(sync_duration),
-            prune_calls,
-            prune_duration: Timed::new(prune_duration),
+            pruned_chunks: context.gauge("pruned_chunks", "Number of pruned bitmap chunks"),
+            sync_boundary: context
+                .gauge("sync_boundary", "Most recent safe sync boundary location"),
+            apply_batch_calls: context.counter("apply_batch_calls", "Number of apply-batch calls"),
+            apply_batch_duration: Timed::register(
+                &context,
+                "apply_batch_duration",
+                "Duration of apply-batch calls",
+            ),
+            sync_calls: context.counter("sync_calls", "Number of sync calls"),
+            sync_duration: Timed::register(&context, "sync_duration", "Duration of sync calls"),
+            prune_calls: context.counter("prune_calls", "Number of prune calls"),
+            prune_duration: Timed::register(&context, "prune_duration", "Duration of prune calls"),
+            clock: Arc::new(context),
         }
     }
 
@@ -146,7 +135,12 @@ pub struct Db<
     ///
     /// Internal nodes are hashed using their position in the ops tree rather than their
     /// grafted position.
-    pub(super) grafted_tree: Mem<F, H::Digest>,
+    ///
+    /// Held in an [`Arc`] so merkleize can hand a zero-copy, immutable snapshot to the
+    /// grafted-layer hashing job running off the calling task. Mutations go through
+    /// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
+    /// otherwise, so a snapshot never observes later mutations.
+    pub(super) grafted_tree: Arc<Mem<F, H::Digest>>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -163,6 +157,11 @@ pub struct Db<
 
     /// Metrics for the Current layer.
     pub(super) metrics: Metrics<E>,
+
+    /// Test-only: park [Self::prune] after the pruning-metadata sync, before the log prune,
+    /// so tests can drop the pending future at that exact point.
+    #[cfg(test)]
+    pub(super) halt_before_prune_log: bool,
 }
 
 // Shared read-only functionality.
@@ -266,7 +265,7 @@ where
     /// This can be used to authenticate an ops root against a trusted canonical `current` root.
     pub async fn ops_root_witness(&self) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
-        let ops_size = storage.size().await;
+        let ops_size = storage.size();
         let ops_leaves = Location::<F>::try_from(ops_size)?;
         let grafted_root = compute_grafted_root::<F, H, _, _, N>(
             self.any.bitmap.as_ref(),
@@ -494,12 +493,15 @@ where
             retained.push(digest);
         }
 
-        self.grafted_tree = Mem::from_pruned_with_retained(prune_pos, pinned, retained);
+        self.grafted_tree = Arc::new(Mem::from_pruned_with_retained(prune_pos, pinned, retained));
         Ok(())
     }
 
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
+    ///
+    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
+    /// uncommitted operations are not guaranteed to survive.
     ///
     /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
     /// advance past the point where the grafting overlay has been pruned. The bitmap and grafted
@@ -521,6 +523,13 @@ where
             return Err(Error::PruneBeyondMinRequired(prune_loc, sync_boundary));
         }
 
+        // The sync boundary may be advanced by applied-but-uncommitted operations, and the
+        // pruning metadata persisted below durably records it. Commit the log first so
+        // recovery can replay to that boundary: otherwise a crash before the log prune
+        // recovers the older durable floor alongside newer pruning metadata and fails to
+        // initialize the bitmap.
+        self.any.log.commit().await?;
+
         // Prune the bitmap to the sync boundary (most aggressive safe location).
         self.any.prune_bitmap(sync_boundary);
         self.prune_grafted_tree_to_bitmap()?;
@@ -531,6 +540,11 @@ where
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
         // a pruned log with stale metadata would lose peak digests permanently.
         self.sync_metadata().await?;
+
+        #[cfg(test)]
+        if self.halt_before_prune_log {
+            std::future::pending::<()>().await;
+        }
 
         self.any.prune_log(prune_loc).await?;
         self.any.update_metrics();
@@ -650,7 +664,7 @@ where
         )
         .await?;
 
-        self.grafted_tree = grafted_tree;
+        self.grafted_tree = Arc::new(grafted_tree);
         self.root = root;
         self.update_metrics();
 
@@ -776,8 +790,11 @@ where
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.metadata.destroy().await?;
-        self.any.destroy().await
+        // Destructure before the await boundary to avoid stack growth from
+        // retaining the entire `self` in the future.
+        let Self { any, metadata, .. } = self;
+        metadata.destroy().await?;
+        any.destroy().await
     }
 }
 
@@ -796,7 +813,8 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`].
+    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
+    /// more details).
     ///
     /// This publishes the batch to the in-memory Current view and appends it to the journal,
     /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
@@ -809,7 +827,7 @@ where
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
-        self.grafted_tree.apply_batch(&batch.grafted)?;
+        Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
         self.update_metrics();
         Ok(range)
@@ -987,7 +1005,7 @@ pub(super) async fn compute_grafted_root<
     ops_leaves: Location<F>,
     inactivity_floor: Location<F>,
 ) -> Result<H::Digest, Error<F>> {
-    let size = storage.size().await;
+    let size = storage.size();
     let leaves = Location::try_from(size)?;
 
     // Collect peak digests of the grafted structure.
@@ -1017,11 +1035,36 @@ pub(super) async fn compute_grafted_root<
     Ok(hasher.root(leaves, inactive_peaks, peaks.iter())?)
 }
 
-/// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
+/// Resolve each bitmap chunk's covering ops-tree node, returning
+/// `(chunk_idx, chunk_ops_digest, chunk)` triples ready for
+/// [`grafting::graft_chunk_digests`].
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`]. The grafted leaf digest is `hash(chunk ||
+/// [`merkle::Graftable::subtree_root_position`].
+pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
+    ops_tree: &impl MerkleStorage<F, Digest = D>,
+    chunks: impl IntoIterator<Item = (usize, [u8; N])>,
+) -> Result<Vec<(usize, D, [u8; N])>, Error<F>> {
+    let grafting_height = grafting::height::<N>();
+
+    // Each graftable chunk has a single h=G ancestor at the deterministic
+    // `subtree_root_position(chunk_idx << G, G)`. Look it up directly.
+    try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| async move {
+        let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
+        let pos = F::subtree_root_position(leaf_start, grafting_height);
+        let chunk_ops_digest = ops_tree
+            .get_node(pos)
+            .await?
+            .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
+        Ok::<_, Error<F>>((chunk_idx, chunk_ops_digest, chunk))
+    }))
+    .await
+}
+
+/// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
+///
+/// See [`read_graft_inputs`] for the chunk requirements. The grafted leaf digest is `hash(chunk ||
 /// ops_h_G_node)`; for all-zero chunks the grafted leaf equals the ops digest directly (zero-chunk
 /// identity).
 ///
@@ -1036,38 +1079,8 @@ pub(super) async fn compute_grafted_leaves<
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     strategy: &S,
 ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
-    let grafting_height = grafting::height::<N>();
-
-    // Each graftable chunk has a single h=G ancestor at the deterministic
-    // `subtree_root_position(chunk_idx << G, G)`. Look it up directly.
-    let inputs = try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| async move {
-        let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
-        let pos = F::subtree_root_position(leaf_start, grafting_height);
-        let chunk_ops_digest = ops_tree
-            .get_node(pos)
-            .await?
-            .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
-        Ok::<_, Error<F>>((chunk_idx, chunk_ops_digest, chunk))
-    }))
-    .await?;
-
-    // Compute the grafted leaf digest for each chunk. For all-zero chunks, the
-    // grafted leaf equals the chunk_ops_digest directly (zero-chunk identity).
-    let zero_chunk = [0u8; N];
-    Ok(strategy.map_init_collect_vec(
-        inputs,
-        || qmdb::hasher::<H>(),
-        |h, (chunk_idx, chunk_ops_digest, chunk)| {
-            if chunk == zero_chunk {
-                (chunk_idx, chunk_ops_digest)
-            } else {
-                (
-                    chunk_idx,
-                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
-                )
-            }
-        },
-    ))
+    let inputs = read_graft_inputs::<F, _, N>(ops_tree, chunks).await?;
+    Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
 }
 
 /// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.
@@ -1398,6 +1411,73 @@ mod tests {
         let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
+    }
+
+    /// A prune dropped between the pruning-metadata sync and the log prune must remain
+    /// recoverable: the metadata durably records a bitmap boundary derived from a floor that
+    /// may exist only in buffered operations, and reopening panics if the recovered floor
+    /// lies below that boundary.
+    #[test_traced]
+    fn test_current_prune_dropped_before_log_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let mut db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("prune-park", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Establish a durable state, then apply (but do not commit) a batch that rewrites
+            // every key, advancing the in-memory floor well past the durable commit's floor.
+            populate_fixed_db::<mmr::Family, _>(&mut db, 0, 512).await;
+            let durable_floor = db.inactivity_floor_loc();
+            {
+                let mut batch = db.new_batch();
+                for idx in 0..512u64 {
+                    let key = Sha256::hash(&idx.to_be_bytes());
+                    let value = Sha256::hash(&(idx + 1024).to_be_bytes());
+                    batch = batch.write(key, Some(value));
+                }
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+            }
+            assert!(db.sync_boundary() > durable_floor);
+            let bounds = db.bounds();
+            let floor = db.inactivity_floor_loc();
+            let root = db.root();
+
+            // Drop the production prune future while it is parked after the metadata sync,
+            // before the log prune: a genuine cancellation at that await.
+            db.halt_before_prune_log = true;
+            {
+                let fut = db.prune(db.sync_boundary());
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the log prune"
+                );
+            }
+            let pruned_bits = db.any.bitmap.pruned_bits();
+            assert!(pruned_bits > *durable_floor);
+            drop(db);
+
+            // Reopening must succeed and recover the post-batch state: prune committed the
+            // buffered operations before durably recording the pruning metadata that depends
+            // on them. Asserting the advanced floor, root, and persisted pruned boundary
+            // proves the drop happened after both the commit and the metadata sync.
+            let db = MmrDb::init(
+                ctx.child("reopen"),
+                fixed_config::<OneCap>("prune-park", &ctx),
+            )
+            .await
+            .expect("prune crash must leave the db recoverable");
+            assert_eq!(db.bounds(), bounds);
+            assert_eq!(db.inactivity_floor_loc(), floor);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.any.bitmap.pruned_bits(), pruned_bits);
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]

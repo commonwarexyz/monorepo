@@ -15,9 +15,8 @@ use commonware_cryptography::{
     Sha256, Signer,
 };
 use commonware_math::algebra::Random as _;
-use commonware_utils::{ordered::Set, TryCollect};
+use commonware_utils::{ordered::Set, TestRng, TryCollect};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Arbitrary, Debug)]
@@ -42,7 +41,7 @@ where
 {
     let Ok(participants) = (1..=input.participants_count)
         .map(|i| {
-            let mut rng = StdRng::seed_from_u64(i as u64);
+            let mut rng = TestRng::new(i as u64);
             let private_key = PrivateKey::random(&mut rng);
             private_key.public_key()
         })

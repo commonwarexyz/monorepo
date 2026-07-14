@@ -1,9 +1,9 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family};
+use commonware_utils::{test_rng, TestRng};
 use criterion::{criterion_group, BatchSize, Criterion};
 use futures::executor::block_on;
-use rand::{rngs::StdRng, SeedableRng};
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
@@ -12,7 +12,7 @@ const N_LEAVES: [usize; 2] = [10_000, 100_000];
 #[cfg(full_bench)]
 const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
 
-fn make_elements(n: usize, sampler: &mut StdRng) -> Vec<sha256::Digest> {
+fn make_elements(n: usize, sampler: &mut TestRng) -> Vec<sha256::Digest> {
     let mut elements = Vec::with_capacity(n);
     for _ in 0..n {
         elements.push(sha256::Digest::random(&mut *sampler));
@@ -37,7 +37,7 @@ fn make_mem<F: Family>(elements: &[sha256::Digest]) -> Mem<F, sha256::Digest> {
 }
 
 fn setup<F: Family>(n: usize, a: usize) -> (Mem<F, sha256::Digest>, Vec<sha256::Digest>) {
-    let mut sampler = StdRng::seed_from_u64(0);
+    let mut sampler = test_rng();
     let elements = make_elements(n, &mut sampler);
     let additional = make_elements(a, &mut sampler);
     (make_mem::<F>(&elements), additional)

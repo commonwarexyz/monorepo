@@ -131,7 +131,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, mocks, BufMut, IoBufMut, Runner, Spawner, Supervisor as _,
     };
-    use rand::Rng;
+    use rand::RngExt as _;
 
     const MAX_MESSAGE_SIZE: u32 = 1024;
 

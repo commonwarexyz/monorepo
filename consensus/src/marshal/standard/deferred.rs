@@ -79,7 +79,7 @@ use crate::{
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             validation::{
-                fetch_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
+                await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
                 ParentCheck,
             },
             Standard,
@@ -108,7 +108,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::TracedAsyncMutex,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, info_span, Instrument as _};
 
@@ -230,13 +230,17 @@ where
     /// 2. The block's height is exactly one greater than the parent's height
     /// 3. The underlying application's verification logic passes
     ///
+    /// The `parent_request` must be a subscription to the parent named by `context.parent`,
+    /// started by the caller so the parent fetch can overlap work that precedes this call.
+    ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
     #[inline]
     async fn deferred_verify(
         &mut self,
         context: <Self as Automaton>::Context,
-        block: B,
+        block: Arc<B>,
+        parent_request: oneshot::Receiver<Arc<B>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let marshal = self.marshal.clone();
@@ -263,12 +267,14 @@ where
                 // candidate availability/recovery, not a validity decision. This
                 // task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
-                let store = stage.store(&marshal, round, block.clone());
+                let store = stage.store(&marshal, round, Arc::clone(&block));
                 let verify = async {
-                    // Fetch the parent and validate structural ancestry before
-                    // any application work.
-                    let parent = match fetch_and_validate_parent(
-                        &context, &block, &marshal, &mut tx,
+                    // Validate the parent we already started fetching.
+                    let parent = match await_and_validate_parent(
+                        context.parent.1,
+                        block.as_ref(),
+                        parent_request,
+                        &mut tx,
                     )
                     .await
                     {
@@ -279,7 +285,7 @@ where
                     run_app_verify(
                         runtime_context,
                         context,
-                        &block,
+                        Arc::clone(&block),
                         parent,
                         &mut application,
                         &marshal,
@@ -386,8 +392,23 @@ where
                     return;
                 }
 
+                // Start the parent fetch for the deferred verification below,
+                // which expects a caller-started subscription. Certify does not
+                // carry the consensus context, so the parent round comes from
+                // the block's embedded context. That context is trustworthy
+                // because the digest is notarized and the notarizing quorum's
+                // f+1 honest validators verified it against the consensus
+                // context before voting.
+                let (parent_view, parent_commitment) = embedded_context.parent;
+                let parent_request = marshaled.marshal.subscribe_by_commitment(
+                    parent_commitment,
+                    CommitmentFallback::FetchByRound {
+                        round: Round::new(embedded_context.epoch(), parent_view),
+                    },
+                );
+
                 let verify_rx = marshaled
-                    .deferred_verify(embedded_context, block, Stage::Certified)
+                    .deferred_verify(embedded_context, block, parent_request, Stage::Certified)
                     .await;
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
@@ -669,6 +690,22 @@ where
             .with_attribute("round", round);
         runtime_context.spawn(move |_| {
             async move {
+                // Start the parent fetch immediately: its commitment and certified
+                // round are known from the consensus context, so it can proceed in
+                // parallel with broadcast delivery of the candidate block.
+                // Reproposals (digest == context.parent.1) skip parent validation
+                // entirely, so they must not fetch: the "parent" is the candidate
+                // itself, and candidate acquisition is deliberately local-only.
+                let parent_request = (digest != context.parent.1).then(|| {
+                    let (parent_view, parent_commitment) = context.parent;
+                    marshal.subscribe_by_commitment(
+                        parent_commitment,
+                        CommitmentFallback::FetchByRound {
+                            round: Round::new(context.epoch(), parent_view),
+                        },
+                    )
+                });
+
                 let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let block = select! {
                     _ = tx.closed() => {
@@ -720,6 +757,11 @@ where
                     Decision::Continue(block) => block,
                 };
 
+                // `Continue` implies a non-reproposal, so the parent subscription
+                // was started above.
+                let parent_request =
+                    parent_request.expect("non-reproposal has a parent subscription");
+
                 // Before casting a notarize vote, ensure the block's embedded context matches
                 // the consensus context.
                 //
@@ -751,7 +793,7 @@ where
                 // work), so deferred verification must run to completion into
                 // the gate.
                 let deferred_rx = marshaled
-                    .deferred_verify(context, block, Stage::Verified)
+                    .deferred_verify(context, block, parent_request, Stage::Verified)
                     .await;
                 tx.send_lossy(true);
                 if let Ok(result) = deferred_rx.await {

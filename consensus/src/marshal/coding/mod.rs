@@ -113,7 +113,7 @@ mod tests {
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
-    type CodingSendRecord = (Round, TestCodedBlock, Recipients<K>);
+    type CodingSendRecord = (Round, Arc<TestCodedBlock>, Recipients<K>);
 
     // Smallest valid coding config used to build trusted genesis commitments.
     const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
@@ -130,8 +130,8 @@ mod tests {
     /// A coding buffer that records subscriptions and never resolves them.
     #[derive(Clone, Default)]
     struct RecordingCodingBuffer {
-        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
-        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
+        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
+        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         sends: Arc<Mutex<Vec<CodingSendRecord>>>,
     }
 
@@ -148,15 +148,18 @@ mod tests {
     impl core::Buffer<TestCodingVariant> for RecordingCodingBuffer {
         type PublicKey = K;
 
-        async fn find_by_digest(&self, _digest: D) -> Option<TestCodedBlock> {
+        async fn find_by_digest(&self, _digest: D) -> Option<Arc<TestCodedBlock>> {
             None
         }
 
-        async fn find_by_commitment(&self, _commitment: Commitment) -> Option<TestCodedBlock> {
+        async fn find_by_commitment(&self, _commitment: Commitment) -> Option<Arc<TestCodedBlock>> {
             None
         }
 
-        fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<TestCodedBlock>> {
+        fn subscribe_by_digest(
+            &self,
+            _digest: D,
+        ) -> Option<oneshot::Receiver<Arc<TestCodedBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.digest_subscriptions.lock().push(sender);
             Some(receiver)
@@ -165,7 +168,7 @@ mod tests {
         fn subscribe_by_commitment(
             &self,
             _commitment: Commitment,
-        ) -> Option<oneshot::Receiver<TestCodedBlock>> {
+        ) -> Option<oneshot::Receiver<Arc<TestCodedBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)
@@ -173,7 +176,7 @@ mod tests {
 
         fn finalized(&self, _commitment: Commitment) {}
 
-        fn send(&self, round: Round, block: TestCodedBlock, recipients: Recipients<K>) {
+        fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
         }
     }

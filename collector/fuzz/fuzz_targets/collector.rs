@@ -19,9 +19,12 @@ use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients
 use commonware_runtime::{
     deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _,
 };
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    TestRng,
+};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngExt as _;
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -130,11 +133,11 @@ struct FuzzHandler {
 }
 
 impl FuzzHandler {
-    fn new(respond: bool, mut rng: StdRng) -> Self {
+    fn new(respond: bool, mut rng: TestRng) -> Self {
         let mut response_map = HashMap::new();
-        for _ in 0..rng.gen_range(0..10) {
-            let id = rng.gen();
-            let result_len = rng.gen_range(0..100);
+        for _ in 0..rng.random_range(0..10) {
+            let id = rng.random();
+            let result_len = rng.random_range(0..100);
             let mut result = vec![0u8; result_len];
             rng.fill(&mut result[..]);
             response_map.insert(id, FuzzResponse { id, result });
@@ -304,7 +307,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut rng = StdRng::seed_from_u64(input.seed);
+    let mut rng = TestRng::new(input.seed);
 
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
@@ -315,9 +318,9 @@ fn fuzz(input: FuzzInput) {
         let mut restarts = 0usize;
 
         for i in 2..5 {
-            let seed = rng.gen();
+            let seed = rng.random();
             peers.push(PrivateKey::from_seed(seed));
-            handlers.insert(i, FuzzHandler::new(rng.gen(), StdRng::seed_from_u64(seed)));
+            handlers.insert(i, FuzzHandler::new(rng.random(), TestRng::new(seed)));
             monitors.insert(i, FuzzMonitor::new());
         }
         assert!(!peers.is_empty(), "no peers");
@@ -334,13 +337,13 @@ fn fuzz(input: FuzzInput) {
                         let recipients = match recipients_type {
                             RecipientsType::All => Recipients::All,
                             RecipientsType::One => {
-                                let target_idx = rng.gen_range(0..peers.len());
+                                let target_idx = rng.random_range(0..peers.len());
                                 Recipients::One(peers[target_idx].public_key())
                             }
                             RecipientsType::Some => {
                                 let mut selected = vec![];
                                 for (i, peer) in peers.iter().enumerate() {
-                                    if i != idx && rng.gen_bool(0.5) {
+                                    if i != idx && rng.random_bool(0.5) {
                                         selected.push(peer.public_key());
                                     }
                                 }
@@ -406,9 +409,10 @@ fn fuzz(input: FuzzInput) {
                     let idx = (peer_idx as usize) % peers.len();
                     let mailbox_size = usize::from(mailbox_size.max(MIN_BUFFER_SIZE));
                     let mailbox_size = NonZeroUsize::new(mailbox_size).unwrap();
-                    let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
-                        FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
-                    });
+                    let handler = handlers
+                        .get(&idx)
+                        .cloned()
+                        .unwrap_or_else(|| FuzzHandler::new(true, TestRng::new(rng.random())));
                     let monitor = monitors.get(&idx).cloned().unwrap_or_else(FuzzMonitor::new);
                     let config = Config {
                         blocker: FuzzBlocker,

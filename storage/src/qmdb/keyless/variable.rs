@@ -14,11 +14,11 @@ use crate::{
         operation::Committable,
         Error, ROOT_BAGGING,
     },
+    Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for variable-length values.
 pub type Operation<F, V> = BaseOperation<F, VariableEncoding<V>>;
@@ -39,9 +39,7 @@ pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
 /// Configuration for a variable-size [keyless](super) compact db.
 pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 
-impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
-    Db<F, E, V, H, S>
-{
+impl<F: Family, E: Context, V: VariableValue, H: Hasher, S: Strategy> Db<F, E, V, H, S> {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
@@ -62,7 +60,7 @@ impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: St
 
 impl<
         F: Family,
-        E: Storage + Clock + Metrics,
+        E: Context,
         V: VariableValue,
         H: Hasher,
         C: Clone + Send + Sync + 'static,
@@ -265,7 +263,7 @@ mod test {
                         ));
                 }
                 let new_commit_loc = Location::new(*db.last_commit_loc() + 1 + 3);
-                db.apply_batch(batch.merkleize(&db, None, new_commit_loc))
+                db.apply_batch(batch.merkleize(&db, None, new_commit_loc).await)
                     .await
                     .unwrap();
             }
@@ -351,12 +349,14 @@ mod test {
             .new_batch()
             .append(v1.clone())
             .append(v2.clone())
-            .merkleize(&db, Some(metadata.clone()), floor);
-        let compact_batch = compact.new_batch().append(v1).append(v2).merkleize(
-            &compact,
-            Some(metadata.clone()),
-            floor,
-        );
+            .merkleize(&db, Some(metadata.clone()), floor)
+            .await;
+        let compact_batch = compact
+            .new_batch()
+            .append(v1)
+            .append(v2)
+            .merkleize(&compact, Some(metadata.clone()), floor)
+            .await;
 
         assert_eq!(retained.root(), compact_batch.root());
 

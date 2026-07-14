@@ -231,7 +231,7 @@ where
     /// `inactivity_floor` declares that all operations before this location are inactive.
     /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
-    pub fn merkleize<E, C, T>(
+    pub async fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
         metadata: Option<V::Value>,
@@ -260,19 +260,17 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
-
-        // Hash before `with_mem` borrows committed Merkle state under its read lock.
-        let journal_batch = self.journal_batch.add_many(ops);
-        let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
-
-        // Compute the root.
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let root = db
+
+        // Leaf and node hashing dominate merkleization, so run them as one job on the
+        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        let (journal, root) = db
             .journal
-            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
+            .merkleize(self.journal_batch, ops, inactive_peaks)
+            .await
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.

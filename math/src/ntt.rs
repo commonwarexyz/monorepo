@@ -7,7 +7,7 @@ use core::{
     num::NonZeroU32,
     ops::{Index, IndexMut},
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
@@ -850,7 +850,7 @@ impl<F> Matrix<F> {
 
 impl<F: crate::algebra::Random> Matrix<F> {
     /// Create a random matrix with certain dimensions.
-    pub fn rand(mut rng: impl CryptoRngCore, rows: usize, cols: usize) -> Self
+    pub fn rand(mut rng: impl CryptoRng, rows: usize, cols: usize) -> Self
     where
         F: Additive,
     {

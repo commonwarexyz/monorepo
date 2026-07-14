@@ -402,7 +402,7 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"test";
 
-    fn signed_peer_info(rng: &mut impl rand_core::CryptoRngCore) -> Info<PublicKey> {
+    fn signed_peer_info(rng: &mut impl rand_core::CryptoRng) -> Info<PublicKey> {
         let c = PrivateKey::random(rng);
         Info {
             ingress: Ingress::Socket(SocketAddr::from(([127, 0, 0, 1], 8080))),

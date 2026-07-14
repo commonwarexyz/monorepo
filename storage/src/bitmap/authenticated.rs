@@ -625,7 +625,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> Storage<mmr::Family>
 {
     type Digest = D;
 
-    async fn size(&self) -> Position {
+    fn size(&self) -> Position {
         self.size()
     }
 

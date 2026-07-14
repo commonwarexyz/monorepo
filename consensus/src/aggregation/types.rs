@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{channel::oneshot, union, N3f1};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
@@ -183,7 +183,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     /// Domain separation is automatically applied to prevent signature reuse.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(rng, &self.item, &self.attestation, strategy)
@@ -334,7 +334,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Verifies the recovered certificate for the item.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D, N3f1>(rng, &self.item, &self.certificate, strategy)
@@ -469,8 +469,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Quorum, test_rng, N3f1};
-    use rand::rngs::StdRng;
+    use commonware_utils::{ordered::Quorum, test_rng, N3f1, TestRng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -486,7 +485,7 @@ mod tests {
     fn codec<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 4);
@@ -581,7 +580,7 @@ mod tests {
     fn activity_invalid_enum<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut buf = BytesMut::new();

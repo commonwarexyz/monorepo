@@ -74,7 +74,7 @@
 //! });
 //! ```
 
-#[cfg(test)]
+#[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 mod metrics;
 pub mod shared;

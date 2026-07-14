@@ -46,7 +46,7 @@ pub mod tests {
         NZU64,
     };
     use core::future::Future;
-    use rand::RngCore;
+    use rand::Rng;
 
     /// Concrete db type used in the shared proof tests, generic over journal (`C`) and value
     /// encoding (`V`).
@@ -77,8 +77,8 @@ pub mod tests {
     {
         let partition = "build-small".to_string();
         let db: C = open_db(context.child("first"), partition.clone()).await;
-        assert_eq!(db.inactivity_floor_loc().await, Location::<F>::new(0));
-        assert_eq!(db.oldest_retained().await, 0);
+        assert_eq!(db.inactivity_floor_loc(), Location::<F>::new(0));
+        assert_eq!(db.oldest_retained(), 0);
         let root0 = db.root();
         drop(db);
         let mut db: C = open_db(context.child("second"), partition.clone()).await;

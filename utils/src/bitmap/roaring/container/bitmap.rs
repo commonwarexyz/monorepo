@@ -562,6 +562,8 @@ impl arbitrary::Arbitrary<'_> for Bitmap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_rng;
+    use rand::RngExt as _;
 
     #[test]
     fn test_new_and_empty() {
@@ -947,13 +949,10 @@ mod tests {
     fn test_run_count_matches_scan_after_random_inserts() {
         // Property: incremental run_count tracking from `insert` must agree with the
         // bulk `count_runs` scan over the same word array.
-        use crate::test_rng;
-        use rand::Rng;
-
         let mut rng = test_rng();
         let mut b = Bitmap::new();
         for _ in 0..2000 {
-            let v: u16 = rng.gen();
+            let v: u16 = rng.random();
             b.insert(v);
         }
         // The cached field is what callers see; the scan is the ground truth.

@@ -39,8 +39,11 @@ use commonware_runtime::{
     Storage as RuntimeStorage,
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
-use rand_core::CryptoRngCore;
-use std::num::{NonZeroU32, NonZeroUsize};
+use rand_core::CryptoRng;
+use std::{
+    num::{NonZeroU32, NonZeroUsize},
+    sync::Arc,
+};
 use tracing::{debug, info, warn};
 
 /// Per-peer label.
@@ -114,7 +117,7 @@ pub struct Config<C: Signer, P, B> {
 
 pub struct Actor<E, P, B, H, C, V>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -140,7 +143,7 @@ where
 
 impl<E, P, B, H, C, V> Actor<E, P, B, H, C, V>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -484,8 +487,9 @@ where
                         }
                     }
                     MailboxMessage::Finalized { block, response } => {
+                        let block_height = block.height;
                         let bounds = epocher
-                            .containing(block.height)
+                            .containing(block_height)
                             .expect("block height covered by epoch strategy");
                         let block_epoch = bounds.epoch();
                         let phase = bounds.phase();
@@ -499,8 +503,9 @@ where
                             continue;
                         }
 
-                        // Process dealer log from block if present
-                        if let Some(log) = block.log {
+                        let log = Arc::try_unwrap(block)
+                            .map_or_else(|block| block.log.clone(), |block| block.log);
+                        if let Some(log) = log {
                             if let Some((dealer, dealer_log)) = log.check(&round) {
                                 // `log.check` only authenticates the self-signature, not
                                 // dealer-set membership. A validly self-signed log from a
@@ -545,7 +550,7 @@ where
                         }
 
                         // Continue if not the last block in the epoch
-                        if block.height != bounds.last() {
+                        if block_height != bounds.last() {
                             // Acknowledge block processing
                             response.acknowledge();
                             continue;

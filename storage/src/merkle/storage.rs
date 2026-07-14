@@ -10,7 +10,7 @@ pub trait Storage<F: Family>: Send + Sync {
     type Digest: Digest;
 
     /// Return the number of nodes in the structure.
-    fn size(&self) -> impl Future<Output = Position<F>> + Send;
+    fn size(&self) -> Position<F>;
 
     /// Return the specified node of the structure if it exists and hasn't been pruned.
     fn get_node(
@@ -26,7 +26,7 @@ where
 {
     type Digest = D;
 
-    async fn size(&self) -> Position<F> {
+    fn size(&self) -> Position<F> {
         self.size()
     }
 

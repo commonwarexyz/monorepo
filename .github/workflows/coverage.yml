@@ -40,6 +40,10 @@ jobs:
         additional-components: llvm-tools-preview
         additional-cache-key: ${{ matrix.flags || 'default' }}
         rust-cache-save: ${{ matrix.partition == 1 }}
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Remove fuzz
       run: |
         rm -rf broadcast/fuzz

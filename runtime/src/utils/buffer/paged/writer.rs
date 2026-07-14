@@ -587,8 +587,8 @@ impl<B: Blob> Writer<B> {
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
     /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
     /// is returned, the contents of `buf` are unspecified.
-    pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        self.view().try_read_sync(offset, buf)
+    pub fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
+        self.view().try_read_sync_into(buf, offset)
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
@@ -623,6 +623,23 @@ impl<B: Blob> Writer<B> {
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
         self.view().read_many_into(buf, offsets, item_size).await
+    }
+
+    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
+    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
+    pub fn try_read_many_sync_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Vec<usize> {
+        self.view().try_read_many_sync_into(buf, offsets, item_size)
+    }
+
+    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges:
+    /// `buf` holds one slot per range, back to back.
+    pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
+        self.view().try_read_ranges_sync_into(buf, ranges)
     }
 
     /// Reads bytes starting at `offset` into `buf`.
@@ -1025,7 +1042,8 @@ impl<B: Blob> Writer<B> {
         // Evict cached pages at or beyond the new full-page boundary. The page at
         // `full_pages` (if partial) is now owned by the tip buffer, and anything above is
         // beyond the new size. Leaving their pre-resize contents in the cache
-        // lets `try_read_sync` (which bypasses the tip buffer) observe stale bytes once
+        // lets `try_read_sync_into` (whose reads below the tip boundary come straight from
+        // the page cache) observe stale bytes once
         // the tip is repopulated.
         self.cache_ref.invalidate_from(self.id, full_pages);
 
@@ -1224,7 +1242,7 @@ mod tests {
             append.append(&data).await.unwrap();
 
             let mut buf = vec![0u8; data.len()];
-            assert!(append.try_read_sync(0, &mut buf));
+            assert!(append.try_read_sync_into(&mut buf, 0));
             assert_eq!(buf, data);
         });
     }
@@ -1252,7 +1270,7 @@ mod tests {
 
             // A read straddling the cached first page and the uncached second page misses.
             let mut buf = vec![0xAA; 4];
-            assert!(!append.try_read_sync((page_size - 2) as u64, &mut buf));
+            assert!(!append.try_read_sync_into(&mut buf, (page_size - 2) as u64));
         });
     }
 
@@ -1372,6 +1390,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    #[should_panic(expected = "buf must hold one slot per range totaling its length")]
     fn test_read_many_into_rejects_invalid_buffer_len() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1386,15 +1405,12 @@ mod tests {
 
             let offsets = [0u64, 4];
             let mut buf = vec![0u8; 7];
-            let err = append
-                .read_many_into(&mut buf, &offsets, NZUsize!(4))
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::BufferLengthInvalid));
+            let _ = append.read_many_into(&mut buf, &offsets, NZUsize!(4)).await;
         });
     }
 
     #[test_traced("DEBUG")]
+    #[should_panic(expected = "ranges must be sorted and non-overlapping")]
     fn test_read_many_into_rejects_unsorted_offsets() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1408,15 +1424,12 @@ mod tests {
             append.append(&data).await.unwrap();
 
             let mut buf = vec![0u8; 8];
-            let err = append
-                .read_many_into(&mut buf, &[8, 4], NZUsize!(4))
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::OffsetsInvalid));
+            let _ = append.read_many_into(&mut buf, &[8, 4], NZUsize!(4)).await;
         });
     }
 
     #[test_traced("DEBUG")]
+    #[should_panic(expected = "ranges must be sorted and non-overlapping")]
     fn test_read_many_into_rejects_overlapping_offsets() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1430,11 +1443,7 @@ mod tests {
             append.append(&data).await.unwrap();
 
             let mut buf = vec![0u8; 8];
-            let err = append
-                .read_many_into(&mut buf, &[2, 4], NZUsize!(4))
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::OffsetsInvalid));
+            let _ = append.read_many_into(&mut buf, &[2, 4], NZUsize!(4)).await;
         });
     }
 
@@ -4006,7 +4015,8 @@ mod tests {
     #[test]
     fn test_resize_invalidates_cache() {
         // Regression: shrinking a blob across a page boundary must drop cached pages for the
-        // truncated region. Before the fix, `try_read_sync` (which bypasses the tip buffer)
+        // truncated region. Before the fix, `try_read_sync_into` (whose reads below the tip
+        // boundary come straight from the page cache)
         // would observe pre-resize bytes at offsets later reclaimed by new appends.
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -4028,7 +4038,7 @@ mod tests {
 
             // Confirm page 0 is reachable via the cache-only fast path.
             let mut probe = vec![0u8; 16];
-            assert!(append.try_read_sync(0, &mut probe));
+            assert!(append.try_read_sync_into(&mut probe, 0));
             assert_eq!(probe, vec![0xAAu8; 16]);
 
             // Rewind to 0 (crossing the page boundary) and append a new, distinct pattern.
@@ -4036,13 +4046,13 @@ mod tests {
             let new_bytes = vec![0xBBu8; 16];
             append.append(&new_bytes).await.unwrap();
 
-            // The cache must not serve pre-resize bytes. Either try_read_sync misses (cache
+            // The cache must not serve pre-resize bytes. Either try_read_sync_into misses (cache
             // was invalidated) or it returns the new pattern; it must never return 0xAA.
             let mut probe = vec![0u8; 16];
-            let hit = append.try_read_sync(0, &mut probe);
+            let hit = append.try_read_sync_into(&mut probe, 0);
             assert!(
                 !hit || probe == new_bytes,
-                "try_read_sync served stale pre-resize bytes: {probe:?}"
+                "try_read_sync_into served stale pre-resize bytes: {probe:?}"
             );
         });
     }
@@ -4099,7 +4109,7 @@ mod tests {
             assert_eq!(stale.as_ref(), old_page1.as_slice());
 
             let mut probe = vec![0u8; page_size];
-            assert!(writer.try_read_sync(page_size as u64, &mut probe));
+            assert!(writer.try_read_sync_into(&mut probe, page_size as u64));
             assert_eq!(probe, new_page1);
         });
     }
@@ -4216,7 +4226,7 @@ mod tests {
             );
 
             let mut read = vec![0; tail.len()];
-            assert!(snapshot.try_read_sync(page_size as u64, &mut read));
+            assert!(snapshot.try_read_sync_into(&mut read, page_size as u64));
             assert_eq!(read.as_slice(), tail);
         });
     }
@@ -4919,7 +4929,7 @@ mod tests {
             assert_eq!(read.as_ref(), data.as_slice());
 
             let mut buf = vec![0u8; 10];
-            assert!(writer.try_read_sync(20, &mut buf));
+            assert!(writer.try_read_sync_into(&mut buf, 20));
             assert_eq!(buf, data[20..30]);
         });
     }

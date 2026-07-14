@@ -72,7 +72,7 @@ use commonware_runtime::{
     Stream,
 };
 use commonware_utils::SystemTimeExt;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
@@ -184,7 +184,7 @@ where
 
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
-pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
+pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: Sink>(
     ctx: R,
     config: Config<S>,
     peer: S::PublicKey,
@@ -244,7 +244,7 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
 pub async fn listen<
-    R: BufferPooler + CryptoRngCore + Clock,
+    R: BufferPooler + CryptoRng + Clock,
     S: Signer,
     I: Stream,
     O: Sink,

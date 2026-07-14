@@ -120,11 +120,11 @@ pub trait DbAny<F: Family>:
         Self: Sized;
 
     /// The location before which all operations can be pruned.
-    fn inactivity_floor_loc(&self) -> impl Future<Output = Location<F>> + Send;
+    fn inactivity_floor_loc(&self) -> Location<F>;
 
     /// The maximum location that [`Self::prune`] accepts and the most recent location from which
     /// this database can be safely synced.
-    fn sync_boundary(&self) -> impl Future<Output = Location<F>> + Send;
+    fn sync_boundary(&self) -> Location<F>;
 }
 
 /// Proof generation for Any database variants.
@@ -221,11 +221,11 @@ macro_rules! impl_db_any {
                 <$ty>::destroy(self).await
             }
 
-            async fn inactivity_floor_loc(&self) -> $crate::merkle::Location<$fam> {
+            fn inactivity_floor_loc(&self) -> $crate::merkle::Location<$fam> {
                 <$ty>::inactivity_floor_loc(self)
             }
 
-            async fn sync_boundary(&self) -> $crate::merkle::Location<$fam> {
+            fn sync_boundary(&self) -> $crate::merkle::Location<$fam> {
                 <$ty>::sync_boundary(self)
             }
         }

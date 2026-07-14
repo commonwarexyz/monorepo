@@ -14,6 +14,17 @@
 //!   its own commit location. Ancestors already on disk are skipped (their floors were
 //!   validated when they were first applied); the rest of the chain and the tip are checked.
 //!
+//! # Best-effort staleness detection
+//!
+//! Boundaries are compared by operation count alone, so the staleness check cannot distinguish
+//! equal-size sibling branches (branches built from the same state with the same total operation
+//! count). After one sibling is applied, a batch from the other branch (or one of its
+//! descendants) whose sizes line up with an accepted boundary still passes the staleness check,
+//! and applying it silently corrupts the database: the committed log (and any snapshot) keeps
+//! the applied sibling's operations while the root commits to the orphaned branch. The check is
+//! a safety net for pipelining bugs, not an authoritative fork check: callers must only apply a
+//! batch when every batch applied since its chain was created is an ancestor of that batch.
+//!
 //! Internal helpers walk the chain via weak parent references and snapshot ancestor bounds into a
 //! `Vec` for storage on a merkleized batch.
 
@@ -134,7 +145,8 @@ where
 ///
 /// A batch is applicable if the database has not advanced since the batch was created
 /// (`batch_db_size`), if all ancestors are already committed (`batch_base_size`), or if the
-/// database has advanced to one of the batch's ancestor boundaries.
+/// database has advanced to one of the batch's ancestor boundaries. Boundaries are compared by
+/// operation count alone. See the module docs for the equal-size sibling limitation.
 pub(crate) fn validate_batch_applicable<F: Family>(
     db_size: u64,
     batch_db_size: u64,

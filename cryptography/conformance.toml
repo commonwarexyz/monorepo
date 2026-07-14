@@ -136,7 +136,7 @@ hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
 ["commonware_cryptography::handshake::conformance::Handshake"]
 n_cases = 4096
-hash = "ed6ff974cf9460e825683ccaef3946e46c0db7281b41209dcee641ad1d46db77"
+hash = "057cc42a74390f0b43250b8fba2c42abad651bee6beacb510f2f2a950185a694"
 
 ["commonware_cryptography::handshake::key_exchange::conformance::CodecConformance<EphemeralPublicKey>"]
 n_cases = 65536
@@ -185,6 +185,10 @@ hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 ["commonware_cryptography::transcript::test::conformance::CodecConformance<Summary>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
+
+["commonware_cryptography::transcript::test::conformance::TranscriptOps"]
+n_cases = 4096
+hash = "9115bb89c941947d7bfabb3c67b7812c842c3ab8be196a61e3378a873e2e5837"
 
 ["commonware_cryptography::zk::bulletproofs::ipa::conformance::CodecConformance<Claim<TestF,TestG>>"]
 n_cases = 65536

@@ -18,7 +18,7 @@ use commonware_runtime::{
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
@@ -38,7 +38,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     _phantom: std::marker::PhantomData<C>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (relay, receivers) = Relay::new(context.child("relay"), cfg.mailbox_size);

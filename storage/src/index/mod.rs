@@ -265,7 +265,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::sync::Mutex;
-    use rand::Rng;
+    use rand::RngExt as _;
     use std::{
         collections::{HashMap, HashSet},
         sync::Arc,

@@ -318,6 +318,36 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok(None)
     }
 
+    /// Check whether any retained index stores `key`.
+    ///
+    /// Confirms translated-key candidates against index journal entries,
+    /// never reading values.
+    async fn has_key(&self, key: &K) -> Result<bool, Error> {
+        for index in self.keys.get(key) {
+            // Continue if index is no longer allowed due to pruning.
+            if self.pruned(*index) {
+                continue;
+            }
+
+            // Get all positions at this index
+            if !self.indices.contains_key(index) {
+                return Err(Error::RecordCorrupted);
+            }
+            let section = self.section(*index);
+
+            for position in self.iter_positions(*index) {
+                // Fetch index entry from index journal to verify key
+                let entry = self.oversized.get(section, position).await?;
+                if entry.key.as_ref() == key.as_ref() {
+                    return Ok(true);
+                }
+                self.unnecessary_reads.inc();
+            }
+        }
+
+        Ok(false)
+    }
+
     fn has_index(&self, index: u64) -> bool {
         // Check if index exists
         self.indices.contains_key(&index)
@@ -441,7 +471,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.has.inc();
         match identifier {
             Identifier::Index(index) => Ok(self.has_index(index)),
-            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
+            Identifier::Key(key) => self.has_key(key).await,
         }
     }
 

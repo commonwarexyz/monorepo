@@ -13,7 +13,6 @@ use crate::stateful::db::{
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     index::{
         ordered::Index as OrderedIdx, unordered::Index as UnorderedIdx, Ordered as OrderedIndex,
@@ -25,12 +24,13 @@ use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
         any::{
+            initial_root,
             operation::{Operation, Update},
             ordered, unordered,
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         current::{
-            batch::{MerkleizedBatch, UnmerkleizedBatch},
+            batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
             db::Db,
             FixedConfig, VariableConfig,
         },
@@ -39,9 +39,13 @@ use commonware_storage::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
-use std::{ops::Deref, sync::Arc};
+use std::{
+    ops::{Deref, Range},
+    sync::Arc,
+};
 
 type CurrentDbHandle<F, E, C, I, H, U, const N: usize, S> =
     Arc<TracedAsyncRwLock<Db<F, E, C, I, H, U, N, S>>>;
@@ -51,7 +55,7 @@ type CurrentDbHandle<F, E, C, I, H, U, const N: usize, S> =
 pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -64,44 +68,89 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Key-value operations for the `current` unordered update kind.
-impl<F, E, C, I, H, K, V, const N: usize, S>
-    CurrentUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>
+/// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
+/// reference to the parent database.
+///
+/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
+/// stays valid only while every batch finalized on the database is an ancestor of this batch
+/// (see [`MerkleizedBatch`]'s branch-validity contract).
+pub struct CurrentStaged<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
+    E: Context,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    staged: Staged<F, H, U, N, S>,
+    db: CurrentDbHandle<F, E, C, I, H, U, N, S>,
+    metadata: Option<U::Value>,
+}
+
+/// Key-value operations shared by both `current` update kinds.
+impl<F, E, C, I, H, U, const N: usize, S> CurrentUnmerkleized<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
-    Operation<F, unordered::Update<K, V>>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Set commit metadata included in the next
     /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
+    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
     /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
 
     /// Read multiple values by key, falling back to committed state.
     ///
-    /// Returns results in the same order as the input keys. Each unique read is cached on the
-    /// batch for reuse at merkleize, so memory grows with the number of unique keys read.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await
     }
 
+    /// Read multiple values and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn stage(
+        self,
+        keys: &[&U::Key],
+    ) -> Result<(Vec<Option<U::Value>>, CurrentStaged<F, E, C, I, H, U, N, S>), Error<F>> {
+        let Self {
+            batch,
+            db,
+            metadata,
+        } = self;
+        let (values, staged) = {
+            let guard = db.read().await;
+            batch.stage(keys, &*guard).await?
+        };
+        Ok((
+            values,
+            CurrentStaged {
+                staged,
+                db,
+                metadata,
+            },
+        ))
+    }
+
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
-    pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
+    pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
     }
@@ -112,7 +161,7 @@ where
 pub struct CurrentMerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -127,7 +176,7 @@ where
 impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentUnmerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -145,7 +194,7 @@ where
 impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -160,12 +209,109 @@ where
     }
 }
 
-/// Key-value operations for the `current` ordered update kind.
-impl<F, E, C, I, H, K, V, const N: usize, S>
-    CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
+/// Read-expansion operations for the `current` staged batch.
+impl<F, E, C, I, H, U, const N: usize, S> CurrentStaged<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Set commit metadata included in the [`merkleize`](Self::merkleize) call, replacing any
+    /// metadata set before staging.
+    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// Expand this staged batch with more reads.
+    ///
+    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
+    /// assigned the returned range. Expansion does not deduplicate against previously staged keys
+    /// and does not observe values computed for earlier staged slots but not yet passed to
+    /// `merkleize`.
+    pub async fn expand(
+        self,
+        keys: &[&U::Key],
+    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
+        let Self {
+            staged,
+            db,
+            metadata,
+        } = self;
+        let (range, values, staged) = {
+            let guard = db.read().await;
+            staged.expand(keys, &*guard).await?
+        };
+        Ok((
+            range,
+            values,
+            Self {
+                staged,
+                db,
+                metadata,
+            },
+        ))
+    }
+}
+
+/// Staged merkleize for the `current` unordered update kind.
+impl<F, E, C, I, H, K, V, const N: usize, S>
+    CurrentStaged<F, E, C, I, H, unordered::Update<K, V>, N, S>
+where
+    F: Graftable,
+    E: Context,
+    K: Key,
+    V: ValueEncoding + 'static,
+    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, unordered::Update<K, V>>: Codec,
+{
+    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// Consumes the staged handle and write vectors. Call [`expand`](CurrentStaged::expand)
+    /// before this method if more keys must be read into the staged index space.
+    ///
+    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](CurrentStaged::expand) ranges.
+    /// Metadata set via [`with_metadata`](CurrentStaged::with_metadata) (or before staging) is
+    /// committed with the returned batch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
+    pub async fn merkleize(
+        self,
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
+    ) -> Result<CurrentMerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>, Error<F>> {
+        let Self {
+            staged,
+            db,
+            metadata,
+        } = self;
+        let inner = {
+            let guard = db.read().await;
+            staged
+                .merkleize(updates, upserts, metadata, &*guard)
+                .await?
+        };
+        Ok(CurrentMerkleized { inner, db })
+    }
+}
+
+/// Staged merkleize for the `current` ordered update kind.
+impl<F, E, C, I, H, K, V, const N: usize, S>
+    CurrentStaged<F, E, C, I, H, ordered::Update<K, V>, N, S>
+where
+    F: Graftable,
+    E: Context,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
@@ -174,31 +320,36 @@ where
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
-    /// Set commit metadata included in the next
-    /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-
-    /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get(key, &*db).await
-    }
-
-    /// Read multiple values by key, falling back to committed state.
+    /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
-    /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get_many(keys, &*db).await
-    }
-
-    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
-    pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
-        self.batch = self.batch.write(key, value);
-        self
+    /// Consumes the staged handle and write vectors. Call [`expand`](CurrentStaged::expand)
+    /// before this method if more keys must be read into the staged index space.
+    ///
+    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](CurrentStaged::expand) ranges.
+    /// Metadata set via [`with_metadata`](CurrentStaged::with_metadata) (or before staging) is
+    /// committed with the returned batch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
+    pub async fn merkleize(
+        self,
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
+    ) -> Result<CurrentMerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>, Error<F>> {
+        let Self {
+            staged,
+            db,
+            metadata,
+        } = self;
+        let inner = {
+            let guard = db.read().await;
+            staged
+                .merkleize(updates, upserts, metadata, &*guard)
+                .await?
+        };
+        Ok(CurrentMerkleized { inner, db })
     }
 }
 
@@ -206,7 +357,7 @@ where
 impl<F, E, C, I, H, U, const N: usize, S> CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -234,7 +385,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
     for CurrentUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
@@ -261,7 +412,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
     for CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
@@ -288,7 +439,7 @@ impl<F, E, C, I, H, U, const N: usize, S> MerkleizedTrait
     for CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -327,7 +478,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -362,6 +513,13 @@ where
         <Self>::init(context, config).await
     }
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        CurrentSyncTarget::new(
+            initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         CurrentUnmerkleized {
@@ -386,7 +544,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
@@ -398,7 +556,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -421,7 +579,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -456,6 +614,13 @@ where
         <Self>::init(context, config).await
     }
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        CurrentSyncTarget::new(
+            initial_root::<F, ordered::Update<K, FixedEncoding<V>>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         CurrentUnmerkleized {
@@ -480,7 +645,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
@@ -492,7 +657,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -513,7 +678,6 @@ mod open {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
-    use commonware_runtime::{Clock, Metrics, Storage};
     use commonware_storage::{
         merkle::Graftable,
         qmdb::{
@@ -527,6 +691,7 @@ mod open {
             },
             Error,
         },
+        Context,
     };
     use commonware_utils::Array;
 
@@ -544,7 +709,7 @@ mod open {
     ) -> Result<Db<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
@@ -561,7 +726,7 @@ mod open {
     ) -> Result<OrderedVariableDb<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: commonware_storage::qmdb::operation::Key,
         V: VariableValue + 'static,
         H: Hasher,
@@ -587,7 +752,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -627,6 +792,13 @@ where
         open::variable(context, config).await
     }
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        CurrentSyncTarget::new(
+            initial_root::<F, unordered::Update<K, VariableEncoding<V>>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         CurrentUnmerkleized {
@@ -651,7 +823,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
@@ -663,7 +835,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -686,7 +858,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -726,6 +898,13 @@ where
         open::ordered_variable(context, config).await
     }
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        CurrentSyncTarget::new(
+            initial_root::<F, ordered::Update<K, VariableEncoding<V>>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         CurrentUnmerkleized {
@@ -750,7 +929,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
@@ -762,7 +941,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -785,7 +964,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -840,7 +1019,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -895,7 +1074,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -951,7 +1130,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -1162,6 +1341,92 @@ mod tests {
         });
     }
 
+    /// The glue staged wrapper (`CurrentUnmerkleized::stage` -> `CurrentStaged::expand` ->
+    /// `CurrentStaged::merkleize`) must return the same values and root as an explicit `get_many` +
+    /// `write` + `merkleize`, including a staged delete, an upsert, and metadata flow (both set
+    /// on the staged handle via `with_metadata` and carried from before staging). This guards
+    /// metadata flow and db-handle pairing through the wrapper.
+    #[test]
+    fn ordered_fixed_staged_merkleize_matches_explicit_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("ordered-fixed-glue-staged", &context);
+            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+                .await
+                .unwrap();
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+
+            let key = |i: u64| Sha256::hash(&i.to_be_bytes());
+            let val = |i: u64| Sha256::hash(&(i + 10_000).to_be_bytes());
+            let metadata = Sha256::hash(b"metadata");
+
+            // Seed keys 0..50 and finalize.
+            let mut seed = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            for i in 0..50u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
+                .await
+                .unwrap();
+            {
+                let mut guard = db.write().await;
+                <OrderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
+                    .await
+                    .unwrap();
+            }
+
+            // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
+            let read_keys = [key(1), key(2), key(999)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let indexed_updates = vec![(0, Some(val(1_000))), (1, None), (2, Some(val(1_001)))];
+            let upserts = vec![(key(3), Some(val(1_002)))];
+
+            // Explicit path.
+            let mut explicit = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let explicit_values = explicit.get_many(&keys).await.unwrap();
+            for (slot, value) in &indexed_updates {
+                explicit = explicit.write(read_keys[*slot], *value);
+            }
+            for (k, v) in &upserts {
+                explicit = explicit.write(*k, *v);
+            }
+            let explicit_root =
+                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata))
+                    .await
+                    .unwrap()
+                    .root();
+
+            // Staged path, with metadata set on the staged handle.
+            let staged_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let split = 2;
+            let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
+            let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
+            assert_eq!(range, split..keys.len());
+            staged_values.extend(suffix_values);
+            let staged_root = staged
+                .with_metadata(metadata)
+                .merkleize(indexed_updates.clone(), upserts.clone())
+                .await
+                .unwrap()
+                .root();
+
+            assert_eq!(explicit_values, staged_values);
+            assert_eq!(explicit_root, staged_root);
+
+            // Metadata set before staging must be carried through to staged merkleize.
+            let carried_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .with_metadata(metadata);
+            let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
+            let carried_root = staged
+                .merkleize(indexed_updates.clone(), upserts.clone())
+                .await
+                .unwrap()
+                .root();
+            assert_eq!(explicit_values, carried_values);
+            assert_eq!(explicit_root, carried_root);
+        });
+    }
+
     #[test]
     fn ordered_variable_managed_db_finalizes_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
@@ -1235,8 +1500,7 @@ mod tests {
                 .unwrap();
             verification_db.sync().await.unwrap();
 
-            let valid_target =
-                <OrderedFixedDb as ManagedDb<_>>::sync_target(&verification_db).await;
+            let valid_target = <OrderedFixedDb as ManagedDb<_>>::sync_target(&verification_db);
             assert!(<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &valid_target,
@@ -1288,7 +1552,7 @@ mod tests {
             }
             let target_after_first = {
                 let guard = db.read().await;
-                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard).await
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
             };
 
             let key2 = Sha256::hash(b"key2");
@@ -1319,7 +1583,7 @@ mod tests {
             }
             let target_after_rewind = {
                 let guard = db.read().await;
-                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard).await
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
             };
             assert_eq!(target_after_rewind, target_after_first);
         });
@@ -1355,7 +1619,7 @@ mod tests {
                 .unwrap();
             verification_db.sync().await.unwrap();
 
-            let valid_target = <FixedDb as ManagedDb<_>>::sync_target(&verification_db).await;
+            let valid_target = <FixedDb as ManagedDb<_>>::sync_target(&verification_db);
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &valid_target,

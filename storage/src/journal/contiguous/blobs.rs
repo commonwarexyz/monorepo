@@ -463,10 +463,10 @@ impl<'a, B: RBlob> Blob<'a, B> {
     }
 
     /// Read into `buf` if the data is already cached.
-    pub(super) fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
+    pub(super) fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
         match self {
-            Self::Writer(writer) => writer.try_read_sync(offset, buf),
-            Self::Sealed(sealed) => sealed.try_read_sync(offset, buf),
+            Self::Writer(writer) => writer.try_read_sync_into(buf, offset),
+            Self::Sealed(sealed) => sealed.try_read_sync_into(buf, offset),
         }
     }
 
@@ -536,6 +536,32 @@ impl<'a, B: RBlob> Blob<'a, B> {
                 .read_many_into(buf, offsets, item_size)
                 .await
                 .map_err(Error::Runtime),
+        }
+    }
+
+    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
+    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
+    pub(super) fn try_read_many_sync_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Vec<usize> {
+        match self {
+            Self::Writer(writer) => writer.try_read_many_sync_into(buf, offsets, item_size),
+            Self::Sealed(sealed) => sealed.try_read_many_sync_into(buf, offsets, item_size),
+        }
+    }
+
+    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges.
+    pub(super) fn try_read_ranges_sync_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Vec<usize> {
+        match self {
+            Self::Writer(writer) => writer.try_read_ranges_sync_into(buf, ranges),
+            Self::Sealed(sealed) => sealed.try_read_ranges_sync_into(buf, ranges),
         }
     }
 }

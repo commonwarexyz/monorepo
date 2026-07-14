@@ -21,7 +21,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
 use futures::future::{self, Either};
-use rand::Rng;
+use rand_core::Rng;
 use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
 

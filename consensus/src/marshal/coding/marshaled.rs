@@ -120,7 +120,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::TracedAsyncMutex,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, info_span, warn, Instrument as _};
 
@@ -317,7 +317,7 @@ where
         &mut self,
         consensus_context: Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
         commitment: Commitment,
-        prefetched_block: Option<CodedBlock<B, C, H>>,
+        prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let marshal = self.marshal.clone();
@@ -342,6 +342,18 @@ where
             async move {
                 let round = consensus_context.round;
                 let (parent_view, parent_commitment) = consensus_context.parent;
+
+                // Start the parent fetch immediately so it can proceed in parallel
+                // with candidate reconstruction. The parent round comes from the
+                // caller's context (the certified consensus context in verify, the
+                // quorum-defended embedded context in certify), never from the
+                // unverified child block.
+                let parent_request = marshal.subscribe_by_commitment(
+                    parent_commitment,
+                    core::CommitmentFallback::FetchByRound {
+                        round: Round::new(consensus_context.epoch(), parent_view),
+                    },
+                );
 
                 // Get the candidate block either from the caller or by waiting for
                 // local reconstruction. Candidate data remains local-only: a
@@ -375,15 +387,9 @@ where
                 // candidate availability/recovery, not a validity decision. This
                 // task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
-                let store = stage.store(&marshal, round, block.clone());
+                let store = stage.store(&marshal, round, Arc::clone(&block));
                 let verify = async {
-                    // The context supplies the certified parent round. Do not derive a
-                    // height from the unverified child block for this lookup.
-                    let fallback = core::CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    };
-                    let parent_request =
-                        marshal.subscribe_by_commitment(parent_commitment, fallback);
+                    // Await the parent fetch we started above.
                     let parent = select! {
                         _ = tx.closed() => {
                             debug!(
@@ -403,8 +409,8 @@ where
 
                     if let Err(err) = validate_block::<H, _, _>(
                         &epocher,
-                        &block,
-                        &parent,
+                        block.as_ref(),
+                        parent.as_ref(),
                         &consensus_context,
                         commitment,
                         parent_commitment,
@@ -426,7 +432,7 @@ where
 
                     let ancestry_stream = marshal.ancestor_stream(
                         Arc::new(runtime_context.child("ancestor_stream")),
-                        [block.clone(), parent],
+                        [block.inner_shared(), parent.inner_shared()],
                         ancestor_fetch_duration,
                     );
                     let validity_request = application
@@ -805,7 +811,7 @@ where
 
                 let ancestor_stream = marshal.ancestor_stream(
                     Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent],
+                    [parent.inner_shared()],
                     ancestor_fetch_duration,
                 );
                 let build_request = application

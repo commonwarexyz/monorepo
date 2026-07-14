@@ -25,13 +25,13 @@ use commonware_runtime::{
     Metrics, Spawner,
 };
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::{debug, info_span};
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
+    E: BufferPooler + Clock + CryptoRng + Metrics + Spawner,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -52,7 +52,7 @@ pub struct Actor<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
+        E: BufferPooler + Clock + CryptoRng + Metrics + Spawner,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,

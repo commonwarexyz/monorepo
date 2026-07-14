@@ -486,7 +486,7 @@ mod tests {
     };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, ThreadPooler};
+    use commonware_runtime::{deterministic, Runner as _, Strategizer};
     use commonware_utils::NZUsize;
 
     type D = sha256::Digest;
@@ -724,7 +724,7 @@ mod tests {
         executor.start(|ctx| async move {
             let hasher: H = Standard::new(ForwardFold);
             let mem = build::<F>(&hasher, 200);
-            let strategy = ctx.create_strategy(NZUsize!(4)).unwrap();
+            let strategy = ctx.strategy(NZUsize!(4));
             do_batch_update(&hasher, mem, strategy);
         });
     }
