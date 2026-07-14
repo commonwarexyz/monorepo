@@ -16,10 +16,10 @@ type Staged<B> = (Arc<B>, oneshot::Sender<Handle<()>>);
 /// The registries behind [`Gates`], sharing one lock.
 struct Inner<D: Digest, B> {
     /// In-flight certification gate tasks, consumed by certification.
-    tasks: HashMap<(Round, D), oneshot::Receiver<bool>>,
+    certifications: HashMap<(Round, D), oneshot::Receiver<bool>>,
     /// Proposals staged for their relay broadcast, consumed by the relay (or
     /// by certification when no broadcast was requested).
-    staged: HashMap<(Round, D), Staged<B>>,
+    proposals: HashMap<(Round, D), Staged<B>>,
 }
 
 /// A shared, thread-safe registry of in-flight certification gate tasks and
@@ -57,20 +57,23 @@ impl<D: Digest, B> Gates<D, B> {
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                tasks: HashMap::new(),
-                staged: HashMap::new(),
+                certifications: HashMap::new(),
+                proposals: HashMap::new(),
             })),
         }
     }
 
     /// Registers a certification gate task for the block identified by `(round, digest)`.
     pub(crate) fn insert(&self, round: Round, digest: D, task: oneshot::Receiver<bool>) {
-        self.inner.lock().tasks.insert((round, digest), task);
+        self.inner
+            .lock()
+            .certifications
+            .insert((round, digest), task);
     }
 
     /// Removes and returns the certification gate task for `(round, digest)`, if present.
     pub(crate) fn take(&self, round: Round, digest: D) -> Option<oneshot::Receiver<bool>> {
-        self.inner.lock().tasks.remove(&(round, digest))
+        self.inner.lock().certifications.remove(&(round, digest))
     }
 
     /// Removes and returns the staged proposal for `(round, digest)`, if present.
@@ -78,7 +81,7 @@ impl<D: Digest, B> Gates<D, B> {
     /// The taken block and ack are handed to marshal exactly once: by the relay
     /// broadcast, or by certification when no broadcast was ever requested.
     pub(crate) fn take_staged(&self, round: Round, digest: D) -> Option<Staged<B>> {
-        self.inner.lock().staged.remove(&(round, digest))
+        self.inner.lock().proposals.remove(&(round, digest))
     }
 
     /// Discards all entries whose round is at or before `finalized_round`.
@@ -88,11 +91,11 @@ impl<D: Digest, B> Gates<D, B> {
     pub(crate) fn retain_after(&self, finalized_round: &Round) {
         let mut inner = self.inner.lock();
         inner
-            .tasks
-            .retain(|(task_round, _), _| task_round > finalized_round);
+            .certifications
+            .retain(|(round, _), _| round > finalized_round);
         inner
-            .staged
-            .retain(|(staged_round, _), _| staged_round > finalized_round);
+            .proposals
+            .retain(|(round, _), _| round > finalized_round);
     }
 
     /// Stages `block` for its relay broadcast and completes the propose
@@ -123,8 +126,8 @@ impl<D: Digest, B> Gates<D, B> {
         let (ack, persist) = oneshot::channel();
         {
             let mut inner = self.inner.lock();
-            inner.tasks.insert((round, id), durable_rx);
-            inner.staged.insert((round, id), (block, ack));
+            inner.certifications.insert((round, id), durable_rx);
+            inner.proposals.insert((round, id), (block, ack));
         }
         tx.send_lossy(id);
         let Ok(handle) = persist.await else {
