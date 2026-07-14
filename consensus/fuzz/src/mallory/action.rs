@@ -8,10 +8,11 @@
 //! enacts that plan against the network asynchronously. Later PRs append packet,
 //! lifecycle, and adversary-profile actions to the END of [`CATALOG`].
 
-use crate::mallory::adversary::AdversaryRole;
-use crate::mallory::policy::ActionId;
-use crate::utils::SetPartition;
-use crate::SniffChannel;
+use crate::{
+    mallory::{adversary::AdversaryRole, policy::ActionId},
+    utils::SetPartition,
+    SniffChannel,
+};
 use rand::{Rng, RngExt as _};
 use std::time::Duration;
 
