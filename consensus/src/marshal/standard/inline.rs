@@ -380,7 +380,6 @@ where
                 build_timer.observe(&runtime_context);
 
                 let digest = built_block.digest();
-
                 gates
                     .stage_and_defer(
                         consensus_context.round,
