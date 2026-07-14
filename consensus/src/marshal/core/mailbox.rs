@@ -146,9 +146,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         recipients: Recipients<S::PublicKey>,
     },
     /// A request to broadcast a locally proposed block and persist it.
-    ///
-    /// The block is handed to the network before it is ingested and persisted,
-    /// so the storage write never delays propagation.
     Proposed {
         /// The span carried with this request.
         span: Span,
