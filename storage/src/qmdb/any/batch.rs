@@ -311,35 +311,67 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
-    keys: Vec<U::Key>,
+    keys: StagedKeys<U::Key>,
     resolutions: Vec<StagedResolution<F, U>>,
-    /// Slot -> distinct-key id, assigned by first occurrence across
-    /// [`stage`](UnmerkleizedBatch::stage) and [`expand`](Staged::expand) (1:1 with `keys`).
-    /// Built while staging so [`resolve_updates`](Staged::resolve_updates) deduplicates
-    /// updates by direct indexing instead of hashing every key on the merkleize path.
-    key_ids: Vec<u32>,
-    /// Key -> distinct-key id backing `key_ids`, retained so `expand` assigns consistent ids
-    /// to keys staged again in a later chunk. Only probed, never iterated.
-    key_id_map: AHashMap<U::Key, u32>,
 }
 
-/// Assign each staged key its distinct-key id (by first occurrence), appending to `ids`.
-fn assign_key_ids<K: Clone + Eq + core::hash::Hash>(
-    map: &mut AHashMap<K, u32>,
-    ids: &mut Vec<u32>,
-    keys: &[K],
-) {
-    // `ids` grows 1:1 with staged slots and `map.len() <= ids.len()`, so this bounds both
-    // the distinct-key id space and the slot indices `resolve_updates` narrows to u32.
-    assert!(
-        ids.len() + keys.len() <= u32::MAX as usize,
-        "staged read count overflows key id space"
-    );
-    ids.reserve(keys.len());
-    for key in keys {
-        let next = map.len() as u32;
-        let id = *map.entry(key.clone()).or_insert(next);
-        ids.push(id);
+/// The staged read slots: each staged key paired with its distinct-key id, assigned by
+/// first occurrence across [`stage`](UnmerkleizedBatch::stage) and
+/// [`expand`](Staged::expand). Ids are assigned while staging so
+/// [`resolve_updates`](Staged::resolve_updates) deduplicates updates by direct indexing
+/// instead of hashing every key on the merkleize path.
+struct StagedKeys<K> {
+    /// Staged keys, one per slot.
+    keys: Vec<K>,
+    /// Slot -> distinct-key id (1:1 with `keys`).
+    slots: Vec<usize>,
+    /// Key -> distinct-key id backing `slots`, retained so a later
+    /// [`expand`](Staged::expand) chunk assigns consistent ids to keys staged again. Only
+    /// probed, never iterated.
+    ids: AHashMap<K, usize>,
+}
+
+impl<K: Clone + Eq + core::hash::Hash> StagedKeys<K> {
+    /// Wrap the initial staged chunk, assigning each key its distinct-key id.
+    fn new(keys: Vec<K>) -> Self {
+        let mut staged = Self {
+            keys: Vec::new(),
+            slots: Vec::new(),
+            ids: AHashMap::with_capacity(keys.len()),
+        };
+        staged.append(keys);
+        staged
+    }
+
+    /// Append a staged chunk, assigning each key its distinct-key id (by first occurrence).
+    fn append(&mut self, mut keys: Vec<K>) {
+        self.slots.reserve(keys.len());
+        for key in &keys {
+            let next = self.ids.len();
+            let id = *self.ids.entry(key.clone()).or_insert(next);
+            self.slots.push(id);
+        }
+        self.keys.append(&mut keys);
+    }
+
+    /// Number of staged slots.
+    const fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// The key staged at `slot`.
+    fn key(&self, slot: usize) -> &K {
+        &self.keys[slot]
+    }
+
+    /// The distinct-key id assigned to `slot`.
+    fn id(&self, slot: usize) -> usize {
+        self.slots[slot]
+    }
+
+    /// Number of distinct staged keys, bounding the id space.
+    fn distinct(&self) -> usize {
+        self.ids.len()
     }
 }
 
@@ -1409,9 +1441,8 @@ where
         let end = start
             .checked_add(keys.len())
             .expect("staged read index overflow");
-        let (values, mut keys, mut resolutions) = self.batch.stage_reads(keys, db).await?;
-        assign_key_ids(&mut self.key_id_map, &mut self.key_ids, &keys);
-        self.keys.append(&mut keys);
+        let (values, keys, mut resolutions) = self.batch.stage_reads(keys, db).await?;
+        self.keys.append(keys);
         self.resolutions.append(&mut resolutions);
         Ok((start..end, values, self))
     }
@@ -1458,8 +1489,6 @@ where
             mut batch,
             keys,
             resolutions,
-            key_ids,
-            key_id_map,
         } = self;
         let mut staged_updates = StagedUpdates::<F, U>::new();
         if updates.is_empty() {
@@ -1467,18 +1496,18 @@ where
         }
 
         // Resolve last-write-wins per distinct key without hashing on the merkleize path:
-        // `key_ids` maps each slot to its distinct-key id, so a forward walk leaves each id's
+        // each staged slot carries its distinct-key id, so a forward walk leaves each id's
         // final write (the same winner as a newest-first scan). Overlapping updates for upsert
         // keys are dropped (upserts are applied last and win). Detecting the overlap is the
         // one remaining hash probe, skipped entirely for the common upsert-free call.
         let upsert_keys: AHashSet<&U::Key> = upserts.iter().map(|(key, _)| key).collect();
-        let mut winners: Vec<Option<(u32, Option<U::Value>)>> = vec![None; key_id_map.len()];
+        let mut winners: Vec<Option<(usize, Option<U::Value>)>> = vec![None; keys.distinct()];
         for (slot, value) in updates {
             assert!(slot < keys.len(), "update index out of staged read range");
-            if !upsert_keys.is_empty() && upsert_keys.contains(&keys[slot]) {
+            if !upsert_keys.is_empty() && upsert_keys.contains(keys.key(slot)) {
                 continue;
             }
-            winners[key_ids[slot] as usize] = Some((slot as u32, value));
+            winners[keys.id(slot)] = Some((slot, value));
         }
 
         // Split the winners: updates whose slot resolved to a location become staged
@@ -1488,13 +1517,13 @@ where
         // key is visited at most once (winners are per key id), so a staged winner can never
         // chase a fallback inserted by this same loop.
         let had_mutations = !batch.mutations.is_empty();
-        let mut order: Vec<(Location<F>, u32)> = Vec::with_capacity(winners.len());
+        let mut order: Vec<(Location<F>, usize)> = Vec::with_capacity(winners.len());
         for winner in &mut winners {
             let Some((slot, value)) = winner else {
                 continue;
             };
-            let key = &keys[*slot as usize];
-            match &resolutions[*slot as usize] {
+            let key = keys.key(*slot);
+            match &resolutions[*slot] {
                 Some((sloc, _)) if value.is_some() || U::STAGES_DELETES => {
                     if had_mutations {
                         batch.mutations.remove(key);
@@ -1514,14 +1543,18 @@ where
         // traffic low. The tuples are then materialized in sorted order across the strategy.
         strategy.sort_by(&mut order, |a, b| a.0.cmp(&b.0));
         staged_updates = strategy.map_collect_vec(&order, |&(_, slot)| {
-            let slot = slot as usize;
-            let (_, value) = winners[key_ids[slot] as usize]
+            let (_, value) = winners[keys.id(slot)]
                 .as_ref()
                 .expect("winner recorded for staged slot");
             let (sloc, payload) = resolutions[slot]
                 .as_ref()
                 .expect("resolution checked above");
-            (keys[slot].clone(), *sloc, payload.clone(), value.clone())
+            (
+                keys.key(slot).clone(),
+                *sloc,
+                payload.clone(),
+                value.clone(),
+            )
         });
         (Self::apply_upserts(batch, upserts), staged_updates)
     }
@@ -1565,29 +1598,34 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        // Overlap the serial update resolution with the floor-raise candidate prefetch: the
-        // committed-prefix candidate set depends only on the base floor, the committed
-        // bitmap, and a step bound, none of which depend on the resolution. Resolution runs
-        // as one job on the strategy while this task gathers and reads the candidates.
-        //
-        // The bound over-approximates the raise's steps (every emitted op traces to a
-        // distinct update key, upsert, or prior mutation, plus one for the CommitFloor).
-        // Duplicate update slots collapse to one write per distinct key, so the update term
-        // is clamped by the distinct staged-key count. Surplus candidates are dropped by
-        // the raise once it moves enough ops.
-        let distinct_updates = updates.len().min(self.key_id_map.len());
+        // Bound the steps the floor raise can take, over-approximated: every emitted op
+        // traces to a distinct update key, upsert, or prior mutation, plus one for the
+        // CommitFloor. Duplicate update slots collapse to one write per distinct key, so
+        // the update term is clamped by the distinct staged-key count. Surplus candidates
+        // are dropped by the raise once it moves enough ops.
+        let distinct_updates = updates.len().min(self.keys.distinct());
         let steps_bound = distinct_updates + upserts.len() + self.batch.mutations.len() + 1;
+
+        // Overlap the serial update resolution with the candidate prefetch: the
+        // committed-prefix candidate set depends only on the base floor, the committed
+        // bitmap, and the step bound, none of which depend on the resolution. The batch
+        // moves into the job, so its floor is captured first.
         let scan_from = self.batch.base.inactivity_floor_loc();
         let resolve = db
             .strategy()
             .spawn(move |strategy| self.resolve_updates(updates, upserts, &strategy));
 
+        // Gather the committed-prefix candidates and read their operations, sharded, while
+        // the resolution job runs.
         let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
         let mut raw: Vec<u64> = Vec::with_capacity(steps_bound);
         let next_scan = db
             .bitmap
             .fill_candidates(*scan_from, committed_tip, steps_bound, &mut raw);
         let read = db.log.read_many_sharded(&raw).await;
+
+        // Join the resolution, surface any read failure, and seed the raise with the
+        // prefetched prefix.
         let (batch, staged_updates) = resolve.await;
         let prefetched = PrefetchedCandidates {
             locs: raw.into_iter().map(Location::new).collect(),
@@ -1801,17 +1839,12 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         let (results, keys, resolutions) = self.stage_reads(keys, db).await?;
-        let mut key_id_map = AHashMap::with_capacity(keys.len());
-        let mut key_ids = Vec::new();
-        assign_key_ids(&mut key_id_map, &mut key_ids, &keys);
         Ok((
             results,
             Staged {
                 batch: self,
-                keys,
+                keys: StagedKeys::new(keys),
                 resolutions,
-                key_ids,
-                key_id_map,
             },
         ))
     }
@@ -3799,15 +3832,10 @@ mod tests {
     where
         Operation<F, U>: Codec,
     {
-        let mut key_id_map = AHashMap::with_capacity(keys.len());
-        let mut key_ids = Vec::new();
-        assign_key_ids(&mut key_id_map, &mut key_ids, &keys);
         Staged {
             batch,
-            keys,
+            keys: StagedKeys::new(keys),
             resolutions,
-            key_ids,
-            key_id_map,
         }
     }
 
