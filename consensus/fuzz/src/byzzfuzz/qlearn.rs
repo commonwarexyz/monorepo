@@ -324,7 +324,10 @@ mod tests {
         let bootstrapped_q = bootstrapped.row(2)[FaultAction::NoFault.index()];
         let expected = ALPHA * (5.0 + GAMMA * bootstrapped.best(next));
         assert!((bootstrapped_q - expected).abs() < 1e-9);
-        assert!(bootstrapped_q > terminal_q, "bootstrap must add next-state value");
+        assert!(
+            bootstrapped_q > terminal_q,
+            "bootstrap must add next-state value"
+        );
     }
 
     #[test]
@@ -346,7 +349,9 @@ mod tests {
         policy.learn_terminal(0, FaultAction::Partition, 3.0);
         let draw = || {
             let mut rng = FuzzRng::new(vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
-            (0..16).map(|_| policy.select(0, &mut rng)).collect::<Vec<_>>()
+            (0..16)
+                .map(|_| policy.select(0, &mut rng))
+                .collect::<Vec<_>>()
         };
         let first = draw();
         assert!(first.iter().all(|a| FaultAction::ALL.contains(a)));
@@ -366,6 +371,9 @@ mod tests {
         let before = policy.row(probe)[FaultAction::Partition.index()];
         policy.learn_terminal(probe, FaultAction::Partition, 1.0);
         let after = policy.row(probe)[FaultAction::Partition.index()];
-        assert!(after > before, "any state must still learn after saturation");
+        assert!(
+            after > before,
+            "any state must still learn after saturation"
+        );
     }
 }

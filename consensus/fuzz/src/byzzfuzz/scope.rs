@@ -142,7 +142,10 @@ mod tests {
         // would make it a guaranteed no-op.
         let mut rng = FuzzRng::new(vec![0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15]);
         for _ in 0..1000 {
-            assert!(!matches!(sample_vote(&mut rng), MessageScope::Certificate(_)));
+            assert!(!matches!(
+                sample_vote(&mut rng),
+                MessageScope::Certificate(_)
+            ));
         }
     }
 }

@@ -1240,7 +1240,12 @@ pub(crate) struct SniffingReceiver<P: simplex::Simplex, R> {
 }
 
 impl<P: simplex::Simplex, R> SniffingReceiver<P, R> {
-    pub(crate) fn new(inner: R, channel: SniffChannel, cert_cfg: CertCfgOf<P>, sink: SniffSink<P>) -> Self {
+    pub(crate) fn new(
+        inner: R,
+        channel: SniffChannel,
+        cert_cfg: CertCfgOf<P>,
+        sink: SniffSink<P>,
+    ) -> Self {
         Self {
             inner,
             channel,

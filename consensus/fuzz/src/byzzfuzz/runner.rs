@@ -14,8 +14,7 @@ use crate::{
         log,
         mutator::ByzzFuzzMutator,
         observed::ObservedState,
-        qlearn,
-        sampling,
+        qlearn, sampling,
         scope::{self, MessageScope},
         ByzzFuzz,
     },
@@ -293,7 +292,11 @@ where
         // Wrap each round-tracking receiver in a happens-before sniffer. Honest
         // nodes record wire arrivals; the Byzantine node (and the `None`-capture
         // `run` path) get a pass-through sink.
-        let node_hb = if i == BYZANTINE_IDX { &none_hb } else { &hb_log };
+        let node_hb = if i == BYZANTINE_IDX {
+            &none_hb
+        } else {
+            &hb_log
+        };
         let vote_receiver = SniffingReceiver::<P, _>::new(
             vote_receiver,
             SniffChannel::Vote,
