@@ -30,8 +30,9 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// When false, staged deletes fall back to normal mutations.
     const STAGES_DELETES: bool;
 
-    /// Whether merkleize may stage a read that resolved in an uncommitted ancestor's diff,
-    /// expressed as the cached payload such a staged read carries.
+    /// Whether merkleize may stage a read that resolved in an uncommitted ancestor's diff.
+    /// `Some` supplies the cached payload recorded for such a read. `None` leaves those
+    /// slots unresolved, so their updates fall back to normal mutations.
     const STAGES_ANCESTORS: Option<Self::Cached>;
 
     /// The updated key.
