@@ -442,6 +442,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_mallory"
+path = "fuzz_targets/simplex_id_mallory.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ordered_broadcast_cert_mock"
 path = "fuzz_targets/ordered_broadcast_cert_mock.rs"
 test = false

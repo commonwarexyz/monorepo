@@ -21,6 +21,7 @@
 //!   Byzantine process faults remain active;
 //! - [`log`] stores the bounded decision trace drained on panic.
 
+mod catalog;
 mod fault;
 mod forwarder;
 mod injector;
@@ -28,7 +29,6 @@ mod intercept;
 pub mod log;
 mod mutator;
 mod observed;
-pub(crate) mod qlearn;
 mod runner;
 mod sampling;
 mod scope;

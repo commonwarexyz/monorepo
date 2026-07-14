@@ -7,6 +7,7 @@
 use super::BYZANTINE_IDX;
 use crate::{
     byzzfuzz::{
+        catalog::{self, FaultAction},
         fault::{NetworkFault, ProcessAction, ProcessFault},
         forwarder,
         injector::ByzzFuzzInjector,
@@ -14,13 +15,14 @@ use crate::{
         log,
         mutator::ByzzFuzzMutator,
         observed::ObservedState,
-        qlearn, sampling,
+        sampling,
         scope::{self, MessageScope},
         ByzzFuzz,
     },
     happens_before, invariants,
+    mallory,
     simplex::Simplex,
-    sniff_sink, spawn_honest_validator, state_cov,
+    sniff_sink, spawn_honest_validator,
     utils::Partition,
     CertifyChoice, PublicKeyOf, SniffChannel, SniffingReceiver, EPOCH, FAULT_INJECTION_RATIO,
     FAULT_PHASE, N4F0C4, POST_GST_WINDOW,
@@ -40,12 +42,7 @@ use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor};
 use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, sync::Mutex, FuzzRng};
 use futures::future::join_all;
 use rand::RngExt as _;
-use std::{
-    collections::{BTreeSet, HashSet},
-    fmt::Write as _,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 use tracing::{dispatcher, Dispatch};
 
 /// Number of policy decision steps in one Q-learning episode (Algorithm 1's
@@ -591,59 +588,9 @@ where
     });
 }
 
-/// View-relative protocol-state descriptor of the honest reporters: a compact
-/// fingerprint of their agreement state as offsets, spreads, and counts relative
-/// to the finalization frontier -- never absolute view numbers. Unlike
-/// [`state_cov::alpha`] (whose tokens embed absolute views and so almost never
-/// recur across runs), this recurs, so its novelty is a genuine reward signal.
-fn state_descriptor<P: Simplex>(honest: &[ByzzReporter<P>], max_participants: usize) -> u64 {
-    let states = state_cov::encode_reporter_states(honest, max_participants);
-    if states.is_empty() {
-        return 0;
-    }
-    let max_fin = states.values().map(|r| r.last_finalized).max().unwrap_or(0);
-    let min_fin = states.values().map(|r| r.last_finalized).min().unwrap_or(0);
-    let max_notar = states.values().map(|r| r.last_notarized).max().unwrap_or(0);
-    let max_null = states.values().map(|r| r.last_nullified).max().unwrap_or(0);
-
-    let mut notarized = BTreeSet::new();
-    let mut finalized = BTreeSet::new();
-    let mut nullified = BTreeSet::new();
-    let mut faulty = false;
-    for r in states.values() {
-        notarized.extend(r.notarizations.keys().copied());
-        finalized.extend(r.finalizations.keys().copied());
-        nullified.extend(r.nullifications.iter().copied());
-        faulty |= !r.faults.is_empty();
-    }
-    let notar_unfinalized = notarized
-        .iter()
-        .filter(|v| !finalized.contains(v) && !nullified.contains(v))
-        .count();
-    let notar_and_nullified = notarized.intersection(&nullified).count();
-
-    // Bucketed, view-relative features packed into one descriptor: notarization
-    // depth over the finalized frontier, nullification depth over it, inter-
-    // replica finalization spread, count of notarized-but-undecided views, count
-    // of notarized-and-nullified (conflict) views, and any recorded equivocation.
-    let fin_gap = max_notar.saturating_sub(max_fin).min(3);
-    let null_gap = max_null.saturating_sub(max_fin).min(3);
-    let fin_spread = max_fin.saturating_sub(min_fin).min(3);
-    let unfinalized = (notar_unfinalized as u64).min(3);
-    let conflicted = (notar_and_nullified as u64).min(2);
-
-    let mut d = 0u64;
-    d = (d << 2) | fin_gap;
-    d = (d << 2) | null_gap;
-    d = (d << 2) | fin_spread;
-    d = (d << 2) | unfinalized;
-    d = (d << 2) | conflicted;
-    (d << 1) | u64::from(faulty)
-}
-
 /// Run one Q-learning ByzzFuzz episode (`Mode::ByzzfuzzQLearn`).
 ///
-/// Reuses [`setup_engines`] (with honest-only happens-before capture), then
+/// Reuses `setup_engines` (with honest-only happens-before capture), then
 /// clears the i.i.d. fault schedule and lets a campaign-persistent Q-policy
 /// produce the process- and network-fault schedule step by step. Every
 /// stochastic choice -- softmax action sampling and the target/scope/receiver/
@@ -655,7 +602,7 @@ fn state_descriptor<P: Simplex>(honest: &[ByzzReporter<P>], max_participants: us
 /// the ByzzFuzz decision log so a crashing episode is reproducible.
 ///
 /// The safety + liveness oracle is identical to [`run`]: a single
-/// [`reach_gst_and_check_liveness`] heal at episode end (process faults never
+/// `reach_gst_and_check_liveness` heal at episode end (process faults never
 /// wedge the three-honest quorum; only partitions can, and GST disables them),
 /// then the same invariant checks.
 pub fn run_qlearn<P: Simplex>(mut input: crate::FuzzInput)
@@ -675,8 +622,6 @@ where
     let hb_log = happens_before::capture::EventLog::new();
 
     executor.start(|mut context| async move {
-        use qlearn::FaultAction;
-
         let gate = FaultGate::new();
         let setup = setup_engines::<P>(
             &mut context,
@@ -721,8 +666,13 @@ where
             reporters[clock_idx].subscribe().await;
         let mut honest_finalized = latest.get();
 
-        let campaign = qlearn::campaign();
-        let mut state: u64 = 0;
+        // ByzzFuzz's five actions are always available, so the policy sees an
+        // all-legal mask every step.
+        let legal = [true; catalog::N_ACTIONS];
+        let campaign = mallory::policy::campaign(catalog::N_ACTIONS);
+        // Observe before the first decision: the initial (empty-history) HB
+        // fingerprint is the step-0 Q-state, so there is no `state = 0` sentinel.
+        let mut state = hb_log.summary().fingerprint();
         for step in 0..QLEARN_EPISODE_STEPS {
             // Drain every already-queued finalization to the current frontier
             // before deciding, so this step's progress baseline is the max
@@ -734,7 +684,8 @@ where
             }
 
             let byz_view = byzantine_view.get();
-            let action = campaign.lock().policy.select(state, &mut context);
+            let action_id = campaign.lock().policy.select(state, &legal, &mut context);
+            let action = FaultAction::from_id(action_id);
 
             // Resolve the chosen action into concrete faults on the live schedule,
             // recording the fully-sampled fault so the decision log reproduces the
@@ -842,15 +793,15 @@ where
             // stored in the policy's fixed-size table. The protocol-state term
             // uses the view-relative descriptor for the same reason.
             let hb_fp = hb_log.summary().fingerprint();
-            let state_fp = state_descriptor::<P>(&honest_reporters, n);
+            let state_fp = mallory::state::state_descriptor::<P>(&honest_reporters, n);
             let terminal = step + 1 == QLEARN_EPISODE_STEPS;
             {
                 let mut c = campaign.lock();
                 let reward = c.reward(state_fp, hb_fp);
                 if terminal {
-                    c.policy.learn_terminal(state, action, reward);
+                    c.policy.learn_terminal(state, action_id, reward);
                 } else {
-                    c.policy.learn(state, action, reward, hb_fp);
+                    c.policy.learn(state, action_id, reward, hb_fp, &legal);
                 }
             }
             state = hb_fp;
@@ -917,13 +868,46 @@ mod tests {
     #[test]
     #[ignore]
     fn run_qlearn_smoke_completes_and_learns() {
-        qlearn::reset_campaign();
+        mallory::policy::reset_campaign(catalog::N_ACTIONS);
         for seed in [1u64, 2, 3] {
             run_qlearn::<SimplexId>(qlearn_input(seed));
         }
         assert!(
-            !qlearn::campaign().lock().policy.is_empty(),
+            !mallory::policy::campaign(catalog::N_ACTIONS)
+                .lock()
+                .policy
+                .is_empty(),
             "episodes must populate the campaign Q-table"
         );
+    }
+
+    /// Run the plain ByzzFuzz baseline and drain its decision log, tolerating a
+    /// panic so a same-seed liveness violation is still captured identically.
+    fn baseline_trace(input: FuzzInput) -> (bool, Vec<String>) {
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run::<SimplexId>(input);
+        }))
+        .is_ok();
+        (ok, log::take())
+    }
+
+    // Same-seed determinism regression for the extracted Q-core: `run` never
+    // touches the campaign, so two runs of one fixed input must produce a
+    // byte-identical decision log (the full sampled process/network schedule)
+    // and the same completion outcome. This fixed input finalizes in the fault
+    // phase, so it stays within the fast-test budget.
+    #[test]
+    fn run_baseline_is_deterministic_for_fixed_input() {
+        let (ok_first, first) = baseline_trace(qlearn_input(7));
+        let (ok_second, second) = baseline_trace(qlearn_input(7));
+        assert_eq!(
+            ok_first, ok_second,
+            "same seed must reach the same completion outcome"
+        );
+        assert_eq!(
+            first, second,
+            "same seed must produce a byte-identical ByzzFuzz schedule"
+        );
+        assert!(!first.is_empty(), "the decision log must record the schedule");
     }
 }

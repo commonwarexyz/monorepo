@@ -1,0 +1,752 @@
+//! The Mallory backend's stable action catalog, per-step legal mask, and the
+//! concrete [`FaultPlan`] the runner enacts.
+//!
+//! The Q-core is action-agnostic (it sees only numeric ids); this catalog is the
+//! Mallory binding of those ids to concrete adversarial actions. Selection is
+//! split in two: [`Action::sample`] draws an action's concrete parameters from
+//! the runtime RNG synchronously and returns a [`FaultPlan`], and the runner then
+//! enacts that plan against the network asynchronously. Later PRs append packet,
+//! lifecycle, and adversary-profile actions to the END of [`CATALOG`].
+
+use crate::mallory::policy::ActionId;
+use crate::utils::SetPartition;
+use crate::SniffChannel;
+use rand::{Rng, RngExt as _};
+use std::time::Duration;
+
+/// The `n = 4` set partitions (indices into [`SetPartition::N4`]) that split the
+/// validators two-against-two: `{{0,1},{2,3}}`, `{{0,2},{1,3}}`, `{{0,3},{1,2}}`.
+/// None contains a singleton, so neither side reaches the N4F0C4 quorum of three
+/// during the window -- all progress stalls until the partition heals.
+const PARTITION_2_2: [usize; 3] = [5, 6, 7];
+
+/// Mallory fixes `n = 4` honest validators (see [`crate::mallory`]); a packet
+/// fault may target any of them, since all four run honest engines behind a pump.
+const MALLORY_N: usize = 4;
+/// Sampled packet-delay bounds (ms): a sub-window per-packet slowdown, so delayed
+/// packets still arrive within the observation window and the channel recovers as
+/// soon as the fault heals.
+const PACKET_DELAY_MS_MIN: u64 = 10;
+const PACKET_DELAY_MS_MAX: u64 = 250;
+/// Sampled packet-loss bounds: a small count so a run still completes -- Simplex
+/// backfills the gap once the fault heals.
+const PACKET_LOSS_MIN: u32 = 1;
+const PACKET_LOSS_MAX: u32 = 8;
+/// Sampled packet-corrupt bounds: how many of the next matching packets are byte-
+/// mutated. Bounded like loss (a corrupted message fails to decode, so it acts as
+/// an effective loss) so backfill still recovers and a run completes.
+const PACKET_CORRUPT_MIN: u32 = 1;
+const PACKET_CORRUPT_MAX: u32 = 6;
+/// The corrupt XOR is applied at `offset % len`; a small offset (exclusive upper
+/// bound) biases the mutation toward a message's header bytes, so it is more
+/// likely to break the structural decode and drop the message from HB.
+const PACKET_CORRUPT_OFFSET_MAX: u16 = 8;
+/// The corrupt XOR mask is nonzero so the byte always changes.
+const PACKET_CORRUPT_MASK_MIN: u8 = 1;
+const PACKET_CORRUPT_MASK_MAX: u8 = 255;
+/// Sampled packet-duplicate bounds: extra identical copies per matching packet,
+/// hard-bounded so the internal FIFO cannot blow up.
+const PACKET_DUPLICATE_MIN: u32 = 1;
+const PACKET_DUPLICATE_MAX: u32 = 3;
+/// Sampled packet-reorder bounds: the per-pump reorder-buffer capacity, hard-
+/// bounded so held memory (and the reorder distance) stays small.
+const PACKET_REORDER_MIN: u32 = 2;
+const PACKET_REORDER_MAX: u32 = 8;
+
+/// The adversarial action the policy chooses per step.
+///
+/// # Stable catalog order (contract)
+///
+/// [`CATALOG`] fixes each action's [`ActionId`]: index `i` has id `i`. That order
+/// is the contract between the runner's `select` and its enactment, and it is the
+/// column layout of a Q-table persisted across the whole libFuzzer campaign, so
+/// it MUST NOT change. New actions are APPENDED after the last existing entry;
+/// existing ids never move (so a growing catalog reuses a warm Q-table). PR4a:
+/// - `NoFault = 0`
+/// - `IsolateNodeWindow = 1`
+/// - `PartitionWindow = 2`
+/// - `PacketDelay = 3`
+/// - `PacketLoss = 4`
+///
+/// PR4b appends the remaining packet faults on the same pump:
+/// - `PacketCorrupt = 5`
+/// - `PacketDuplicate = 6`
+/// - `PacketReorder = 7`
+///
+/// PR5 appends the managed-validator lifecycle faults, both targeting the single
+/// faultable identity ([`crate::BYZANTINE_IDX`]):
+/// - `CrashStop = 8`
+/// - `CrashRestartDurable = 9`
+///
+/// PR7a appends the third lifecycle fault on the same faultable identity:
+/// - `AmnesiaRestart = 10`
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Action {
+    /// Enact nothing and heal nothing for this step.
+    NoFault,
+    /// Isolate the single faultable identity ([`crate::BYZANTINE_IDX`]) from the
+    /// other three validators for one window (`{{0},{1,2,3}}`).
+    IsolateNodeWindow,
+    /// Split the validators into a balanced 2-2 partition for one window; no side
+    /// holds a quorum, so all progress stalls until the window heals.
+    PartitionWindow,
+    /// Slow one honest node's one channel by a per-packet delay for the window: a
+    /// coarse, in-order channel slowdown applied by the packet-fault pump.
+    PacketDelay,
+    /// Drop a small, bounded number of packets on one honest node's one channel
+    /// for the window; the dropped packets never reach the engine or the
+    /// happens-before log.
+    PacketLoss,
+    /// Corrupt the raw wire bytes of a small, bounded number of packets on one
+    /// honest node's one channel WITHOUT re-signing; each corrupted message fails
+    /// to decode, so it is dropped from the happens-before log and rejected by the
+    /// engine (an effective loss that exercises the decode-rejection path).
+    PacketCorrupt,
+    /// Duplicate each packet on one honest node's one channel with a hard-bounded
+    /// number of extra identical copies for the window; the engine's idempotent
+    /// vote handling tolerates them.
+    PacketDuplicate,
+    /// Reorder one honest node's one channel through a hard-bounded per-pump
+    /// reorder buffer for the window; the buffer is drained in order when the
+    /// fault heals, so no packet is lost.
+    PacketReorder,
+    /// Crash-stop the single faultable identity ([`crate::BYZANTINE_IDX`]): abort
+    /// its engine and application tasks so they can never send again. TERMINAL --
+    /// the episode ends after this action; the crashed node stays out of the
+    /// liveness watch but its retained reporter remains in the safety set.
+    CrashStop,
+    /// Crash then durably restart the single faultable identity on its EXISTING
+    /// storage partition: the node loses volatile state, replays its journal, and
+    /// catches up via resolver backfill from the quorum. Not terminal.
+    CrashRestartDurable,
+    /// Crash then restart the single faultable identity on a FRESH (empty) storage
+    /// partition: the node forgets its durable state (including signed votes), so it
+    /// may equivocate (double-vote a view it already signed) -- disk-loss /
+    /// Byzantine amnesia. Counts as BYZANTINE: the node runs but is excluded from the
+    /// honest safety and liveness sets for the rest of the episode. Not terminal.
+    AmnesiaRestart,
+}
+
+/// Actions in [`ActionId`] order: index `i` has id `i`. Appended-to, never
+/// reordered (see [`Action`]).
+pub(crate) const CATALOG: &[Action] = &[
+    Action::NoFault,
+    Action::IsolateNodeWindow,
+    Action::PartitionWindow,
+    Action::PacketDelay,
+    Action::PacketLoss,
+    Action::PacketCorrupt,
+    Action::PacketDuplicate,
+    Action::PacketReorder,
+    Action::CrashStop,
+    Action::CrashRestartDurable,
+    Action::AmnesiaRestart,
+];
+
+/// Number of Mallory actions (the Q-table's column count).
+pub(crate) const N_ACTIONS: usize = CATALOG.len();
+
+/// A concrete, enactable fault: the result of sampling an [`Action`]'s
+/// parameters. A topology fault (`IsolateByzantine`, `Partition`) is installed
+/// via [`crate::mallory::network::Topology`]; a packet fault (`PacketDelay`,
+/// `PacketLoss`, `PacketCorrupt`, `PacketDuplicate`, `PacketReorder`) is installed
+/// by [`set`](crate::mallory::network::PacketFaultCell::set)ting the shared
+/// packet-fault cell the pumps read. The runner heals every active fault at the
+/// window's end (a reorder fault is additionally flushed so its held buffer
+/// drains in order). `apply_partition` either installs a topology plan
+/// or panics on an oracle error, so reaching the observation window is itself the
+/// enactment acknowledgement -- a fault that fails to install is a wiring bug,
+/// not a silently-skipped step.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FaultPlan {
+    /// No perturbation this step.
+    None,
+    /// Isolate [`crate::BYZANTINE_IDX`] from the other three validators.
+    IsolateByzantine,
+    /// Apply this set partition (Mallory only ever samples a 2-2 split).
+    Partition(SetPartition),
+    /// Slow one honest node's one channel by `per_packet` for the window.
+    PacketDelay {
+        node: usize,
+        channel: SniffChannel,
+        per_packet: Duration,
+    },
+    /// Drop the next `drop_count` packets on one honest node's one channel.
+    PacketLoss {
+        node: usize,
+        channel: SniffChannel,
+        drop_count: u32,
+    },
+    /// Corrupt the next `count` packets on one honest node's one channel by XOR-ing
+    /// `mask` into the byte at `offset % len` (no re-sign).
+    PacketCorrupt {
+        node: usize,
+        channel: SniffChannel,
+        count: u32,
+        offset: u16,
+        mask: u8,
+    },
+    /// Duplicate each packet on one honest node's one channel with `extra`
+    /// additional identical copies.
+    PacketDuplicate {
+        node: usize,
+        channel: SniffChannel,
+        extra: u32,
+    },
+    /// Reorder one honest node's one channel through a per-pump reorder buffer of
+    /// capacity `buffer`.
+    PacketReorder {
+        node: usize,
+        channel: SniffChannel,
+        buffer: u32,
+    },
+    /// Crash-stop [`crate::BYZANTINE_IDX`] (fixed target, no parameters). Enacted
+    /// against the managed validator, not the network.
+    CrashStop,
+    /// Crash and durably restart [`crate::BYZANTINE_IDX`] (fixed target, no
+    /// parameters). Enacted against the managed validator, not the network.
+    CrashRestartDurable,
+    /// Crash and restart [`crate::BYZANTINE_IDX`] on a FRESH (empty) storage
+    /// partition (fixed target, no parameters). Enacted against the managed
+    /// validator, not the network; marks the node Byzantine for the rest of the
+    /// episode.
+    AmnesiaRestart,
+}
+
+impl FaultPlan {
+    /// A log-ready description of this plan's concrete parameters.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            FaultPlan::None => "none".to_string(),
+            FaultPlan::IsolateByzantine => "isolate(node=0)".to_string(),
+            FaultPlan::Partition(sp) => format!("partition({sp:?})"),
+            FaultPlan::PacketDelay {
+                node,
+                channel,
+                per_packet,
+            } => format!("packet_delay(node={node}, channel={channel:?}, per_packet={per_packet:?})"),
+            FaultPlan::PacketLoss {
+                node,
+                channel,
+                drop_count,
+            } => format!("packet_loss(node={node}, channel={channel:?}, drop_count={drop_count})"),
+            FaultPlan::PacketCorrupt {
+                node,
+                channel,
+                count,
+                offset,
+                mask,
+            } => format!(
+                "packet_corrupt(node={node}, channel={channel:?}, count={count}, offset={offset}, mask={mask:#04x})"
+            ),
+            FaultPlan::PacketDuplicate {
+                node,
+                channel,
+                extra,
+            } => format!("packet_duplicate(node={node}, channel={channel:?}, extra={extra})"),
+            FaultPlan::PacketReorder {
+                node,
+                channel,
+                buffer,
+            } => format!("packet_reorder(node={node}, channel={channel:?}, buffer={buffer})"),
+            FaultPlan::CrashStop => "crash_stop(node=0)".to_string(),
+            FaultPlan::CrashRestartDurable => "crash_restart_durable(node=0)".to_string(),
+            FaultPlan::AmnesiaRestart => "amnesia_restart(node=0)".to_string(),
+        }
+    }
+
+    /// Whether this plan installs a transient network/packet fault that the runner
+    /// heals before the next decision. The lifecycle faults ([`FaultPlan::CrashStop`],
+    /// [`FaultPlan::CrashRestartDurable`], [`FaultPlan::AmnesiaRestart`]) are NOT such
+    /// faults -- they are enacted against the managed validator, so they are not
+    /// "active" here and must not trigger a topology heal.
+    pub(crate) fn is_active(&self) -> bool {
+        !matches!(
+            self,
+            FaultPlan::None
+                | FaultPlan::CrashStop
+                | FaultPlan::CrashRestartDurable
+                | FaultPlan::AmnesiaRestart
+        )
+    }
+}
+
+/// Uniformly sample one of the three consensus channels a packet fault can
+/// target.
+fn sample_channel(rng: &mut impl Rng) -> SniffChannel {
+    match rng.random_range(0..3u8) {
+        0 => SniffChannel::Vote,
+        1 => SniffChannel::Certificate,
+        _ => SniffChannel::Resolver,
+    }
+}
+
+impl Action {
+    /// The action an [`ActionId`] the policy returned maps to.
+    pub(crate) fn from_id(id: ActionId) -> Self {
+        CATALOG[id]
+    }
+
+    /// This action's stable [`ActionId`] (its index in [`CATALOG`]).
+    pub(crate) fn id(self) -> ActionId {
+        CATALOG
+            .iter()
+            .position(|&a| a == self)
+            .expect("action is in the catalog")
+    }
+
+    /// Sample this action's concrete parameters from the runtime RNG, producing a
+    /// [`FaultPlan`] the runner enacts. [`Action::NoFault`] and
+    /// [`Action::IsolateNodeWindow`] have a fixed shape and draw no `FuzzRng`
+    /// bytes; [`Action::PartitionWindow`] draws one uniform choice among the 2-2
+    /// splits; the packet actions draw a target node, a target channel, and a
+    /// bounded intensity (a per-packet delay, a drop / corrupt count, a corrupt
+    /// offset and mask, a duplicate count, or a reorder-buffer capacity). All
+    /// draws come from the runtime RNG so the pump applies a deterministic
+    /// transform.
+    ///
+    /// `role_active` restricts the packet-fault target: when a Byzantine role owns
+    /// node 0 it holds RAW channels (no pump / sniffer), so a `node:0` packet fault
+    /// would match nothing -- the target is then drawn from the honest managed nodes
+    /// `{1, 2, 3}` instead of all four. With no role active the target is drawn from
+    /// all four exactly as before, so an Honest-episode replay is unperturbed.
+    pub(crate) fn sample(self, rng: &mut impl Rng, role_active: bool) -> FaultPlan {
+        // The lowest packet-fault target: node 0 is excluded when it is an unmanaged
+        // byzantine adversary (see above). This does not draw RNG, so the non-packet
+        // arms are unaffected.
+        let node_lo = usize::from(role_active);
+        match self {
+            Action::NoFault => FaultPlan::None,
+            Action::IsolateNodeWindow => FaultPlan::IsolateByzantine,
+            Action::PartitionWindow => {
+                let idx = PARTITION_2_2[rng.random_range(0..PARTITION_2_2.len())];
+                FaultPlan::Partition(SetPartition::n4(idx))
+            }
+            Action::PacketDelay => FaultPlan::PacketDelay {
+                node: rng.random_range(node_lo..MALLORY_N),
+                channel: sample_channel(rng),
+                per_packet: Duration::from_millis(
+                    rng.random_range(PACKET_DELAY_MS_MIN..=PACKET_DELAY_MS_MAX),
+                ),
+            },
+            Action::PacketLoss => FaultPlan::PacketLoss {
+                node: rng.random_range(node_lo..MALLORY_N),
+                channel: sample_channel(rng),
+                drop_count: rng.random_range(PACKET_LOSS_MIN..=PACKET_LOSS_MAX),
+            },
+            Action::PacketCorrupt => FaultPlan::PacketCorrupt {
+                node: rng.random_range(node_lo..MALLORY_N),
+                channel: sample_channel(rng),
+                count: rng.random_range(PACKET_CORRUPT_MIN..=PACKET_CORRUPT_MAX),
+                offset: rng.random_range(0..PACKET_CORRUPT_OFFSET_MAX),
+                mask: rng.random_range(PACKET_CORRUPT_MASK_MIN..=PACKET_CORRUPT_MASK_MAX),
+            },
+            Action::PacketDuplicate => FaultPlan::PacketDuplicate {
+                node: rng.random_range(node_lo..MALLORY_N),
+                channel: sample_channel(rng),
+                extra: rng.random_range(PACKET_DUPLICATE_MIN..=PACKET_DUPLICATE_MAX),
+            },
+            Action::PacketReorder => FaultPlan::PacketReorder {
+                node: rng.random_range(node_lo..MALLORY_N),
+                channel: sample_channel(rng),
+                buffer: rng.random_range(PACKET_REORDER_MIN..=PACKET_REORDER_MAX),
+            },
+            // The lifecycle faults have a fixed target (BYZANTINE_IDX) and draw no
+            // parameters, so a same-seed replay is unperturbed by their presence.
+            Action::CrashStop => FaultPlan::CrashStop,
+            Action::CrashRestartDurable => FaultPlan::CrashRestartDurable,
+            Action::AmnesiaRestart => FaultPlan::AmnesiaRestart,
+        }
+    }
+}
+
+/// The per-step legal-action mask: which catalog actions the policy may select
+/// this step. With an Honest faultable identity running, every catalog action is
+/// legal -- the loop heals every transient topology/packet fault before the next
+/// decision, so at most one is ever active without any masking, and all three
+/// lifecycle faults target the running managed node 0.
+///
+/// Once that node is crash-stopped (`node0_crashed`), a crash-stop is terminal, so
+/// only [`Action::NoFault`] stays legal: every fault (including a resurrection via
+/// [`Action::CrashRestartDurable`] or [`Action::AmnesiaRestart`]) is masked out, and
+/// the Q-core then never selects or bootstraps it. A durable restart returns the
+/// node to running, which clears the mask again.
+///
+/// When a Byzantine role owns node 0 (`role_active`) OR node 0 has become an
+/// amnesiac (`node0_amnesiac`, an empty-storage restart that may equivocate), node 0
+/// is now the single Byzantine identity, so ALL THREE lifecycle faults
+/// ([`Action::CrashStop`], [`Action::CrashRestartDurable`], [`Action::AmnesiaRestart`])
+/// are masked out -- this enforces the one-faultable-identity contract (no lifecycle
+/// fault on a second node; no further lifecycle fault on the already-Byzantine
+/// identity). Under a role node 0 is UNMANAGED, so there is no
+/// [`ManagedValidator`](crate::ManagedValidator) to target at all. The topology
+/// faults stay legal and are complementary -- [`Action::IsolateNodeWindow`]
+/// temporarily MUTES the adversary by cutting node 0 off, and
+/// [`Action::PartitionWindow`] still stalls progress. The packet faults stay legal
+/// too; under a role their target is restricted to the honest managed nodes at
+/// sample time (see [`Action::sample`]), while post-amnesia node 0 still has a
+/// pump/sniffer so it stays a valid packet target.
+pub(crate) fn legal_mask(
+    node0_crashed: bool,
+    role_active: bool,
+    node0_amnesiac: bool,
+) -> [bool; N_ACTIONS] {
+    if node0_crashed {
+        let mut mask = [false; N_ACTIONS];
+        mask[Action::NoFault.id()] = true;
+        return mask;
+    }
+    let mut mask = [true; N_ACTIONS];
+    if role_active || node0_amnesiac {
+        mask[Action::CrashStop.id()] = false;
+        mask[Action::CrashRestartDurable.id()] = false;
+        mask[Action::AmnesiaRestart.id()] = false;
+    }
+    mask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_utils::FuzzRng;
+
+    #[test]
+    fn catalog_ids_round_trip() {
+        assert_eq!(N_ACTIONS, 11);
+        assert_eq!(N_ACTIONS, CATALOG.len());
+        for (id, &action) in CATALOG.iter().enumerate() {
+            assert_eq!(action.id(), id, "catalog index must equal the action id");
+            assert_eq!(
+                Action::from_id(id),
+                action,
+                "from_id must invert id for every catalog entry"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_order_is_stable() {
+        // The stable-order contract: existing ids never move as the catalog
+        // grows, so a warm Q-table's columns stay valid.
+        assert_eq!(Action::NoFault.id(), 0);
+        assert_eq!(Action::IsolateNodeWindow.id(), 1);
+        assert_eq!(Action::PartitionWindow.id(), 2);
+        assert_eq!(Action::PacketDelay.id(), 3);
+        assert_eq!(Action::PacketLoss.id(), 4);
+        assert_eq!(Action::PacketCorrupt.id(), 5);
+        assert_eq!(Action::PacketDuplicate.id(), 6);
+        assert_eq!(Action::PacketReorder.id(), 7);
+        assert_eq!(Action::CrashStop.id(), 8);
+        assert_eq!(Action::CrashRestartDurable.id(), 9);
+        assert_eq!(Action::AmnesiaRestart.id(), 10);
+        assert_eq!(Action::from_id(0), Action::NoFault);
+        assert_eq!(Action::from_id(1), Action::IsolateNodeWindow);
+        assert_eq!(Action::from_id(2), Action::PartitionWindow);
+        assert_eq!(Action::from_id(3), Action::PacketDelay);
+        assert_eq!(Action::from_id(4), Action::PacketLoss);
+        assert_eq!(Action::from_id(5), Action::PacketCorrupt);
+        assert_eq!(Action::from_id(6), Action::PacketDuplicate);
+        assert_eq!(Action::from_id(7), Action::PacketReorder);
+        assert_eq!(Action::from_id(8), Action::CrashStop);
+        assert_eq!(Action::from_id(9), Action::CrashRestartDurable);
+        assert_eq!(Action::from_id(10), Action::AmnesiaRestart);
+    }
+
+    #[test]
+    fn legal_mask_running_is_all_true_and_sized() {
+        let mask = legal_mask(false, false, false);
+        assert_eq!(mask.len(), N_ACTIONS);
+        assert_eq!(mask.len(), 11);
+        assert!(
+            mask.iter().all(|&ok| ok),
+            "every action is legal while the faultable node is running"
+        );
+    }
+
+    #[test]
+    fn legal_mask_crashed_masks_every_fault_but_no_fault() {
+        // A crash-stop is terminal: once the faultable node is crashed, only
+        // NoFault stays legal, so no fault (including a durable or amnesia restart)
+        // can be selected or bootstrapped.
+        let mask = legal_mask(true, false, false);
+        assert_eq!(mask.len(), N_ACTIONS);
+        assert!(mask[Action::NoFault.id()], "NoFault stays legal when crashed");
+        for &action in CATALOG.iter().filter(|&&a| a != Action::NoFault) {
+            assert!(
+                !mask[action.id()],
+                "{action:?} must be masked out once the node is crashed"
+            );
+        }
+    }
+
+    /// The three lifecycle faults are masked out whenever node 0 is the Byzantine
+    /// identity -- under a byzantine role or once it is amnesiac -- while the
+    /// topology and packet faults stay legal. Shared by the role and amnesia cases,
+    /// which impose the same one-faultable-identity masking.
+    fn assert_lifecycle_masked_topology_and_packet_legal(mask: [bool; N_ACTIONS]) {
+        assert_eq!(mask.len(), N_ACTIONS);
+        assert!(!mask[Action::CrashStop.id()], "CrashStop masked");
+        assert!(
+            !mask[Action::CrashRestartDurable.id()],
+            "CrashRestartDurable masked"
+        );
+        assert!(
+            !mask[Action::AmnesiaRestart.id()],
+            "AmnesiaRestart masked"
+        );
+        for action in [
+            Action::NoFault,
+            Action::IsolateNodeWindow,
+            Action::PartitionWindow,
+            Action::PacketDelay,
+            Action::PacketLoss,
+            Action::PacketCorrupt,
+            Action::PacketDuplicate,
+            Action::PacketReorder,
+        ] {
+            assert!(mask[action.id()], "{action:?} stays legal");
+        }
+    }
+
+    #[test]
+    fn legal_mask_role_active_masks_lifecycle_keeps_topology_and_packet() {
+        // A byzantine role owns node 0 as an unmanaged adversary: the lifecycle
+        // faults have no ManagedValidator to target and are masked, but the
+        // topology and packet faults stay legal (isolation mutes the adversary; a
+        // partition still stalls; packet faults retarget the honest nodes).
+        assert_lifecycle_masked_topology_and_packet_legal(legal_mask(false, true, false));
+    }
+
+    #[test]
+    fn legal_mask_amnesiac_masks_lifecycle_keeps_topology_and_packet() {
+        // After an amnesia restart node 0 is Running but Byzantine (empty storage,
+        // may equivocate): the one-faultable-identity contract masks every lifecycle
+        // fault (including a second amnesia restart), while the topology and packet
+        // faults stay legal -- node 0 keeps its pump, so it is still a packet target.
+        assert_lifecycle_masked_topology_and_packet_legal(legal_mask(false, false, true));
+    }
+
+    #[test]
+    fn legal_mask_amnesia_only_under_honest_running() {
+        // AmnesiaRestart is legal ONLY when node 0 is an Honest, running managed
+        // node: masked once it is crashed, under a byzantine role, or once amnesiac.
+        assert!(
+            legal_mask(false, false, false)[Action::AmnesiaRestart.id()],
+            "AmnesiaRestart legal under Honest + Running"
+        );
+        assert!(!legal_mask(true, false, false)[Action::AmnesiaRestart.id()]);
+        assert!(!legal_mask(false, true, false)[Action::AmnesiaRestart.id()]);
+        assert!(!legal_mask(false, false, true)[Action::AmnesiaRestart.id()]);
+    }
+
+    #[test]
+    fn packet_target_never_node0_under_role() {
+        // Under a byzantine role node 0 has no pump/sniffer, so every packet fault
+        // must target an honest managed node in {1, 2, 3}.
+        let mut rng = FuzzRng::new(vec![0x24, 0x8b, 0xf1, 0x0e, 0x77, 0x35, 0xac, 0x51]);
+        for _ in 0..256 {
+            for action in [
+                Action::PacketDelay,
+                Action::PacketLoss,
+                Action::PacketCorrupt,
+                Action::PacketDuplicate,
+                Action::PacketReorder,
+            ] {
+                let node = match action.sample(&mut rng, true) {
+                    FaultPlan::PacketDelay { node, .. }
+                    | FaultPlan::PacketLoss { node, .. }
+                    | FaultPlan::PacketCorrupt { node, .. }
+                    | FaultPlan::PacketDuplicate { node, .. }
+                    | FaultPlan::PacketReorder { node, .. } => node,
+                    other => panic!("{action:?} must sample a packet plan, got {other:?}"),
+                };
+                assert!(
+                    (1..MALLORY_N).contains(&node),
+                    "{action:?} must target an honest node under a role, got node {node}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_actions_draw_no_rng_and_fix_the_target() {
+        // CrashStop / CrashRestartDurable / AmnesiaRestart target BYZANTINE_IDX with
+        // no sampled parameters, so they must not advance the RNG (a same-seed replay
+        // is unperturbed by their presence in the catalog).
+        for action in [
+            Action::CrashStop,
+            Action::CrashRestartDurable,
+            Action::AmnesiaRestart,
+        ] {
+            let seed = vec![0xa5, 0x5a, 0xc3, 0x3c, 0x0f, 0xf0, 0x99, 0x66];
+            let mut consumed = FuzzRng::new(seed.clone());
+            let mut untouched = FuzzRng::new(seed);
+            let plan = action.sample(&mut consumed, false);
+            assert!(
+                matches!(
+                    plan,
+                    FaultPlan::CrashStop | FaultPlan::CrashRestartDurable | FaultPlan::AmnesiaRestart
+                ),
+                "a lifecycle action samples a lifecycle plan, got {plan:?}"
+            );
+            assert!(!plan.is_active(), "a lifecycle fault is not a network/packet fault");
+            assert_eq!(
+                consumed.random_range(0u64..u64::MAX),
+                untouched.random_range(0u64..u64::MAX),
+                "{action:?} must not consume any FuzzRng bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn no_fault_samples_none_and_draws_no_rng() {
+        let seed = vec![0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15];
+        let mut consumed = FuzzRng::new(seed.clone());
+        let mut untouched = FuzzRng::new(seed);
+        let plan = Action::NoFault.sample(&mut consumed, false);
+        assert!(matches!(plan, FaultPlan::None));
+        assert!(!plan.is_active());
+        // NoFault must not advance the RNG, so a subsequent draw matches an
+        // untouched stream at the same offset.
+        assert_eq!(
+            consumed.random_range(0u64..u64::MAX),
+            untouched.random_range(0u64..u64::MAX),
+            "NoFault must not consume any FuzzRng bytes"
+        );
+    }
+
+    #[test]
+    fn isolate_always_isolates_byzantine_and_draws_no_rng() {
+        let seed = vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+        let mut consumed = FuzzRng::new(seed.clone());
+        let mut untouched = FuzzRng::new(seed);
+        for _ in 0..32 {
+            let plan = Action::IsolateNodeWindow.sample(&mut consumed, false);
+            assert!(matches!(plan, FaultPlan::IsolateByzantine));
+            assert!(plan.is_active());
+        }
+        // A fixed-target isolate draws no parameters.
+        assert_eq!(
+            consumed.random_range(0u64..u64::MAX),
+            untouched.random_range(0u64..u64::MAX),
+            "IsolateNodeWindow must not consume any FuzzRng bytes"
+        );
+    }
+
+    #[test]
+    fn partition_window_only_yields_2_2_splits() {
+        let mut rng = FuzzRng::new(vec![0x5a, 0xa5, 0x0f, 0xf0, 0x33, 0xcc, 0x11, 0xee]);
+        let allowed: Vec<SetPartition> = PARTITION_2_2.iter().map(|&i| SetPartition::n4(i)).collect();
+        for _ in 0..256 {
+            let FaultPlan::Partition(sp) = Action::PartitionWindow.sample(&mut rng, false) else {
+                panic!("PartitionWindow must sample a Partition plan");
+            };
+            assert!(
+                allowed.contains(&sp),
+                "PartitionWindow must only yield a balanced 2-2 split, got {sp:?}"
+            );
+            // A 2-2 split has exactly two blocks: node 0 is connected to exactly
+            // one other node, never isolated.
+            let peers = (1..4).filter(|&j| sp.connected(0, j)).count();
+            assert_eq!(peers, 1, "a 2-2 split pairs node 0 with exactly one node");
+        }
+    }
+
+    #[test]
+    fn packet_actions_sample_valid_targets_and_bounded_params() {
+        let mut rng = FuzzRng::new(vec![0x13, 0x37, 0xbe, 0xef, 0xca, 0xfe, 0x00, 0x99]);
+        let is_channel =
+            |c: SniffChannel| matches!(c, SniffChannel::Vote | SniffChannel::Certificate | SniffChannel::Resolver);
+        for _ in 0..256 {
+            let delay = Action::PacketDelay.sample(&mut rng, false);
+            assert!(delay.is_active(), "PacketDelay installs a transient fault");
+            let FaultPlan::PacketDelay {
+                node,
+                channel,
+                per_packet,
+            } = delay
+            else {
+                panic!("PacketDelay must sample a PacketDelay plan, got {delay:?}");
+            };
+            assert!(node < MALLORY_N, "delay must target a valid receiving node");
+            assert!(is_channel(channel));
+            let ms = per_packet.as_millis() as u64;
+            assert!(
+                (PACKET_DELAY_MS_MIN..=PACKET_DELAY_MS_MAX).contains(&ms),
+                "per-packet delay {ms}ms out of bounds"
+            );
+
+            let loss = Action::PacketLoss.sample(&mut rng, false);
+            assert!(loss.is_active(), "PacketLoss installs a transient fault");
+            let FaultPlan::PacketLoss {
+                node,
+                channel,
+                drop_count,
+            } = loss
+            else {
+                panic!("PacketLoss must sample a PacketLoss plan, got {loss:?}");
+            };
+            assert!(node < MALLORY_N, "loss must target a valid receiving node");
+            assert!(is_channel(channel));
+            assert!(
+                (PACKET_LOSS_MIN..=PACKET_LOSS_MAX).contains(&drop_count),
+                "drop count {drop_count} out of bounds"
+            );
+
+            let corrupt = Action::PacketCorrupt.sample(&mut rng, false);
+            assert!(corrupt.is_active(), "PacketCorrupt installs a transient fault");
+            let FaultPlan::PacketCorrupt {
+                node,
+                channel,
+                count,
+                offset,
+                mask,
+            } = corrupt
+            else {
+                panic!("PacketCorrupt must sample a PacketCorrupt plan, got {corrupt:?}");
+            };
+            assert!(node < MALLORY_N, "corrupt must target a valid receiving node");
+            assert!(is_channel(channel));
+            assert!(
+                (PACKET_CORRUPT_MIN..=PACKET_CORRUPT_MAX).contains(&count),
+                "corrupt count {count} out of bounds"
+            );
+            assert!(offset < PACKET_CORRUPT_OFFSET_MAX, "corrupt offset out of bounds");
+            assert!(mask != 0, "corrupt mask must be nonzero so a byte always changes");
+
+            let duplicate = Action::PacketDuplicate.sample(&mut rng, false);
+            assert!(duplicate.is_active(), "PacketDuplicate installs a transient fault");
+            let FaultPlan::PacketDuplicate {
+                node,
+                channel,
+                extra,
+            } = duplicate
+            else {
+                panic!("PacketDuplicate must sample a PacketDuplicate plan, got {duplicate:?}");
+            };
+            assert!(node < MALLORY_N, "duplicate must target a valid receiving node");
+            assert!(is_channel(channel));
+            assert!(
+                (PACKET_DUPLICATE_MIN..=PACKET_DUPLICATE_MAX).contains(&extra),
+                "duplicate extra {extra} out of bounds"
+            );
+
+            let reorder = Action::PacketReorder.sample(&mut rng, false);
+            assert!(reorder.is_active(), "PacketReorder installs a transient fault");
+            let FaultPlan::PacketReorder {
+                node,
+                channel,
+                buffer,
+            } = reorder
+            else {
+                panic!("PacketReorder must sample a PacketReorder plan, got {reorder:?}");
+            };
+            assert!(node < MALLORY_N, "reorder must target a valid receiving node");
+            assert!(is_channel(channel));
+            assert!(
+                (PACKET_REORDER_MIN..=PACKET_REORDER_MAX).contains(&buffer),
+                "reorder buffer {buffer} out of bounds"
+            );
+        }
+    }
+}

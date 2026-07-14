@@ -10,6 +10,7 @@ pub mod disrupter;
 pub mod happens_before;
 pub mod id_mock;
 pub mod invariants;
+pub(crate) mod mallory;
 #[cfg(feature = "mocks")]
 pub mod marshal;
 pub mod network;
@@ -59,7 +60,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     deterministic,
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
-    Clock, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
+    Clock, Handle, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
 };
 use commonware_utils::{
     channel::mpsc::{self, Receiver},
@@ -508,7 +509,7 @@ impl Arbitrary<'_> for FuzzInput {
 }
 
 pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Verifier>::PublicKey;
-type CertCfgOf<P> =
+pub(crate) type CertCfgOf<P> =
     <<<P as simplex::Simplex>::Scheme as Verifier>::Certificate as commonware_codec::Read>::Cfg;
 /// Happens-before sink for a [`SniffingReceiver`].
 pub(crate) struct Sniff<P: simplex::Simplex> {
@@ -735,7 +736,151 @@ fn spawn_disrupter<P: simplex::Simplex>(
     );
 }
 
-/// Spawn an honest validator with application, reporter, and engine.
+/// Whether a [`ManagedValidator`]'s engine is running, has been crash-stopped, or
+/// was restarted with empty storage.
+/// A crash is terminal within the run: after [`Running`](Self::Running) transitions
+/// to [`Crashed`](Self::Crashed) the old engine/application tasks are aborted and
+/// never resurrected (a durable restart rebuilds fresh tasks and returns to
+/// `Running`; see `crate::mallory::lifecycle`). An [`Amnesiac`](Self::Amnesiac)
+/// node has a LIVE engine but was rebuilt on a fresh (empty) storage partition, so
+/// it has forgotten its durable state (including signed votes) and may equivocate:
+/// it is treated as Byzantine for the rest of the episode (excluded from the honest
+/// safety and liveness sets), not terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ValidatorLifecycle {
+    /// The engine and application tasks are live.
+    Running,
+    /// The engine and application tasks were aborted and awaited to termination.
+    Crashed,
+    /// The engine was rebuilt on a fresh (empty) storage partition: it has forgotten
+    /// its durable state and is treated as Byzantine for the rest of the episode.
+    Amnesiac,
+}
+
+/// An honest validator whose engine/application task handles are RETAINED (not
+/// dropped) so its lifecycle can be managed at runtime: crash-stopped or durably
+/// restarted (`Mode::Mallory`, PR5+). The reporter is Arc-backed, so its safety
+/// history survives a crash and a clone reflects the live engine's state.
+///
+/// `EC` defaults to the backend's own elector so most callers write
+/// `ManagedValidator<P>`; the generic form exists only so the general
+/// [`build_validator`] can carry whatever elector its caller passed.
+pub(crate) struct ManagedValidator<P, EC = <P as simplex::Simplex>::Elector>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    /// Index of this validator in the participant set (its faultable identity).
+    idx: usize,
+    /// This validator's public key; re-registration and rebuild target it.
+    validator: PublicKeyOf<P>,
+    /// This validator's signing scheme, retained so a rebuild reuses it.
+    scheme: P::Scheme,
+    /// Durable storage partition; a durable restart replays it, so it is kept
+    /// stable across incarnations.
+    partition: String,
+    /// Incarnation counter (0 at first build), bumped on each restart. The seam a
+    /// later amnesia restart uses to derive a fresh partition.
+    generation: u32,
+    /// Arc-backed reporter; a restart reuses this instance to retain pre-crash
+    /// safety history.
+    reporter: reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
+    /// Application actor handle, retained so a crash can abort it. `None` once
+    /// taken by a crash/restart.
+    app_handle: Option<Handle<()>>,
+    /// Engine handle, retained so a crash can abort it (aborting cascades to every
+    /// engine sub-task). `None` once taken by a crash/restart.
+    engine_handle: Option<Handle<()>>,
+    /// Whether the engine is currently running or has been crash-stopped.
+    lifecycle: ValidatorLifecycle,
+}
+
+impl<P, EC> ManagedValidator<P, EC>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    /// A clone of the Arc-backed reporter (shares live state with this validator).
+    pub(crate) fn reporter(
+        &self,
+    ) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest> {
+        self.reporter.clone()
+    }
+
+    /// This validator's index in the participant set.
+    pub(crate) fn idx(&self) -> usize {
+        self.idx
+    }
+
+    /// This validator's public key.
+    pub(crate) fn validator(&self) -> &PublicKeyOf<P> {
+        &self.validator
+    }
+
+    /// This validator's signing scheme.
+    pub(crate) fn scheme(&self) -> &P::Scheme {
+        &self.scheme
+    }
+
+    /// The durable storage partition (stable across incarnations).
+    pub(crate) fn partition(&self) -> &str {
+        &self.partition
+    }
+
+    /// The current lifecycle state.
+    pub(crate) fn lifecycle(&self) -> ValidatorLifecycle {
+        self.lifecycle
+    }
+
+    /// Take the engine handle for a crash/restart abort, leaving `None`.
+    pub(crate) fn take_engine_handle(&mut self) -> Option<Handle<()>> {
+        self.engine_handle.take()
+    }
+
+    /// Take the application handle for a crash/restart abort, leaving `None`.
+    pub(crate) fn take_app_handle(&mut self) -> Option<Handle<()>> {
+        self.app_handle.take()
+    }
+
+    /// Mark the engine crash-stopped after both handles were aborted and awaited.
+    pub(crate) fn mark_crashed(&mut self) {
+        self.lifecycle = ValidatorLifecycle::Crashed;
+    }
+
+    /// Adopt a freshly rebuilt incarnation: take over its engine/application
+    /// handles, bump the generation, and return to `Running`. The reporter is
+    /// unchanged (a durable restart reuses the same instance).
+    pub(crate) fn adopt(&mut self, rebuilt: ManagedValidator<P, EC>) {
+        self.app_handle = rebuilt.app_handle;
+        self.engine_handle = rebuilt.engine_handle;
+        self.generation = self.generation.wrapping_add(1);
+        self.lifecycle = ValidatorLifecycle::Running;
+    }
+
+    /// Adopt an amnesia-restarted incarnation: take over its engine/application
+    /// handles and its FRESH storage partition and reporter (the rebuild used an
+    /// empty partition and a clean-slate reporter), bump the generation, and mark
+    /// the node [`Amnesiac`](ValidatorLifecycle::Amnesiac). Unlike [`adopt`](Self::adopt)
+    /// this replaces the partition and reporter, because the node forgot its durable
+    /// state and its new incarnation owns a distinct storage and history.
+    pub(crate) fn adopt_amnesiac(&mut self, rebuilt: ManagedValidator<P, EC>) {
+        self.app_handle = rebuilt.app_handle;
+        self.engine_handle = rebuilt.engine_handle;
+        self.partition = rebuilt.partition;
+        self.reporter = rebuilt.reporter;
+        self.generation = self.generation.wrapping_add(1);
+        self.lifecycle = ValidatorLifecycle::Amnesiac;
+    }
+
+    /// This validator's current incarnation counter.
+    pub(crate) fn generation(&self) -> u32 {
+        self.generation
+    }
+}
+
+/// Spawn an honest validator with application, reporter, and engine, returning
+/// only its reporter. A thin wrapper over [`build_validator`] preserved so its
+/// many existing callers compile unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_honest_validator<
     P,
@@ -775,12 +920,153 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
 {
-    let reporter_cfg = reporter::Config {
-        participants: participants.try_into().expect("public keys are unique"),
-        scheme: scheme.clone(),
-        elector: elector.clone(),
+    build_validator::<P, EC, _, _, _, _, _, _>(
+        context,
+        oracle,
+        participants,
+        scheme,
+        validator,
+        elector,
+        relay,
+        leader_timeout,
+        certification_timeout,
+        mailbox_size,
+        fetch_concurrent,
+        forwarding,
+        pending,
+        recovered,
+        resolver,
+        certify,
+        wiring,
+    )
+    .reporter
+}
+
+/// Build an honest validator (application, reporter, engine) and RETAIN its task
+/// handles in a [`ManagedValidator`], instead of dropping them like
+/// [`spawn_honest_validator`]. The storage partition is `validator.to_string()`,
+/// matching the historical behavior of the dropped-handle path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_validator<
+    P,
+    EC,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    elector: EC,
+    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    fetch_concurrent: NonZeroUsize,
+    forwarding: ForwardingPolicy,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+    certify: CertifyChoice,
+    wiring: ReporterWiring,
+) -> ManagedValidator<P, EC>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    let partition = validator.to_string();
+    build_validator_with_reporter::<P, EC, _, _, _, _, _, _>(
+        None,
+        context,
+        oracle,
+        participants,
+        scheme,
+        validator,
+        elector,
+        relay,
+        leader_timeout,
+        certification_timeout,
+        mailbox_size,
+        fetch_concurrent,
+        forwarding,
+        partition,
+        pending,
+        recovered,
+        resolver,
+        certify,
+        wiring,
+    )
+}
+
+/// [`build_validator`] with an explicit reporter and storage partition. When
+/// `existing` is `Some`, that reporter instance is reused (rather than a fresh
+/// one created) so a durable restart RETAINS the pre-crash safety history whose
+/// Arc-backed maps survived the abort. The public build paths pass `None` and the
+/// default `validator.to_string()` partition; a durable restart passes the
+/// crashed validator's reporter and its unchanged partition.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_validator_with_reporter<
+    P,
+    EC,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
+    existing: Option<reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>>,
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    elector: EC,
+    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    fetch_concurrent: NonZeroUsize,
+    forwarding: ForwardingPolicy,
+    partition: String,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+    certify: CertifyChoice,
+    wiring: ReporterWiring,
+) -> ManagedValidator<P, EC>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    let reporter = match existing {
+        Some(reporter) => reporter,
+        None => {
+            let reporter_cfg = reporter::Config {
+                participants: participants.try_into().expect("public keys are unique"),
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            };
+            reporter::Reporter::new(context.child("reporter"), reporter_cfg)
+        }
     };
-    let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
     let (vote_sender, vote_receiver) = pending;
     let (certificate_sender, certificate_receiver) = recovered;
@@ -800,9 +1086,10 @@ where
         should_certify: certify.into_certifier(validator_idx),
     };
     let (actor, application) = application::Application::new(context.child("application"), app_cfg);
-    actor.start();
+    let app_handle = actor.start();
 
     let blocker = oracle.control(validator.clone());
+    let stored_scheme = scheme.clone();
     let engine_cfg = config::Config {
         blocker,
         scheme,
@@ -810,7 +1097,7 @@ where
         automaton: application.clone(),
         relay: application.clone(),
         reporter: wiring.wire(reporter.clone()),
-        partition: validator.to_string(),
+        partition: partition.clone(),
         mailbox_size,
         epoch: Epoch::new(EPOCH),
         floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
@@ -828,13 +1115,23 @@ where
         forwarding,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
-    engine.start(
+    let engine_handle = engine.start(
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
         (resolver_sender, resolver_receiver),
     );
 
-    reporter
+    ManagedValidator {
+        idx: validator_idx,
+        validator,
+        scheme: stored_scheme,
+        partition,
+        generation: 0,
+        reporter,
+        app_handle: Some(app_handle),
+        engine_handle: Some(engine_handle),
+        lifecycle: ValidatorLifecycle::Running,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1168,7 +1465,7 @@ fn run_with_warn_trace_collection<T>(run: impl FnOnce(&Dispatch) -> T) -> T {
 }
 
 /// The consensus channel a [`SniffingReceiver`] decodes.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SniffChannel {
     Vote,
     Certificate,
@@ -2291,6 +2588,7 @@ pub enum Mode {
     FaultyNet,
     Byzzfuzz,
     ByzzfuzzQLearn,
+    Mallory,
 }
 
 pub trait FuzzMode {
@@ -2459,7 +2757,8 @@ impl FuzzMode for Byzzfuzz {
 /// the per-episode fault schedule is produced by a campaign-persistent tabular
 /// Q-policy (Mallory-style, arXiv:2305.02601) instead of being sampled i.i.d.
 /// Each libFuzzer input drives one episode of bounded steps; each step picks a
-/// [`byzzfuzz::qlearn::FaultAction`] by softmax over the observed state's Q-row,
+/// ByzzFuzz fault action by softmax over the observed state's Q-row (via the
+/// backend-agnostic Q-core in the `mallory` module),
 /// enacts it on the live fault schedule, runs to the next finalization boundary,
 /// and applies a temporal-difference update rewarding novel protocol-state and
 /// happens-before fingerprints. The learned policy persists across inputs, so
@@ -2468,6 +2767,28 @@ impl FuzzMode for Byzzfuzz {
 pub struct ByzzfuzzQLearn;
 impl FuzzMode for ByzzfuzzQLearn {
     const MODE: Mode = Mode::ByzzfuzzQLearn;
+}
+
+/// **Mallory mode** - a dedicated adaptive-adversary runner over its own action
+/// catalog.
+///
+/// Runs four honest engines (PR2 injects no faults) and drives a fixed-length
+/// episode of observe-orient-decide-act steps. Each step observes the honest
+/// happens-before fingerprint (the Q-state) and protocol-state descriptor,
+/// selects an action from the stable catalog (`mallory::action`) under a legal
+/// mask, enacts it, runs one FIXED deterministic-time window, then heals the
+/// action and (for the learned chooser) applies a temporal-difference update
+/// rewarding novel state / happens-before fingerprints via the same
+/// backend-agnostic Q-core as [`ByzzfuzzQLearn`]. Unlike that mode, Mallory does
+/// not reuse the ByzzFuzz fault machinery: it builds its own honest setup from
+/// the shared harness helpers and never samples ByzzFuzz `(c, d, r)`.
+///
+/// The episode-end oracle requires every correct reporter to reach
+/// `required_containers` (liveness) and runs the vote / state-extraction safety
+/// invariants over all four honest reporters. See `mallory::runner::run`.
+pub struct Mallory;
+impl FuzzMode for Mallory {
+    const MODE: Mode = Mode::Mallory;
 }
 
 /// Install (once per process) a panic-hook chain that drains and prints the
@@ -2501,9 +2822,36 @@ fn install_byzzfuzz_panic_hook() {
     });
 }
 
+/// Install (once per process) a panic-hook chain that drains and prints the
+/// Mallory decision log when `CONSENSUS_FUZZ_LOG` is set (any value). Mirrors
+/// [`install_byzzfuzz_panic_hook`] over the separate Mallory log; the same
+/// ordering (log -> default message -> libfuzzer trace) applies.
+fn install_mallory_panic_hook() {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let dump = std::env::var_os(FUZZ_LOG_ENV).is_some();
+        let prev = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if dump {
+                let log = mallory::log::take();
+                if !log.is_empty() {
+                    eprintln!("---- Mallory decision log ({} entries) ----", log.len());
+                    for line in &log {
+                        eprintln!("{line}");
+                    }
+                    eprintln!("---- end of Mallory decision log ----");
+                }
+            }
+            prev(info);
+        }));
+    });
+}
+
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput) {
     if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzQLearn) {
         install_byzzfuzz_panic_hook();
+    } else if matches!(M::MODE, Mode::Mallory) {
+        install_mallory_panic_hook();
     } else {
         if matches!(M::MODE, Mode::FaultyNet) {
             // We run only fuzzing with network faults, populated later by the
@@ -2536,6 +2884,9 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Mode::ByzzfuzzQLearn => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run_qlearn::<P>(input)))
         }
+        Mode::Mallory => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            mallory::runner::run::<P>(input, mallory::runner::Chooser::Learned)
+        })),
     };
     match run_result {
         Ok(()) => {
@@ -2543,6 +2894,10 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
             // or otherwise) starts clean. This is cheap when the log is empty.
             if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzQLearn) {
                 let _ = byzzfuzz::log::take();
+            }
+            // Same for the separate Mallory log.
+            if matches!(M::MODE, Mode::Mallory) {
+                let _ = mallory::log::take();
             }
         }
         Err(payload) => {
