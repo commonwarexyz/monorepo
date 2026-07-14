@@ -82,48 +82,6 @@ worker threads at all: strategies partition work as configured but execute on
 the executor thread, and multi-thread pool requests that previously could abort
 the process under task suspension now work ([#4221], [#4223]).
 
-### Non-Blocking Durability
-
-The runtime `Blob` trait gained `start_sync`, which begins persisting pending
-data and returns a `Handle<()>` that resolves once the data is durable. This
-provides the same guarantee as `sync` without blocking the caller on the fsync
-itself. `Handle` was generalized from a spawned-task handle into a handle to any
-asynchronous result, with new `ready`, `from_receiver`, and `from_future`
-constructors and a new `Error::Aborted` variant. Aborting a completion handle
-only stops waiting and does not cancel the underlying sync, and bytes written
-after `start_sync` returns are not covered by the returned handle ([#4078]).
-
-The primitive is threaded through the storage stack. The buffered writers
-`buffer::Write` and `buffer::paged::Writer`, the segmented journals, and the
-prunable archive expose `start_sync`, the `Archive` trait gained `start_sync`
-and `put_start_sync` and the `MultiArchive` trait `put_multi_start_sync`, all
-with blocking defaults, and the marshal `Certificates` and `Blocks` traits
-mirror `start_sync` and `put_start_sync` ([#4141], [#4145], [#4151]). Later
-operations that mutate a blob wait for the in-flight sync, so newer bytes are
-never folded into an older durability barrier. A flush failure encountered while
-starting a sync is reported only through the returned handle, so every handle
-must be observed or a failure can be silently vouched for. To let one sync
-result serve multiple waiters, `commonware_runtime::Error` is now `Clone` and
-its I/O-carrying variants wrap the underlying error in an `Arc`, which is a
-breaking change for code that constructs or destructures those variants directly
-([#4141]).
-
-Durability at the runtime boundary is tightened as well. On startup, the tokio
-runtime flushes the filesystem containing the storage directory before user code
-runs, so bytes a prior process wrote but never fsynced are durable before
-recovery reads them. On Linux this is a single `syncfs` call whose failure
-aborts startup. On other platforms the flush is best-effort, so the guarantee is
-Linux-only ([#3950]). `Storage::remove` now documents read-after-remove
-semantics: previously opened handles remain readable until dropped, and
-re-opening a removed name creates a new independent blob ([#3966]).
-
-Two persistence APIs were removed. The `Persistable` trait is gone: `commit`,
-`sync`, and `destroy` now live directly on `journal::contiguous::Mutable` and
-the `DbAny` trait, and remain inherent methods on the concrete types, so most
-callers only need to drop the import and adjust generic bounds ([#3991]).
-`Glob::close` was removed because it only forwarded to `sync_all`: call
-`sync_all` and drop the value instead ([#4114]).
-
 ### Journal Ownership and Storage I/O
 
 Contiguous journals are now single-owner writers ([#4119]). Append, rewind,
@@ -246,6 +204,48 @@ the compact databases, `commit()` is also no longer an alias for `sync()`: it
 persists the witness through a cheaper commit point, so committed state still
 survives a crash but reopening may replay the journal's tail. Callers that want
 minimal recovery work on reopen should keep calling `sync()` ([#4032]).
+
+### Non-Blocking Durability
+
+The runtime `Blob` trait gained `start_sync`, which begins persisting pending
+data and returns a `Handle<()>` that resolves once the data is durable. This
+provides the same guarantee as `sync` without blocking the caller on the fsync
+itself. `Handle` was generalized from a spawned-task handle into a handle to any
+asynchronous result, with new `ready`, `from_receiver`, and `from_future`
+constructors and a new `Error::Aborted` variant. Aborting a completion handle
+only stops waiting and does not cancel the underlying sync, and bytes written
+after `start_sync` returns are not covered by the returned handle ([#4078]).
+
+The primitive is threaded through the storage stack. The buffered writers
+`buffer::Write` and `buffer::paged::Writer`, the segmented journals, and the
+prunable archive expose `start_sync`, the `Archive` trait gained `start_sync`
+and `put_start_sync` and the `MultiArchive` trait `put_multi_start_sync`, all
+with blocking defaults, and the marshal `Certificates` and `Blocks` traits
+mirror `start_sync` and `put_start_sync` ([#4141], [#4145], [#4151]). Later
+operations that mutate a blob wait for the in-flight sync, so newer bytes are
+never folded into an older durability barrier. A flush failure encountered while
+starting a sync is reported only through the returned handle, so every handle
+must be observed or a failure can be silently vouched for. To let one sync
+result serve multiple waiters, `commonware_runtime::Error` is now `Clone` and
+its I/O-carrying variants wrap the underlying error in an `Arc`, which is a
+breaking change for code that constructs or destructures those variants directly
+([#4141]).
+
+Durability at the runtime boundary is tightened as well. On startup, the tokio
+runtime flushes the filesystem containing the storage directory before user code
+runs, so bytes a prior process wrote but never fsynced are durable before
+recovery reads them. On Linux this is a single `syncfs` call whose failure
+aborts startup. On other platforms the flush is best-effort, so the guarantee is
+Linux-only ([#3950]). `Storage::remove` now documents read-after-remove
+semantics: previously opened handles remain readable until dropped, and
+re-opening a removed name creates a new independent blob ([#3966]).
+
+Two persistence APIs were removed. The `Persistable` trait is gone: `commit`,
+`sync`, and `destroy` now live directly on `journal::contiguous::Mutable` and
+the `DbAny` trait, and remain inherent methods on the concrete types, so most
+callers only need to drop the import and adjust generic bounds ([#3991]).
+`Glob::close` was removed because it only forwarded to `sync_all`: call
+`sync_all` and drop the value instead ([#4114]).
 
 ### Consensus Latency
 
@@ -453,30 +453,6 @@ unchanged, and private-key decoding still rejects zero. Golden's own decoding
 now accepts legitimately zero masked shares and proof scalars instead of
 spuriously failing.
 
-### Runtime and Networking
-
-Storage conformance testing gained a first-class helper. The runtime's new
-`conformance` module (ALPHA, behind the `arbitrary` feature) provides a
-`StorageWorkload` trait and a `StorageConformance` wrapper that runs a workload
-under a seeded deterministic runtime and commits a digest of the resulting
-storage state ([#4216]). Alongside it, deterministic audit hashing was made
-unambiguous: audited fields are length-prefixed and the storage audit gained
-domain separation, so auditor state strings and storage audit digests differ
-from the previous release and tests that pin those values need re-pinning. No
-storage or wire format changed.
-
-The encrypted stream receiver no longer copies ciphertext before decrypting.
-When a received frame is a single uniquely-owned buffer, which is the common
-case for both network backends, `recv` decrypts it in place, saving an
-allocation and a full-message copy per received message ([#4011]). OpenSSL is
-also gone from the dependency tree: bumping reqwest and the opentelemetry stack
-removed openssl, openssl-sys, and native-tls in favor of rustls with the
-platform certificate verifier, so building crates that use OTLP trace export or
-the deployer no longer requires a system OpenSSL installation. Users who wire
-the runtime's exported tracer into their own telemetry setup must move to the
-opentelemetry 0.32 family and tracing-opentelemetry 0.33 so the types align
-([#4117]).
-
 ### Indexes, Caching, and Encoding
 
 The in-memory index structures in `commonware-storage` became denser and safer.
@@ -502,6 +478,30 @@ documented contract that the bitmap must not be mutated during iteration
 derive (via the new commonware-codec-macros crate) that generates uniform
 byte-array conversions for fixed-size types, adopted across digests, public
 keys, signatures, and the fixed-size sequence types ([#3913]).
+
+### Runtime and Networking
+
+Storage conformance testing gained a first-class helper. The runtime's new
+`conformance` module (ALPHA, behind the `arbitrary` feature) provides a
+`StorageWorkload` trait and a `StorageConformance` wrapper that runs a workload
+under a seeded deterministic runtime and commits a digest of the resulting
+storage state ([#4216]). Alongside it, deterministic audit hashing was made
+unambiguous: audited fields are length-prefixed and the storage audit gained
+domain separation, so auditor state strings and storage audit digests differ
+from the previous release and tests that pin those values need re-pinning. No
+storage or wire format changed.
+
+The encrypted stream receiver no longer copies ciphertext before decrypting.
+When a received frame is a single uniquely-owned buffer, which is the common
+case for both network backends, `recv` decrypts it in place, saving an
+allocation and a full-message copy per received message ([#4011]). OpenSSL is
+also gone from the dependency tree: bumping reqwest and the opentelemetry stack
+removed openssl, openssl-sys, and native-tls in favor of rustls with the
+platform certificate verifier, so building crates that use OTLP trace export or
+the deployer no longer requires a system OpenSSL installation. Users who wire
+the runtime's exported tracer into their own telemetry setup must move to the
+opentelemetry 0.32 family and tracing-opentelemetry 0.33 so the types align
+([#4117]).
 
 ### Deployer
 
