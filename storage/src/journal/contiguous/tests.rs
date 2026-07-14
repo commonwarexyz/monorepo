@@ -1518,9 +1518,8 @@ async fn test_start_commit_failure_propagates<F, Fut, J>(
         "the surfaced error is the retained failure, not a fresh sync's"
     );
 
-    // A mutable method returned an error, so the journal is unusable per the failures-are-fatal
-    // contract; just drop it.
-    drop(journal);
+    // Destroy may fail because journal state is undefined after mutable method error.
+    let _ = journal.destroy().await;
 }
 
 fn fixed_overlap_cfg(context: &deterministic::Context, partition: &str) -> fixed::Config {
@@ -1701,9 +1700,8 @@ async fn test_rewind_surfaces_failed_sync<F, Fut, J>(
         "rewind must surface the failed rollover sync"
     );
 
-    // A mutable method returned an error, so the journal is unusable per the failures-are-fatal
-    // contract; just drop it.
-    drop(journal);
+    // Destroy may fail because journal state is undefined after mutable method error.
+    let _ = journal.destroy().await;
 }
 
 #[test]

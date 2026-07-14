@@ -2058,7 +2058,11 @@ mod tests {
             let entered_before = pending.entered();
             let completions_before = pending.completions();
             let handle = journal.start_commit().await.unwrap();
-            assert!(pending.starts() > starts_before);
+            assert_eq!(
+                pending.starts(),
+                starts_before + 1,
+                "start_commit began exactly one blob sync"
+            );
             assert_eq!(pending.completions(), completions_before);
 
             // Observe the sync while the journal keeps working.
@@ -2146,9 +2150,8 @@ mod tests {
                 "the surfaced error is the retained failure, not a fresh sync's"
             );
 
-            // A mutable method returned an error, so the journal is unusable per the
-            // failures-are-fatal contract; just drop it.
-            drop(journal);
+            // Destroy may fail because journal state is undefined after mutable method error.
+            let _ = journal.destroy().await;
         });
     }
 

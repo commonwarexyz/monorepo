@@ -244,7 +244,11 @@ pub(crate) mod test {
             let entered_before = pending.entered();
             let completions_before = pending.completions();
             let handle = db.start_commit().await.unwrap();
-            assert!(pending.starts() > starts_before);
+            assert_eq!(
+                pending.starts(),
+                starts_before + 1,
+                "start_commit began exactly one blob sync"
+            );
             assert_eq!(pending.completions(), completions_before);
 
             // Observe the sync while the database keeps working.
@@ -326,9 +330,8 @@ pub(crate) mod test {
                 "the surfaced error is the retained failure, not a fresh sync's"
             );
 
-            // A mutable method returned an error, so the database is unusable per the
-            // failures-are-fatal contract; just drop it.
-            drop(db);
+            // Destroy may fail because database state is undefined after mutable method error.
+            let _ = db.destroy().await;
         });
     }
 
@@ -344,13 +347,27 @@ pub(crate) mod test {
             let value0 = Sha256::hash(&100u64.to_be_bytes());
             apply_write(&mut db, key0, value0).await;
 
+            let starts_before = pending.starts();
             let handle = db.start_commit().await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before + 1,
+                "start_commit began exactly one blob sync"
+            );
+
+            // A non-trivial prune: the floor advanced past the seed commit.
             let floor = db.inactivity_floor_loc();
+            assert!(*floor > 0);
             {
                 let mut prune = std::pin::pin!(db.prune(floor));
                 assert!(
                     prune.as_mut().now_or_never().is_none(),
                     "prune proceeded while the commit sync was pending"
+                );
+                assert_eq!(
+                    pending.starts(),
+                    starts_before + 2,
+                    "prune started the merkle journal sync before blocking"
                 );
 
                 pending.unblock();
