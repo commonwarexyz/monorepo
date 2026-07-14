@@ -128,13 +128,6 @@ pub struct BufferPoolClassConfig {
     pub max_buffers: NonZeroU32,
 }
 
-impl BufferPoolClassConfig {
-    /// Creates a new class configuration.
-    pub const fn new(size: NonZeroUsize, max_buffers: NonZeroU32) -> Self {
-        Self { size, max_buffers }
-    }
-}
-
 impl From<(NonZeroUsize, NonZeroU32)> for BufferPoolClassConfig {
     fn from((size, max_buffers): (NonZeroUsize, NonZeroU32)) -> Self {
         Self { size, max_buffers }
@@ -260,7 +253,7 @@ impl BufferPoolConfig {
     /// - `min` or `max` exceeds `isize::MAX`
     /// - `max < min`
     pub fn with_size_class_range(
-        mut self,
+        self,
         min: NonZeroUsize,
         max: NonZeroUsize,
         max_buffers: NonZeroU32,
@@ -269,10 +262,10 @@ impl BufferPoolConfig {
         Self::validate_class_size(max);
         assert!(max >= min, "max size must be >= min size");
 
-        self.class_limits = (min.get().trailing_zeros()..=max.get().trailing_zeros())
-            .map(|exponent| (NZUsize!(1 << exponent), max_buffers))
-            .collect();
-        self
+        self.with_size_classes(
+            (min.get().trailing_zeros()..=max.get().trailing_zeros())
+                .map(|exponent| (NZUsize!(1 << exponent), max_buffers)),
+        )
     }
 
     /// Returns a copy of this config whose layout is exactly the given classes.
@@ -1892,7 +1885,7 @@ impl BufferPool {
     /// it until data has been written.
     pub fn alloc(&self, capacity: usize) -> IoBufMut {
         self.try_alloc(capacity).unwrap_or_else(|_| {
-            let size = capacity.max(self.inner.min_size);
+            let size = capacity.max(1);
             IoBufMut::with_alignment(size, self.inner.config.alignment)
         })
     }
@@ -1990,7 +1983,7 @@ impl BufferPool {
     pub fn alloc_zeroed(&self, len: usize) -> IoBufMut {
         self.try_alloc_zeroed(len).unwrap_or_else(|_| {
             // Pool exhausted or oversized: allocate untracked zeroed memory.
-            let size = len.max(self.inner.min_size);
+            let size = len.max(1);
             let mut buf = IoBufMut::zeroed_with_alignment(size, self.inner.config.alignment);
             buf.truncate(len);
             buf
@@ -2223,7 +2216,10 @@ mod tests {
 
         // BufferPoolClassConfig values work as inputs too.
         let explicit = BufferPoolConfig::for_network()
-            .with_size_classes([BufferPoolClassConfig::new(NZUsize!(512), NZU32!(2))]);
+            .with_size_classes([BufferPoolClassConfig {
+                size: NZUsize!(512),
+                max_buffers: NZU32!(2),
+            }]);
         assert_eq!(classes_of(&explicit), vec![(512, 2)]);
     }
 
@@ -2366,12 +2362,13 @@ mod tests {
         // The larger class is unaffected.
         let _large = pool.try_alloc(page * 8).unwrap();
 
-        // The untracked fallback still serves the request at its natural
-        // size, clamped to the smallest enabled class rather than the routed
-        // class size.
+        // The untracked fallback serves requests at their exact size.
         let fallback = pool.alloc(page);
         assert!(!fallback.is_pooled());
         assert_eq!(fallback.capacity(), page);
+        let small_fallback = pool.alloc(100);
+        assert!(!small_fallback.is_pooled());
+        assert_eq!(small_fallback.capacity(), 100);
     }
 
     #[test]
@@ -3797,21 +3794,18 @@ mod tests {
         assert!(buf1.is_pooled());
         assert!(buf2.is_pooled());
 
-        // Fallback via alloc() when exhausted - still aligned, but untracked.
-        // The fallback is sized from the requested capacity, clamped to the
-        // smallest enabled class.
+        // Fallback via alloc() when exhausted - still aligned, but untracked,
+        // and sized from the requested capacity.
         let mut fallback_exhausted = pool.alloc(page);
         assert!(!fallback_exhausted.is_pooled());
         assert!((fallback_exhausted.as_mut_ptr() as usize).is_multiple_of(page));
         assert_eq!(fallback_exhausted.capacity(), page);
 
-        // A sub-class exhausted request clamps up to the smallest enabled class.
         let fallback_small = pool.alloc(100);
         assert!(!fallback_small.is_pooled());
-        assert_eq!(fallback_small.capacity(), page);
+        assert_eq!(fallback_small.capacity(), 100);
 
-        // Fallback via alloc() when oversized - still aligned, but untracked,
-        // and sized from the requested capacity rather than any class size.
+        // Fallback via alloc() when oversized - still aligned, but untracked.
         let mut fallback_oversized = pool.alloc(page * 10);
         assert!(!fallback_oversized.is_pooled());
         assert!((fallback_oversized.as_mut_ptr() as usize).is_multiple_of(page));

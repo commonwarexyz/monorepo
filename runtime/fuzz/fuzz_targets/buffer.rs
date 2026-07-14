@@ -188,20 +188,18 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
                     let cache_page_size = cache_page_size.max(1);
-                    // Cache slots are allocated from the storage pool, which rounds
-                    // requests up to the smallest enabled size class that fits. Cap
-                    // capacity against that actual allocation size rather than the
-                    // requested page size, since sparse layouts can route requests to
-                    // a much larger class. Oversized requests fall back to untracked
-                    // allocations of the requested size.
-                    let requested_slot_size = (cache_page_size as usize).next_power_of_two();
+                    // Cache slots come from the storage pool, so each slot occupies
+                    // the smallest enabled size class that fits the page, which in
+                    // sparse layouts can be much larger than the page itself. Cap
+                    // capacity against that class size. Pages larger than every
+                    // class fall back to untracked allocations of their exact size.
                     let cache_slot_size = context
                         .storage_buffer_pool()
                         .config()
                         .size_classes()
                         .map(|class| class.size.get())
-                        .find(|&size| size >= requested_slot_size)
-                        .unwrap_or(requested_slot_size);
+                        .find(|&size| size >= cache_page_size as usize)
+                        .unwrap_or(cache_page_size as usize);
                     let max_cache_capacity = (MAX_CACHE_BYTES / cache_slot_size).max(1);
                     let cache_capacity =
                         NZUsize!((cache_capacity as usize).clamp(1, max_cache_capacity));
