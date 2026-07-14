@@ -2424,96 +2424,108 @@ mod tests {
 
     #[test]
     fn test_sparse_routing_allocates_next_enabled_class() {
-        // Classes 4K and 32K with 8K/16K disabled: requests in the gap route
-        // forward to the 32K class.
+        // Classes `page` and `8 * page` with the two exponents between them
+        // disabled: requests in the gap route forward to the larger class.
+        let page = page_size();
         let pool = test_pool(
             BufferPoolConfig::for_network()
                 .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(4096), NZU32!(4)), (NZUsize!(32768), NZU32!(4))])
-                .with_alignment(NZUsize!(page_size())),
+                .with_size_classes([(NZUsize!(page), NZU32!(4)), (NZUsize!(page * 8), NZU32!(4))])
+                .with_alignment(NZUsize!(page)),
         );
 
         // Below the first class routes to it.
         let buf = pool.try_alloc(1).unwrap();
-        assert_eq!(buf.capacity(), 4096);
+        assert_eq!(buf.capacity(), page);
 
         // Exact fit for the first class.
-        let buf = pool.try_alloc(4096).unwrap();
-        assert_eq!(buf.capacity(), 4096);
+        let buf = pool.try_alloc(page).unwrap();
+        assert_eq!(buf.capacity(), page);
 
         // One byte into the gap routes to the next enabled class.
-        let buf = pool.try_alloc(4097).unwrap();
-        assert_eq!(buf.capacity(), 32768);
+        let buf = pool.try_alloc(page + 1).unwrap();
+        assert_eq!(buf.capacity(), page * 8);
 
         // A request whose natural class is disabled routes forward too.
-        let buf = pool.try_alloc(16384).unwrap();
-        assert_eq!(buf.capacity(), 32768);
+        let buf = pool.try_alloc(page * 4).unwrap();
+        assert_eq!(buf.capacity(), page * 8);
 
         // Exact fit for the last class.
-        let buf = pool.try_alloc(32768).unwrap();
-        assert_eq!(buf.capacity(), 32768);
+        let buf = pool.try_alloc(page * 8).unwrap();
+        assert_eq!(buf.capacity(), page * 8);
 
         // Above the last class is oversized.
-        assert_eq!(pool.try_alloc(32769).unwrap_err(), PoolError::Oversized);
+        assert_eq!(
+            pool.try_alloc(page * 8 + 1).unwrap_err(),
+            PoolError::Oversized
+        );
     }
 
     #[test]
     fn test_sparse_routing_exhaustion_does_not_cascade() {
+        let page = page_size();
         let pool = test_pool(
             BufferPoolConfig::for_network()
                 .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(4096), NZU32!(1)), (NZUsize!(32768), NZU32!(1))])
-                .with_alignment(NZUsize!(page_size())),
+                .with_size_classes([(NZUsize!(page), NZU32!(1)), (NZUsize!(page * 8), NZU32!(1))])
+                .with_alignment(NZUsize!(page)),
         );
 
-        // Exhaust the 4K class. A 4K request must report exhaustion even
-        // though the 32K class still has capacity.
-        let _small = pool.try_alloc(4096).unwrap();
-        assert_eq!(pool.try_alloc(4096).unwrap_err(), PoolError::Exhausted);
+        // Exhaust the small class. A page-sized request must report
+        // exhaustion even though the larger class still has capacity.
+        let _small = pool.try_alloc(page).unwrap();
+        assert_eq!(pool.try_alloc(page).unwrap_err(), PoolError::Exhausted);
 
         // The larger class is unaffected.
-        let _large = pool.try_alloc(32768).unwrap();
+        let _large = pool.try_alloc(page * 8).unwrap();
 
         // The untracked fallback still serves the request at its natural
         // size, clamped to the smallest enabled class rather than the routed
         // class size.
-        let fallback = pool.alloc(4096);
+        let fallback = pool.alloc(page);
         assert!(!fallback.is_pooled());
-        assert_eq!(fallback.capacity(), 4096);
+        assert_eq!(fallback.capacity(), page);
     }
 
     #[test]
     fn test_sparse_metrics_use_enabled_class_labels() {
         // Metrics attribute to the enabled class that served the request, so
         // a request routed through a gap lands on the larger class's label.
+        let page = page_size();
         let mut registry = Registry::default();
         let pool = BufferPool::new(
             BufferPoolConfig::for_network()
                 .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(4096), NZU32!(1)), (NZUsize!(32768), NZU32!(1))])
-                .with_alignment(NZUsize!(page_size())),
+                .with_size_classes([(NZUsize!(page), NZU32!(1)), (NZUsize!(page * 8), NZU32!(1))])
+                .with_alignment(NZUsize!(page)),
             &mut registry,
         );
 
         // Allocate through the gap, then exhaust the routed class through it.
-        let _held = pool.try_alloc(8192).unwrap();
-        assert!(pool.try_alloc(8192).is_err());
+        let _held = pool.try_alloc(page * 2).unwrap();
+        assert!(pool.try_alloc(page * 2).is_err());
         // Request above the largest class records an oversized attempt.
-        assert!(pool.try_alloc(65536).is_err());
+        assert!(pool.try_alloc(page * 16).is_err());
 
         let encoded = registry.encode();
-        // Both created and exhausted count against the 32K class, and the
-        // disabled 8K exponent never appears as a label.
+        // Both created and exhausted count against the larger class, and the
+        // disabled exponent of the natural request never appears as a label.
         assert!(
-            encoded.contains("buffer_pool_created{size_class=\"32768\"} 1"),
+            encoded.contains(&format!(
+                "buffer_pool_created{{size_class=\"{}\"}} 1",
+                page * 8
+            )),
             "metrics output: {encoded}"
         );
         assert!(
-            encoded.contains("buffer_pool_exhausted_total_total{size_class=\"32768\"} 1"),
+            encoded.contains(&format!(
+                "buffer_pool_exhausted_total_total{{size_class=\"{}\"}} 1",
+                page * 8
+            )),
             "metrics output: {encoded}"
         );
         assert!(
-            !encoded.contains("size_class=\"8192\""),
+            !encoded.contains(&format!("size_class=\"{}\"", page * 2)),
             "metrics output: {encoded}"
         );
         assert!(
@@ -2526,20 +2538,21 @@ mod tests {
     fn test_sparse_gap_allocations_share_one_class() {
         // Requests routed through a gap and requests hitting the class
         // directly must share the same allocator, TLS cache, and metrics.
+        let page = page_size();
         let pool = test_pool(
             BufferPoolConfig::for_network()
                 .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(4096), NZU32!(4)), (NZUsize!(32768), NZU32!(4))])
-                .with_alignment(NZUsize!(page_size())),
+                .with_size_classes([(NZUsize!(page), NZU32!(4)), (NZUsize!(page * 8), NZU32!(4))])
+                .with_alignment(NZUsize!(page)),
         );
 
         // All gap exponents alias the same class as the direct exponent.
-        let direct = pool.class_index(32768).unwrap();
-        for size in [4097, 8192, 16384, 32768] {
+        let direct = pool.class_index(page * 8).unwrap();
+        for size in [page + 1, page * 2, page * 4, page * 8] {
             let index = pool.class_index(size).unwrap();
             assert_eq!(
                 pool.inner.classes[index].token, pool.inner.classes[direct].token,
-                "size {size} must alias the 32K class"
+                "size {size} must alias the largest class"
             );
             assert_eq!(
                 pool.inner.classes[index].class_id,
@@ -2549,10 +2562,10 @@ mod tests {
 
         // A buffer allocated through the gap returns to the aliased class and
         // is reusable through the direct route.
-        let mut via_gap = pool.try_alloc(8192).unwrap();
+        let mut via_gap = pool.try_alloc(page * 2).unwrap();
         let ptr = via_gap.as_mut_ptr();
         drop(via_gap);
-        let mut direct_reuse = pool.try_alloc(32768).unwrap();
+        let mut direct_reuse = pool.try_alloc(page * 8).unwrap();
         assert_eq!(direct_reuse.as_mut_ptr(), ptr);
     }
 
@@ -2561,22 +2574,26 @@ mod tests {
         // Dropping a sparse pool must reclaim globally parked buffers exactly
         // as the contiguous pool does, draining each unique class once even
         // though several routing entries alias it.
+        let page = page_size();
         let pool = test_pool(
             BufferPoolConfig::for_network()
                 .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(4096), NZU32!(2)), (NZUsize!(65536), NZU32!(2))])
-                .with_alignment(NZUsize!(page_size()))
+                .with_size_classes([
+                    (NZUsize!(page), NZU32!(2)),
+                    (NZUsize!(page * 16), NZU32!(2)),
+                ])
+                .with_alignment(NZUsize!(page))
                 .with_thread_cache_disabled(),
         );
 
-        let class_index = pool.class_index(65536).unwrap();
+        let class_index = pool.class_index(page * 16).unwrap();
         let class = &pool.inner.classes[class_index];
         // SAFETY: `class` owns one strong reference for `class.token`.
         unsafe { class.token.retain() };
         let class = SizeClassHandle { token: class.token };
 
         // Park one buffer allocated through the gap in the global freelist.
-        let buf = pool.try_alloc(8192).unwrap();
+        let buf = pool.try_alloc(page * 2).unwrap();
         drop(buf);
         assert_eq!(get_global_len(&class), 1);
 
@@ -2587,11 +2604,15 @@ mod tests {
 
     #[test]
     fn test_sparse_pool_debug_reports_unique_classes() {
+        let page = page_size();
         let pool = test_pool(
             BufferPoolConfig::for_network()
                 .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(4096), NZU32!(2)), (NZUsize!(65536), NZU32!(2))])
-                .with_alignment(NZUsize!(page_size())),
+                .with_size_classes([
+                    (NZUsize!(page), NZU32!(2)),
+                    (NZUsize!(page * 16), NZU32!(2)),
+                ])
+                .with_alignment(NZUsize!(page)),
         );
         // Two enabled classes span five exponents, Debug must report two.
         assert_eq!(pool.inner.classes.len(), 5);
@@ -2601,30 +2622,31 @@ mod tests {
 
     #[test]
     fn test_sparse_prefill_creates_per_class_limits() {
+        let page = page_size();
         let pool = test_pool(
             BufferPoolConfig::for_network()
                 .with_pool_min_size(0)
-                .with_size_classes([(NZUsize!(4096), NZU32!(3)), (NZUsize!(16384), NZU32!(1))])
-                .with_alignment(NZUsize!(page_size()))
+                .with_size_classes([(NZUsize!(page), NZU32!(3)), (NZUsize!(page * 4), NZU32!(1))])
+                .with_alignment(NZUsize!(page))
                 .with_prefill(true),
         );
 
         // Each unique class prefilled exactly its own limit, aliases add none.
-        let small = &pool.inner.classes[pool.class_index(4096).unwrap()];
-        let large = &pool.inner.classes[pool.class_index(16384).unwrap()];
+        let small = &pool.inner.classes[pool.class_index(page).unwrap()];
+        let large = &pool.inner.classes[pool.class_index(page * 4).unwrap()];
         assert_eq!(get_global_created(small), 3);
         assert_eq!(get_global_len(small), 3);
         assert_eq!(get_global_created(large), 1);
         assert_eq!(get_global_len(large), 1);
 
         // Prefilled capacity is immediately allocatable and bounded.
-        let a = pool.try_alloc(4096).unwrap();
-        let b = pool.try_alloc(4096).unwrap();
-        let c = pool.try_alloc(4096).unwrap();
-        assert!(pool.try_alloc(4096).is_err());
+        let a = pool.try_alloc(page).unwrap();
+        let b = pool.try_alloc(page).unwrap();
+        let c = pool.try_alloc(page).unwrap();
+        assert!(pool.try_alloc(page).is_err());
         drop((a, b, c));
-        let _gap = pool.try_alloc(8192).unwrap();
-        assert!(pool.try_alloc(16384).is_err());
+        let _gap = pool.try_alloc(page * 2).unwrap();
+        assert!(pool.try_alloc(page * 4).is_err());
     }
 
     #[test]
