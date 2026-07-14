@@ -1630,7 +1630,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// call waits for it before starting a new one. Appends and reads proceed while the returned
     /// handle is pending.
     pub async fn start_commit(&mut self) -> Handle<()> {
-        self.metrics.commit_calls.inc();
+        self.metrics.start_commit_calls.inc();
         self.blobs.start_sync().await
     }
 
@@ -1640,7 +1640,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// the previous `sync()`.
     pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
-        let handle = self.start_commit().await;
+        self.metrics.commit_calls.inc();
+        let handle = self.blobs.start_sync().await;
         handle.await?;
         Ok(())
     }
@@ -1649,7 +1650,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        let handle = self.start_commit().await;
+        let handle = self.blobs.start_sync().await;
         handle.await?;
         self.offsets.sync().await
     }
@@ -6996,6 +6997,7 @@ mod tests {
             drop(reader);
             journal.commit().await.unwrap();
             journal.sync().await.unwrap();
+            journal.start_commit().await.await.unwrap();
             journal.prune(2).await.unwrap();
             journal.rewind(4).await.unwrap();
 
@@ -7010,7 +7012,8 @@ mod tests {
                 "variable_metrics_read_calls_total 1",
                 "variable_metrics_read_many_calls_total 1",
                 "variable_metrics_items_read_total 4",
-                "variable_metrics_commit_calls_total 2",
+                "variable_metrics_start_commit_calls_total 1",
+                "variable_metrics_commit_calls_total 1",
                 "variable_metrics_sync_calls_total 1",
                 "variable_metrics_append_duration_count 1",
                 "variable_metrics_append_many_duration_count 1",
