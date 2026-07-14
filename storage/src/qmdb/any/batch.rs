@@ -319,10 +319,10 @@ where
     batch: UnmerkleizedBatch<F, H, U, S>,
     keys: Vec<U::Key>,
     resolutions: Vec<StagedResolution<F, U>>,
-    /// Slot -> distinct-key id, assigned by first occurrence across [`stage`]
-    /// (UnmerkleizedBatch::stage) and [`expand`](Staged::expand) (1:1 with `keys`). Built while
-    /// staging so [`resolve_updates`](Staged::resolve_updates) deduplicates updates by direct
-    /// indexing instead of hashing every key on the merkleize path.
+    /// Slot -> distinct-key id, assigned by first occurrence across
+    /// [`stage`](UnmerkleizedBatch::stage) and [`expand`](Staged::expand) (1:1 with `keys`).
+    /// Built while staging so [`resolve_updates`](Staged::resolve_updates) deduplicates
+    /// updates by direct indexing instead of hashing every key on the merkleize path.
     key_ids: Vec<u32>,
     /// Key -> distinct-key id backing `key_ids`, retained so `expand` assigns consistent ids
     /// to keys staged again in a later chunk. Only probed, never iterated.
@@ -829,8 +829,8 @@ where
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
         // Fast path: a strictly ascending batch entirely within the committed region needs no
         // in-memory resolution, reordering, or per-location bookkeeping, so the positions can
-        // be handed to the reader directly. Floor-raise candidates (always committed, always
-        // ascending) and depth-0 mutation reads take this path every batch.
+        // be handed to the reader directly. Depth-0 mutation reads and floor-raise candidate
+        // batches that stay within the committed prefix (the common case) take this path.
         if self.all_committed_ascending(locations) {
             let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
             return Ok(reader.read_many(&positions).await?);
@@ -853,8 +853,9 @@ where
             return Ok(results.into_iter().map(Option::unwrap).collect());
         }
 
-        // The common callers (floor-raise candidates and depth-0 mutation reads) pass
-        // sorted, unique locations, so sorting is usually a no-op worth skipping.
+        // Batches reaching here contain uncommitted locations or arrived unsorted, but the
+        // committed subset is often still presorted (e.g. floor-raise candidates that cross
+        // the committed boundary), so the sort is worth skipping when possible.
         let mut positions: Vec<u64> = committed.iter().map(|(_, loc)| *loc).collect();
         let presorted = positions.is_sorted_by(|a, b| a < b);
         if !presorted {
@@ -881,10 +882,10 @@ where
     /// Like [`read_ops`](Self::read_ops), but returns chunk-partitioned results whose
     /// concatenation preserves `locations` order.
     ///
-    /// A strictly ascending batch entirely within the committed region (every floor-raise
-    /// candidate read) stays partitioned as the reader probed it, so no serial reassembly
-    /// runs on the calling task. Other shapes resolve through [`read_ops`](Self::read_ops)
-    /// and return a single chunk.
+    /// A strictly ascending batch entirely within the committed region (the typical
+    /// floor-raise candidate read) stays partitioned as the reader probed it, so no serial
+    /// reassembly runs on the calling task. Other shapes resolve through
+    /// [`read_ops`](Self::read_ops) and return a single chunk.
     async fn read_ops_sharded<E, C>(
         &self,
         locations: &[Location<F>],
@@ -1469,6 +1470,7 @@ where
         if updates.is_empty() {
             return (Self::apply_upserts(batch, upserts), staged_updates);
         }
+
         // Resolve last-write-wins per distinct key without hashing on the merkleize path:
         // `key_ids` maps each slot to its distinct-key id, so a forward walk leaves each id's
         // final write (the same winner as a newest-first scan). Overlapping updates for upsert
@@ -1483,6 +1485,7 @@ where
             }
             winners[key_ids[slot] as usize] = Some((slot as u32, value));
         }
+
         // Split the winners: updates whose slot resolved to a location become staged
         // updates, the rest fall back to batch mutations. A surviving staged write must not
         // also emit an older batch mutation for the same key, so it is removed here. The
@@ -1573,9 +1576,12 @@ where
         // as one job on the strategy while this task gathers and reads the candidates.
         //
         // The bound over-approximates the raise's steps (every emitted op traces to a
-        // distinct update key, upsert, or prior mutation, plus one for the CommitFloor);
-        // surplus candidates are dropped by the raise once it moves enough ops.
-        let steps_bound = updates.len() + upserts.len() + self.batch.mutations.len() + 1;
+        // distinct update key, upsert, or prior mutation, plus one for the CommitFloor).
+        // Duplicate update slots collapse to one write per distinct key, so the update term
+        // is clamped by the distinct staged-key count. Surplus candidates are dropped by
+        // the raise once it moves enough ops.
+        let distinct_updates = updates.len().min(self.key_id_map.len());
+        let steps_bound = distinct_updates + upserts.len() + self.batch.mutations.len() + 1;
         let scan_from = self.batch.base.inactivity_floor_loc();
         let strategy = db.strategy().clone();
         let resolve =
@@ -1952,6 +1958,7 @@ where
             Vec::with_capacity(mutations.len() + staged_updates.len() + 1);
         let mut diff: DiffVec<K, F, V::Value> =
             Vec::with_capacity(mutations.len() + staged_updates.len());
+
         // Committed locations superseded by this batch, collected for the floor raise (which
         // skips re-reading them). Emission order is ascending in `base_old_loc` except for
         // entries resolved through ancestor diffs, so `finish` usually skips its sort.
