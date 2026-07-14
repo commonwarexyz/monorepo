@@ -1332,6 +1332,27 @@ mod tests {
     }
 
     #[test]
+    fn test_ones_iter_pruned_bits_near_max() {
+        // The largest pruned offset accepted for 8-byte chunks places pruned_bits at
+        // u64::MAX - 63, so word advances near the top of the range must not wrap.
+        const PRUNED_CHUNKS: usize = (u64::MAX / 64) as usize;
+
+        // Fully pruned and empty: iteration is exhausted at construction.
+        let p = Prunable::<8>::new_with_pruned_chunks(PRUNED_CHUNKS).unwrap();
+        assert_eq!(p.len(), u64::MAX - 63);
+        assert!(Readable::ones_iter_from(&p, 0).next().is_none());
+
+        // Bits in the last representable chunk: iteration must terminate after them.
+        let mut p = Prunable::<8>::new_with_pruned_chunks(PRUNED_CHUNKS).unwrap();
+        let start = p.pruned_bits();
+        for i in 0..32 {
+            p.push(i == 0 || i == 31);
+        }
+        let ones: Vec<u64> = Readable::ones_iter_from(&p, 0).collect();
+        assert_eq!(ones, vec![start, start + 31]);
+    }
+
+    #[test]
     fn test_ones_iter_from_midway_with_pruning() {
         let mut p = Prunable::<4>::new();
         for _ in 0..96 {

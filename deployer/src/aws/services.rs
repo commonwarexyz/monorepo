@@ -1024,8 +1024,43 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
     format!(
         r#"set -e
 
-# Enable BBR congestion control
-echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+# Enable BBR congestion control and tune TCP buffers for cross-region flows
+echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.rmem_max=16777216\nnet.core.wmem_max=16777216\nnet.ipv4.tcp_rmem=4096 2097152 16777216\nnet.ipv4.tcp_wmem=4096 262144 16777216\nnet.ipv4.tcp_slow_start_after_idle=0" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+
+# The default_qdisc sysctl only applies to interfaces attached after it is
+# set, so install fq (which enforces BBR's pacing) on every tx queue of the
+# primary interface explicitly and persist the setup across reboots.
+sudo tee /usr/local/bin/setup-qdisc.sh >/dev/null <<'EOF'
+#!/bin/bash
+set -e
+IFACE=$(ip -o route get 8.8.8.8 | awk '{{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}}')
+# Single-queue interfaces reject mq, so pace on the root instead.
+if tc qdisc replace dev "$IFACE" root handle 1: mq; then
+  NQ=$(ls -d "/sys/class/net/$IFACE/queues/tx-"* | wc -l)
+  for h in $(seq 1 "$NQ"); do
+    tc qdisc del dev "$IFACE" parent "1:$(printf '%x' "$h")" 2>/dev/null || true
+    tc qdisc add dev "$IFACE" parent "1:$(printf '%x' "$h")" fq
+  done
+else
+  tc qdisc replace dev "$IFACE" root fq
+fi
+EOF
+sudo chmod +x /usr/local/bin/setup-qdisc.sh
+sudo tee /etc/systemd/system/setup-qdisc.service >/dev/null <<'EOF'
+[Unit]
+Description=Install fq pacing qdisc on the primary interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-qdisc.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now setup-qdisc.service
 
 {image_services}
 
@@ -1529,6 +1564,10 @@ mod tests {
         assert!(setup.contains("sudo systemctl enable node_exporter"));
         assert!(setup.contains("sudo systemctl enable promtail"));
         assert!(setup.contains("sudo systemctl enable binary"));
+        assert!(setup.contains("tc qdisc replace dev \"$IFACE\" root handle 1: mq"));
+        assert!(setup.contains("tc qdisc replace dev \"$IFACE\" root fq"));
+        assert!(setup.contains("sudo systemctl enable --now setup-qdisc.service"));
+        assert!(setup.contains("net.ipv4.tcp_rmem=4096 2097152 16777216"));
         assert!(setup.contains("sudo systemctl start node_exporter"));
         assert!(setup.contains("sudo systemctl start promtail"));
         assert!(setup.contains("sudo systemctl start binary || true"));

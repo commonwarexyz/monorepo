@@ -485,11 +485,8 @@ where
     /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
     /// affect retrieval of any keys that were set prior to `prune_loc`.
     ///
-    /// Pruning is irreversible. Callers must ensure any floor-raising batch has been durably
-    /// committed (via [`Immutable::commit`] or [`Immutable::sync`]) before pruning. The
-    /// inactivity floor used to gate pruning is updated by [`Immutable::apply_batch`] before
-    /// the batch is durable. If the batch is lost on crash, recovery replays from the prior
-    /// durable floor, which may reference data that has already been pruned.
+    /// Pruning is irreversible and requires no prior commit. After a crash, the database remains
+    /// recoverable; uncommitted operations are not guaranteed to survive.
     ///
     /// # Errors
     ///
@@ -1025,6 +1022,71 @@ pub(super) mod test {
         assert_eq!(
             db.get(&key_19).await.unwrap(),
             Some(Sha256::fill(19u8.wrapping_add(100)))
+        );
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Pruning immediately after an uncommitted batch must leave the database recoverable. Since
+    /// prune is not a durability boundary, recovery may return either the durable baseline or the
+    /// buffered state, but never a mixture whose floor references pruned operations.
+    #[boxed]
+    pub(crate) async fn test_immutable_prune_after_uncommitted_apply_batch_recovery<
+        F: Family,
+        V,
+        C,
+    >(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.child("first")).await;
+
+        // Fill more than one journal blob and establish a durable baseline whose floor still
+        // requires the oldest blob.
+        let mut batch = db.new_batch();
+        for i in 0..6u8 {
+            batch = batch.set(Sha256::fill(i), Sha256::fill(i.wrapping_add(10)));
+        }
+        db.apply_batch(batch.merkleize(&db, None, Location::new(0)).await)
+            .await
+            .unwrap();
+        db.sync().await.unwrap();
+        let durable_state = (db.root(), db.inactivity_floor_loc(), db.bounds().end);
+
+        // Apply, but do not commit, a batch that advances the floor far enough for prune to
+        // remove the oldest blob.
+        let buffered_floor = db.bounds().end;
+        let key = Sha256::fill(100);
+        let value = Sha256::fill(101);
+        db.apply_batch(
+            db.new_batch()
+                .set(key, value)
+                .merkleize(&db, None, buffered_floor)
+                .await,
+        )
+        .await
+        .unwrap();
+        let buffered_state = (db.root(), db.inactivity_floor_loc(), db.bounds().end);
+        assert_ne!(buffered_state, durable_state);
+
+        db.prune(buffered_floor).await.unwrap();
+        assert!(db.bounds().start > Location::new(0));
+        drop(db);
+
+        // Reopen must produce one coherent state. In particular, it must not recover the old
+        // floor after the prune has removed operations that floor still needs.
+        let db = open_db(context.child("second")).await;
+        assert!(db.bounds().start <= db.inactivity_floor_loc());
+        let recovered_state = (db.root(), db.inactivity_floor_loc(), db.bounds().end);
+        assert!(
+            recovered_state == durable_state || recovered_state == buffered_state,
+            "recovered state is neither the durable baseline nor the buffered state"
         );
 
         db.destroy().await.unwrap();
