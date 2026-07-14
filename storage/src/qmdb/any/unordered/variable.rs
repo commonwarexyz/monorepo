@@ -394,6 +394,109 @@ pub(crate) mod test {
         });
     }
 
+    /// A staged read that resolved in an uncommitted ancestor's diff keeps its recorded
+    /// base while that ancestor is alive at `Staged::merkleize` (see `StagedLoc`), and the
+    /// full lifecycle must hold under both apply shapes: one `apply_batch` call committing
+    /// the still-pending ancestors together with the staged batch (the recorded bases are
+    /// used directly), and the ancestors applied first by their own calls (the staged
+    /// batch's apply re-resolves each base in the applied ancestors' diffs). Covers
+    /// grandparent-updated, grandparent-created, and parent-updated keys plus a staged
+    /// delete, so both `Some` and `None` recorded bases flow through each path.
+    #[test_traced("WARN")]
+    fn unordered_variable_staged_ancestor_alive_through_apply() {
+        deterministic::Runner::default().start(|context| async move {
+            for apply_ancestors_first in [false, true] {
+                let mut db = create_test_db(context.child("staged_ancestor_alive")).await;
+
+                let key = |i: u64| Sha256::hash(&i.to_be_bytes());
+
+                // Committed base state: the grandparent's write of key(0) and the parent's
+                // write of key(1) supersede committed locations. key(100) is created by
+                // the grandparent, so its recorded base is `None`.
+                let mut seed = db.new_batch();
+                for i in 0..8u64 {
+                    seed = seed.write(key(i), Some(to_bytes(i)));
+                }
+                let seed = seed.merkleize(&db, None).await.unwrap();
+                db.apply_batch(seed).await.unwrap();
+                db.commit().await.unwrap();
+
+                let grandparent = db
+                    .new_batch()
+                    .write(key(0), Some(to_bytes(1_000)))
+                    .write(key(100), Some(to_bytes(1_001)))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                let parent = grandparent
+                    .new_batch::<Sha256>()
+                    .write(key(1), Some(to_bytes(1_002)))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+
+                // key(3) is untouched by the ancestors (their floor raises move other
+                // keys), so its staged read stays committed-resolved.
+                let read_keys = [key(0), key(100), key(1), key(3)];
+                let keys: Vec<&Digest> = read_keys.iter().collect();
+                let (values, staged) = parent
+                    .new_batch::<Sha256>()
+                    .stage(&keys, &db)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    values,
+                    vec![
+                        Some(to_bytes(1_000)),
+                        Some(to_bytes(1_001)),
+                        Some(to_bytes(1_002)),
+                        Some(to_bytes(3)),
+                    ]
+                );
+
+                // Merkleize with every ancestor still alive: the ancestor-resolved slots
+                // trust their recorded bases. Slot 2 is a staged delete.
+                let updates = vec![
+                    (0, Some(to_bytes(2_000))),
+                    (1, Some(to_bytes(2_001))),
+                    (2, None),
+                    (3, Some(to_bytes(2_002))),
+                ];
+                let staged = staged
+                    .merkleize(updates, Vec::new(), None, &db)
+                    .await
+                    .unwrap();
+
+                // The explicit path over the same chain must agree.
+                let explicit_root = parent
+                    .new_batch::<Sha256>()
+                    .write(key(0), Some(to_bytes(2_000)))
+                    .write(key(100), Some(to_bytes(2_001)))
+                    .write(key(1), None)
+                    .write(key(3), Some(to_bytes(2_002)))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap()
+                    .root();
+                assert_eq!(staged.root(), explicit_root);
+
+                if apply_ancestors_first {
+                    db.apply_batch(grandparent).await.unwrap();
+                    db.apply_batch(parent).await.unwrap();
+                }
+                db.apply_batch(staged).await.unwrap();
+                db.commit().await.unwrap();
+
+                assert_eq!(db.get(&key(0)).await.unwrap(), Some(to_bytes(2_000)));
+                assert_eq!(db.get(&key(100)).await.unwrap(), Some(to_bytes(2_001)));
+                assert_eq!(db.get(&key(1)).await.unwrap(), None);
+                assert_eq!(db.get(&key(3)).await.unwrap(), Some(to_bytes(2_002)));
+
+                db.destroy().await.unwrap();
+            }
+        });
+    }
+
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
         let cfg = create_test_config(0, &context);

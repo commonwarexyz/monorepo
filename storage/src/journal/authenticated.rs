@@ -857,7 +857,10 @@ where
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
-        let shards = self.read_many_sharded(positions).await?;
+        let mut shards = self.read_many_sharded(positions).await?;
+        if shards.len() == 1 {
+            return Ok(shards.pop().expect("length checked"));
+        }
         let mut items = Vec::with_capacity(positions.len());
         for shard in shards {
             items.extend(shard);
