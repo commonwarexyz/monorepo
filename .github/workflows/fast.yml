@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_COOLDOWN_VERSION: 0.3.0
+  CARGO_COOLDOWN_VERSION: 0.3.4
   UDEPS_VERSION: 0.1.57
   NIGHTLY_VERSION: nightly-2026-06-21
   PANDOC_VERSION: 3.8.2.1
@@ -256,12 +256,14 @@ jobs:
       run: just udeps
 
   Cooldown:
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       with:
+        ref: ${{ github.event.pull_request.head.sha }}
         fetch-depth: 0
     - name: Run setup
       uses: ./.github/actions/setup
@@ -274,7 +276,6 @@ jobs:
     - name: Check dependency cooldown
       env:
         COOLDOWN_BASE_REF: ${{ github.event.pull_request.base.ref }}
-        COOLDOWN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: just cooldown
 
   Lock:

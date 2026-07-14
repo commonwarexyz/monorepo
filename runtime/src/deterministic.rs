@@ -63,8 +63,8 @@ use crate::{
         supervision::Tree,
         Panicker,
     },
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Name, Panicked,
-    METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf, Name,
+    Panicked, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -141,6 +141,37 @@ impl Metrics {
 /// A SHA-256 digest.
 type Digest = [u8; 32];
 
+/// Hashes an unambiguous sequence of fields for deterministic runtime auditing.
+pub(crate) struct AuditHasher(Sha256);
+
+impl AuditHasher {
+    /// Creates an empty audit hasher.
+    pub(crate) fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    /// Adds a length-prefixed field to the audit.
+    pub(crate) fn update(&mut self, value: impl AsRef<[u8]>) {
+        let value = value.as_ref();
+        self.0.update((value.len() as u64).to_be_bytes());
+        self.0.update(value);
+    }
+
+    /// Adds the logical contents of `bufs` as one length-prefixed field.
+    ///
+    /// Physical chunk boundaries are excluded because they are not part of the storage or network
+    /// operation being audited.
+    pub(crate) fn update_bufs(&mut self, bufs: &IoBufs) {
+        self.0.update((bufs.len() as u64).to_be_bytes());
+        bufs.for_each_chunk(|chunk| self.0.update(chunk));
+    }
+
+    /// Returns the digest of all fields added to the audit.
+    pub(crate) fn finalize(self) -> Digest {
+        self.0.finalize().into()
+    }
+}
+
 /// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
     digest: Mutex<Digest>,
@@ -160,16 +191,16 @@ impl Auditor {
     /// whatever other data is passed in the `payload` closure.
     pub(crate) fn event<F>(&self, label: &'static [u8], payload: F)
     where
-        F: FnOnce(&mut Sha256),
+        F: FnOnce(&mut AuditHasher),
     {
         let mut digest = self.digest.lock();
 
-        let mut hasher = Sha256::new();
+        let mut hasher = AuditHasher::new();
         hasher.update(digest.as_ref());
         hasher.update(label);
         payload(&mut hasher);
 
-        *digest = hasher.finalize().into();
+        *digest = hasher.finalize();
     }
 
     /// Generate a representation of the current state of the runtime.
@@ -1609,6 +1640,21 @@ mod tests {
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
         run_tasks(5, executor)
+    }
+
+    fn run_with_metric(name: &'static str, help: &'static str) -> String {
+        deterministic::Runner::default().start(|context| async move {
+            let _: Registered<raw::Counter> = context.register(name, help, raw::Counter::default());
+            context.auditor().state()
+        })
+    }
+
+    #[test]
+    fn test_auditor_separates_metric_fields() {
+        let state_a = run_with_metric("a", "bc");
+        let state_b = run_with_metric("ab", "c");
+
+        assert_ne!(state_a, state_b);
     }
 
     #[test]

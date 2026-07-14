@@ -97,6 +97,8 @@
 //! });
 //! ```
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
 mod storage;
 
 use std::num::{NonZeroU64, NonZeroUsize};

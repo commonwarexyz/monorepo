@@ -34,6 +34,7 @@ tracing = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
+commonware-bench.workspace = true
 commonware-conformance.workspace = true
 commonware-math.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
@@ -44,6 +45,15 @@ rand = { workspace = true, features = ["alloc"] }
 rand_distr.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+commonware-bench = { workspace = true, features = ["gungraun"] }
+gungraun = { workspace = true, features = ["client_requests"] }
+
+[package.metadata.cargo-udeps.ignore]
+# These are exercised only by the cfg-gated benchmark tracking target, so cargo-udeps flags
+# them falsely.
+development = ["commonware-bench", "gungraun", "rand_distr"]
 
 [features]
 default = [ "std" ]
@@ -89,6 +99,12 @@ path = "src/qmdb/benches/constantinople.rs"
 name = "qmdb"
 harness = false
 path = "src/qmdb/benches/bench.rs"
+required-features = ["test-traits"]
+
+[[bench]]
+name = "qmdb_gungraun"
+harness = false
+path = "src/qmdb/benches/bench_gungraun.rs"
 required-features = ["test-traits"]
 
 [[bench]]

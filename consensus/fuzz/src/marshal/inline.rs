@@ -26,7 +26,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
-use commonware_utils::{FuzzRng, NZUsize};
+use commonware_utils::{channel::oneshot, FuzzRng, NZUsize};
 use futures::StreamExt;
 use std::time::Duration;
 
@@ -384,7 +384,11 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                     let round = block.context.round;
                     match seed {
                         InlineSeed::Proposed => {
-                            let _ = marshal.proposed(round, block).await;
+                            let (ack, rx) = oneshot::channel();
+                            let _ = marshal.proposed(round, block, Recipients::All, ack);
+                            if let Ok(sync) = rx.await {
+                                let _ = sync.await;
+                            }
                         }
                         InlineSeed::Verified => {
                             let _ = marshal.verified(round, block).await;

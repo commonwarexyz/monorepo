@@ -13,12 +13,12 @@ use std::{
 /// A mock application that stores finalized blocks.
 #[derive(Clone)]
 pub struct Application<B: Block> {
-    blocks: Arc<Mutex<BTreeMap<Height, B>>>,
     /// Append-only record of every delivered block in arrival order, as
     /// `(height, digest)`. Unlike `blocks` (a by-height map that overwrites),
     /// this preserves delivery order and same-height forks for invariants.
     #[allow(clippy::type_complexity)]
     delivered: Arc<Mutex<Vec<(Height, B::Digest)>>>,
+    blocks: Arc<Mutex<BTreeMap<Height, Arc<B>>>>,
     #[allow(clippy::type_complexity)]
     tip: Arc<Mutex<Option<(Height, B::Digest)>>>,
     pending_acks: Arc<Mutex<VecDeque<(Height, Exact)>>>,
@@ -49,7 +49,7 @@ impl<B: Block> Application<B> {
     }
 
     /// Returns the finalized blocks.
-    pub fn blocks(&self) -> BTreeMap<Height, B> {
+    pub fn blocks(&self) -> BTreeMap<Height, Arc<B>> {
         self.blocks.lock().clone()
     }
 

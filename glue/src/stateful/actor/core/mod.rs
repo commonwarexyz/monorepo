@@ -207,7 +207,7 @@ where
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor).await;
         } else if self.plan.requires_state_sync_floor() {
-            panic!("interrupted state sync must resume from a newly selected floor");
+            panic!("interrupted state sync is missing its persisted floor");
         } else {
             self.start_from_marshal().await;
         }

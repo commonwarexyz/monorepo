@@ -484,6 +484,8 @@ where
         strategy,
         root,
         metrics,
+        #[cfg(test)]
+        halt_before_prune_log: false,
     };
     db.update_metrics();
     Ok(db)

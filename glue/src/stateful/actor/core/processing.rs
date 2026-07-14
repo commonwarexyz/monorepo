@@ -144,12 +144,15 @@ where
                     let prune = async {
                         if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
                             self.processor
-                                .notify_finalized(self.context.as_present(), &block)
+                                .notify_finalized(self.context.as_present(), block.as_ref())
                                 .await;
                             acknowledgement.acknowledge();
                             return None;
                         }
-                        let (status, prune) = self.processor.finalize(&self.context, block).await;
+                        let (status, prune) = self
+                            .processor
+                            .finalize(&self.context, block.as_ref())
+                            .await;
                         if let FinalizeStatus::Persisted { height } = status {
                             debug!(height = height.get(), "persisted finalized database batch");
                         }

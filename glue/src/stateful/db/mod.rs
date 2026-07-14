@@ -183,6 +183,11 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         config: Self::Config,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
+    /// Return the sync target produced by a newly initialized database.
+    ///
+    /// This must match [`sync_target`](Self::sync_target) after opening an empty partition.
+    fn initial_sync_target() -> Self::SyncTarget;
+
     /// Create a new unmerkleized batch rooted at the database's committed
     /// state.
     ///
@@ -258,6 +263,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Construct the database set from its configuration.
     fn init(context: E, config: Self::Config) -> impl Future<Output = Self> + Send;
+
+    /// Return the sync targets produced by a newly initialized database set.
+    fn initial_sync_targets() -> Self::SyncTargets;
 
     /// Create unmerkleized batches from each database's committed state.
     ///
@@ -438,6 +446,10 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
             .await
             .expect("database init failed");
         Self::new(TracedAsyncRwLock::new("stateful.db", db))
+    }
+
+    fn initial_sync_targets() -> Self::SyncTargets {
+        T::initial_sync_target()
     }
 
     async fn new_batches(&self) -> Self::Unmerkleized {
@@ -667,6 +679,10 @@ macro_rules! impl_database_set {
                     },
                 )+);
                 result
+            }
+
+            fn initial_sync_targets() -> Self::SyncTargets {
+                ($($T::initial_sync_target(),)+)
             }
 
             async fn new_batches(&self) -> Self::Unmerkleized {
@@ -1503,6 +1519,378 @@ mod tests {
         time::Duration,
     };
 
+    mod initial_sync_targets {
+        use super::ManagedDb;
+        use commonware_cryptography::{sha256::Digest, Sha256};
+        use commonware_parallel::Sequential;
+        use commonware_runtime::{
+            buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _,
+        };
+        use commonware_storage::{
+            journal::contiguous::{
+                fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+            },
+            merkle::{full::Config as MerkleConfig, mmr},
+            qmdb::{
+                any as storage_any, current as storage_current, immutable as storage_immutable,
+                keyless as storage_keyless,
+            },
+            translator::TwoCap,
+        };
+        use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
+        use rstest::rstest;
+        use std::{fmt::Debug, marker::PhantomData};
+
+        type Context = deterministic::Context;
+
+        type AnyFixed = storage_any::unordered::fixed::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            TwoCap,
+            Sequential,
+        >;
+        type AnyVariable = storage_any::unordered::variable::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            TwoCap,
+            Sequential,
+        >;
+
+        type CurrentUnorderedFixed = storage_current::unordered::fixed::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            TwoCap,
+            64,
+            Sequential,
+        >;
+        type CurrentOrderedFixed = storage_current::ordered::fixed::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            TwoCap,
+            64,
+            Sequential,
+        >;
+        type CurrentUnorderedVariable = storage_current::unordered::variable::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            TwoCap,
+            64,
+            Sequential,
+        >;
+        type CurrentOrderedVariable = storage_current::ordered::variable::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            TwoCap,
+            64,
+            Sequential,
+        >;
+
+        type ImmutableFixed = storage_immutable::fixed::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            TwoCap,
+            Sequential,
+        >;
+        type ImmutableVariable = storage_immutable::variable::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            TwoCap,
+            Sequential,
+        >;
+        type ImmutableCompactFixed = storage_immutable::fixed::CompactDb<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            Sequential,
+        >;
+        type ImmutableCompactVariable = storage_immutable::variable::CompactDb<
+            mmr::Family,
+            Context,
+            Digest,
+            U64,
+            Sha256,
+            ((), ()),
+            Sequential,
+        >;
+
+        type KeylessFixed =
+            storage_keyless::fixed::Db<mmr::Family, Context, U64, Sha256, Sequential>;
+        type KeylessVariable =
+            storage_keyless::variable::Db<mmr::Family, Context, U64, Sha256, Sequential>;
+        type KeylessCompactFixed =
+            storage_keyless::fixed::CompactDb<mmr::Family, Context, U64, Sha256, Sequential>;
+        type KeylessCompactVariable =
+            storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, (), Sequential>;
+
+        fn page_cache(context: &Context) -> CacheRef {
+            CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11))
+        }
+
+        fn merkle_config(context: &Context, suffix: &str) -> MerkleConfig<Sequential> {
+            MerkleConfig {
+                journal_partition: format!("initial-target-{suffix}-merkle-journal"),
+                metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: page_cache(context),
+            }
+        }
+
+        fn fixed_journal_config(context: &Context, suffix: &str) -> FixedJournalConfig {
+            FixedJournalConfig {
+                partition: format!("initial-target-{suffix}-log"),
+                items_per_blob: NZU64!(7),
+                page_cache: page_cache(context),
+                write_buffer: NZUsize!(1024),
+            }
+        }
+
+        fn variable_journal_config<C>(
+            context: &Context,
+            suffix: &str,
+            codec_config: C,
+        ) -> VariableJournalConfig<C> {
+            VariableJournalConfig {
+                partition: format!("initial-target-{suffix}-log"),
+                items_per_section: NZU64!(7),
+                compression: None,
+                codec_config,
+                page_cache: page_cache(context),
+                write_buffer: NZUsize!(1024),
+            }
+        }
+
+        fn any_fixed_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_any::FixedConfig<TwoCap, Sequential> {
+            storage_any::Config {
+                merkle_config: merkle_config(context, suffix),
+                journal_config: fixed_journal_config(context, suffix),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+            }
+        }
+
+        fn any_variable_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
+            storage_any::Config {
+                merkle_config: merkle_config(context, suffix),
+                journal_config: variable_journal_config(context, suffix, ((), ())),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+            }
+        }
+
+        fn current_fixed_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_current::FixedConfig<TwoCap, Sequential> {
+            storage_current::Config {
+                merkle_config: merkle_config(context, suffix),
+                journal_config: fixed_journal_config(context, suffix),
+                grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+            }
+        }
+
+        fn current_variable_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
+            storage_current::Config {
+                merkle_config: merkle_config(context, suffix),
+                journal_config: variable_journal_config(context, suffix, ((), ())),
+                grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+            }
+        }
+
+        fn immutable_fixed_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
+            storage_immutable::Config {
+                merkle_config: merkle_config(context, suffix),
+                log: fixed_journal_config(context, suffix),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+            }
+        }
+
+        fn immutable_variable_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
+            storage_immutable::Config {
+                merkle_config: merkle_config(context, suffix),
+                log: variable_journal_config(context, suffix, ((), ())),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+            }
+        }
+
+        fn keyless_fixed_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_keyless::fixed::Config<Sequential> {
+            storage_keyless::Config {
+                merkle: merkle_config(context, suffix),
+                log: fixed_journal_config(context, suffix),
+            }
+        }
+
+        fn keyless_variable_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_keyless::variable::Config<(), Sequential> {
+            storage_keyless::Config {
+                merkle: merkle_config(context, suffix),
+                log: variable_journal_config(context, suffix, ()),
+            }
+        }
+
+        fn immutable_compact_fixed_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_immutable::fixed::CompactConfig<Sequential> {
+            storage_immutable::CompactConfig {
+                strategy: Sequential,
+                witness: variable_journal_config(context, suffix, ()),
+                commit_codec_config: (),
+            }
+        }
+
+        fn immutable_compact_variable_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
+            storage_immutable::CompactConfig {
+                strategy: Sequential,
+                witness: variable_journal_config(context, suffix, ()),
+                commit_codec_config: ((), ()),
+            }
+        }
+
+        fn keyless_compact_fixed_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_keyless::fixed::CompactConfig<Sequential> {
+            storage_keyless::CompactConfig {
+                strategy: Sequential,
+                witness: variable_journal_config(context, suffix, ()),
+                commit_codec_config: (),
+            }
+        }
+
+        fn keyless_compact_variable_config(
+            context: &Context,
+            suffix: &str,
+        ) -> storage_keyless::variable::CompactConfig<(), Sequential> {
+            storage_keyless::CompactConfig {
+                strategy: Sequential,
+                witness: variable_journal_config(context, suffix, ()),
+                commit_codec_config: (),
+            }
+        }
+
+        async fn assert_initial_sync_target<T>(context: Context, config: T::Config)
+        where
+            T: ManagedDb<Context>,
+            T::SyncTarget: Debug,
+        {
+            let initial = T::initial_sync_target();
+            let db = T::init(context, config).await.unwrap();
+            assert_eq!(initial, db.sync_target());
+        }
+
+        #[rstest]
+        #[case::any_fixed(PhantomData::<AnyFixed>, any_fixed_config)]
+        #[case::any_variable(PhantomData::<AnyVariable>, any_variable_config)]
+        #[case::current_unordered_fixed(
+            PhantomData::<CurrentUnorderedFixed>,
+            current_fixed_config
+        )]
+        #[case::current_ordered_fixed(
+            PhantomData::<CurrentOrderedFixed>,
+            current_fixed_config
+        )]
+        #[case::current_unordered_variable(
+            PhantomData::<CurrentUnorderedVariable>,
+            current_variable_config
+        )]
+        #[case::current_ordered_variable(
+            PhantomData::<CurrentOrderedVariable>,
+            current_variable_config
+        )]
+        #[case::immutable_fixed(PhantomData::<ImmutableFixed>, immutable_fixed_config)]
+        #[case::immutable_variable(
+            PhantomData::<ImmutableVariable>,
+            immutable_variable_config
+        )]
+        #[case::immutable_compact_fixed(
+            PhantomData::<ImmutableCompactFixed>,
+            immutable_compact_fixed_config
+        )]
+        #[case::immutable_compact_variable(
+            PhantomData::<ImmutableCompactVariable>,
+            immutable_compact_variable_config
+        )]
+        #[case::keyless_fixed(PhantomData::<KeylessFixed>, keyless_fixed_config)]
+        #[case::keyless_variable(PhantomData::<KeylessVariable>, keyless_variable_config)]
+        #[case::keyless_compact_fixed(
+            PhantomData::<KeylessCompactFixed>,
+            keyless_compact_fixed_config
+        )]
+        #[case::keyless_compact_variable(
+            PhantomData::<KeylessCompactVariable>,
+            keyless_compact_variable_config
+        )]
+        fn initial_sync_target_matches_initialized_database<T>(
+            #[case] _db: PhantomData<T>,
+            #[case] config: fn(&Context, &str) -> T::Config,
+        ) where
+            T: ManagedDb<Context> + 'static,
+            T::SyncTarget: Debug,
+        {
+            deterministic::Runner::default().start(|context| async move {
+                let config = config(&context, "db");
+                assert_initial_sync_target::<T>(context.child("db"), config).await;
+            });
+        }
+    }
+
     #[derive(Default)]
     struct TestDb;
 
@@ -1521,6 +1909,8 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = ();
+
+        fn initial_sync_target() -> Self::SyncTarget {}
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             Ok(Self)
@@ -1552,6 +1942,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("CountingRewindDb is constructed directly in tests")
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("CountingRewindDb is constructed directly in tests")
@@ -1586,6 +1980,8 @@ mod tests {
         type Error = Infallible;
         type Config = Arc<AtomicUsize>;
         type SyncTarget = ();
+
+        fn initial_sync_target() -> Self::SyncTarget {}
 
         async fn init(_context: E, prune_count: Self::Config) -> Result<Self, Self::Error> {
             Ok(Self { prune_count })
@@ -1692,6 +2088,8 @@ mod tests {
         type Config = ();
         type SyncTarget = ();
 
+        fn initial_sync_target() -> Self::SyncTarget {}
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             Ok(Self)
         }
@@ -1774,6 +2172,8 @@ mod tests {
         type Config = ();
         type SyncTarget = ();
 
+        fn initial_sync_target() -> Self::SyncTarget {}
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("BlockingFinalizeDb is constructed directly in tests")
         }
@@ -1810,6 +2210,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("SlowSyncDb is only constructed through state sync in tests")
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
@@ -1841,6 +2245,12 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!(
+                "RejectDuplicateTargetSyncDb is only constructed through state sync in tests"
+            )
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!(
@@ -1876,6 +2286,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("FastSyncDb is only constructed through state sync in tests")
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
@@ -1907,6 +2321,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
@@ -1940,6 +2358,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
@@ -1971,6 +2393,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
@@ -2004,6 +2430,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
@@ -2035,6 +2465,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
@@ -2068,6 +2502,10 @@ mod tests {
         type Config = ();
         type SyncTarget = u64;
 
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
+        }
+
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
@@ -2099,6 +2537,12 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!(
+                "DistinctObservedFastSyncDb is only constructed through state sync in tests"
+            )
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!(
@@ -2242,6 +2686,10 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")
+        }
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")

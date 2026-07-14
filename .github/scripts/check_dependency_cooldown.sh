@@ -1,52 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-check_cooldown() {
-  cargo cooldown --workspace --all-features check
-}
+base_ref="${COOLDOWN_BASE_REF:-main}"
 
-check_lockfile() {
-  git diff --exit-code Cargo.lock
-}
-
-if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]]; then
-  check_cooldown
-  check_lockfile
-  exit 0
-fi
-
-base_ref="${COOLDOWN_BASE_REF:-}"
-head_sha="${COOLDOWN_HEAD_SHA:-}"
-if [[ -z "${base_ref}" || -z "${head_sha}" ]]; then
-  echo "COOLDOWN_BASE_REF and COOLDOWN_HEAD_SHA are required for pull_request cooldown checks" >&2
-  exit 1
-fi
-
-git fetch --no-tags origin "refs/heads/${base_ref}:refs/remotes/origin/${base_ref}"
+git fetch --no-tags origin "+refs/heads/${base_ref}:refs/remotes/origin/${base_ref}" ||
+  echo "Failed to fetch origin/${base_ref}; using the local ref." >&2
 base_rev="refs/remotes/origin/${base_ref}"
-merge_base="$(git merge-base "${base_rev}" "${head_sha}")"
+merge_base="$(git merge-base "${base_rev}" HEAD)"
 
-if git diff --quiet "${merge_base}" "${head_sha}" -- Cargo.lock; then
+if git diff --quiet "${merge_base}" -- Cargo.lock; then
   echo "Cargo.lock did not change; skipping cargo-cooldown."
   exit 0
 fi
 
 tmpdir="$(mktemp -d)"
 cp Cargo.lock "${tmpdir}/pr.Cargo.lock"
+cp cooldown.toml "${tmpdir}/cooldown.toml"
 cleanup() {
   status=$?
   cp "${tmpdir}/pr.Cargo.lock" Cargo.lock
+  cp "${tmpdir}/cooldown.toml" cooldown.toml
   rm -rf "${tmpdir}"
   exit "${status}"
 }
 trap cleanup EXIT
 
-git show "${base_rev}:Cargo.lock" > Cargo.lock
+git show "${merge_base}:Cargo.lock" > "${tmpdir}/base.Cargo.lock"
+# Versions already present at the merge base are allowed regardless of publish age.
+# The generated exemptions match crate and version only (cargo-cooldown ignores source).
+awk '
+  function exempt() {
+    if (source ~ /^(registry|sparse)\+/) {
+      print ""
+      print "[[allow.exact]]"
+      print "crate = \"" name "\""
+      print "version = \"" version "\""
+    }
+  }
 
-check_cooldown
+  /^\[\[/ {
+    exempt()
+    name = version = source = ""
+    next
+  }
+  /^name = "/ { name = substr($0, 9, length($0) - 9) }
+  /^version = "/ { version = substr($0, 12, length($0) - 12) }
+  /^source = "/ { source = substr($0, 11, length($0) - 11) }
+  END { exempt() }
+' "${tmpdir}/base.Cargo.lock" >> cooldown.toml
+
+cargo cooldown metadata --all-features --format-version 1 --no-deps > /dev/null
 
 if ! cmp --silent Cargo.lock "${tmpdir}/pr.Cargo.lock"; then
-  echo "Cargo.lock differs after applying the cooldown baseline." >&2
-  echo "Regenerate Cargo.lock after the upgraded dependencies satisfy cooldown." >&2
+  echo "cargo-cooldown rewrote these Cargo.lock entries:" >&2
+  diff "${tmpdir}/pr.Cargo.lock" Cargo.lock >&2 || true
+  echo "Wait for the dependencies above to satisfy cooldown, or regenerate Cargo.lock if it is out of sync with the manifests." >&2
   exit 1
 fi

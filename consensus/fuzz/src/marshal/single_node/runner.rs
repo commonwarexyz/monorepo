@@ -47,7 +47,7 @@ use commonware_runtime::{
     Clock, Runner, Supervisor as _,
 };
 use commonware_storage::archive;
-use commonware_utils::{vec::NonEmptyVec, FuzzRng, NZUsize};
+use commonware_utils::{channel::oneshot, vec::NonEmptyVec, FuzzRng, NZUsize};
 use futures::{future::BoxFuture, task::noop_waker_ref, FutureExt, StreamExt};
 use std::{
     collections::{HashSet, VecDeque},
@@ -787,7 +787,7 @@ where
                     let mut blocks = (0..len)
                         .map(|offset| {
                             let idx = (start + offset) % canonical.len();
-                            application_block::<H>(&canonical[idx])
+                            Arc::new(application_block::<H>(&canonical[idx]))
                         })
                         .collect::<Vec<_>>();
                     if reverse {
@@ -1035,7 +1035,11 @@ where
                         {
                             let mailbox = handle.mailbox.clone();
                             park_mailbox_future(&mut parked_queries, async move {
-                                mailbox.proposed(round, proposed).await
+                                let (ack, rx) = oneshot::channel();
+                                let _ = mailbox.proposed(round, proposed, Recipients::All, ack);
+                                if let Ok(sync) = rx.await {
+                                    let _ = sync.await;
+                                }
                             });
                         }
                         {
