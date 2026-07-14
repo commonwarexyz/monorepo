@@ -24,8 +24,9 @@
 //!
 //! A partition also fills when a single key collects many values -- keys that collide on the full
 //! prefix, or repeated inserts of one key. The spill covers this too: it triggers on the total
-//! value count, and a spilled key's values form a deque whose newest value is pushed at the front
-//! in amortized O(1), so these inserts stay as cheap as any other. What it cannot bound is how many
+//! value count, and a spilled key's newest value is pushed onto the end of its chain in amortized
+//! O(1) (reads iterate the chain in reverse), so these inserts stay as cheap as any other. What it
+//! cannot bound is how many
 //! values one key holds, and a lookup must scan all of them -- a key with `M` values costs O(M) per
 //! lookup. Every index that resolves collisions pays this (the flat `crate::index::ordered::Index`
 //! included); `M` stays near 1 only when the indexed `P + N`-byte prefix is well-distributed, so
@@ -48,7 +49,8 @@ use commonware_runtime::{
     Metrics,
 };
 use std::{
-    collections::{btree_map, hash_map, vec_deque, BTreeMap, HashMap, VecDeque},
+    collections::{btree_map, hash_map, BTreeMap, HashMap},
+    iter,
     ops::Bound,
     slice,
 };
@@ -73,11 +75,12 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     partitions: Box<[Partition<T::Key, V>]>,
 
     /// Partitions that have spilled out of their sorted arrays (reached `SPILL_THRESHOLD` entries),
-    /// keyed by partition index; each maps translated keys to their values newest-first. A key's
-    /// values form a deque so a colliding insert prepends the newest value in amortized O(1) rather
-    /// than shifting the chain. Empty until a partition fills, whether from honest growth at low
-    /// `P` or adversarial grinding.
-    spilled: HashMap<usize, BTreeMap<T::Key, VecDeque<V>>>,
+    /// keyed by partition index; each maps translated keys to their values oldest-first, the
+    /// reverse of the inline representation. Storing chains oldest-first lets a colliding insert
+    /// push the newest value in amortized O(1) rather than shifting the chain, and read paths
+    /// iterate chains in reverse to serve values newest-first. Empty until a partition fills,
+    /// whether from honest growth at low `P` or adversarial grinding.
+    spilled: HashMap<usize, BTreeMap<T::Key, Vec<V>>>,
 
     /// Sorted-array length at which a partition spills to `spilled`; [SPILL_THRESHOLD] in
     /// production, lowered by tests to exercise spilling cheaply.
@@ -96,10 +99,11 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
 /// Iterator over one translated key's values, newest first, from whichever representation the
 /// partition currently uses.
 enum Values<'a, V> {
-    /// A key's contiguous run in an inline sorted-array partition.
+    /// A key's contiguous run in an inline sorted-array partition (stored newest-first).
     Inline(slice::Iter<'a, V>),
-    /// A key's chain in a spilled partition's `BTreeMap`.
-    Spilled(vec_deque::Iter<'a, V>),
+    /// A key's chain in a spilled partition's `BTreeMap`, reversed because chains are stored
+    /// oldest-first (see the `spilled` field).
+    Spilled(iter::Rev<slice::Iter<'a, V>>),
 }
 
 impl<'a, V> Iterator for Values<'a, V> {
@@ -156,17 +160,21 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         if self.partitions[i].len() < self.threshold {
             return;
         }
-        let inner: BTreeMap<T::Key, VecDeque<V>> = self.partitions[i]
+        let inner: BTreeMap<T::Key, Vec<V>> = self.partitions[i]
             .drain_runs()
             .into_iter()
-            .map(|(k, run)| (k, VecDeque::from(run)))
+            .map(|(k, mut run)| {
+                // Inline runs are newest-first; spilled chains are stored oldest-first.
+                run.reverse();
+                (k, run)
+            })
             .collect();
         self.spilled.insert(i, inner);
     }
 
     /// The `BTreeMap` of spilled partition `i`, or `None` if `i` has not spilled. The empty-map
     /// check skips hashing `i` in the common case where no partition has ever spilled.
-    fn spilled_partition(&self, i: usize) -> Option<&BTreeMap<T::Key, VecDeque<V>>> {
+    fn spilled_partition(&self, i: usize) -> Option<&BTreeMap<T::Key, Vec<V>>> {
         if self.spilled.is_empty() {
             return None;
         }
@@ -183,7 +191,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             .and_then(|inner| inner.get(k))
             .map_or_else(
                 || Values::Inline([].iter()),
-                |run| Values::Spilled(run.iter()),
+                |run| Values::Spilled(run.iter().rev()),
             )
     }
 
@@ -195,7 +203,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             .or_else(|| {
                 self.spilled_partition(i)?
                     .first_key_value()
-                    .map(|(_, v)| Values::Spilled(v.iter()))
+                    .map(|(_, v)| Values::Spilled(v.iter().rev()))
             })
     }
 
@@ -207,7 +215,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             .or_else(|| {
                 self.spilled_partition(i)?
                     .last_key_value()
-                    .map(|(_, v)| Values::Spilled(v.iter()))
+                    .map(|(_, v)| Values::Spilled(v.iter().rev()))
             })
     }
 
@@ -225,7 +233,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
                 self.spilled_partition(i)?
                     .range((Bound::Excluded(*k), Bound::Unbounded))
                     .next()
-                    .map(|(_, v)| Values::Spilled(v.iter()))
+                    .map(|(_, v)| Values::Spilled(v.iter().rev()))
             })
     }
 
@@ -238,7 +246,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
                 self.spilled_partition(i)?
                     .range((Bound::Unbounded, Bound::Excluded(*k)))
                     .next_back()
-                    .map(|(_, v)| Values::Spilled(v.iter()))
+                    .map(|(_, v)| Values::Spilled(v.iter().rev()))
             })
     }
 
@@ -370,10 +378,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
                     &self.pruned,
                 ));
             }
-            self.spilled
-                .get_mut(&i)
-                .unwrap()
-                .insert(k, VecDeque::from([value]));
+            self.spilled.get_mut(&i).unwrap().insert(k, vec![value]);
             self.keys.inc();
             self.items.inc();
             return None;
@@ -407,9 +412,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         if !self.spilled.is_empty() {
             if let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i) {
                 match partition.get_mut().entry(k) {
-                    btree_map::Entry::Occupied(mut run) => run.get_mut().push_front(value),
+                    btree_map::Entry::Occupied(mut run) => run.get_mut().push(value),
                     btree_map::Entry::Vacant(run) => {
-                        run.insert(VecDeque::from([value]));
+                        run.insert(vec![value]);
                         self.keys.inc();
                     }
                 }

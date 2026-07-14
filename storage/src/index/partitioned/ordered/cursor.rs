@@ -11,7 +11,7 @@ use super::partition::Partition;
 use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
 use std::{
-    collections::{btree_map, hash_map, BTreeMap, HashMap, VecDeque},
+    collections::{btree_map, hash_map, BTreeMap, HashMap},
     ops::Range,
 };
 
@@ -44,8 +44,12 @@ enum Backing<'a, K: Ord + Copy, V> {
     },
     /// Spilled partition: the key's values live in the side-table's `BTreeMap`, re-resolved on each
     /// access (spilling is the rare case, so the extra descent is off the hot path).
+    ///
+    /// Spilled chains are stored oldest-first (the reverse of run/iteration order, so plain inserts
+    /// can push the newest value at the end), so run offset `off` addresses chain index
+    /// `len - 1 - off` and an insert at run offset `off` lands at chain index `len - off`.
     Spilled {
-        spilled: &'a mut HashMap<usize, BTreeMap<K, VecDeque<V>>>,
+        spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
         partition: usize,
         key: K,
     },
@@ -63,7 +67,7 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
             } => spilled
                 .get(partition)
                 .and_then(|inner| inner.get(key))
-                .map_or(0, VecDeque::len),
+                .map_or(0, Vec::len),
         }
     }
 
@@ -75,10 +79,13 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 spilled,
                 partition,
                 key,
-            } => &spilled
-                .get(partition)
-                .and_then(|inner| inner.get(key))
-                .expect("active cursor must reference a present key")[off],
+            } => {
+                let run = spilled
+                    .get(partition)
+                    .and_then(|inner| inner.get(key))
+                    .expect("active cursor must reference a present key");
+                &run[run.len() - 1 - off]
+            }
         }
     }
 
@@ -91,10 +98,12 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 partition,
                 key,
             } => {
-                spilled
+                let run = spilled
                     .get_mut(partition)
                     .and_then(|inner| inner.get_mut(key))
-                    .expect("active cursor must reference a present key")[off] = value;
+                    .expect("active cursor must reference a present key");
+                let idx = run.len() - 1 - off;
+                run[idx] = value;
             }
         }
     }
@@ -119,11 +128,12 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 key,
             } => match spilled.entry(*partition).or_default().entry(*key) {
                 btree_map::Entry::Occupied(mut run) => {
-                    run.get_mut().insert(off, value);
+                    let idx = run.get().len() - off;
+                    run.get_mut().insert(idx, value);
                     false
                 }
                 btree_map::Entry::Vacant(run) => {
-                    run.insert(VecDeque::from([value]));
+                    run.insert(vec![value]);
                     true
                 }
             },
@@ -150,9 +160,8 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 let btree_map::Entry::Occupied(mut run) = part.get_mut().entry(*key) else {
                     unreachable!("active cursor must reference a present key")
                 };
-                run.get_mut()
-                    .remove(off)
-                    .expect("active cursor offset must be within the run");
+                let idx = run.get().len() - 1 - off;
+                run.get_mut().remove(idx);
                 if !run.get().is_empty() {
                     return false;
                 }
@@ -206,7 +215,7 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
 
     /// A cursor over a key's values held in a spilled partition's `BTreeMap`.
     pub(super) const fn spilled(
-        spilled: &'a mut HashMap<usize, BTreeMap<K, VecDeque<V>>>,
+        spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
         partition: usize,
         key: K,
         keys: &'a Gauge,
