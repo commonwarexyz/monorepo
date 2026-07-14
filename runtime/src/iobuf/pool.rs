@@ -61,6 +61,7 @@ use commonware_utils::{NZUsize, NZU32};
 use std::{
     alloc::Layout,
     cell::{Cell, UnsafeCell},
+    collections::BTreeMap,
     mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
     ptr,
@@ -140,14 +141,6 @@ impl From<(NonZeroUsize, NonZeroU32)> for BufferPoolClassConfig {
     }
 }
 
-/// Per-exponent class limits.
-///
-/// Index `i` holds the tracked-buffer limit for the class of size `1 << i`,
-/// or `None` when that class is disabled. Indexing by exponent makes the
-/// table naturally sorted and gives constant-time upsert and removal without
-/// allocation, which keeps the fixed-shape builders `const`.
-type ClassLimits = [Option<NonZeroU32>; usize::BITS as usize];
-
 /// Configuration for a buffer pool.
 ///
 /// The class layout is a set of power-of-two size classes, each with its own
@@ -168,10 +161,11 @@ pub struct BufferPoolConfig {
     /// allocation instead. A value of `0` means all eligible requests use the
     /// pool.
     pub pool_min_size: usize,
-    /// Enabled size classes, keyed by power-of-two exponent.
+    /// Enabled size classes, keyed by power-of-two size. Sizes absent from the
+    /// map are disabled.
     ///
     /// Builders maintain the invariant that at least one class is enabled.
-    class_limits: ClassLimits,
+    class_limits: BTreeMap<NonZeroUsize, NonZeroU32>,
     /// Whether to create every tracked buffer during pool construction.
     ///
     /// When enabled, each size class creates its configured limit of buffers
@@ -215,45 +209,13 @@ impl std::fmt::Debug for BufferPoolConfig {
     }
 }
 
-/// Iterator over enabled size classes in ascending size order.
-struct SizeClassConfigIter<'a> {
-    limits: &'a ClassLimits,
-    exponent: usize,
-    remaining: usize,
-}
-
-impl Iterator for SizeClassConfigIter<'_> {
-    type Item = BufferPoolClassConfig;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.exponent < self.limits.len() {
-            let exponent = self.exponent;
-            self.exponent += 1;
-            if let Some(max_buffers) = self.limits[exponent] {
-                self.remaining -= 1;
-                return Some(BufferPoolClassConfig {
-                    size: NonZeroUsize::new(1 << exponent).expect("class size is non-zero"),
-                    max_buffers,
-                });
-            }
-        }
-        None
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.remaining, Some(self.remaining))
-    }
-}
-
-impl ExactSizeIterator for SizeClassConfigIter<'_> {}
-
 impl BufferPoolConfig {
     /// Network I/O preset: 1KB to 128KB buffers, 4096 per class, not prefilled.
     ///
     /// Network operations typically need multiple concurrent buffers per
     /// connection (message, encoding, encryption) so we allow 4096 buffers per
     /// size class.
-    pub const fn for_network() -> Self {
+    pub fn for_network() -> Self {
         Self {
             pool_min_size: 0,
             class_limits: Self::contiguous_limits(
@@ -283,12 +245,12 @@ impl BufferPoolConfig {
         }
     }
 
-    /// Returns the power-of-two exponent for a class size, panicking otherwise.
+    /// Validates a class size, panicking on invalid values.
     ///
     /// Sizes above `isize::MAX` are rejected here because `Layout` cannot
     /// represent them, which would otherwise surface as a misleading panic at
     /// pool construction.
-    const fn class_exponent(size: NonZeroUsize) -> usize {
+    const fn validate_class_size(size: NonZeroUsize) {
         assert!(
             size.get().is_power_of_two(),
             "class size must be a power of two"
@@ -297,7 +259,6 @@ impl BufferPoolConfig {
             size.get() <= isize::MAX as usize,
             "class size must not exceed isize::MAX"
         );
-        size.get().trailing_zeros() as usize
     }
 
     /// Builds a class-limit table for an inclusive, contiguous range.
@@ -307,35 +268,21 @@ impl BufferPoolConfig {
     /// - `min` or `max` is not a power of two
     /// - `min` or `max` exceeds `isize::MAX`
     /// - `max < min`
-    const fn contiguous_limits(
+    fn contiguous_limits(
         min: NonZeroUsize,
         max: NonZeroUsize,
         max_buffers: NonZeroU32,
-    ) -> ClassLimits {
-        let min_exponent = Self::class_exponent(min);
-        let max_exponent = Self::class_exponent(max);
-        assert!(max.get() >= min.get(), "max size must be >= min size");
+    ) -> BTreeMap<NonZeroUsize, NonZeroU32> {
+        Self::validate_class_size(min);
+        Self::validate_class_size(max);
+        assert!(max >= min, "max size must be >= min size");
 
-        let mut limits: ClassLimits = [None; usize::BITS as usize];
-        let mut exponent = min_exponent;
-        while exponent <= max_exponent {
-            limits[exponent] = Some(max_buffers);
-            exponent += 1;
-        }
-        limits
-    }
-
-    /// Returns the number of enabled classes.
-    const fn num_enabled(&self) -> usize {
-        let mut count = 0;
-        let mut exponent = 0;
-        while exponent < self.class_limits.len() {
-            if self.class_limits[exponent].is_some() {
-                count += 1;
-            }
-            exponent += 1;
-        }
-        count
+        (min.get().trailing_zeros()..=max.get().trailing_zeros())
+            .map(|exponent| {
+                let size = NonZeroUsize::new(1 << exponent).expect("class size is non-zero");
+                (size, max_buffers)
+            })
+            .collect()
     }
 
     /// Returns a copy of this config with a new minimum request size that uses pooling.
@@ -354,7 +301,7 @@ impl BufferPoolConfig {
     /// - `min` or `max` is not a power of two
     /// - `min` or `max` exceeds `isize::MAX`
     /// - `max < min`
-    pub const fn with_size_class_range(
+    pub fn with_size_class_range(
         mut self,
         min: NonZeroUsize,
         max: NonZeroUsize,
@@ -380,20 +327,20 @@ impl BufferPoolConfig {
         I: IntoIterator<Item = C>,
         C: Into<BufferPoolClassConfig>,
     {
-        let mut limits: ClassLimits = [None; usize::BITS as usize];
-        let mut any = false;
+        let mut limits = BTreeMap::new();
         for class in classes {
             let class = class.into();
-            let exponent = Self::class_exponent(class.size);
+            Self::validate_class_size(class.size);
             assert!(
-                limits[exponent].is_none(),
+                limits.insert(class.size, class.max_buffers).is_none(),
                 "duplicate class size {}",
                 class.size
             );
-            limits[exponent] = Some(class.max_buffers);
-            any = true;
         }
-        assert!(any, "class layout must enable at least one class");
+        assert!(
+            !limits.is_empty(),
+            "class layout must enable at least one class"
+        );
         self.class_limits = limits;
         self
     }
@@ -405,8 +352,9 @@ impl BufferPoolConfig {
     ///
     /// - `size` is not a power of two
     /// - `size` exceeds `isize::MAX`
-    pub const fn with_size_class(mut self, size: NonZeroUsize, max_buffers: NonZeroU32) -> Self {
-        self.class_limits[Self::class_exponent(size)] = Some(max_buffers);
+    pub fn with_size_class(mut self, size: NonZeroUsize, max_buffers: NonZeroU32) -> Self {
+        Self::validate_class_size(size);
+        self.class_limits.insert(size, max_buffers);
         self
     }
 
@@ -421,28 +369,24 @@ impl BufferPoolConfig {
     /// - `size` exceeds `isize::MAX`
     /// - no class with `size` is enabled
     /// - the class is the final enabled class
-    pub const fn without_size_class(mut self, size: NonZeroUsize) -> Self {
-        let exponent = Self::class_exponent(size);
+    pub fn without_size_class(mut self, size: NonZeroUsize) -> Self {
+        Self::validate_class_size(size);
         assert!(
-            self.class_limits[exponent].is_some(),
+            self.class_limits.contains_key(&size),
             "cannot remove a class that is not enabled"
         );
         assert!(
-            self.num_enabled() > 1,
+            self.class_limits.len() > 1,
             "cannot remove the final enabled class"
         );
-        self.class_limits[exponent] = None;
+        self.class_limits.remove(&size);
         self
     }
 
     /// Returns a copy of this config with the same limit on every enabled class.
-    pub const fn with_max_per_class(mut self, max_buffers: NonZeroU32) -> Self {
-        let mut exponent = 0;
-        while exponent < self.class_limits.len() {
-            if self.class_limits[exponent].is_some() {
-                self.class_limits[exponent] = Some(max_buffers);
-            }
-            exponent += 1;
+    pub fn with_max_per_class(mut self, max_buffers: NonZeroU32) -> Self {
+        for limit in self.class_limits.values_mut() {
+            *limit = max_buffers;
         }
         self
     }
@@ -457,20 +401,15 @@ impl BufferPoolConfig {
     /// # Panics
     ///
     /// Panics if a derived limit exceeds `u32::MAX`.
-    pub const fn with_bytes_per_class(mut self, bytes: NonZeroUsize) -> Self {
-        let mut exponent = 0;
-        while exponent < self.class_limits.len() {
-            if self.class_limits[exponent].is_some() {
-                let count = bytes.get() >> exponent;
-                assert!(
-                    count <= u32::MAX as usize,
-                    "per-class byte weight derives a limit above u32::MAX"
-                );
-                let count = if count == 0 { 1 } else { count as u32 };
-                self.class_limits[exponent] =
-                    Some(NonZeroU32::new(count).expect("count is at least one"));
-            }
-            exponent += 1;
+    pub fn with_bytes_per_class(mut self, bytes: NonZeroUsize) -> Self {
+        for (size, limit) in self.class_limits.iter_mut() {
+            let count = bytes.get() / size.get();
+            assert!(
+                count <= u32::MAX as usize,
+                "per-class byte weight derives a limit above u32::MAX"
+            );
+            let count = u32::try_from(count.max(1)).expect("count fits u32");
+            *limit = NonZeroU32::new(count).expect("count is at least one");
         }
         self
     }
@@ -614,76 +553,50 @@ impl BufferPoolConfig {
             "budget requires scaling a class limit above u32::MAX"
         );
 
-        // Write the optimal counts back into the class table.
+        // Write the optimal counts back in ascending class order, matching
+        // the order the shape snapshot above was collected in.
         let counts = scaled(lo);
-        let mut class = 0;
-        let mut exponent = 0;
-        while exponent < self.class_limits.len() {
-            if self.class_limits[exponent].is_some() {
-                let count = u32::try_from(counts[class]).expect("feasible count fits u32");
-                self.class_limits[exponent] =
-                    Some(NonZeroU32::new(count).expect("count is at least one"));
-                class += 1;
-            }
-            exponent += 1;
+        for (limit, &count) in self.class_limits.values_mut().zip(counts.iter()) {
+            let count = u32::try_from(count).expect("feasible count fits u32");
+            *limit = NonZeroU32::new(count).expect("count is at least one");
         }
         self
     }
 
     /// Returns an iterator over enabled classes in ascending size order.
     pub fn size_classes(&self) -> impl ExactSizeIterator<Item = BufferPoolClassConfig> + '_ {
-        SizeClassConfigIter {
-            limits: &self.class_limits,
-            exponent: 0,
-            remaining: self.num_enabled(),
-        }
+        self.class_limits
+            .iter()
+            .map(|(&size, &max_buffers)| BufferPoolClassConfig { size, max_buffers })
     }
 
     /// Returns the smallest enabled class size.
-    pub const fn min_size(&self) -> NonZeroUsize {
-        let mut exponent = 0;
-        while exponent < self.class_limits.len() {
-            if self.class_limits[exponent].is_some() {
-                match NonZeroUsize::new(1 << exponent) {
-                    Some(size) => return size,
-                    None => unreachable!(),
-                }
-            }
-            exponent += 1;
-        }
-        panic!("class layout must enable at least one class");
+    pub fn min_size(&self) -> NonZeroUsize {
+        *self
+            .class_limits
+            .first_key_value()
+            .expect("class layout must enable at least one class")
+            .0
     }
 
     /// Returns the largest enabled class size.
-    pub const fn max_size(&self) -> NonZeroUsize {
-        let mut exponent = self.class_limits.len();
-        while exponent > 0 {
-            exponent -= 1;
-            if self.class_limits[exponent].is_some() {
-                match NonZeroUsize::new(1 << exponent) {
-                    Some(size) => return size,
-                    None => unreachable!(),
-                }
-            }
-        }
-        panic!("class layout must enable at least one class");
+    pub fn max_size(&self) -> NonZeroUsize {
+        *self
+            .class_limits
+            .last_key_value()
+            .expect("class layout must enable at least one class")
+            .0
     }
 
     /// Returns `sum(class size * class limit)`, saturating at `usize::MAX`.
     ///
     /// A saturated result means the configured maximum tracked capacity is at
     /// least that large.
-    pub const fn max_tracked_bytes(&self) -> usize {
-        let mut bytes: usize = 0;
-        let mut exponent = 0;
-        while exponent < self.class_limits.len() {
-            if let Some(limit) = self.class_limits[exponent] {
-                let class_bytes = (limit.get() as usize).saturating_mul(1 << exponent);
-                bytes = bytes.saturating_add(class_bytes);
-            }
-            exponent += 1;
-        }
-        bytes
+    pub fn max_tracked_bytes(&self) -> usize {
+        self.class_limits
+            .iter()
+            .map(|(size, limit)| size.get().saturating_mul(limit.get() as usize))
+            .fold(0usize, usize::saturating_add)
     }
 
     /// Validates cross-field constraints, panicking on invalid values.
@@ -700,7 +613,7 @@ impl BufferPoolConfig {
     /// - `pool_min_size` is larger than the smallest enabled class
     fn validate(&self) {
         assert!(
-            self.num_enabled() > 0,
+            !self.class_limits.is_empty(),
             "class layout must enable at least one class"
         );
         assert!(
