@@ -909,9 +909,9 @@ mod tests {
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
-        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, Plan},
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton,
+        Automaton, CertifiableAutomaton, Relay,
     };
     use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
@@ -1432,7 +1432,10 @@ mod tests {
     /// Regression: when marshal holds a verified block for a round from a
     /// pre-crash propose, a restarted leader's `propose` must return that
     /// block's digest instead of asking the application to build afresh.
-    /// See `standard::inline::tests::test_propose_reuses_verified_block_on_restart`.
+    /// The recovered proposal must also be staged for the relay, so the
+    /// broadcast re-sends it and certification resolves through the
+    /// deduplicated re-persist. The inline variant skips the view instead
+    /// (see `inline::tests::test_propose_skips_when_verified_block_exists_on_restart`).
     #[test_traced("WARN")]
     fn test_propose_reuses_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1470,12 +1473,13 @@ mod tests {
             let digest_a = block_a.digest();
             assert!(marshal.verified(round, block_a.clone()).await);
 
-            let block_b = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
-            let digest_b = block_b.digest();
-            assert_ne!(digest_a, digest_b, "test requires distinct digests");
-
-            let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new().with_propose_result(block_b);
+            // The app cannot build (`propose` returns None) and its
+            // verification never completes, so the assertions below hold
+            // only if the stored block is reused as-is and certification
+            // resolves through the durability gate registered by the
+            // recovery staging.
+            let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<B, S>, _, _) =
+                GatedVerifyingApp::new();
             let mut marshaled = Deferred::new(
                 context.child("deferred"),
                 mock_app,
@@ -1489,6 +1493,24 @@ mod tests {
                 digest, digest_a,
                 "propose must reuse the block marshal already persisted for this round"
             );
+
+            // The relay broadcast must find the recovered proposal staged and
+            // re-persist it (a dedup no-op whose handle covers the pre-crash
+            // write), resolving the certification gate registered by the
+            // recovery path.
+            let _ = marshaled.broadcast(digest, Plan::Propose { round });
+            let certify_rx = marshaled.certify(round, digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "recovered proposal must certify through the relay handshake"
+                    );
+                },
+                _ = verify_started => {
+                    panic!("certifying a recovered proposal must not run app verification");
+                },
+            }
         });
     }
 
