@@ -74,13 +74,15 @@ type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 ///
 /// An `Ancestor` resolution's `base_old_loc` reflects the chain at stage time. It stays
 /// trustworthy while the resolving ancestor is in the alive chain at merkleize: the
-/// ancestor's diff then travels with this batch, and `apply_batch`'s
-/// already-applied-ancestor fixup re-resolves the base if that ancestor commits first. If
-/// the ancestor commits and is freed before merkleize, its diff no longer rides along and
-/// the recorded base is one transition stale (the ancestor's own apply retired it and made
-/// `loc` the key's committed location, so trusting it would corrupt the snapshot and
-/// bitmap). The merkleize consumption catches this case as `loc` sitting below the
-/// merkleize-time committed boundary and supersedes `loc` itself instead.
+/// ancestor's diff then travels with this batch, so if the ancestor commits before this
+/// batch is applied, `apply_batch` resolves the key in that already-applied diff and
+/// supersedes its entry's location (the key's committed location by then) instead of the
+/// recorded base. If the ancestor commits and is freed before merkleize, its diff no
+/// longer rides along and the recorded base is one transition stale (the ancestor's own
+/// apply retired it and made `loc` the key's committed location, so trusting it would
+/// corrupt the snapshot and bitmap). The merkleize consumption catches this case as `loc`
+/// sitting below the merkleize-time committed boundary and supersedes `loc` itself
+/// instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StagedLoc<F: Family> {
     /// Resolved directly in the committed DB snapshot. The location doubles as the
@@ -2006,9 +2008,9 @@ where
         // ancestor has committed and dropped out of the alive chain, retiring the recorded
         // base (see [`StagedLoc`]). The location itself is then the committed location this
         // write supersedes, matching what the fallback path's live-snapshot resolution would
-        // produce. Resolutions whose ancestor is still alive keep their recorded base, and
-        // `apply_batch`'s already-applied-ancestor fixup covers the case where that ancestor
-        // commits later.
+        // produce. Resolutions whose ancestor is still alive keep their recorded base. If
+        // that ancestor commits before this batch is applied, `apply_batch` resolves the
+        // key in the ancestor's traveling diff and supersedes its entry's location instead.
         let staged_base_old_loc = |sloc: StagedLoc<F>| {
             if *sloc.loc() < m.db_size {
                 Some(sloc.loc())
