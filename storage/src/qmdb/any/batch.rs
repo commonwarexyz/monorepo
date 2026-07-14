@@ -103,7 +103,6 @@ impl<F: Family> StagedLoc<F> {
             Self::Committed(loc) | Self::Ancestor { loc, .. } => *loc,
         }
     }
-
 }
 
 /// Staged update entry: key, resolved location, cached payload from the old update, and
@@ -1579,9 +1578,9 @@ where
         let distinct_updates = updates.len().min(self.key_id_map.len());
         let steps_bound = distinct_updates + upserts.len() + self.batch.mutations.len() + 1;
         let scan_from = self.batch.base.inactivity_floor_loc();
-        let strategy = db.strategy().clone();
-        let resolve =
-            strategy.spawn(move |strategy| self.resolve_updates(updates, upserts, &strategy));
+        let resolve = db
+            .strategy()
+            .spawn(move |strategy| self.resolve_updates(updates, upserts, &strategy));
 
         let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
         let mut raw: Vec<u64> = Vec::with_capacity(steps_bound);
