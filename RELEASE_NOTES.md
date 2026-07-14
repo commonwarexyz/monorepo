@@ -536,53 +536,56 @@ so allocator-sensitive workloads should link jemalloc or mimalloc directly
 ### Synchronous Messaging
 
 The new `commonware-actor` crate provides a bounded mailbox abstraction with
-caller-defined overflow handling and is now used by many actor-style
+caller-defined overflow handling ([#3739]) and is now used by many actor-style
 components.
 
 The mailbox has a bounded ready queue and a separate overflow queue. When the
 ready queue is full, each message type's `Policy` decides whether to retain,
-coalesce, replace, or discard pending work. This makes backpressure behavior an
-explicit part of each actor's API instead of being spread across ad hoc channel
-wrappers.
+coalesce, replace, or discard pending work ([#3739], [#3789]). This makes
+backpressure behavior an explicit part of each actor's API instead of being
+spread across ad hoc channel wrappers.
 
-Users will see this in `p2p`, `resolver`, `broadcast`, `collector`, `simplex`,
-`marshal`, and the examples. Many public handles that previously returned
-futures or response oneshots now synchronously enqueue work and return
-`Feedback` values:
+Users will see this in `p2p`, `resolver` ([#3795], [#3791]), `broadcast`,
+`collector`, `simplex` ([#3768]), `marshal`, and the examples ([#3785],
+[#3806]). Many public handles that previously returned futures or response
+oneshots now synchronously enqueue work and return `Feedback` values ([#3739]):
 
 - `Ok`: accepted within ready capacity.
 - `Backoff`: handled through overflow, but the caller is applying pressure.
 - `Closed`: the actor is no longer accepting work.
 
-For lossy ingress paths, APIs can return `Unreliable<Feedback>`, where
+For lossy ingress paths, APIs can return `Unreliable<Feedback>` ([#3849]), where
 `Rejected` means the work was not semantically handled and the caller must retry
 or treat the submission as failed.
 
-Actor ingress behavior is now uniform, bounded, and inspectable. Application
-code that previously assumed fire-and-forget sends should now check whether
-submission was accepted.
+Actor ingress behavior is now uniform, bounded, and inspectable ([#3866],
+[#3802]). Application code that previously assumed fire-and-forget sends should
+now check whether submission was accepted.
 
 ### Runtime Identity and Observability
 
-Runtime context identity now exposes the existing supervision tree more directly:
+Runtime context identity now exposes the existing supervision tree more
+directly:
 
 - `Supervisor::child("name")` creates a supervised child context and extends the
-  metric name prefix.
+  metric name prefix ([#3680]).
 - `Supervisor::with_attribute("key", value)` attaches Prometheus labels and
-  tracing attributes without creating a new metric-name segment.
-- `Tracing::with_span()` opts the next spawned task into a tracing span.
+  tracing attributes without creating a new metric-name segment ([#3680]).
+- `Tracing::with_span()` opts the next spawned task into a tracing span
+  ([#3680]).
 - `Metrics::register()` returns a registered metric handle, and dropping the
-  last handle unregisters the metric.
+  last handle unregisters the metric ([#3648]).
 - Metric label derive macros now resolve through `commonware-runtime`, so
   downstream crates can derive metric labels without depending directly on
-  `prometheus-client`.
+  `prometheus-client` ([#3648]).
 
 Earlier versions already supervised task hierarchies, but context cloning and
 metric label builders could hide when a new child identity was being created.
 Static component names should be modeled with `child()`; dynamic dimensions such
-as epoch, round, shard, or peer should be modeled with `with_attribute()`.
+as epoch, round, shard, or peer should be modeled with `with_attribute()`
+([#3680]).
 
-The runtime trait surface was also split more clearly:
+The runtime trait surface was also split more clearly ([#3680]):
 
 - `Supervisor` owns task identity.
 - `Spawner` builds on supervision and controls task placement.
@@ -591,13 +594,14 @@ The runtime trait surface was also split more clearly:
 - `Observer` groups tracing and metrics when both are required.
 
 This is a user-visible migration point for code that used `with_label`,
-`with_scope`, or relied on context cloning to imply a new child task identity.
+`with_scope`, or relied on context cloning to imply a new child task identity
+([#3680], [#3648]).
 
 ### Stateful Consensus Glue
 
 The new `commonware-glue` crate provides default constructions that span
 multiple primitives. Its first major component is `glue::stateful`, a wrapper
-for stateful applications built on consensus and QMDB.
+for stateful applications built on consensus and QMDB ([#3381]).
 
 The wrapper owns the common bookkeeping that every stateful consensus
 application otherwise has to reimplement:
@@ -609,196 +613,242 @@ application otherwise has to reimplement:
 - Apply the winning fork on finalization and prune pending entries from dead
   forks.
 - Lazily rebuild missing pending state after restart by walking the block DAG
-  through marshal and replaying certified blocks.
-- Coordinate startup between marshal sync and one-time QMDB state sync.
+  through marshal and replaying certified blocks ([#3381], [#3764]).
+- Coordinate startup between marshal sync and one-time QMDB state sync ([#3381],
+  [#3896]).
 
 The same module includes database-set traits, QMDB resolver actors, sync plans,
-and simulation support for multi-validator stateful tests. This gives
+and simulation support for multi-validator stateful tests ([#3381]). This gives
 application authors a concrete path for combining consensus, marshal, QMDB, and
 state sync without hand-wiring all of the lifecycle edges.
 
 ### Consensus Startup and Recovery
 
-Marshal now has a unified core actor shared by the standard full-block path and
-the coded shard path. Variant-specific logic is expressed through `Variant` and
-`Buffer` abstractions, while the core actor owns ordering finalized blocks,
-persisting blocks and certificates, backfilling gaps, managing acknowledgements,
-and serving block lookups.
+Marshal startup and recovery became more explicit:
 
 - Marshal can start from a configurable finalized floor instead of always from
-  genesis. This is the consensus-side counterpart to state sync: nodes can
-  retain and serve only the block history needed above the floor.
+  genesis ([#3828], [#3855]). This is the consensus-side counterpart to state
+  sync: nodes can retain and serve only the block history needed above the
+  floor.
 - The `Mailbox` implements block-provider behavior for parent walking and lazy
   recovery, so stateful wrappers can fetch ancestors through the same marshal
-  surface.
+  surface ([#3764], [#3835]).
 - Backfill and subscription behavior is more explicit around digest-based and
   commitment-based lookup, including local-only wait behavior and peer fetch
-  fallbacks.
+  fallbacks ([#3796]).
 - Deferred verification now works with the shared marshal core, and the older
-  `VerifyingApplication` split has been removed.
+  `VerifyingApplication` split has been removed ([#3754]).
 
 Simplex also exposes a clearer startup floor:
 
-- `Floor::Genesis` starts a fresh epoch from the genesis payload.
+- `Floor::Genesis` starts a fresh epoch from the genesis payload ([#3828]).
 - `Floor::Finalized` starts from an already-finalized proposal and verifies the
-  supplied finalization certificate.
-
-Simplex now also includes a `ForwardingPolicy` for proactively forwarding
-certified blocks to silent voters or the next leader. This is a liveness aid
-that avoids forwarding blocks before local certification succeeds.
+  supplied finalization certificate ([#3828]).
 
 Application-facing Simplex semantics were tightened around startup and recovery.
 `propose` may decline work by dropping its response, but `verify` and `certify`
-are stable validity decisions rather than backpressure signals. If an
+are stable validity decisions rather than backpressure signals ([#3753]). If an
 application is waiting for data, those requests should stay pending. Once a
 locally proposed payload is notarized, Simplex treats it as certifiable without
-calling back into `certify`; `certify` remains the hook for payloads learned
-from other validators. Simplex also syncs votes and certificates before
-broadcasting them, and journals certification outcomes so restart can replay
-them instead of asking the application to re-certify the same view.
+calling back into `certify` ([#3543]); `certify` remains the hook for payloads
+learned from other validators.
 
 ### Subscriber-Aware Fetching
 
-The resolver API is now subscriber-aware. A single peer-visible fetch key can
-serve multiple local subscribers, and the resolver retains a fetch while at
-least one subscriber is still wanted by the latest `retain` predicate.
+The resolver API is now subscriber-aware ([#3796]). A single peer-visible fetch
+key can serve multiple local subscribers, and the resolver retains a fetch while
+at least one subscriber is still wanted by the latest `retain` predicate
+([#3796], [#3867]).
 
 The `Consumer::deliver` call now receives a `Delivery` containing both the
-peer-visible key and the retained subscriber set. This separates peer validity
-from local demand: the key validates the response, while subscribers determine
-which local waiters should observe it.
-
-P2P fetches also support targeted fetch hints. A caller can restrict a fetch to
-specific peers when it knows only those peers may eventually have the data.
-Targets persist across transient failures and are cleared on successful fetch
-or peer blocking.
+peer-visible key and the retained subscriber set ([#3796]). This separates peer
+validity from local demand: the key validates the response, while subscribers
+determine which local waiters should observe it.
 
 The new `resolver::opaque` actor brings the same request lifecycle to
-application-provided async fetchers that do not need peer-specific routing. It
-coalesces duplicate keys, retries transient misses, prunes stale subscribers,
-and redelivers accepted responses to subscribers that attached while validation
-was still in flight.
+application-provided async fetchers that do not need peer-specific routing
+([#3867]). It coalesces duplicate keys, retries transient misses, prunes stale
+subscribers, and redelivers accepted responses to subscribers that attached
+while validation was still in flight.
 
-Resolver demand is now more composable: duplicate requests can be coalesced,
-late subscribers can attach to in-flight validation, and stale subscribers can
-be pruned without tearing down unrelated demand for the same key.
+Resolver demand is now more composable: duplicate requests can be coalesced
+([#3796], [#3867]), late subscribers can attach to in-flight validation
+([#3691], [#3867]), and stale subscribers can be pruned without tearing down
+unrelated demand for the same key ([#3796]).
 
 ### Authenticated Storage and Sync
 
-Merkle structures are now family-generic. Shared `Position<F>` and
-`Location<F>` types, plus the `Family` trait, allow MMR and MMB implementations
-to share batching, proof, pruning, and persistence logic while retaining their
-different tree geometry. Bagging policy is separated from family topology.
+Merkle bagging policy is now separated from family topology ([#3667],
+[#3693]).
 
-QMDB now builds on this family abstraction and exposes more of its lifecycle in
-the type system and batch API:
+QMDB exposes more of its lifecycle in the type system and batch API:
 
 - `any`, `current`, `immutable`, and `keyless` variants gained broader support
-  for MMR and MMB families.
-- Batches can be merkleized and then used as parents for child batches before
-  committing, making speculative execution and forked state transitions a
-  first-class pattern.
-- Commit operations carry inactivity floors. The floor is authenticated in the
-  operation log and governs what can be pruned and what must be replayed during
-  reconstruction.
+  for MMR and MMB families ([#3626], [#3593]).
+- Commit operations carry inactivity floors ([#3588], [#3624]). The floor is
+  authenticated in the operation log and governs what can be pruned and what
+  must be replayed during reconstruction.
 - Merkle and QMDB configuration now carries an explicit
-  `commonware_parallel::Strategy`. Use `Sequential` for previous serial
-  behavior, or a parallel strategy such as `Rayon` to parallelize batch work.
+  `commonware_parallel::Strategy` ([#3674], [#3751]). Use `Sequential` for
+  previous serial behavior, or a parallel strategy such as `Rayon` to
+  parallelize batch work.
 - Storage journals and QMDB variants gained `read_many` and `get_many` paths
   that reduce repeated storage lookups for callers that need multiple positions,
-  locations, or keys.
+  locations, or keys ([#3574], [#3637]).
 - QMDB metrics were expanded around state, reads, operations, sync, and
-  durability behavior.
+  durability behavior ([#3721], [#3663]).
 - Lower-level storage indexes moved to retain-style predicates. The public API
-  now uses `retain` and `insert_and_retain`, cursor values no longer require
-  `Eq`, and colliding values are exposed newest-first.
+  now uses `retain` and `insert_and_retain` ([#3879]), cursor values no longer
+  require `Eq` ([#3877]), and colliding values are exposed newest-first
+  ([#3760]).
 
-`current` QMDB now authenticates current-value status by grafting a status
-bitmap into the operations tree. This produces a single canonical root that can
-prove both operation inclusion and whether the operation is active, instead of
-requiring independent proofs for the operation log and bitmap state. For replay
-sync, `current` still verifies operation batches against the ops root; the new
-`OpsRootWitness` links that ops root back to a trusted canonical `current` root
-when callers need that authentication.
+For replay sync, `current` verifies operation batches against the ops root. The
+new `OpsRootWitness` links that ops root back to a trusted canonical `current`
+root when callers need that authentication ([#3610], [#3717], [#3743]).
 
 Compact is a new authenticated storage mode for applications that need the
 latest committed state and future appendability, but do not need to retain or
-serve full operation history.
+serve full operation history ([#3650]).
 
 Instead of persisting every historical Merkle node, `merkle::compact` persists
 the compact frontier: the committed leaf count and pinned peaks needed to
-recover the current root and continue appending after restart. The compact QMDB
-variants, `qmdb::immutable::CompactDb` and `qmdb::keyless::CompactDb`, mirror
-the normal batch flow (`new_batch -> merkleize -> apply_batch -> sync`) while
-intentionally omitting historical read/proof APIs such as `get`, `proof`, and
-`bounds`.
+recover the current root and continue appending after restart ([#3650]). The
+compact QMDB variants, `qmdb::immutable::CompactDb` and
+`qmdb::keyless::CompactDb`, mirror the normal batch flow (`new_batch ->
+merkleize -> apply_batch -> sync`) while intentionally omitting historical
+read/proof APIs such as `get`, `proof`, and `bounds` ([#3650]).
 
 Compact nodes can still participate in authenticated state transfer. On every
-durable sync, compact QMDB persists a witness for the final commit operation.
-Compact sync uses that witness, the target root, leaf count, frontier pins, and
-final commit proof to reconstruct the latest committed compact state directly.
-It does not replay the full historical operation log.
+durable sync, compact QMDB persists a witness for the final commit operation
+([#3650], [#3699]). Compact sync uses that witness, the target root, leaf count,
+frontier pins, and final commit proof to reconstruct the latest committed
+compact state directly ([#3650], [#3892]). It does not replay the full
+historical operation log.
 
-Replay sync rebuilds a database from the operation stream when a node must
-retain or serve past operations. Compact sync lets a node join at a proven
-committed root, materialize only the append frontier, and continue from there
-without downloading or storing the full operation history.
+Compact sync lets a node join at a proven committed root, materialize only the
+append frontier, and continue from there without downloading or storing the
+full operation history ([#3650]).
 
 ### Runtime I/O Durability
 
 - `Blob::write_at_sync` writes bytes at an offset and durably persists that
-  specific write. This is not a global durability barrier for earlier unsynced
-  operations.
-- The io_uring backend was reworked around a single event loop with bounded
-  admission, typed waiter slots, a userspace timeout wheel, futex wakeups when
-  idle, and eventfd wakeups while blocked in `submit_and_wait`.
+  specific write ([#3840]). This is not a global durability barrier for earlier
+  unsynced operations.
+- The io_uring event loop now parks on a futex when idle and wakes through
+  eventfd while blocked in `submit_and_wait` ([#3606]).
 - io_uring storage operations are serialized where needed to avoid unsafe
-  overlapping filesystem behavior.
-- The I/O buffer layer now distinguishes `Bytes`, untracked aligned buffers,
-  and pooled aligned buffers. The pool has a lower-overhead freelist and
-  exposes system page size and cache-line size helpers.
+  overlapping filesystem behavior ([#3869]).
+- The I/O buffer pool has a lower-overhead freelist ([#3546], [#3767]) and
+  exposes system page size and cache-line size helpers ([#3860]).
 - Runtime network sinks and streams are poisoned after send/receive errors or
-  cancellation of a partially progressed operation. After that point, later
-  calls return `Closed` instead of pretending the object is reusable.
+  cancellation of a partially progressed operation ([#3501]). After that point,
+  later calls return `Closed` instead of pretending the object is reusable.
 
 ### Cryptography Building Blocks
 
 The BLS12-381 DKG module now separates the original Feldman-Desmedt construction
-from a new Golden DKG implementation:
+from a new Golden DKG implementation ([#3704], [#3854]):
 
-- `feldman_desmedt` remains the simpler synchronous, two-round construction.
+- `feldman_desmedt` remains the simpler synchronous, two-round construction
+  ([#3854]).
 - `golden` adds an asynchronous, one-round DKG and resharing protocol with
-  public verification and optional resharing from a previous output.
+  public verification and optional resharing from a previous output ([#3704]).
 
 The Golden path introduces an eVRF setup and carries explicit safety
 requirements around log agreement, round-number reuse, reshare dealer
-membership, and use of the authenticated output quorum.
+membership, and use of the authenticated output quorum ([#3704]).
 
 The new `cryptography::zk` module adds Bulletproof-related infrastructure and a
 Pedersen-to-plain proof that links a transparent commitment and a Pedersen
-commitment to the same hidden value. These are ALPHA building blocks for higher
-level protocols that need proof composition.
+commitment to the same hidden value ([#3704]). These are ALPHA building blocks
+for higher level protocols that need proof composition.
 
 Ed25519 internals are now vendored rather than relying directly on the upstream
-crate. The vendored implementation keeps ZIP215 semantics, uses
+crate ([#3616]). The vendored implementation keeps ZIP215 semantics, uses
 `curve25519-dalek`, removes unneeded dependencies, zeroizes additional signing
-material, and lets the batch verifier reuse pre-decompressed verification keys.
+material, and lets the batch verifier reuse pre-decompressed verification keys
+([#3617]).
 
 The generic `BatchVerifier` API is now strategy-aware, enabling parallel batch
-verification where the chosen `commonware-parallel` strategy supports it.
+verification where the chosen `commonware-parallel` strategy supports it
+([#3749]).
 
 ### Encoding, Formatting, and Utilities
 
 - `commonware-formatting` is now a dedicated crate for formatting and parsing
   encoded data, including the hex helpers previously exposed from
-  `commonware-utils` and allocation-free hex display wrappers.
+  `commonware-utils` and allocation-free hex display wrappers ([#3696]).
 - `commonware-codec` gained byte-container specialization hooks so generic
   container implementations can bulk-copy byte-oriented data without abandoning
-  generic fallbacks.
-- `commonware-utils` includes a Roaring bitmap implementation and channel
-  reservation helpers for reserving bounded-channel capacity while retaining
-  ownership of the unsent value.
+  generic fallbacks ([#3673]).
+- `commonware-utils` includes a Roaring bitmap implementation ([#3687]) and
+  channel reservation helpers for reserving bounded-channel capacity while
+  retaining ownership of the unsent value ([#3683]).
 - `commonware-math` exposes synthetic linear combinations for building symbolic
-  group expressions that are later evaluated with an MSM strategy.
-- Coding APIs were tightened around canonical Reed-Solomon decoding and
-  caller-provided ZODA namespaces.
+  group expressions that are later evaluated with an MSM strategy ([#3704]).
+- Coding APIs were tightened around canonical Reed-Solomon decoding ([#3758])
+  and caller-provided ZODA namespaces ([#3409]).
+
+[#3381]: https://github.com/commonwarexyz/monorepo/pull/3381
+[#3409]: https://github.com/commonwarexyz/monorepo/pull/3409
+[#3501]: https://github.com/commonwarexyz/monorepo/pull/3501
+[#3543]: https://github.com/commonwarexyz/monorepo/pull/3543
+[#3546]: https://github.com/commonwarexyz/monorepo/pull/3546
+[#3574]: https://github.com/commonwarexyz/monorepo/pull/3574
+[#3588]: https://github.com/commonwarexyz/monorepo/pull/3588
+[#3593]: https://github.com/commonwarexyz/monorepo/pull/3593
+[#3606]: https://github.com/commonwarexyz/monorepo/pull/3606
+[#3610]: https://github.com/commonwarexyz/monorepo/pull/3610
+[#3616]: https://github.com/commonwarexyz/monorepo/pull/3616
+[#3617]: https://github.com/commonwarexyz/monorepo/pull/3617
+[#3624]: https://github.com/commonwarexyz/monorepo/pull/3624
+[#3626]: https://github.com/commonwarexyz/monorepo/pull/3626
+[#3637]: https://github.com/commonwarexyz/monorepo/pull/3637
+[#3648]: https://github.com/commonwarexyz/monorepo/pull/3648
+[#3650]: https://github.com/commonwarexyz/monorepo/pull/3650
+[#3663]: https://github.com/commonwarexyz/monorepo/pull/3663
+[#3667]: https://github.com/commonwarexyz/monorepo/pull/3667
+[#3673]: https://github.com/commonwarexyz/monorepo/pull/3673
+[#3674]: https://github.com/commonwarexyz/monorepo/pull/3674
+[#3680]: https://github.com/commonwarexyz/monorepo/pull/3680
+[#3683]: https://github.com/commonwarexyz/monorepo/pull/3683
+[#3687]: https://github.com/commonwarexyz/monorepo/pull/3687
+[#3691]: https://github.com/commonwarexyz/monorepo/pull/3691
+[#3693]: https://github.com/commonwarexyz/monorepo/pull/3693
+[#3696]: https://github.com/commonwarexyz/monorepo/pull/3696
+[#3699]: https://github.com/commonwarexyz/monorepo/pull/3699
+[#3704]: https://github.com/commonwarexyz/monorepo/pull/3704
+[#3717]: https://github.com/commonwarexyz/monorepo/pull/3717
+[#3721]: https://github.com/commonwarexyz/monorepo/pull/3721
+[#3739]: https://github.com/commonwarexyz/monorepo/pull/3739
+[#3743]: https://github.com/commonwarexyz/monorepo/pull/3743
+[#3749]: https://github.com/commonwarexyz/monorepo/pull/3749
+[#3751]: https://github.com/commonwarexyz/monorepo/pull/3751
+[#3753]: https://github.com/commonwarexyz/monorepo/pull/3753
+[#3754]: https://github.com/commonwarexyz/monorepo/pull/3754
+[#3758]: https://github.com/commonwarexyz/monorepo/pull/3758
+[#3760]: https://github.com/commonwarexyz/monorepo/pull/3760
+[#3764]: https://github.com/commonwarexyz/monorepo/pull/3764
+[#3767]: https://github.com/commonwarexyz/monorepo/pull/3767
+[#3768]: https://github.com/commonwarexyz/monorepo/pull/3768
+[#3785]: https://github.com/commonwarexyz/monorepo/pull/3785
+[#3789]: https://github.com/commonwarexyz/monorepo/pull/3789
+[#3791]: https://github.com/commonwarexyz/monorepo/pull/3791
+[#3795]: https://github.com/commonwarexyz/monorepo/pull/3795
+[#3796]: https://github.com/commonwarexyz/monorepo/pull/3796
+[#3802]: https://github.com/commonwarexyz/monorepo/pull/3802
+[#3806]: https://github.com/commonwarexyz/monorepo/pull/3806
+[#3828]: https://github.com/commonwarexyz/monorepo/pull/3828
+[#3835]: https://github.com/commonwarexyz/monorepo/pull/3835
+[#3840]: https://github.com/commonwarexyz/monorepo/pull/3840
+[#3849]: https://github.com/commonwarexyz/monorepo/pull/3849
+[#3854]: https://github.com/commonwarexyz/monorepo/pull/3854
+[#3855]: https://github.com/commonwarexyz/monorepo/pull/3855
+[#3860]: https://github.com/commonwarexyz/monorepo/pull/3860
+[#3866]: https://github.com/commonwarexyz/monorepo/pull/3866
+[#3867]: https://github.com/commonwarexyz/monorepo/pull/3867
+[#3869]: https://github.com/commonwarexyz/monorepo/pull/3869
+[#3877]: https://github.com/commonwarexyz/monorepo/pull/3877
+[#3879]: https://github.com/commonwarexyz/monorepo/pull/3879
+[#3892]: https://github.com/commonwarexyz/monorepo/pull/3892
+[#3896]: https://github.com/commonwarexyz/monorepo/pull/3896
