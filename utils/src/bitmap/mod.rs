@@ -966,7 +966,7 @@ pub trait Readable<const N: usize> {
         Self: Sized,
     {
         let len = self.len();
-        let pruned_start = (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS;
+        let pruned_start = self.pruned_bits();
         let pos = pos.max(pruned_start);
         let mut iter = OnesIter {
             bitmap: self,
@@ -1102,9 +1102,11 @@ impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_rng;
     use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
     use commonware_formatting::hex;
+    use rand::RngExt as _;
 
     #[test]
     fn test_constructors() {
@@ -2104,10 +2106,11 @@ mod tests {
         // 23). Check the full iteration and every possible starting position against
         // get_bit.
         fn check<const N: usize>() {
+            let mut rng = test_rng();
             let mut bv: BitMap<N> = BitMap::new();
             let len = 5 * BitMap::<N>::CHUNK_SIZE_BITS + 7;
-            for i in 0..len {
-                bv.push(i.wrapping_mul(crate::GOLDEN_RATIO) >> 61 < 3);
+            for _ in 0..len {
+                bv.push(rng.random_bool(0.375));
             }
             let expected: Vec<u64> = (0..len).filter(|&i| bv.get_bit(i)).collect();
             assert_eq!(bv.ones_iter().collect::<Vec<_>>(), expected);
