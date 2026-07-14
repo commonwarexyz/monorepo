@@ -170,7 +170,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The verified block.
         block: Arc<V::Block>,
         /// A channel sent once the block sync has started.
-        ack: Option<oneshot::Sender<Handle<()>>>,
+        ack: oneshot::Sender<Handle<()>>,
     },
     /// A notification that a block has been certified by the application.
     Certified {
@@ -182,7 +182,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         block: Arc<V::Block>,
         /// A channel sent once the block and notarization syncs have started; the
         /// handle covers both.
-        ack: Option<oneshot::Sender<Handle<()>>>,
+        ack: oneshot::Sender<Handle<()>>,
     },
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
@@ -892,7 +892,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             span: info_span!("marshal.mailbox.verified", round = %round),
             round,
             block: block.into(),
-            ack: Some(ack),
+            ack,
         });
     }
 
@@ -921,7 +921,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             span: info_span!("marshal.mailbox.certified", round = %round),
             round,
             block: block.into(),
-            ack: Some(ack),
+            ack,
         });
         let Ok(handle) = receiver.await else {
             return false;
@@ -1073,7 +1073,7 @@ mod tests {
                 span: Span::none(),
                 round: round(height),
                 block: block(height).into(),
-                ack: Some(ack),
+                ack,
             },
             receiver,
         )
@@ -1086,7 +1086,7 @@ mod tests {
                 span: Span::none(),
                 round: round(height),
                 block: block(height).into(),
-                ack: Some(ack),
+                ack,
             },
             receiver,
         )

@@ -663,7 +663,7 @@ where
                     .cache
                     .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
                     .await;
-                ack.expect("durable ack present").send_lossy(handle);
+                ack.send_lossy(handle);
             }
             Message::Certified {
                 round, block, ack, ..
@@ -696,7 +696,7 @@ where
                     let (notarization, block) = join(notarization_sync, block_sync).await;
                     notarization.and(block)
                 });
-                ack.expect("durable ack present").send_lossy(handle);
+                ack.send_lossy(handle);
             }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
