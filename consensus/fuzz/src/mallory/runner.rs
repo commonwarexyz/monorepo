@@ -6,13 +6,14 @@
 //! Impersonator, Outdated). It then drives a reactive observe-orient-decide-act
 //! loop: each step observes the honest happens-before fingerprint (the Q-state,
 //! keyed by the environment) and a protocol-state descriptor, selects an
-//! [`action`] under a legal mask, enacts its [`action::FaultPlan`] -- a network
-//! (isolation, partition), packet (delay/loss/corrupt/duplicate/reorder), or
-//! lifecycle (crash-stop, durable restart, amnesia restart) fault -- waits for the
-//! first new honest finalization or a per-action timeout, heals the fault, and
-//! (for the learned chooser) applies a temporal-difference update rewarding novel
+//! [`action`] under a legal mask, and enacts its [`action::FaultPlan`]. The action
+//! is a network (isolation, partition), packet (delay/loss/corrupt/duplicate/reorder),
+//! or lifecycle (crash-stop, durable restart, amnesia restart) fault. It then waits
+//! for the first new honest finalization or a per-action timeout, heals the fault,
+//! and (for the learned chooser) applies a temporal-difference update rewarding novel
 //! state / happens-before fingerprints. The episode stops once it has observed
-//! `required_containers` distinct finalizations (or on crash-stop / step cap).
+//! `required_containers` distinct finalizations, or on the step cap. A crash-stop is
+//! permanent but not terminal: the loop continues over the surviving quorum.
 //!
 //! Reporter membership and the episode-end oracle follow the environment. Under
 //! `Honest` all four validators are honest [`ManagedValidator`]s. Under a
@@ -84,6 +85,13 @@ const MALLORY_SETTLE: Duration = Duration::from_millis(500);
 /// otherwise alias despite a different legality and fault model.
 const AMNESIA_TAG: u64 = 0xa3f1_9c2d_7b64_e850;
 
+/// Env-tag bit folded in once node 0 is permanently crash-stopped: the episode
+/// continues over the surviving quorum, but under a DIFFERENT legality (lifecycle /
+/// isolate-node-0 masked) and fault model (a bare quorum of three, no faultable
+/// identity left), so it must key distinct Q-rows / novelty slots from both the
+/// pre-crash Honest and the amnesiac environments.
+const CRASHED_TAG: u64 = 0x5c8b_2e71_d4a0_936f;
+
 /// The honest reporter type the runner clones for state extraction and liveness.
 type MalloryReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
@@ -103,10 +111,13 @@ enum Enactment {
 
 /// The per-step environment tag folded into the Q-state and novelty fingerprints:
 /// the episode [`adversary::AdversaryRole`] tag XOR [`AMNESIA_TAG`] once node 0 is
-/// amnesiac. Under the Honest role with no amnesia this is `0` (an identity mix, so
-/// the warm campaign's honest rows are unchanged).
-fn env_tag(role: adversary::AdversaryRole, node0_amnesiac: bool) -> u64 {
-    role.tag() ^ if node0_amnesiac { AMNESIA_TAG } else { 0 }
+/// amnesiac XOR [`CRASHED_TAG`] once node 0 is permanently crash-stopped (the two
+/// lifecycle states are mutually exclusive). Under the Honest role with neither this
+/// is `0` (an identity mix, so the warm campaign's honest rows are unchanged).
+fn env_tag(role: adversary::AdversaryRole, node0_amnesiac: bool, node0_crashed: bool) -> u64 {
+    role.tag()
+        ^ if node0_amnesiac { AMNESIA_TAG } else { 0 }
+        ^ if node0_crashed { CRASHED_TAG } else { 0 }
 }
 
 /// Coarse remaining-container horizon tag folded into the Q-STATE ONLY (never the
@@ -957,17 +968,15 @@ fn run_inner<P: Simplex>(
         let finalization_budget = required_containers as usize;
         let mut observed_finalizations: HashSet<u64> = HashSet::new();
 
-        // A crash-stop ends the episode; this flips true when node 0 is crashed so
-        // the loop finishes after that step's TD update.
-        let mut episode_terminal = false;
         // Observe before the first decision: the initial (empty-history) HB
-        // fingerprint XOR the env tag (role plus an amnesia bit) XOR the horizon tag
-        // is the step-0 Q-state. The env tag keeps Honest, each byzantine role, and a
-        // post-amnesia node 0 in distinct Q-rows; the horizon tag keeps a different
-        // remaining container budget distinct (folded into the Q-STATE only, never
-        // novelty). Node 0 cannot be amnesiac yet, so the env tag reduces to the role.
+        // fingerprint XOR the env tag (role plus amnesia / crashed bits) XOR the
+        // horizon tag is the step-0 Q-state. The env tag keeps Honest, each byzantine
+        // role, a post-amnesia node 0, and a post-crash node 0 in distinct Q-rows; the
+        // horizon tag keeps a different remaining container budget distinct (folded
+        // into the Q-STATE only, never novelty). Node 0 cannot be amnesiac or crashed
+        // yet, so the env tag reduces to the role.
         let mut state = hb_log.summary().fingerprint()
-            ^ env_tag(current_role, false)
+            ^ env_tag(current_role, false, false)
             ^ horizon_tag(remaining_bucket(finalization_budget, 0));
         // Summed per-step novelty reward and the executed-step count. The role
         // bandit's signal (Learned only) is their ratio -- the per-step AVERAGE, which
@@ -1040,7 +1049,9 @@ fn run_inner<P: Simplex>(
             // folding that into the window keeps every step exactly one window long
             // (F6) rather than a restart observing downtime + window.
             let step_start = context.current();
-            let plan = action.sample(&mut context, byz);
+            // Exclude node 0 as a packet target when it has no live pump / sniffer:
+            // a byzantine role owns it (raw channels) or it is crash-stopped.
+            let plan = action.sample(&mut context, byz || node0_crashed);
             let params = plan.describe();
             match &plan {
                 action::FaultPlan::None => {}
@@ -1102,13 +1113,16 @@ fn run_inner<P: Simplex>(
                     kind: network::PacketFaultKind::Reorder { buffer: *buffer },
                 }),
                 action::FaultPlan::CrashStop => {
-                    // Crash-stop the faultable identity and END the episode after
-                    // this step's TD update: abort+await both handles so the old
-                    // engine/application tasks can never send again. Enacted against
-                    // the managed validator, so the topology/packet layers are
-                    // untouched (no heal below).
+                    // Crash-stop the faultable identity PERMANENTLY (but NOT terminal):
+                    // abort+await both handles so the old engine/application tasks can
+                    // never send again. Node 0 stays `Crashed` for the rest of the
+                    // episode, dropped from the reactive finalization / liveness sets
+                    // and every subsequent step's legal mask (lifecycle and
+                    // isolate-node-0 masked), while Mallory keeps perturbing the
+                    // surviving quorum. Its retained reporter (pre-crash history) stays
+                    // in the safety set. Enacted against the managed validator, so the
+                    // topology / packet layers are untouched (no heal below).
                     lifecycle::crash_stop(&mut managed[0]).await;
-                    episode_terminal = true;
                 }
                 action::FaultPlan::CrashRestartDurable => {
                     // Crash then durably restart the faultable identity in place on
@@ -1208,8 +1222,9 @@ fn run_inner<P: Simplex>(
                 !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Amnesiac);
             // The env tag uses the POST-enact `current_role`: a `SetRole` this step has
             // already swapped it, so the effect / next fingerprints key the NEW role
-            // region -- the transition that connects the role regions of the MDP.
-            let tag = env_tag(current_role, node0_amnesiac_now);
+            // region -- the transition that connects the role regions of the MDP. A
+            // crash this step also keys the post-crash region for every later step.
+            let tag = env_tag(current_role, node0_amnesiac_now, node0_crashed_now);
 
             // (h) FAULT-EFFECT fingerprints, captured BEFORE healing so recovery /
             // settle work is not credited to the fault. The reward and its novelty use
@@ -1283,12 +1298,11 @@ fn run_inner<P: Simplex>(
             };
 
             // (i2) Episode budget check (item 13): does the episode end after this
-            // step, and why? A crash-stop is terminal; otherwise the hard step cap or
-            // the distinct-finalization budget can end it. `step` is this step's 0-based
-            // index; `step + 1` is the count.
-            let ended: Option<&'static str> = if episode_terminal {
-                Some("crash_stop")
-            } else if step + 1 >= steps {
+            // step, and why? Only the hard step cap or the distinct-finalization budget
+            // end it. A crash-stop is NOT terminal (the episode continues over the
+            // surviving quorum). `step` is this step's 0-based index; `step + 1` is the
+            // count.
+            let ended: Option<&'static str> = if step + 1 >= steps {
                 Some("step_cap")
             } else {
                 (observed_finalizations.len() >= finalization_budget).then_some("budget")
@@ -1593,22 +1607,34 @@ mod tests {
     }
 
     #[test]
-    fn env_tag_separates_post_amnesia_from_every_other_environment() {
-        // The amnesia bit keys a distinct Q-state / novelty slot, so post-amnesia
-        // node 0 no longer aliases the pre-amnesia Honest environment (nor any role).
+    fn env_tag_separates_post_amnesia_and_post_crash_from_every_other_environment() {
+        use adversary::AdversaryRole::Honest;
+        // The amnesia and crashed bits each key a distinct Q-state / novelty slot, so a
+        // post-amnesia or post-crash node 0 no longer aliases the pre-fault Honest
+        // environment, each other, or any role.
         assert_ne!(AMNESIA_TAG, 0, "the amnesia tag must be nonzero");
+        assert_ne!(CRASHED_TAG, 0, "the crashed tag must be nonzero");
+        assert_ne!(AMNESIA_TAG, CRASHED_TAG, "amnesia and crashed must differ");
         assert_eq!(
-            env_tag(adversary::AdversaryRole::Honest, false),
-            adversary::AdversaryRole::Honest.tag(),
-            "no amnesia reduces to the role tag"
+            env_tag(Honest, false, false),
+            Honest.tag(),
+            "neither bit reduces to the role tag"
+        );
+        let amnesiac = env_tag(Honest, true, false);
+        let crashed = env_tag(Honest, false, true);
+        assert_ne!(
+            amnesiac,
+            env_tag(Honest, false, false),
+            "amnesia differs from Honest"
         );
         assert_ne!(
-            env_tag(adversary::AdversaryRole::Honest, true),
-            env_tag(adversary::AdversaryRole::Honest, false),
-            "post-amnesia must differ from Honest"
+            crashed,
+            env_tag(Honest, false, false),
+            "crashed differs from Honest"
         );
+        assert_ne!(amnesiac, crashed, "amnesia and crashed key different rows");
         for role in [
-            adversary::AdversaryRole::Honest,
+            Honest,
             adversary::AdversaryRole::Disrupter,
             adversary::AdversaryRole::Conflicter,
             adversary::AdversaryRole::Nuller,
@@ -1617,16 +1643,24 @@ mod tests {
             adversary::AdversaryRole::Outdated,
         ] {
             assert_ne!(
-                env_tag(adversary::AdversaryRole::Honest, true),
-                env_tag(role, false),
+                amnesiac,
+                env_tag(role, false, false),
                 "post-amnesia must not alias {role:?}"
             );
-            // Equivalently, every role tag is distinct from AMNESIA_TAG, so no role
-            // environment collides with the post-amnesia environment as a Q-state key.
+            assert_ne!(
+                crashed,
+                env_tag(role, false, false),
+                "post-crash must not alias {role:?}"
+            );
             assert_ne!(
                 role.tag(),
                 AMNESIA_TAG,
                 "{role:?} tag must differ from AMNESIA_TAG"
+            );
+            assert_ne!(
+                role.tag(),
+                CRASHED_TAG,
+                "{role:?} tag must differ from CRASHED_TAG"
             );
         }
     }
@@ -1813,8 +1847,8 @@ mod tests {
         for (i, a) in byz.iter().enumerate() {
             for b in &byz[i + 1..] {
                 assert_ne!(
-                    env_tag(*a, false),
-                    env_tag(*b, false),
+                    env_tag(*a, false, false),
+                    env_tag(*b, false, false),
                     "a {a:?}<->{b:?} switch must change the Q-state role component"
                 );
             }

@@ -117,9 +117,11 @@ pub(crate) enum Action {
     /// fault heals, so no packet is lost.
     PacketReorder,
     /// Crash-stop the single faultable identity ([`crate::BYZANTINE_IDX`]): abort
-    /// its engine and application tasks so they can never send again. TERMINAL --
-    /// the episode ends after this action; the crashed node stays out of the
-    /// liveness watch but its retained reporter remains in the safety set.
+    /// its engine and application tasks so they can never send again. PERMANENT but
+    /// NOT terminal. Node 0 stays down for the rest of the episode while Mallory keeps
+    /// perturbing the surviving quorum (nodes 1-3). The crashed node is dropped from
+    /// the reactive finalization set and the liveness watch, but its retained reporter
+    /// (pre-crash history) stays in the safety set.
     CrashStop,
     /// Crash then durably restart the single faultable identity on its EXISTING
     /// storage partition: the node loses volatile state, replays its journal, and
@@ -335,16 +337,16 @@ impl Action {
     /// draws come from the runtime RNG so the pump applies a deterministic
     /// transform.
     ///
-    /// `role_active` restricts the packet-fault target: when a Byzantine role owns
-    /// node 0 it holds RAW channels (no pump / sniffer), so a `node:0` packet fault
-    /// would match nothing -- the target is then drawn from the honest managed nodes
-    /// `{1, 2, 3}` instead of all four. With no role active the target is drawn from
-    /// all four exactly as before, so an Honest-episode replay is unperturbed.
-    pub(crate) fn sample(self, rng: &mut impl Rng, role_active: bool) -> FaultPlan {
-        // The lowest packet-fault target: node 0 is excluded when it is an unmanaged
-        // byzantine adversary (see above). This does not draw RNG, so the non-packet
-        // arms are unaffected.
-        let node_lo = usize::from(role_active);
+    /// `exclude_node0` restricts the packet-fault target: node 0 is dropped from the
+    /// target set `{1, 2, 3}` (instead of all four) when it has no live pump / sniffer
+    /// to match, i.e. when a Byzantine role owns it (RAW channels) or it is
+    /// crash-stopped (no engine). Otherwise the target is drawn from all four exactly
+    /// as before, so an Honest-episode replay is unperturbed.
+    pub(crate) fn sample(self, rng: &mut impl Rng, exclude_node0: bool) -> FaultPlan {
+        // The lowest packet-fault target: node 0 is excluded when it has no live
+        // pump / sniffer (byzantine-owned or crashed). This does not draw RNG, so the
+        // non-packet arms are unaffected.
+        let node_lo = usize::from(exclude_node0);
         match self {
             Action::NoFault => FaultPlan::None,
             Action::IsolateNodeWindow => FaultPlan::IsolateByzantine,
@@ -401,11 +403,16 @@ impl Action {
 /// most one is ever active without any masking, and all three lifecycle faults
 /// target the running managed node 0.
 ///
-/// Once that node is crash-stopped (`node0_crashed`), a crash-stop is terminal, so
-/// only [`Action::NoFault`] stays legal: every fault (including a resurrection via
-/// [`Action::CrashRestartDurable`] or [`Action::AmnesiaRestart`]) is masked out, and
-/// the Q-core then never selects or bootstraps it. A durable restart returns the
-/// node to running, which clears the mask again.
+/// Once that node is crash-stopped (`node0_crashed`) the crash is PERMANENT for the
+/// episode, but the episode CONTINUES over the surviving quorum. The three lifecycle
+/// faults are masked (no re-crash of a dead node, and no resurrection, since a
+/// crash-stop is permanent within the episode) and so is [`Action::IsolateNodeWindow`]
+/// (cutting off an already-dead node is a no-op). The transient
+/// [`Action::PartitionWindow`] and
+/// packet faults stay legal, so Mallory can keep perturbing nodes 1-3 (their targets
+/// exclude node 0 at sample time). [`Action::SetRole`] stays masked (a crashed Honest
+/// node 0 has no multiplexer). Because node 0 never returns, `node0_crashed` stays set
+/// for every later step.
 ///
 /// When a Byzantine role owns node 0 (`role_active`) OR node 0 has become an
 /// amnesiac (`node0_amnesiac`, an empty-storage restart that may equivocate), node 0
@@ -437,8 +444,15 @@ pub(crate) fn legal_mask(
     role_switches_exhausted: bool,
 ) -> [bool; N_ACTIONS] {
     if node0_crashed {
-        let mut mask = [false; N_ACTIONS];
-        mask[Action::NoFault.id()] = true;
+        // Node 0 is permanently down, but the episode keeps perturbing nodes 1-3.
+        // Legal: NoFault, PartitionWindow, and the five packet faults (targets exclude
+        // node 0). Masked: the three lifecycle faults, IsolateNodeWindow, and SetRole.
+        let mut mask = [true; N_ACTIONS];
+        mask[Action::CrashStop.id()] = false;
+        mask[Action::CrashRestartDurable.id()] = false;
+        mask[Action::AmnesiaRestart.id()] = false;
+        mask[Action::IsolateNodeWindow.id()] = false;
+        mask[Action::SetRole.id()] = false;
         return mask;
     }
     let mut mask = [true; N_ACTIONS];
@@ -525,20 +539,26 @@ mod tests {
     }
 
     #[test]
-    fn legal_mask_crashed_masks_every_fault_but_no_fault() {
-        // A crash-stop is terminal: once the faultable node is crashed, only
-        // NoFault stays legal, so no fault (including a durable or amnesia restart)
-        // can be selected or bootstrapped.
+    fn legal_mask_crashed_keeps_survivor_faults_and_masks_lifecycle() {
+        // A crash-stop is permanent but the episode continues over the surviving
+        // quorum. NoFault, PartitionWindow, and the five packet faults stay legal;
+        // the three lifecycle faults, IsolateNodeWindow (a no-op on a dead node), and
+        // SetRole are masked.
         let mask = legal_mask(true, false, false, false);
         assert_eq!(mask.len(), N_ACTIONS);
-        assert!(
-            mask[Action::NoFault.id()],
-            "NoFault stays legal when crashed"
-        );
-        for &action in CATALOG.iter().filter(|&&a| a != Action::NoFault) {
-            assert!(
-                !mask[action.id()],
-                "{action:?} must be masked out once the node is crashed"
+        let masked = [
+            Action::CrashStop,
+            Action::CrashRestartDurable,
+            Action::AmnesiaRestart,
+            Action::IsolateNodeWindow,
+            Action::SetRole,
+        ];
+        for &action in CATALOG.iter() {
+            let want = !masked.contains(&action);
+            assert_eq!(
+                mask[action.id()],
+                want,
+                "{action:?} legality once node 0 is crashed"
             );
         }
     }
