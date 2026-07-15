@@ -626,11 +626,15 @@ where
                 ack,
                 ..
             } => {
-                // We broadcast the block before persisting it because
-                // durability is not required until certify. Because the send
-                // precedes vote durability, a leader that crashes here may
-                // broadcast a conflicting block for the same round after
-                // restart.
+                // To lower view latency as much as possible while preserving
+                // safety, we broadcast the block before persisting it
+                // (durability is not required until certify). A leader that
+                // crashes here may broadcast a conflicting block for the same
+                // round after restart. This is tolerated: extra block bytes
+                // cannot form a conflicting certificate (unlike votes), block
+                // storage tolerates multiple candidates per round (see
+                // [Mailbox::get_verified]), and the propose paths skip or
+                // reuse a recovered block on restart.
                 buffer.send(round, Arc::clone(&block), recipients);
                 self.persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
