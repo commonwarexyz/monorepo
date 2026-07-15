@@ -19,6 +19,13 @@ pub use write::Write;
 struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
 
 impl Completion {
+    /// Share the result of `sync`.
+    fn new(
+        sync: impl std::future::Future<Output = Result<(), crate::Error>> + Send + 'static,
+    ) -> Self {
+        Self(sync.boxed().shared())
+    }
+
     /// Return a handle for the sync result.
     fn handle(&self) -> crate::Handle<()> {
         crate::Handle::from_future(self.0.clone())
@@ -30,20 +37,16 @@ impl Completion {
     }
 }
 
-impl From<crate::Handle<()>> for Completion {
-    fn from(handle: crate::Handle<()>) -> Self {
-        Self(handle.boxed().shared())
-    }
-}
-
 /// Tracks whether blob mutations still need a sync.
 ///
 /// Callers rely on three properties:
-/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
+/// - Every operation that mutates the blob first waits for a pending sync, so a started
 ///   sync's coverage is never disturbed by later writes.
-/// - [SyncState::start_sync] on a [SyncState::Pending] state returns the in-flight sync's
-///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
-///   observe outstanding work.
+/// - [SyncState::start_sync] and [SyncState::start_sync_after] on a [SyncState::Pending]
+///   state return the pending sync's handle (completed syncs resolve immediately), so
+///   re-requesting a sync is a cheap way to observe outstanding work. A reused sync keeps
+///   its original semantics: one started by [SyncState::start_sync_after] progresses only
+///   while observed, even through a handle obtained from [SyncState::start_sync].
 /// - A failure is never lost: every handle cloned from the shared completion reports it, and
 ///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
 ///   which also marks the state [SyncState::Dirty] since the mutations still need durability.
@@ -52,7 +55,7 @@ enum SyncState {
     Clean,
     // Unsynced mutations need a sync.
     Dirty,
-    // A started sync is in flight.
+    // A started (possibly gated) sync covers all mutations.
     Pending(Completion),
 }
 
@@ -149,7 +152,40 @@ impl SyncState {
             Self::Clean => crate::Handle::ready(Ok(())),
             Self::Dirty => {
                 // Store a shared completion so repeated calls observe the same sync.
-                let pending = Completion::from(blob.start_sync().await);
+                let pending = Completion::new(blob.start_sync().await);
+                let handle = pending.handle();
+                *self = Self::Pending(pending);
+                handle
+            }
+            Self::Pending(pending) => pending.handle(),
+        }
+    }
+
+    /// Start making pending mutations durable once `gate` resolves successfully, returning a
+    /// handle for completion.
+    ///
+    /// Unlike [SyncState::start_sync], the sync is not in flight when this returns: it is
+    /// issued only after `gate` resolves `Ok` (a gate failure fails the sync without issuing
+    /// it), and it progresses only while the returned handle is polled or when the next
+    /// operation drives it via [SyncState::wait_for_pending]. `gate` must therefore complete
+    /// independently of this state, or the next operation deadlocks waiting for it.
+    ///
+    /// The returned handle covers only this state's mutations: a [SyncState::Clean] state has
+    /// nothing to gate and a [SyncState::Pending] state reuses the in-flight sync, so callers
+    /// composing with `gate` must observe it separately.
+    fn start_sync_after(
+        &mut self,
+        blob: &impl crate::Blob,
+        gate: impl std::future::Future<Output = Result<(), crate::Error>> + Send + 'static,
+    ) -> crate::Handle<()> {
+        match self {
+            Self::Clean => crate::Handle::ready(Ok(())),
+            Self::Dirty => {
+                let blob = blob.clone();
+                let pending = Completion::new(async move {
+                    gate.await?;
+                    blob.sync().await
+                });
                 let handle = pending.handle();
                 *self = Self::Pending(pending);
                 handle

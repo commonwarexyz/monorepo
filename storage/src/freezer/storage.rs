@@ -690,13 +690,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Rewind oversized to the committed section and key size
+                // Rewind oversized to the committed section and key size. The rewind makes
+                // its truncations durable before returning.
                 oversized
                     .rewind(checkpoint.section, checkpoint.oversized_size)
                     .await?;
-
-                // Sync oversized
-                oversized.sync(checkpoint.section).await?;
 
                 // Resize table if needed
                 let expected_table_len = Self::table_offset(checkpoint.table_size);

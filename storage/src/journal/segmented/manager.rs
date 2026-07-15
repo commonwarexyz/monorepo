@@ -13,7 +13,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
 };
-use futures::future::{join_all, try_join_all};
+use futures::future::{join_all, try_join_all, FutureExt as _};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -37,6 +37,23 @@ pub trait SectionBuffer: Send + Sync {
     /// underlying blob and may reuse an in-flight handle when no newer writes need syncing.
     fn start_sync(&mut self) -> impl Future<Output = Handle<()>> + Send;
 
+    /// Start making data currently accepted by this buffer durable once `gate` resolves
+    /// successfully.
+    ///
+    /// Buffered writes are flushed immediately, but unlike [SectionBuffer::start_sync] the
+    /// underlying sync is not in flight when this returns: it is issued only after `gate`
+    /// resolves `Ok` (a gate failure fails it without issuing), and it progresses only while
+    /// the returned handle is polled or a later operation waits for it. `gate` must therefore
+    /// complete independently of this buffer, or the next operation deadlocks waiting for it.
+    ///
+    /// The gate orders only a sync started by this call: an already-pending sync (gated or
+    /// not) is reused as-is, and a buffer with nothing to sync resolves immediately, so
+    /// callers composing with `gate` must observe it separately.
+    fn start_sync_after(
+        &mut self,
+        gate: impl Future<Output = Result<(), RError>> + Send + 'static,
+    ) -> impl Future<Output = Handle<()>> + Send;
+
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
@@ -55,6 +72,13 @@ impl<B: Blob> SectionBuffer for Writer<B> {
 
     async fn start_sync(&mut self) -> Handle<()> {
         Self::start_sync(self).await
+    }
+
+    async fn start_sync_after(
+        &mut self,
+        gate: impl Future<Output = Result<(), RError>> + Send + 'static,
+    ) -> Handle<()> {
+        Self::start_sync_after(self, gate).await
     }
 
     async fn wait_for_sync(&mut self) -> Result<(), RError> {
@@ -77,6 +101,13 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn start_sync(&mut self) -> Handle<()> {
         Self::start_sync(self).await
+    }
+
+    async fn start_sync_after(
+        &mut self,
+        gate: impl Future<Output = Result<(), RError>> + Send + 'static,
+    ) -> Handle<()> {
+        Self::start_sync_after(self, gate).await
     }
 
     async fn wait_for_sync(&mut self) -> Result<(), RError> {
@@ -159,7 +190,8 @@ pub struct Config<F> {
 ///
 /// # In-flight syncs
 ///
-/// Syncs started by [Manager::start_sync] complete in the background, so every path that
+/// Syncs started by [Manager::start_sync] complete in the background, and syncs started by
+/// [Manager::start_sync_after] complete when driven, so every path that
 /// removes a blob from `blobs` (`prune`, `remove_section`, `rewind`, `clear`, `destroy`) must
 /// call [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared
 /// completion first, guaranteeing that caller-held sync handles always report the sync's true
@@ -315,6 +347,43 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.synced.inc_by(futures.len() as u64);
         let handles = join_all(futures).await;
         Ok(Handle::from_future(async move {
+            try_join_all(handles).await.map(|_| ())
+        }))
+    }
+
+    /// Start syncing the given `sections` to storage once `gate` resolves successfully.
+    ///
+    /// Each selected buffer follows [SectionBuffer::start_sync_after] semantics: nothing is
+    /// in flight when this returns, and the gated syncs progress only while the returned
+    /// handle is polled or a later operation on a selected section waits for them. The
+    /// returned handle completes once `gate` and every selected section's sync complete,
+    /// failing with the first error encountered.
+    pub async fn start_sync_after(
+        &mut self,
+        sections: impl crate::Sections,
+        gate: Handle<()>,
+    ) -> Result<Handle<()>, Error> {
+        let sections = sections.sections().collect::<BTreeSet<_>>();
+        for &section in &sections {
+            self.prune_guard(section)?;
+        }
+        let gate = gate.shared();
+        let futures: Vec<_> = self
+            .blobs
+            .iter_mut()
+            .filter(|(section, _)| sections.contains(section))
+            .map(|(_, blob)| blob.start_sync_after(gate.clone()))
+            .collect();
+
+        // Count every selected section, including reused and clean no-op syncs, matching
+        // `sync` and `sync_all`.
+        self.synced.inc_by(futures.len() as u64);
+        let handles = join_all(futures).await;
+        Ok(Handle::from_future(async move {
+            // The buffer handles do not uniformly embed the gate (clean buffers resolve
+            // immediately and pending syncs are reused as-is), so the composed handle must
+            // await it itself.
+            gate.await?;
             try_join_all(handles).await.map(|_| ())
         }))
     }
@@ -525,10 +594,7 @@ mod tests {
     use super::*;
     use commonware_runtime::{deterministic, Runner as _, Spawner as _, Supervisor as _};
     use commonware_utils::{channel::oneshot, sync::Mutex};
-    use futures::{
-        future::{BoxFuture, Shared},
-        FutureExt as _,
-    };
+    use futures::future::{BoxFuture, Shared};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -568,6 +634,29 @@ mod tests {
             let (sender, receiver) = oneshot::channel();
             self.pending.lock().push(sender);
             let sync = async move {
+                receiver.await.map_err(|_| RError::Closed)??;
+                Ok(())
+            }
+            .boxed()
+            .shared();
+            self.syncing = Some(sync.clone());
+            Handle::from_future(sync)
+        }
+
+        async fn start_sync_after(
+            &mut self,
+            gate: impl Future<Output = Result<(), RError>> + Send + 'static,
+        ) -> Handle<()> {
+            if let Some(syncing) = &self.syncing {
+                return Handle::from_future(syncing.clone());
+            }
+            // Register the pending sync only once the gate resolves, mirroring the runtime
+            // buffers' deferred issuance.
+            let pending = self.pending.clone();
+            let sync = async move {
+                gate.await?;
+                let (sender, receiver) = oneshot::channel();
+                pending.lock().push(sender);
                 receiver.await.map_err(|_| RError::Closed)??;
                 Ok(())
             }
@@ -708,6 +797,83 @@ mod tests {
             first.await.expect("first sync handle should complete");
             second.await.expect("reused sync handle should complete");
             manager.destroy().await.expect("destroy failed");
+        });
+    }
+
+    #[test]
+    fn test_start_sync_after_defers_issuance_until_gate() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let wait_for_syncs = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(pending.clone(), wait_for_syncs);
+            let mut manager = Manager::init(context.child("manager"), cfg)
+                .await
+                .expect("failed to initialize manager");
+
+            manager
+                .get_or_create(1)
+                .await
+                .expect("failed to create section");
+            let (gate_release, gate) = oneshot::channel::<Result<(), RError>>();
+            let gate = Handle::from_receiver(gate);
+            let handle = manager
+                .start_sync_after(1, gate)
+                .await
+                .expect("failed to start gated sync");
+            futures::pin_mut!(handle);
+
+            // Driving the handle before the gate resolves must not issue the sync.
+            assert!(futures::poll!(handle.as_mut()).is_pending());
+            assert!(
+                pending.lock().is_empty(),
+                "sync must not be issued before the gate resolves"
+            );
+
+            // Once the gate resolves, driving the handle issues the sync.
+            gate_release.send(Ok(())).expect("gate receiver dropped");
+            assert!(futures::poll!(handle.as_mut()).is_pending());
+            assert_eq!(
+                pending.lock().len(),
+                1,
+                "sync must be issued once the gate resolves"
+            );
+
+            release_pending_syncs(&pending);
+            handle.await.expect("gated sync handle should complete");
+            manager.destroy().await.expect("destroy failed");
+        });
+    }
+
+    #[test]
+    fn test_start_sync_after_gate_failure_never_issues_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let wait_for_syncs = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(pending.clone(), wait_for_syncs);
+            let mut manager = Manager::init(context.child("manager"), cfg)
+                .await
+                .expect("failed to initialize manager");
+
+            manager
+                .get_or_create(1)
+                .await
+                .expect("failed to create section");
+            let gate = Handle::ready(Err(RError::Closed));
+            let handle = manager
+                .start_sync_after(1, gate)
+                .await
+                .expect("failed to start gated sync");
+
+            assert!(handle.await.is_err(), "gate failure must fail the handle");
+            assert!(
+                pending.lock().is_empty(),
+                "sync must never be issued after a gate failure"
+            );
+
+            // The failure resurfaces from the buffer on the next operation.
+            assert!(manager.destroy().await.is_err());
         });
     }
 

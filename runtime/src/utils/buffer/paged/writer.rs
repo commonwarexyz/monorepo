@@ -965,6 +965,24 @@ impl<B: Blob> Writer<B> {
         self.sync_state.start_sync(&self.blob).await
     }
 
+    /// Flushes buffered data and begins making all pending mutations durable once `gate`
+    /// resolves successfully, returning a completion handle.
+    ///
+    /// Unlike [`Self::start_sync`], the sync is issued only after `gate` resolves `Ok` (a
+    /// gate failure fails it without issuing) and progresses only while the returned
+    /// [`Handle`] is polled or a later writer method waits for it, so `gate` must complete
+    /// independently of this writer. An already-pending sync is reused as-is, without the
+    /// gate.
+    pub async fn start_sync_after(
+        &mut self,
+        gate: impl std::future::Future<Output = Result<(), Error>> + Send + 'static,
+    ) -> Handle<()> {
+        if let Err(err) = self.flush_internal(true, false).await {
+            return Handle::ready(Err(err));
+        }
+        self.sync_state.start_sync_after(&self.blob, gate)
+    }
+
     /// Wait for any started sync to complete without starting a new sync.
     pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
         self.sync_state.wait_for_pending().await

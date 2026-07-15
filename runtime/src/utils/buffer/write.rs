@@ -2,7 +2,7 @@ use crate::{
     buffer::{tip::Buffer, SyncState},
     Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs,
 };
-use std::num::NonZeroUsize;
+use std::{future::Future, num::NonZeroUsize};
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
 /// updating data.
@@ -245,6 +245,27 @@ impl<B: Blob> Write<B> {
         }
 
         self.sync_state.start_sync(&self.blob).await
+    }
+
+    /// Flush buffered bytes and begin durably syncing mutations tracked by this writer once
+    /// `gate` resolves successfully.
+    ///
+    /// Unlike [`Self::start_sync`], the sync is issued only after `gate` resolves `Ok` (a
+    /// gate failure fails it without issuing) and progresses only while the returned
+    /// [`Handle`] is polled or a later writer method waits for it, so `gate` must complete
+    /// independently of this writer. An already-pending sync is reused as-is, without the
+    /// gate.
+    pub async fn start_sync_after(
+        &mut self,
+        gate: impl Future<Output = Result<(), Error>> + Send + 'static,
+    ) -> Handle<()> {
+        if let Some((buf, offset)) = self.buffer.take() {
+            if let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await {
+                return Handle::ready(Err(err));
+            }
+        }
+
+        self.sync_state.start_sync_after(&self.blob, gate)
     }
 
     /// Wait for any started sync to complete without starting a new sync.
