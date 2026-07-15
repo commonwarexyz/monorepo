@@ -30,9 +30,9 @@
 //! included); `M` stays near 1 only when the indexed `P + N`-byte prefix is well-distributed, so
 //! use enough prefix bytes and high-entropy keys.
 //!
-//! A caller-held cursor can temporarily grow an inline partition to the spill threshold. The next
-//! index mutation of that partition spills it before access. [`Unordered::insert_and_retain`]
-//! performs the check after releasing its internal cursor.
+//! A caller-held cursor can temporarily grow an inline partition to or past the spill threshold.
+//! The next index mutation of that partition spills it before access.
+//! [`Unordered::insert_and_retain`] performs the check after releasing its internal cursor.
 
 mod cursor;
 mod partition;
@@ -690,6 +690,28 @@ mod tests {
             index.insert_and_retain(&other, 5, |_| true);
             assert_eq!(index.spilled_count(), 2);
             assert_eq!(index.get(&other).copied().collect::<Vec<_>>(), vec![4, 5]);
+        });
+    }
+
+    #[test_traced]
+    fn test_spill_after_get_mut_or_insert_cursor_growth() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index_spilling(context);
+            let key = [0x10, 0x01];
+
+            index.insert(&key, 1);
+            {
+                let mut cursor = index.get_mut_or_insert(&key, 2).unwrap();
+                assert_eq!(cursor.next().copied(), Some(1));
+                assert_eq!(cursor.next(), None);
+                cursor.insert(2);
+            }
+            assert_eq!(index.spilled_count(), 0);
+
+            // The next replay-style update spills before returning another collision cursor.
+            assert!(index.get_mut_or_insert(&key, 3).is_some());
+            assert_eq!(index.spilled_count(), 1);
+            assert_eq!(index.get(&key).copied().collect::<Vec<_>>(), vec![1, 2]);
         });
     }
 
