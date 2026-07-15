@@ -6,7 +6,7 @@
 //!
 //! - [`crash_stop`]: abort and await BOTH task handles so the old incarnation can
 //!   never send again, then mark it [`Crashed`](crate::ValidatorLifecycle::Crashed).
-//!   Terminal within the run -- no re-registration, no rebuild.
+//!   Terminal within the run, no re-registration, no rebuild.
 //! - [`abort_tasks`]: the shared abort+await step, also the FIRST step of the
 //!   runner's durable and amnesia restarts (so no second incarnation ever coexists
 //!   with the first).
@@ -33,7 +33,7 @@ pub(crate) const MALLORY_RESTART_DOWNTIME: Duration = Duration::from_secs(2);
 /// it is deterministic under replay and always distinct from the durable partition
 /// (`validator.to_string()`, which carries no `_gen` suffix) and from any prior
 /// incarnation's partition. Building on this empty partition means the engine finds
-/// no journaled storage to replay -- it has forgotten its prior durable state,
+/// no journaled storage to replay, it has forgotten its prior durable state,
 /// including signed votes (disk-loss / Byzantine amnesia).
 pub(crate) fn amnesia_partition<PK: Display>(validator: &PK, generation: u32) -> String {
     format!("{validator}_gen{generation}")
@@ -53,7 +53,7 @@ pub(crate) async fn crash_stop<P: Simplex>(mv: &mut ManagedValidator<P>) {
 ///
 /// Aborting the engine handle cascades to every engine sub-task (the runtime
 /// aborts a finished task's descendants), and awaiting each handle drives the
-/// aborted task to termination -- so once this returns, no task of the aborted
+/// aborted task to termination, so once this returns, no task of the aborted
 /// incarnation is still schedulable. The runner calls this FIRST on a durable
 /// restart, before re-registration, so a second incarnation never coexists with
 /// the first.

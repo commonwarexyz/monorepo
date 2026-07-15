@@ -9,13 +9,13 @@
 //!
 //! This descriptor is an *exact* key: the policy's fixed-size Q-table hashes it
 //! into a row, and colliding fingerprints share that row. There is no similarity
-//! metric and no approximate nearest-neighbour matching -- two states are either
+//! metric and no approximate nearest-neighbour matching, two states are either
 //! the same key or unrelated. That bounded-memory / exact-key tradeoff is
 //! deliberate and matches the novelty registries in [`crate::mallory::policy`].
 //! The features below are therefore chosen to be *view-relative* (offsets,
 //! spreads, and counts against the finalization frontier, never absolute view
 //! numbers) so that the same protocol situation at different absolute views maps
-//! to the same key and its novelty is a genuine, recurring reward signal --
+//! to the same key and its novelty is a genuine, recurring reward signal,
 //! unlike [`crate::state_cov::alpha`], whose tokens embed absolute views and so
 //! almost never recur across runs.
 
@@ -32,7 +32,7 @@ type HonestReporter<P> =
 
 /// View-relative protocol-state descriptor of the honest reporters: a compact
 /// fingerprint of their agreement state as offsets, spreads, and counts relative
-/// to the finalization frontier -- never absolute view numbers.
+/// to the finalization frontier, never absolute view numbers.
 pub(crate) fn state_descriptor<P: Simplex>(
     honest: &[HonestReporter<P>],
     max_participants: usize,

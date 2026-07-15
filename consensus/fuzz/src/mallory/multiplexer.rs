@@ -12,14 +12,14 @@
 //! Only ONE actor is ever live at a time (abort-then-respawn, never
 //! pre-spawn-and-gate), so the single-consumer channel mailboxes always have
 //! exactly one owner. [`set_role`](RoleMultiplexer::set_role) aborts and awaits the
-//! live actor's [`Handle`] FIRST -- driving it to termination and cascading to its
-//! sub-tasks -- before re-registering and spawning the replacement, so no second
+//! live actor's [`Handle`] FIRST, driving it to termination and cascading to its
+//! sub-tasks, before re-registering and spawning the replacement, so no second
 //! incarnation ever coexists with the first.
 //!
 //! # Re-registration preserves connectivity
 //!
 //! Re-registration through the owned [`Oracle`] clone overwrites node 0's three
-//! mailboxes -- disconnecting the aborted actor's receivers -- while leaving the
+//! mailboxes, disconnecting the aborted actor's receivers, while leaving the
 //! honest<->node0 links intact, so the honest quorum keeps delivering to (and
 //! hearing from) node 0's fresh actor. This mirrors the durable-restart
 //! re-registration in [`crate::mallory::runner`].

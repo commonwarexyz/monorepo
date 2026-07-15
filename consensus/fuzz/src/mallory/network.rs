@@ -6,7 +6,7 @@
 //! topology (link set). It owns a clone of the setup [`Oracle`] and drives every
 //! partition through [`crate::utils::apply_partition`]. Each transient partition
 //! is applied for one observation window and then [`Topology::heal`]ed back to a
-//! full mesh, so at most one is ever active -- the v1 "at most one transient
+//! full mesh, so at most one is ever active, the v1 "at most one transient
 //! network fault" contract (see [`crate::mallory`]).
 //!
 //! The packet-fault layer sits BELOW the sniffer so the sniffer records exactly
@@ -55,7 +55,7 @@ use std::{
 
 /// The canonical `n = 4` partition `{{0},{1,2,3}}` that isolates node 0. Node 0
 /// is [`BYZANTINE_IDX`], the single faultable identity, so this leaves the other
-/// three -- an N4F0C4 quorum -- connected. Index 4 isolates node 0 specifically,
+/// three, an N4F0C4 quorum, connected. Index 4 isolates node 0 specifically,
 /// which is correct only because the v1 contract fixes the faultable identity at
 /// index 0.
 const ISOLATE_BYZANTINE: usize = 4;
@@ -133,7 +133,7 @@ pub(crate) enum PacketFaultKind {
     /// never reaches the sniffer, so it is absent from the happens-before log.
     Loss { drop_count: u32 },
     /// Corrupt the raw wire bytes of the next `count` matching packets WITHOUT
-    /// re-signing -- XOR the byte at `offset % len` with `mask` -- then forward
+    /// re-signing, XOR the byte at `offset % len` with `mask`, then forward
     /// unchanged. A corrupted message fails to decode, so the sniffer drops it
     /// from the happens-before log and the engine rejects it. `count` is bounded
     /// like a loss so a run still completes.
@@ -150,7 +150,7 @@ pub(crate) enum PacketFaultKind {
 }
 
 /// A concrete, active packet fault: the [`PacketFaultKind`] transform plus its
-/// target -- the receiving honest node index and the [`SniffChannel`] the pump
+/// target, the receiving honest node index and the [`SniffChannel`] the pump
 /// matches its own `(node, channel)` against.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PacketFault {
@@ -159,9 +159,9 @@ pub(crate) struct PacketFault {
     pub kind: PacketFaultKind,
 }
 
-/// The single active packet fault, shared (cheap `Arc` clone) by the runner --
+/// The single active packet fault, shared (cheap `Arc` clone) by the runner,
 /// which [`set`](Self::set)s it at a step's start and [`clear`](Self::clear)s it
-/// at the step's end -- and every [`pump`], which reads it per packet. Exactly
+/// at the step's end, and every [`pump`], which reads it per packet. Exactly
 /// one fault is active at a time, so a pump acts only when the active fault's
 /// `(node, channel)` matches its own.
 #[derive(Clone)]
@@ -214,7 +214,7 @@ impl PacketFaultCell {
 
     /// Install `fault` as the single active fault: reset the match flag and arm
     /// the per-packet budget of a `Loss` (drops) or a `Corrupt` (mutations). The
-    /// previous fault (if any) must have been [`clear`](Self::clear)ed first --
+    /// previous fault (if any) must have been [`clear`](Self::clear)ed first,
     /// the runner heals every step.
     pub(crate) fn set(&self, fault: PacketFault) {
         let (drops, corrupts) = match fault.kind {
@@ -358,7 +358,7 @@ fn reorder_step<P: PublicKey>(
 /// Relay one honest node's one channel from the simulated receiver `sim_rx` into
 /// the internal FIFO `internal_tx` the [`PacketFaultReceiver`] drains, applying
 /// the active packet fault from `cell`. With no matching fault the pump is a
-/// transparent, in-order relay -- an unbounded FIFO -- so liveness and order are
+/// transparent, in-order relay, an unbounded FIFO, so liveness and order are
 /// unchanged. It draws no randomness (the fault's parameters were sampled by the
 /// runner; `select!` is biased, not random), so two same-seed runs relay
 /// identically.
@@ -370,7 +370,7 @@ fn reorder_step<P: PublicKey>(
 /// WAIT for quiescence before clearing the fault (the F3 barrier). The flush branch
 /// is biased first so a pending flush drains promptly even under a steady packet
 /// stream, and a per-packet delay in the sim branch is polled to completion before
-/// the flush is handled -- so the ack implies no in-flight delayed packet remains.
+/// the flush is handled, so the ack implies no in-flight delayed packet remains.
 /// Breaks when the simulated channel closes, the internal receiver is dropped, or
 /// the runner drops the flush sender at teardown (any buffer still held is then
 /// discarded).
@@ -854,7 +854,7 @@ mod tests {
     fn flush_ack_implies_the_reorder_buffer_is_drained() {
         // F3 request-reply barrier: the pump replies to a flush only AFTER draining
         // its held reorder buffer, so once the runner's ack await returns, every held
-        // packet is already queued for the engine -- none remains buffered in the
+        // packet is already queued for the engine, none remains buffered in the
         // pump to leak into the next decision step.
         let executor = deterministic::Runner::seeded(1);
         let drained = executor.start(|context| async move {

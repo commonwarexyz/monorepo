@@ -19,7 +19,7 @@
 //! max, so it can neither be enacted nor receive temporal-difference credit.
 //!
 //! The Q-table and the novelty registries live in a process-global [`Campaign`]
-//! that persists across inputs -- Algorithm 1's outer `repeat until time
+//! that persists across inputs, Algorithm 1's outer `repeat until time
 //! budget`. Because that state is persistent, replaying the same input bytes can
 //! produce a different schedule than the first time (the policy has since moved
 //! on); this is inherent to online RL over libFuzzer.
@@ -47,8 +47,8 @@ const W_STATE: f64 = 1.0;
 const W_HB: f64 = 1.0;
 
 /// Fixed number of Q-table rows (a power of two). A state maps to a row by
-/// `state & (Q_TABLE_SIZE - 1)`; distinct states that collide share a row -- a
-/// bounded, graceful approximation -- so campaign memory never grows.
+/// `state & (Q_TABLE_SIZE - 1)`; distinct states that collide share a row, a
+/// bounded, graceful approximation, so campaign memory never grows.
 const Q_TABLE_SIZE: usize = 1 << 16;
 /// Fixed number of membership slots per novelty registry (a power of two). A
 /// fingerprint sets one bit; slot collisions make a distinct fingerprint

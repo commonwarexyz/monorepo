@@ -254,7 +254,7 @@ impl RoleBandit {
     }
 
     /// Non-stationary running-average update of the chosen role's Q-value toward the
-    /// episode's productivity `reward` -- the PER-STEP-averaged novelty in `[-2, 0]`
+    /// episode's productivity `reward`, the PER-STEP-averaged novelty in `[-2, 0]`
     /// (`0` = every step reached a novel state and happens-before fingerprint, `-2` =
     /// none): `q[role] <- (1 - ALPHA) q[role] + ALPHA reward`. Constant-alpha (not
     /// `1/n`) so the bandit tracks recent productivity as campaign novelty saturates.

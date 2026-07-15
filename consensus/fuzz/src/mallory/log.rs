@@ -2,7 +2,7 @@
 //!
 //! The Mallory runner pushes one line per OODA step (the selected fault, its
 //! legal mask, sampled parameters, applied status, previous/next state, reward,
-//! and heal result). The buffer is bounded and quiet by default -- entries are
+//! and heal result). The buffer is bounded and quiet by default, entries are
 //! only surfaced by [`take`], which `fuzz()` calls in its panic-catching path.
 //! Successful runs flush the buffer so the next run starts clean.
 //!
@@ -24,7 +24,7 @@ fn buf() -> &'static Mutex<VecDeque<String>> {
     LOG.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-/// Append a line. Bounded -- oldest entries are dropped beyond an internal cap.
+/// Append a line. Bounded, oldest entries are dropped beyond an internal cap.
 pub fn push(line: String) {
     let mut b = buf().lock();
     if b.len() >= LOG_CAP {

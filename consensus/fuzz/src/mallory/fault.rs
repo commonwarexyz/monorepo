@@ -19,7 +19,7 @@ use std::time::Duration;
 /// The `n = 4` set partitions (indices into [`SetPartition::N4`]) that split the
 /// validators two-against-two: `{{0,1},{2,3}}`, `{{0,2},{1,3}}`, `{{0,3},{1,2}}`.
 /// None contains a singleton, so neither side reaches the N4F0C4 quorum of three
-/// during the window -- all progress stalls until the partition heals.
+/// during the window, all progress stalls until the partition heals.
 const PARTITION_2_2: [usize; 3] = [5, 6, 7];
 
 /// Mallory fixes `n = 4` honest validators (see [`crate::mallory`]); a packet
@@ -30,7 +30,7 @@ const MALLORY_N: usize = 4;
 /// soon as the fault heals.
 const PACKET_DELAY_MS_MIN: u64 = 10;
 const PACKET_DELAY_MS_MAX: u64 = 250;
-/// Sampled packet-loss bounds: a small count so a run still completes -- Simplex
+/// Sampled packet-loss bounds: a small count so a run still completes, Simplex
 /// backfills the gap once the fault heals.
 const PACKET_LOSS_MIN: u32 = 1;
 const PACKET_LOSS_MAX: u32 = 8;
@@ -131,7 +131,7 @@ pub(crate) enum Fault {
     CrashRestartDurable,
     /// Crash then restart the single faultable identity on a FRESH (empty) storage
     /// partition: the node forgets its durable state (including signed votes), so it
-    /// may equivocate (double-vote a view it already signed) -- disk-loss /
+    /// may equivocate (double-vote a view it already signed), disk-loss /
     /// Byzantine amnesia. Counts as BYZANTINE: the node runs but is excluded from the
     /// honest safety and liveness sets for the rest of the episode. Not terminal.
     AmnesiaRestart,
@@ -179,7 +179,7 @@ pub(crate) const MALLORY_MAX_ROLE_SWITCHES: u32 = 3;
 /// window's end (a reorder fault is additionally flushed so its held buffer
 /// drains in order). `apply_partition` either installs a topology plan
 /// or panics on an oracle error, so reaching the observation window is itself the
-/// enactment acknowledgement -- a fault that fails to install is a wiring bug,
+/// enactment acknowledgement, a fault that fails to install is a wiring bug,
 /// not a silently-skipped step.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FaultPlan {
@@ -287,7 +287,7 @@ impl FaultPlan {
     /// Whether this plan installs a transient network/packet fault. The lifecycle
     /// faults ([`FaultPlan::CrashStop`], [`FaultPlan::CrashRestartDurable`],
     /// [`FaultPlan::AmnesiaRestart`]) and the role switch ([`FaultPlan::SetRole`]) are
-    /// NOT such faults -- they are enacted against the managed validator or the
+    /// NOT such faults, they are enacted against the managed validator or the
     /// multiplexer, not the network, and the role switch persists rather than being
     /// healed. Test-only: the runner classifies each plan directly via its heal-match
     /// arms and its `Enactment` accounting, so this survives only as a catalog-property
@@ -400,7 +400,7 @@ impl Fault {
 
 /// The per-step legal-fault mask: which catalog faults the policy may select
 /// this step. With an Honest faultable identity running, every catalog fault
-/// except [`Fault::SetRole`] (which needs a byzantine multiplexer) is legal -- the
+/// except [`Fault::SetRole`] (which needs a byzantine multiplexer) is legal, the
 /// loop heals every transient topology/packet fault before the next decision, so at
 /// most one is ever active without any masking, and all three lifecycle faults
 /// target the running managed node 0.
@@ -420,11 +420,11 @@ impl Fault {
 /// amnesiac (`node0_amnesiac`, an empty-storage restart that may equivocate), node 0
 /// is now the single Byzantine identity, so ALL THREE lifecycle faults
 /// ([`Fault::CrashStop`], [`Fault::CrashRestartDurable`], [`Fault::AmnesiaRestart`])
-/// are masked out -- this enforces the one-faultable-identity contract (no lifecycle
+/// are masked out, this enforces the one-faultable-identity contract (no lifecycle
 /// fault on a second node; no further lifecycle fault on the already-Byzantine
 /// identity). Under a role node 0 is UNMANAGED, so there is no
 /// [`ManagedValidator`](crate::ManagedValidator) to target at all. The topology
-/// faults stay legal and are complementary -- [`Fault::IsolateNodeWindow`]
+/// faults stay legal and are complementary, [`Fault::IsolateNodeWindow`]
 /// temporarily MUTES the adversary by cutting node 0 off, and
 /// [`Fault::PartitionWindow`] still stalls progress. The packet faults stay legal
 /// too; under a role their target is restricted to the honest managed nodes at
@@ -566,7 +566,7 @@ mod tests {
     }
 
     /// The three lifecycle faults are masked out whenever node 0 is the Byzantine
-    /// identity -- under a byzantine role or once it is amnesiac -- while the
+    /// identity, under a byzantine role or once it is amnesiac, while the
     /// topology and packet faults stay legal. Shared by the role and amnesia cases,
     /// which impose the same one-faultable-identity masking.
     fn assert_lifecycle_masked_topology_and_packet_legal(mask: [bool; N_FAULTS]) {
@@ -605,7 +605,7 @@ mod tests {
         // After an amnesia restart node 0 is Running but Byzantine (empty storage,
         // may equivocate): the one-faultable-identity contract masks every lifecycle
         // fault (including a second amnesia restart), while the topology and packet
-        // faults stay legal -- node 0 keeps its pump, so it is still a packet target.
+        // faults stay legal, node 0 keeps its pump, so it is still a packet target.
         assert_lifecycle_masked_topology_and_packet_legal(legal_mask(false, false, true, false));
     }
 
