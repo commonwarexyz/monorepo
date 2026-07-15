@@ -21,7 +21,7 @@ use commonware_utils::{
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
-use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc, time::Duration};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -93,7 +93,7 @@ const MAX_RAW_FUZZ_BYTES: usize = 32_768;
 const MAX_RECENT_DIGESTS: usize = (u8::MAX as usize) + 1;
 
 /// Subscription result paired with the digest requested so completions can be validated.
-type Subscription = (Digest, Result<FuzzMessage, oneshot::error::RecvError>);
+type Subscription = (Digest, Result<Arc<FuzzMessage>, oneshot::error::RecvError>);
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
@@ -501,9 +501,7 @@ fn fuzz(input: FuzzInput) {
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        let (responder, receiver) = oneshot::channel();
-                        drop(receiver);
-                        mailbox.subscribe_prepared(digest, responder);
+                        drop(mailbox.subscribe(digest));
                         context.sleep(Duration::from_millis(1)).await;
                     }
                 }
@@ -594,9 +592,7 @@ fn fuzz(input: FuzzInput) {
                         for _ in 0..pressure_count {
                             let _ = mailbox.broadcast(Recipients::All, message.clone());
 
-                            let (responder, receiver) = oneshot::channel();
-                            drop(receiver);
-                            mailbox.subscribe_prepared(digest, responder);
+                            drop(mailbox.subscribe(digest));
 
                             let _ = mailbox.get(digest).now_or_never();
                         }

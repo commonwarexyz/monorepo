@@ -17,7 +17,7 @@ use std::{
 };
 
 /// A stream of blocks used by application propose and verify calls.
-pub trait Ancestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {
+pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Send + Unpin + 'static {
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.
     fn peek(&self) -> Option<&B>;
@@ -27,7 +27,7 @@ pub trait Ancestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {
 ///
 /// Blocks are yielded in iterator order and no parent fetching is performed. This is useful when
 /// the caller wants to bound the ancestry available to the application.
-pub fn from_iter<B>(blocks: impl IntoIterator<Item = B>) -> impl Ancestry<B>
+pub fn from_iter<B>(blocks: impl IntoIterator<Item = Arc<B>>) -> impl Ancestry<B>
 where
     B: Block,
 {
@@ -37,19 +37,19 @@ where
 }
 
 struct BoundedAncestry<B: Block> {
-    blocks: VecDeque<B>,
+    blocks: VecDeque<Arc<B>>,
 }
 
 impl<B: Block> Unpin for BoundedAncestry<B> {}
 
 impl<B: Block> Ancestry<B> for BoundedAncestry<B> {
     fn peek(&self) -> Option<&B> {
-        self.blocks.front()
+        self.blocks.front().map(Arc::as_ref)
     }
 }
 
 impl<B: Block> Stream for BoundedAncestry<B> {
-    type Item = B;
+    type Item = Arc<B>;
 
     fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(self.blocks.pop_front())
@@ -76,14 +76,15 @@ pub trait BlockProvider: Send + 'static {
     fn subscribe_parent(
         &self,
         block: &Self::Block,
-    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static;
+    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static;
 }
 
 // Expected parent height and digest for a pending fetch.
 struct ExpectedParent<D>(Height, D);
 
 // Pending parent fetch paired with the relationship it must satisfy.
-type PendingFetch<B> = BoxFuture<'static, Option<(ExpectedParent<<B as Digestible>::Digest>, B)>>;
+type PendingFetch<B> =
+    BoxFuture<'static, Option<(ExpectedParent<<B as Digestible>::Digest>, Arc<B>)>>;
 
 impl<D: Digest> ExpectedParent<D> {
     fn from_child<B: Block<Digest = D>>(child: &B) -> Self {
@@ -138,7 +139,7 @@ where
 /// height-zero genesis block if it is available.
 #[pin_project]
 pub struct AncestorStream<M: BlockProvider, C: Clock> {
-    buffered: Vec<M::Block>,
+    buffered: Vec<Arc<M::Block>>,
     marshal: M,
     fetch_duration: Timed,
     clock: Arc<C>,
@@ -155,11 +156,11 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     pub(crate) fn new(
         clock: Arc<C>,
         marshal: M,
-        initial: impl IntoIterator<Item = M::Block>,
+        initial: impl IntoIterator<Item = Arc<M::Block>>,
         fetch_duration: Timed,
     ) -> Self {
-        let mut buffered = initial.into_iter().collect::<Vec<M::Block>>();
-        buffered.sort_by_key(Heightable::height);
+        let mut buffered = initial.into_iter().collect::<Vec<_>>();
+        buffered.sort_by_key(|block| block.height());
 
         // Check that the initial blocks are contiguous in height.
         buffered.windows(2).for_each(|window| {
@@ -187,7 +188,7 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.
     pub fn peek(&self) -> Option<&M::Block> {
-        self.buffered.last()
+        self.buffered.last().map(Arc::as_ref)
     }
 }
 
@@ -206,7 +207,7 @@ where
     M: BlockProvider,
     C: Clock,
 {
-    type Item = M::Block;
+    type Item = Arc<M::Block>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         const END_BOUND: Height = Height::zero();
@@ -227,7 +228,7 @@ where
                 // buffer it for the next poll.
                 match this.pending.as_mut().poll(cx) {
                     Poll::Ready(Some(Some((expected, parent)))) => {
-                        expected.assert_matches(&parent);
+                        expected.assert_matches(parent.as_ref());
                         this.buffered.push(parent);
                     }
                     Poll::Ready(Some(None)) => {
@@ -250,7 +251,7 @@ where
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Some((expected, block)))) => {
-                expected.assert_matches(&block);
+                expected.assert_matches(block.as_ref());
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
@@ -262,7 +263,7 @@ where
                     // buffer it for the next poll.
                     match this.pending.as_mut().poll(cx) {
                         Poll::Ready(Some(Some((expected, parent)))) => {
-                            expected.assert_matches(&parent);
+                            expected.assert_matches(parent.as_ref());
                             this.buffered.push(parent);
                         }
                         Poll::Ready(Some(None)) => {
@@ -304,9 +305,15 @@ mod test {
         fn subscribe_parent(
             &self,
             block: &Self::Block,
-        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             let parent = block.parent;
-            std::future::ready(self.0.iter().find(|b| b.digest() == parent).cloned())
+            std::future::ready(
+                self.0
+                    .iter()
+                    .find(|b| b.digest() == parent)
+                    .cloned()
+                    .map(Arc::new),
+            )
         }
     }
 
@@ -318,8 +325,8 @@ mod test {
         fn subscribe_parent(
             &self,
             _block: &Self::Block,
-        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
-            std::future::ready(Some(self.0.clone()))
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
+            std::future::ready(Some(Arc::new(self.0.clone())))
         }
     }
 
@@ -341,7 +348,12 @@ mod test {
     {
         let stream_context = context.child("ancestor_stream");
         let fetch_duration = timed(&stream_context);
-        AncestorStream::new(Arc::new(stream_context), marshal, initial, fetch_duration)
+        AncestorStream::new(
+            Arc::new(stream_context),
+            marshal,
+            initial.into_iter().map(Arc::new),
+            fetch_duration,
+        )
     }
 
     #[test]
@@ -425,7 +437,7 @@ mod test {
         }
 
         let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-        let ancestry = from_iter([block.clone()]);
+        let ancestry = from_iter([Arc::new(block.clone())]);
 
         assert_eq!(peek_height(ancestry), Some(block.height()));
     }
@@ -435,12 +447,12 @@ mod test {
         deterministic::Runner::default().start(|_| async move {
             let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
             let child = Block::new::<Sha256>((), parent.digest(), Height::new(2), 2);
-            let mut ancestry = from_iter([child.clone(), parent.clone()]);
+            let mut ancestry = from_iter([Arc::new(child.clone()), Arc::new(parent.clone())]);
 
             assert_eq!(ancestry.peek(), Some(&child));
-            assert_eq!(ancestry.next().await, Some(child));
+            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
             assert_eq!(ancestry.peek(), Some(&parent));
-            assert_eq!(ancestry.next().await, Some(parent));
+            assert_eq!(ancestry.next().await.as_deref(), Some(&parent));
             assert_eq!(ancestry.peek(), None);
             assert_eq!(ancestry.next().await, None);
         });
@@ -456,7 +468,7 @@ mod test {
             let stream = stream(&context, provider, [child.clone()]);
 
             let results = stream.collect::<Vec<_>>().await;
-            assert_eq!(results, vec![child, genesis]);
+            assert_eq!(results, vec![Arc::new(child), Arc::new(genesis)]);
         });
     }
 
@@ -480,7 +492,10 @@ mod test {
             let stream = stream(&context, provider, [block3.clone()]);
 
             let results = stream.collect::<Vec<_>>().await;
-            assert_eq!(results, vec![block3, block2, block1]);
+            assert_eq!(
+                results,
+                vec![Arc::new(block3), Arc::new(block2), Arc::new(block1)]
+            );
         });
     }
 
@@ -499,7 +514,10 @@ mod test {
             );
 
             let results = stream.collect::<Vec<_>>().await;
-            assert_eq!(results, vec![block3, block2, block1]);
+            assert_eq!(
+                results,
+                vec![Arc::new(block3), Arc::new(block2), Arc::new(block1)]
+            );
         });
     }
 
@@ -514,7 +532,7 @@ mod test {
             let stream = stream(&context, provider, [block3.clone()]);
 
             let results = stream.collect::<Vec<_>>().await;
-            assert_eq!(results, vec![block3]);
+            assert_eq!(results, vec![Arc::new(block3)]);
         });
     }
 }

@@ -47,9 +47,13 @@ use crate::{
         contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
-    merkle::{hasher::Standard as StandardHasher, Bagging, Family, Location},
+    merkle::{
+        hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
+        Bagging, Family, Location,
+    },
     qmdb::operation::Operation,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_utils::{cache::Clock, NZUsize};
 use core::num::NonZeroUsize;
@@ -82,6 +86,21 @@ pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
 /// Return the Merkle hasher configuration used by QMDB operation roots and proofs.
 pub const fn hasher<H: Hasher>() -> StandardHasher<H> {
     StandardHasher::new(ROOT_BAGGING)
+}
+
+/// Return the root of an operation log containing only `operation`.
+///
+/// This lets database variants derive their initial root from the bootstrap commit without
+/// opening a database.
+fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Digest {
+    let hasher = hasher::<H>();
+    let leaf = MerkleHasher::<F>::leaf_digest(
+        &hasher,
+        F::location_to_position(Location::new(0)),
+        &operation.encode(),
+    );
+    MerkleHasher::<F>::root(&hasher, Location::new(1), 0, [&leaf])
+        .expect("a single-leaf Merkle root is always valid")
 }
 
 /// Look up the inactivity floor declared at the commit immediately preceding `op_count`.

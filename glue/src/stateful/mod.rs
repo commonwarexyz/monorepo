@@ -63,9 +63,10 @@
 //!   above `database_anchor` arrives first, the actor processes it during handoff.
 //!   Durable metadata is marked in-progress before any database mutation and is
 //!   marked complete at the converged anchor before handoff acknowledgement. A
-//!   crash before completion restarts through the state-sync path, reopening
-//!   the existing sync journals. Subsequent restarts after completion take the
-//!   marshal sync path to ensure a contiguous stream.
+//!   crash before completion restarts through the state-sync path from the
+//!   persisted floor, reopening the existing sync journals. A lagging floor
+//!   sampled during restart cannot move that floor backward. Subsequent restarts
+//!   after completion take the marshal sync path to ensure a contiguous stream.
 //!
 //! # Lazy Recovery
 //!
@@ -95,7 +96,7 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
 use futures::Stream;
 use rand_core::Rng;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 mod actor;
 pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
@@ -185,7 +186,7 @@ where
     fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: &mut Self::InputProvider,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
@@ -224,7 +225,7 @@ where
     fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 

@@ -517,12 +517,21 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
+
+        // Overlap the update resolution with a committed-prefix candidate prefetch.
+        // Candidates come from the speculative `bitmap_parent` (the same source the floor
+        // raise scans below), clamped to the committed prefix inside the helper.
+        let (inner, staged_updates, prefetched) = inner
+            .resolve_updates_prefetched(updates, upserts, &db.any, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
+            .await?;
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
                 staged_updates,
+                Some(prefetched),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
@@ -624,6 +633,7 @@ where
                 &db.any,
                 metadata,
                 StagedUpdates::<F, update::Unordered<K, V>>::new(),
+                None,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;

@@ -14,11 +14,11 @@ use commonware_runtime::{telemetry::traces::TracedExt as _, Clock, Metrics, Spaw
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use futures::Stream;
 use rand_core::Rng;
-use std::{collections::VecDeque, pin::Pin};
+use std::{collections::VecDeque, pin::Pin, sync::Arc};
 use tracing::{info_span, Span};
 
 /// Type alias for an ancestor stream sent through the actor mailbox.
-pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = B> + Send>>;
+pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = Arc<B>> + Send>>;
 
 /// Messages processed by the actor loop.
 pub(crate) enum Message<E, A>
@@ -45,7 +45,7 @@ where
     /// A reporting of a new finalized block.
     Finalized {
         span: Span,
-        block: A::Block,
+        block: Arc<A::Block>,
         acknowledgement: Exact,
     },
 
@@ -206,7 +206,7 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send + 'static,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
@@ -226,7 +226,7 @@ where
     async fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send + 'static,
     ) -> bool {
         // We must panic if we don't get a response; We cannot override the decision
         // of the application based on the availabilitiy of the actor.

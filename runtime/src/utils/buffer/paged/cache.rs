@@ -437,6 +437,14 @@ impl CacheRef {
         buf.len()
     }
 
+    /// Drop all cached pages while retaining the backing page buffers for reuse.
+    ///
+    /// Call only when no reads are in flight for this cache.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn clear(&self) {
+        self.cache.write().clear();
+    }
+
     /// Drop any cached pages for `blob_id` at `page_num >= start_page`. Used after a blob is
     /// truncated so subsequent reads can't observe pre-truncation bytes in a page that the tip
     /// buffer (or future writes) now owns.
@@ -530,6 +538,13 @@ impl Cache {
         self.cache
             .retain(|&(bid, page_num), _| bid != blob_id || page_num < start_page);
     }
+
+    /// Drop all cached pages while retaining backing page buffers for reuse.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn clear(&mut self) {
+        self.cache.retain(|_, _| false);
+        self.page_fetches.clear();
+    }
 }
 
 /// Fetch one logical page for insertion into the page cache, rejecting partial pages because cache
@@ -564,8 +579,8 @@ mod tests {
     use super::{super::Checksum, *};
     use crate::{
         buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
-        BufferPoolConfig, Clock as _, Handle, IoBufsMut, Runner as _, Spawner as _, Storage as _,
-        Supervisor as _,
+        BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _, Spawner as _,
+        Storage as _, Supervisor as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -891,6 +906,90 @@ mod tests {
 
             // Cleanup.
             blob.sync().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_clear_forces_blob_read() {
+        #[derive(Clone)]
+        struct CountingBlob {
+            reads: Arc<AtomicUsize>,
+            page: Arc<Vec<u8>>,
+        }
+
+        impl Blob for CountingBlob {
+            async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+                self.read_at_buf(offset, len, IoBufsMut::default()).await
+            }
+
+            async fn read_at_buf(
+                &self,
+                _offset: u64,
+                _len: usize,
+                _bufs: impl Into<IoBufsMut> + Send,
+            ) -> Result<IoBufsMut, Error> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                Ok(IoBufsMut::from(self.page.as_ref().clone()))
+            }
+
+            async fn write_at(
+                &self,
+                _offset: u64,
+                _bufs: impl Into<IoBufs> + Send,
+            ) -> Result<(), Error> {
+                Ok(())
+            }
+
+            async fn write_at_sync(
+                &self,
+                offset: u64,
+                bufs: impl Into<IoBufs> + Send,
+            ) -> Result<(), Error> {
+                self.write_at(offset, bufs).await
+            }
+
+            async fn resize(&self, _len: u64) -> Result<(), Error> {
+                Ok(())
+            }
+
+            async fn sync(&self) -> Result<(), Error> {
+                Ok(())
+            }
+
+            async fn start_sync(&self) -> Handle<()> {
+                Handle::ready(self.sync().await)
+            }
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let page = vec![7u8; PAGE_SIZE.get() as usize];
+            let crc = Crc32::checksum(&page);
+            let record = Checksum::new(PAGE_SIZE.get(), crc);
+            let mut physical_page = page.clone();
+            physical_page.extend_from_slice(&record.to_bytes());
+            let blob = CountingBlob {
+                reads: Arc::new(AtomicUsize::new(0)),
+                page: Arc::new(physical_page),
+            };
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
+
+            let mut buf = vec![0u8; page.len()];
+            cache_ref.read(&blob, 0, &mut buf, 0).await.unwrap();
+            assert_eq!(buf, page);
+            assert_eq!(blob.reads.load(Ordering::Relaxed), 1);
+
+            let mut buf = vec![0u8; page.len()];
+            cache_ref.read(&blob, 0, &mut buf, 0).await.unwrap();
+            assert_eq!(buf, page);
+            assert_eq!(blob.reads.load(Ordering::Relaxed), 1);
+
+            cache_ref.clear();
+
+            let mut buf = vec![0u8; page.len()];
+            cache_ref.read(&blob, 0, &mut buf, 0).await.unwrap();
+            assert_eq!(buf, page);
+            assert_eq!(blob.reads.load(Ordering::Relaxed), 2);
         });
     }
 

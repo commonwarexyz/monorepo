@@ -12,12 +12,12 @@ use crate::{
     types::Round,
     Block,
 };
-use commonware_broadcast::{buffered, Broadcaster};
+use commonware_broadcast::buffered;
 use commonware_codec::Read;
 use commonware_cryptography::{certificate::Scheme, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
@@ -71,6 +71,14 @@ where
         block
     }
 
+    fn into_inner_shared(block: Arc<Self::Block>) -> Arc<Self::ApplicationBlock> {
+        block
+    }
+
+    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
+        Arc::new(block)
+    }
+
     fn from_application_block(
         block: Self::ApplicationBlock,
         _payload: Self::Commitment,
@@ -86,21 +94,19 @@ where
 {
     type PublicKey = K;
 
-    async fn find_by_digest(&self, digest: B::Digest) -> Option<B> {
+    async fn find_by_digest(&self, digest: B::Digest) -> Option<Arc<B>> {
         self.get(digest).await
     }
 
-    async fn find_by_commitment(&self, commitment: B::Digest) -> Option<B> {
+    async fn find_by_commitment(&self, commitment: B::Digest) -> Option<Arc<B>> {
         self.find_by_digest(commitment).await
     }
 
-    fn subscribe_by_digest(&self, digest: B::Digest) -> Option<oneshot::Receiver<B>> {
-        let (tx, rx) = oneshot::channel();
-        self.subscribe_prepared(digest, tx);
-        Some(rx)
+    fn subscribe_by_digest(&self, digest: B::Digest) -> Option<oneshot::Receiver<Arc<B>>> {
+        Some(self.subscribe(digest))
     }
 
-    fn subscribe_by_commitment(&self, commitment: B::Digest) -> Option<oneshot::Receiver<B>> {
+    fn subscribe_by_commitment(&self, commitment: B::Digest) -> Option<oneshot::Receiver<Arc<B>>> {
         self.subscribe_by_digest(commitment)
     }
 
@@ -108,8 +114,8 @@ where
         // No cleanup needed in standard mode - the buffer handles its own pruning
     }
 
-    fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
-        Broadcaster::broadcast(self, recipients, block);
+    fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
+        self.broadcast_shared(recipients, block);
     }
 }
 
@@ -123,7 +129,7 @@ where
     fn subscribe_parent(
         &self,
         block: &Self::Block,
-    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
         let receiver = block.height().previous().map(|parent_height| {
             self.subscribe_by_commitment(
                 block.parent(),
@@ -132,9 +138,6 @@ where
                 },
             )
         });
-        async move {
-            let receiver = receiver?;
-            receiver.await.ok()
-        }
+        async move { receiver?.await.ok() }
     }
 }

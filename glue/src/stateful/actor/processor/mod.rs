@@ -49,6 +49,7 @@ use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
     num::NonZeroUsize,
+    sync::Arc,
 };
 use tracing::{debug, info_span, warn};
 
@@ -247,7 +248,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<A::Block>> + Send + 'static,
         input_provider: &mut A::InputProvider,
         mut response: oneshot::Sender<Option<A::Block>>,
     ) where
@@ -270,7 +271,7 @@ where
             }
         };
         let parent_digest = parent.digest();
-        let ancestry = stream::once(std::future::ready(parent.clone())).chain(ancestry);
+        let ancestry = stream::once(std::future::ready(Arc::clone(&parent))).chain(ancestry);
 
         let round = consensus_context.round();
         let batches = match self
@@ -339,7 +340,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<A::Block>> + Send + 'static,
         mut response: oneshot::Sender<bool>,
     ) where
         S: Scheme,
@@ -380,8 +381,13 @@ where
         //
         // `last_processed.height` is only advanced from finalized state
         // (genesis, startup reconciliation, or finalize/ack path).
-        match is_already_processed(self.last_processed, marshal.clone(), &block, &mut response)
-            .await
+        match is_already_processed(
+            self.last_processed,
+            marshal.clone(),
+            block.as_ref(),
+            &mut response,
+        )
+        .await
         {
             Ok(true) => {
                 timer.observe(context);
@@ -529,7 +535,7 @@ where
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
-        parent: A::Block,
+        parent: Arc<A::Block>,
         response: &mut oneshot::Sender<Response>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
@@ -572,7 +578,7 @@ where
         &mut self,
         context: &E,
         provider: P,
-        target: A::Block,
+        target: Arc<A::Block>,
         response: &mut oneshot::Sender<Response>,
     ) -> Result<(), PrepareBatchesError>
     where
@@ -694,7 +700,7 @@ where
     pub(super) async fn finalize(
         &mut self,
         context: &E,
-        block: A::Block,
+        block: &A::Block,
     ) -> (FinalizeStatus, DeferredPrune<PendingSyncTargets<A, E>>) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
@@ -715,7 +721,7 @@ where
         let timer = self.metrics.finalize_duration.timer(context);
         let block_context = block.context();
         let round = block_context.round();
-        let sync_targets = A::sync_targets(&block);
+        let sync_targets = A::sync_targets(block);
 
         // Marshal finalization is ordered. A pending miss means we can replay
         // this block on top of finalized state.
@@ -730,7 +736,7 @@ where
                     .app
                     .apply(
                         (context.child("finalize_replay"), block_context),
-                        &block,
+                        block,
                         batches,
                     )
                     .await;
@@ -743,7 +749,7 @@ where
         };
 
         self.databases.finalize(batch).await;
-        self.notify_finalized(context, &block).await;
+        self.notify_finalized(context, block).await;
         let prune = self
             .pruning
             .as_mut()
@@ -1162,7 +1168,7 @@ mod tests {
         async fn propose(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: &mut Self::InputProvider,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -1188,7 +1194,7 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
             let mut ancestry = Box::pin(ancestry);
@@ -1265,10 +1271,10 @@ mod tests {
         fn subscribe_parent(
             &self,
             block: &Self::Block,
-        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             let provider = self.clone();
             let parent = block.parent();
-            async move { provider.fetch_by_digest(parent) }
+            async move { provider.fetch_by_digest(parent).map(Arc::new) }
         }
     }
 
@@ -1296,7 +1302,7 @@ mod tests {
         fn subscribe_parent(
             &self,
             block: &Self::Block,
-        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             let provider = self.clone();
             let child = block.digest();
             async move {
@@ -1307,6 +1313,7 @@ mod tests {
                     .get_mut(&child)
                     .and_then(VecDeque::pop_front)
                     .flatten()
+                    .map(Arc::new)
             }
         }
     }
@@ -1484,7 +1491,7 @@ mod tests {
 
         async fn finalize(&mut self, block: Block) -> FinalizeStatus {
             self.processor
-                .finalize(self.context_cell.as_present(), block)
+                .finalize(self.context_cell.as_present(), &block)
                 .await
                 .0
         }
@@ -1503,7 +1510,7 @@ mod tests {
             >,
         ){
             self.processor
-                .finalize(self.context_cell.as_present(), block)
+                .finalize(self.context_cell.as_present(), &block)
                 .await
         }
 
@@ -1971,7 +1978,7 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider,
-                    gap_block.clone(),
+                    Arc::new(gap_block.clone()),
                     &mut response,
                 )
                 .await;
@@ -2170,7 +2177,7 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider,
-                    block2,
+                    Arc::new(block2),
                     &mut response,
                 )
                 .await;
@@ -2205,7 +2212,7 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider.clone(),
-                    block2,
+                    Arc::new(block2),
                     &mut response,
                 )
                 .await;

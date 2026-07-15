@@ -80,6 +80,8 @@ use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
 mod storage;
 pub use storage::Cache;
 

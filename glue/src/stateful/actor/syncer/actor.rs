@@ -48,7 +48,7 @@ where
     pub resolvers: R,
 
     /// Durable state-sync metadata.
-    pub sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
+    pub sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, S, V::Commitment>>>,
 
     /// Finalized floor marshal should resolve before sync starts.
     pub finalization: Finalization<S, V::Commitment>,
@@ -87,7 +87,7 @@ where
     resolvers: R,
 
     /// Durable state-sync metadata.
-    sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
+    sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, S, V::Commitment>>>,
 
     /// Finalized floor marshal should resolve before sync starts.
     finalization: Finalization<S, V::Commitment>,
@@ -137,7 +137,7 @@ where
             resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
         {
             let mut sync_metadata = self.sync_metadata.lock().await;
-            sync_metadata.begin_sync(resolved_floor.marker).await;
+            sync_metadata.begin_sync(self.finalization.clone()).await;
         }
 
         let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));

@@ -311,6 +311,9 @@ where
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
     /// or current snapshot.
+    ///
+    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
+    /// uncommitted operations are not guaranteed to survive.
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
@@ -318,6 +321,11 @@ where
                 self.inactivity_floor_loc,
             ));
         }
+
+        // The floor justifying the boundary may exist only in buffered operations (it
+        // advances before its batch is durable), and pruning does not guarantee buffered
+        // appends are durable. Commit so the justification survives the prune.
+        self.log.commit().await?;
 
         // Prune the log. The log will prune at section boundaries, so the actual oldest retained
         // location may be less than requested.
@@ -886,6 +894,49 @@ mod test {
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_c);
             assert_eq!(db.get(&k_b).await.unwrap().unwrap(), v_a);
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Pruning to a floor advanced by applied-but-uncommitted entries must not durably outrun
+    /// the last durable commit: after a crash, the recovered floor would lie below the pruned
+    /// boundary and the store could never reopen.
+    #[test_traced("WARN")]
+    pub fn test_store_db_prune_after_unsynced_floor_recovery() {
+        let executor = deterministic::Runner::default();
+        const ELEMENTS: u64 = 1000;
+        executor.start(|context| async move {
+            let mut db = create_test_store(context.child("store").with_attribute("index", 0)).await;
+
+            // Establish a durable state whose last commit declares an early inactivity floor.
+            for i in 0u64..ELEMENTS {
+                let k = Blake3::hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                apply_entries(&mut db, [(k, Some(v))]).await;
+            }
+            db.commit().await.unwrap();
+            let durable_floor = db.inactivity_floor_loc;
+
+            // Apply (but do not commit) entries that advance the in-memory floor past the
+            // durable commit's floor.
+            for i in 0u64..ELEMENTS {
+                let k = Blake3::hash(&i.to_be_bytes());
+                let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
+                apply_entries(&mut db, [(k, Some(v))]).await;
+            }
+            let unsynced_floor = db.inactivity_floor_loc;
+            assert!(unsynced_floor > durable_floor);
+
+            // Prune to the in-memory floor, then crash before any further commit.
+            db.prune(unsynced_floor).await.unwrap();
+            let op_count = db.bounds().end;
+            drop(db);
+
+            // Reopening must succeed: prune committed the buffered operations first, so the
+            // replayed log reproduces the advanced floor.
+            let db = create_test_store(context.child("store").with_attribute("index", 1)).await;
+            assert_eq!(db.bounds().end, op_count);
+            assert_eq!(db.inactivity_floor_loc, unsynced_floor);
             db.destroy().await.unwrap();
         });
     }

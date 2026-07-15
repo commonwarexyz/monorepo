@@ -302,6 +302,18 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_fixed_prune_after_uncommitted_apply_batch_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_prune_after_uncommitted_apply_batch_recovery(
+                ctx,
+                open::<mmr::Family>,
+            )
+            .await;
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_fixed_batch_chain() {
         let executor = deterministic::Runner::default();

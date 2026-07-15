@@ -26,7 +26,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
-use commonware_utils::{FuzzRng, NZUsize};
+use commonware_utils::{channel::oneshot, FuzzRng, NZUsize};
 use futures::StreamExt;
 use std::time::Duration;
 
@@ -384,7 +384,11 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                     let round = block.context.round;
                     match seed {
                         InlineSeed::Proposed => {
-                            let _ = marshal.proposed(round, block).await;
+                            let (ack, rx) = oneshot::channel();
+                            let _ = marshal.proposed(round, block, Recipients::All, ack);
+                            if let Ok(sync) = rx.await {
+                                let _ = sync.await;
+                            }
                         }
                         InlineSeed::Verified => {
                             let _ = marshal.verified(round, block).await;
@@ -407,6 +411,7 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                         leader: me.clone(),
                         parent: (View::new(parent.height().get()), parent.digest()),
                     };
+                    let round = propose_context.round;
                     let rx = inline.propose(propose_context).await;
                     if await_result {
                         let result = select! {
@@ -414,9 +419,10 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                             _ = context.sleep(EVENT_SETTLE) => None,
                         };
                         if let Some(digest) = result {
+                            let _ = inline.broadcast(digest, Plan::Propose { round });
                             assert!(
                                 marshal.get_block(&digest).await.is_some(),
-                                "inline propose returned a digest that marshal cannot serve"
+                                "inline proposal is unavailable after relay"
                             );
                         }
                     }
