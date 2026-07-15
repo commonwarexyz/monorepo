@@ -353,7 +353,7 @@ mod tests {
                 .put_start_sync(1, test_key("aaa"), 10)
                 .await
                 .expect("Failed to start sync");
-            assert_eq!(pending.lock().len(), 2);
+            assert_eq!(pending.lock().len(), 1);
 
             let second = archive
                 .put_start_sync(1, test_key("duplicate"), 99)
@@ -361,7 +361,7 @@ mod tests {
                 .expect("Failed to start duplicate sync");
             assert_eq!(
                 pending.lock().len(),
-                2,
+                1,
                 "duplicate put_start_sync must not issue a new storage sync"
             );
 
@@ -708,7 +708,7 @@ mod tests {
                 .put_start_sync(1, test_key("aaa"), 10)
                 .await
                 .expect("Failed to start first sync");
-            assert_eq!(pending.lock().len(), 2);
+            assert_eq!(pending.lock().len(), 1);
 
             let second = archive
                 .put_start_sync(2, test_key("bbb"), 20)
@@ -716,7 +716,7 @@ mod tests {
                 .expect("Failed to start second sync");
             assert_eq!(
                 pending.lock().len(),
-                4,
+                2,
                 "different sections should be able to have independent in-flight syncs"
             );
 
@@ -759,9 +759,9 @@ mod tests {
                 .put_start_sync(2, test_key("bbb"), 20)
                 .await
                 .expect("Failed to start second sync");
-            assert_eq!(pending.lock().len(), 4);
+            assert_eq!(pending.lock().len(), 2);
 
-            release_next_pending_syncs(&pending, 2);
+            release_next_pending_syncs(&pending, 1);
             first.await.expect("first sync handle should complete");
 
             drop(second);
@@ -798,7 +798,7 @@ mod tests {
                 .put_start_sync(1, test_key("aaa"), 10)
                 .await
                 .expect("Failed to start sync");
-            assert_eq!(pending.lock().len(), 2);
+            assert_eq!(pending.lock().len(), 1);
             fail_pending_syncs(&pending);
 
             archive
