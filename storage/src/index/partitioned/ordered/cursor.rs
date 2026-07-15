@@ -6,6 +6,9 @@
 //! must-call-`next` guards, and the metric bookkeeping) is identical for both representations, so it
 //! is written once here; [Backing] holds the only thing that differs: the positional store
 //! operations.
+//!
+//! Runs store their newest value last, and the cursor serves values newest-first, so it walks run
+//! indices descending from the run's end (as the flat index's cursor walks its overflow chain).
 
 use super::partition::Partition;
 use crate::index::Cursor as CursorTrait;
@@ -18,19 +21,21 @@ use std::{
 const MUST_CALL_NEXT: &str = "must call Cursor::next()";
 const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
 
-/// Position of a [Cursor] within its key's value run (offset 0 is the run's first value).
+/// Position of a [Cursor] within its key's value run (offset 0 is the run's first, oldest value).
+/// Iteration serves values newest-first, so it starts at the run's last offset and steps down.
 enum State {
     /// Before the first `next()` or after an `insert()`/`delete()`: the next `next()` returns the
-    /// value at run offset `from`.
-    NeedNext { from: usize },
+    /// value at run offset `from`, or `None` when iteration is exhausted.
+    NeedNext { from: Option<usize> },
     /// `next()` returned the value at run offset `offset`; `update`/`delete`/`insert` are valid.
     Active { offset: usize },
-    /// `next()` returned `None`; only `insert()` (which appends) is valid.
+    /// `next()` returned `None`; only `insert()` (which appends at the oldest position) is valid.
     Done,
 }
 
 /// The store holding a [Cursor]'s value run, abstracting the inline and spilled representations
-/// behind a common positional interface. All offsets are relative to the start of the key's run.
+/// behind a common positional interface. All offsets are relative to the start of the key's run
+/// (offset 0 is the oldest value).
 enum Backing<'a, K: Ord + Copy, V> {
     /// Inline sorted-array partition: the key's values occupy the contiguous index range `run`.
     ///
@@ -44,10 +49,6 @@ enum Backing<'a, K: Ord + Copy, V> {
     },
     /// Spilled partition: the key's values live in the side-table's `BTreeMap`, re-resolved on each
     /// access (spilling is the rare case, so the extra descent is off the hot path).
-    ///
-    /// Spilled chains are stored oldest-first (the reverse of run/iteration order, so plain inserts
-    /// can push the newest value at the end), so run offset `off` addresses chain index
-    /// `len - 1 - off` and an insert at run offset `off` lands at chain index `len - off`.
     Spilled {
         spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
         partition: usize,
@@ -79,13 +80,10 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 spilled,
                 partition,
                 key,
-            } => {
-                let run = spilled
-                    .get(partition)
-                    .and_then(|inner| inner.get(key))
-                    .expect("active cursor must reference a present key");
-                &run[run.len() - 1 - off]
-            }
+            } => &spilled
+                .get(partition)
+                .and_then(|inner| inner.get(key))
+                .expect("active cursor must reference a present key")[off],
         }
     }
 
@@ -98,12 +96,10 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 partition,
                 key,
             } => {
-                let run = spilled
+                spilled
                     .get_mut(partition)
                     .and_then(|inner| inner.get_mut(key))
-                    .expect("active cursor must reference a present key");
-                let idx = run.len() - 1 - off;
-                run[idx] = value;
+                    .expect("active cursor must reference a present key")[off] = value;
             }
         }
     }
@@ -128,8 +124,7 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 key,
             } => match spilled.entry(*partition).or_default().entry(*key) {
                 btree_map::Entry::Occupied(mut run) => {
-                    let idx = run.get().len() - off;
-                    run.get_mut().insert(idx, value);
+                    run.get_mut().insert(off, value);
                     false
                 }
                 btree_map::Entry::Vacant(run) => {
@@ -160,8 +155,7 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 let btree_map::Entry::Occupied(mut run) = part.get_mut().entry(*key) else {
                     unreachable!("active cursor must reference a present key")
                 };
-                let idx = run.get().len() - 1 - off;
-                run.get_mut().remove(idx);
+                run.get_mut().remove(off);
                 if !run.get().is_empty() {
                     return false;
                 }
@@ -200,21 +194,22 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
         items: &'a Gauge,
         pruned: &'a Counter,
     ) -> Self {
+        let from = (run.end - run.start).checked_sub(1);
         Self {
             backing: Backing::Soa {
                 partition,
                 key,
                 run,
             },
-            state: State::NeedNext { from: 0 },
+            state: State::NeedNext { from },
             keys,
             items,
             pruned,
         }
     }
 
-    /// A cursor over a key's values held in a spilled partition's `BTreeMap`.
-    pub(super) const fn spilled(
+    /// A cursor over a key's (present) values held in a spilled partition's `BTreeMap`.
+    pub(super) fn spilled(
         spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
         partition: usize,
         key: K,
@@ -222,13 +217,15 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
         items: &'a Gauge,
         pruned: &'a Counter,
     ) -> Self {
+        let backing = Backing::Spilled {
+            spilled,
+            partition,
+            key,
+        };
+        let from = backing.len().checked_sub(1);
         Self {
-            backing: Backing::Spilled {
-                spilled,
-                partition,
-                key,
-            },
-            state: State::NeedNext { from: 0 },
+            backing,
+            state: State::NeedNext { from },
             keys,
             items,
             pruned,
@@ -243,12 +240,12 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
         let off = match self.state {
             State::Done => return None,
             State::NeedNext { from } => from,
-            State::Active { offset } => offset + 1,
+            State::Active { offset } => offset.checked_sub(1),
         };
-        if off >= self.backing.len() {
+        let Some(off) = off else {
             self.state = State::Done;
             return None;
-        }
+        };
         self.state = State::Active { offset: off };
         Some(self.backing.get(off))
     }
@@ -265,17 +262,19 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
         match self.state {
             State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
             State::Active { offset } => {
-                // Place immediately after the current value (never a new key, so the return is
-                // ignored); `next()` then returns the value after the inserted one, skipping both
-                // the current and the inserted.
-                self.backing.insert(offset + 1, value);
+                // Place immediately after the current value in iteration order: iteration descends,
+                // so that slot is offset `offset` itself, shifting the current value up by one
+                // (never a new key, so the return is ignored). `next()` then returns the value
+                // after the inserted one, skipping both the current and the inserted.
+                self.backing.insert(offset, value);
                 self.items.inc();
-                self.state = State::NeedNext { from: offset + 2 };
+                self.state = State::NeedNext {
+                    from: offset.checked_sub(1),
+                };
             }
             State::Done => {
-                // Append at the oldest position (run end), re-creating the key if it was emptied.
-                let end = self.backing.len();
-                if self.backing.insert(end, value) {
+                // Append at the oldest position (offset 0), re-creating the key if it was emptied.
+                if self.backing.insert(0, value) {
                     self.keys.inc();
                 }
                 self.items.inc();
@@ -296,7 +295,10 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
         self.items.dec();
         self.pruned.inc();
 
-        // The value after the deleted one shifted into `offset`.
-        self.state = State::NeedNext { from: offset };
+        // Only the already-visited values above `offset` shifted; the value after the deleted one
+        // in iteration order still sits just below `offset`.
+        self.state = State::NeedNext {
+            from: offset.checked_sub(1),
+        };
     }
 }

@@ -24,13 +24,14 @@
 //!
 //! A partition also fills when a single key collects many values -- keys that collide on the full
 //! prefix, or repeated inserts of one key. The spill covers this too: it triggers on the total
-//! value count, and a spilled key's newest value is pushed onto the end of its chain in amortized
-//! O(1) (reads iterate the chain in reverse), so these inserts stay as cheap as any other. What it
-//! cannot bound is how many
-//! values one key holds, and a lookup must scan all of them -- a key with `M` values costs O(M) per
-//! lookup. Every index that resolves collisions pays this (the flat `crate::index::ordered::Index`
-//! included); `M` stays near 1 only when the indexed `P + N`-byte prefix is well-distributed, so
-//! use enough prefix bytes and high-entropy keys.
+//! value count, and a colliding insert appends to the end of the key's run in both representations
+//! (an amortized O(1) push once spilled), so these inserts stay as cheap as any other. Runs store
+//! their newest value last, and read paths iterate runs in reverse to serve values newest-first
+//! like the flat index. What spilling cannot bound is how many values one key holds, and a lookup
+//! must scan all of them -- a key with `M` values costs O(M) per lookup. Every index that resolves
+//! collisions pays this (the flat `crate::index::ordered::Index` included); `M` stays near 1 only
+//! when the indexed `P + N`-byte prefix is well-distributed, so use enough prefix bytes and
+//! high-entropy keys.
 
 mod cursor;
 mod partition;
@@ -50,9 +51,7 @@ use commonware_runtime::{
 };
 use std::{
     collections::{btree_map, hash_map, BTreeMap, HashMap},
-    iter,
     ops::Bound,
-    slice,
 };
 
 /// Sorted-array length at which a partition converts to a `BTreeMap`, bounding the O(occupancy)
@@ -75,11 +74,9 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     partitions: Box<[Partition<T::Key, V>]>,
 
     /// Partitions that have spilled out of their sorted arrays (reached `SPILL_THRESHOLD` entries),
-    /// keyed by partition index; each maps translated keys to their values oldest-first, the
-    /// reverse of the inline representation. Storing chains oldest-first lets a colliding insert
-    /// push the newest value in amortized O(1) rather than shifting the chain, and read paths
-    /// iterate chains in reverse to serve values newest-first. Empty until a partition fills,
-    /// whether from honest growth at low `P` or adversarial grinding.
+    /// keyed by partition index; each maps translated keys to their value runs, newest value last,
+    /// so a colliding insert is an amortized O(1) push. Empty until a partition fills, whether from
+    /// honest growth at low `P` or adversarial grinding.
     spilled: HashMap<usize, BTreeMap<T::Key, Vec<V>>>,
 
     /// Sorted-array length at which a partition spills to `spilled`; [SPILL_THRESHOLD] in
@@ -94,34 +91,6 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
 
     /// Metric: cumulative values removed (via `remove`, cursor `delete`, or `retain`).
     pruned: Counter,
-}
-
-/// Iterator over one translated key's values, newest first, from whichever representation the
-/// partition currently uses.
-enum Values<'a, V> {
-    /// A key's contiguous run in an inline sorted-array partition (stored newest-first).
-    Inline(slice::Iter<'a, V>),
-    /// A key's chain in a spilled partition's `BTreeMap`, reversed because chains are stored
-    /// oldest-first (see the `spilled` field).
-    Spilled(iter::Rev<slice::Iter<'a, V>>),
-}
-
-impl<'a, V> Iterator for Values<'a, V> {
-    type Item = &'a V;
-
-    fn next(&mut self) -> Option<&'a V> {
-        match self {
-            Self::Inline(values) => values.next(),
-            Self::Spilled(values) => values.next(),
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::Inline(values) => values.size_hint(),
-            Self::Spilled(values) => values.size_hint(),
-        }
-    }
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
@@ -160,15 +129,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         if self.partitions[i].len() < self.threshold {
             return;
         }
-        let inner: BTreeMap<T::Key, Vec<V>> = self.partitions[i]
-            .drain_runs()
-            .into_iter()
-            .map(|(k, mut run)| {
-                // Inline runs are newest-first; spilled chains are stored oldest-first.
-                run.reverse();
-                (k, run)
-            })
-            .collect();
+        let inner: BTreeMap<T::Key, Vec<V>> = self.partitions[i].drain_runs().into_iter().collect();
         self.spilled.insert(i, inner);
     }
 
@@ -183,40 +144,31 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// The values for translated key `k` in partition `i` (empty if absent), from whichever
     /// representation the partition currently uses.
-    fn partition_values(&self, i: usize, k: &T::Key) -> Values<'_, V> {
+    fn partition_values(&self, i: usize, k: &T::Key) -> &[V] {
         if !self.partitions[i].is_empty() {
-            return Values::Inline(self.partitions[i].values(k).iter());
+            return self.partitions[i].values(k);
         }
         self.spilled_partition(i)
             .and_then(|inner| inner.get(k))
-            .map_or_else(
-                || Values::Inline([].iter()),
-                |run| Values::Spilled(run.iter().rev()),
-            )
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Values of the smallest key in partition `i` (None if the partition is empty).
-    fn partition_first(&self, i: usize) -> Option<Values<'_, V>> {
-        self.partitions[i]
-            .first_values()
-            .map(|vals| Values::Inline(vals.iter()))
-            .or_else(|| {
-                self.spilled_partition(i)?
-                    .first_key_value()
-                    .map(|(_, v)| Values::Spilled(v.iter().rev()))
-            })
+    fn partition_first(&self, i: usize) -> Option<&[V]> {
+        self.partitions[i].first_values().or_else(|| {
+            self.spilled_partition(i)?
+                .first_key_value()
+                .map(|(_, v)| v.as_slice())
+        })
     }
 
     /// Values of the largest key in partition `i` (None if the partition is empty).
-    fn partition_last(&self, i: usize) -> Option<Values<'_, V>> {
-        self.partitions[i]
-            .last_values()
-            .map(|vals| Values::Inline(vals.iter()))
-            .or_else(|| {
-                self.spilled_partition(i)?
-                    .last_key_value()
-                    .map(|(_, v)| Values::Spilled(v.iter().rev()))
-            })
+    fn partition_last(&self, i: usize) -> Option<&[V]> {
+        self.partitions[i].last_values().or_else(|| {
+            self.spilled_partition(i)?
+                .last_key_value()
+                .map(|(_, v)| v.as_slice())
+        })
     }
 
     /// Whether the index currently holds no keys.
@@ -225,29 +177,23 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     }
 
     /// Values of the smallest key strictly greater than `k` in partition `i`.
-    fn partition_next_after(&self, i: usize, k: &T::Key) -> Option<Values<'_, V>> {
-        self.partitions[i]
-            .next_values_after(k)
-            .map(|vals| Values::Inline(vals.iter()))
-            .or_else(|| {
-                self.spilled_partition(i)?
-                    .range((Bound::Excluded(*k), Bound::Unbounded))
-                    .next()
-                    .map(|(_, v)| Values::Spilled(v.iter().rev()))
-            })
+    fn partition_next_after(&self, i: usize, k: &T::Key) -> Option<&[V]> {
+        self.partitions[i].next_values_after(k).or_else(|| {
+            self.spilled_partition(i)?
+                .range((Bound::Excluded(*k), Bound::Unbounded))
+                .next()
+                .map(|(_, v)| v.as_slice())
+        })
     }
 
     /// Values of the largest key strictly less than `k` in partition `i`.
-    fn partition_prev_before(&self, i: usize, k: &T::Key) -> Option<Values<'_, V>> {
-        self.partitions[i]
-            .prev_values_before(k)
-            .map(|vals| Values::Inline(vals.iter()))
-            .or_else(|| {
-                self.spilled_partition(i)?
-                    .range((Bound::Unbounded, Bound::Excluded(*k)))
-                    .next_back()
-                    .map(|(_, v)| Values::Spilled(v.iter().rev()))
-            })
+    fn partition_prev_before(&self, i: usize, k: &T::Key) -> Option<&[V]> {
+        self.partitions[i].prev_values_before(k).or_else(|| {
+            self.spilled_partition(i)?
+                .range((Bound::Unbounded, Bound::Excluded(*k)))
+                .next_back()
+                .map(|(_, v)| v.as_slice())
+        })
     }
 
     /// Number of partitions currently spilled to the side-table.
@@ -276,7 +222,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        self.partition_values(i, &k)
+        self.partition_values(i, &k).iter().rev()
     }
 
     fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
@@ -296,7 +242,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
             .collect();
         order.sort_unstable();
         for (partition, translated, key_idx) in order {
-            for value in self.partition_values(partition, &translated) {
+            for value in self.partition_values(partition, &translated).iter().rev() {
                 visit(key_idx, value);
             }
         }
@@ -358,7 +304,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
                     &self.pruned,
                 ));
             }
-            self.partitions[i].insert_at(run.start, k, value);
+            self.partitions[i].insert_at(run.end, k, value);
             self.keys.inc();
             self.items.inc();
             self.maybe_spill(i);
@@ -399,7 +345,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);
             let new_key = run.is_empty();
-            self.partitions[i].insert_at(run.start, k, value);
+            self.partitions[i].insert_at(run.end, k, value);
             self.items.inc();
             if new_key {
                 self.keys.inc();
@@ -512,16 +458,16 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
         if let Some(vals) = self.partition_prev_before(i, &k) {
-            return Some((vals, false));
+            return Some((vals.iter().rev(), false));
         }
         for p in (0..i).rev() {
             if let Some(vals) = self.partition_last(p) {
-                return Some((vals, false));
+                return Some((vals.iter().rev(), false));
             }
         }
         for p in (0..self.partitions.len()).rev() {
             if let Some(vals) = self.partition_last(p) {
-                return Some((vals, true));
+                return Some((vals.iter().rev(), true));
             }
         }
         None
@@ -544,16 +490,16 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
         if let Some(vals) = self.partition_next_after(i, &k) {
-            return Some((vals, false));
+            return Some((vals.iter().rev(), false));
         }
         for p in i + 1..self.partitions.len() {
             if let Some(vals) = self.partition_first(p) {
-                return Some((vals, false));
+                return Some((vals.iter().rev(), false));
             }
         }
         for p in 0..self.partitions.len() {
             if let Some(vals) = self.partition_first(p) {
-                return Some((vals, true));
+                return Some((vals.iter().rev(), true));
             }
         }
         None
@@ -571,7 +517,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         // Scan partitions in ascending order for the global first key.
         for p in 0..self.partitions.len() {
             if let Some(vals) = self.partition_first(p) {
-                return Some(vals);
+                return Some(vals.iter().rev());
             }
         }
         None
@@ -589,7 +535,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         // Scan partitions in descending order for the global last key.
         for p in (0..self.partitions.len()).rev() {
             if let Some(vals) = self.partition_last(p) {
-                return Some(vals);
+                return Some(vals.iter().rev());
             }
         }
         None
