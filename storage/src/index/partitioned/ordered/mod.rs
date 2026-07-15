@@ -27,7 +27,7 @@
 //! value count, so a single over-full key still converts the partition and keeps inserts for the
 //! partition's other keys cheap. What it cannot bound is the over-full key itself. Spilled or not,
 //! a key's values form one newest-first run, so prepending its newest value shifts the whole run
-//! (only a cursor insert at the run's end avoids this) and a lookup must scan it -- a key with `M`
+//! (only a cursor insert at the run's end avoids this) and a lookup must scan it. A key with `M`
 //! values costs O(M) per lookup. Every index that resolves collisions pays this scan (the flat
 //! `crate::index::ordered::Index` included); `M` stays near 1 only when the indexed `P + N`-byte
 //! prefix is well-distributed, so use enough prefix bytes and high-entropy keys.
