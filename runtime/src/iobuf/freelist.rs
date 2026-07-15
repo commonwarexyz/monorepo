@@ -273,9 +273,11 @@ impl Freelist {
     /// finally dropped, otherwise the buffer leaks.
     #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer)> {
+        // Loom's atomic implementation does not provide `try_update`.
+        #[allow(deprecated)]
         let slot = self
             .created
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
                 (created < self.storage.len()).then_some(created + 1)
             })
             .ok()? as u32;
