@@ -31,8 +31,8 @@
 //! use enough prefix bytes and high-entropy keys.
 //!
 //! A caller-held cursor can temporarily grow an inline partition to or past the spill threshold.
-//! The next index mutation of that partition spills it before access.
-//! [`Unordered::insert_and_retain`] performs the check after releasing its internal cursor.
+//! The next index mutation of that partition spills it before access. `insert_and_retain` performs
+//! the check after releasing its internal cursor.
 
 mod cursor;
 mod partition;
