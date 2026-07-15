@@ -248,13 +248,12 @@ impl<B: Blob> Write<B> {
     }
 
     /// Flush buffered bytes and begin durably syncing mutations tracked by this writer once
-    /// `gate` resolves successfully.
+    /// `gate` resolves `Ok`.
     ///
-    /// Unlike [`Self::start_sync`], the sync is issued only after `gate` resolves `Ok` (a
-    /// gate failure fails it without issuing) and progresses only while the returned
-    /// [`Handle`] is polled or a later writer method waits for it, so `gate` must complete
-    /// independently of this writer. An already-pending sync is reused as-is, without the
-    /// gate.
+    /// The sync is issued only after `gate` resolves (a failure fails it without issuing)
+    /// and progresses only while the returned [`Handle`] is polled or a later writer method
+    /// waits for it, so `gate` must complete independently of this writer. An
+    /// already-pending sync is reused as-is, without the gate.
     pub async fn start_sync_after(
         &mut self,
         gate: impl Future<Output = Result<(), Error>> + Send + 'static,

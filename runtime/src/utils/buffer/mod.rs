@@ -161,18 +161,14 @@ impl SyncState {
         }
     }
 
-    /// Start making pending mutations durable once `gate` resolves successfully, returning a
-    /// handle for completion.
+    /// Start making pending mutations durable once `gate` resolves `Ok`, returning a handle
+    /// for completion.
     ///
-    /// Unlike [SyncState::start_sync], the sync is not in flight when this returns: it is
-    /// issued only after `gate` resolves `Ok` (a gate failure fails the sync without issuing
-    /// it), and it progresses only while the returned handle is polled or when the next
-    /// operation drives it via [SyncState::wait_for_pending]. `gate` must therefore complete
-    /// independently of this state, or the next operation deadlocks waiting for it.
-    ///
-    /// The returned handle covers only this state's mutations: a [SyncState::Clean] state has
-    /// nothing to gate and a [SyncState::Pending] state reuses the in-flight sync, so callers
-    /// composing with `gate` must observe it separately.
+    /// The sync is issued only after `gate` resolves (a failure fails it without issuing) and
+    /// progresses only while the handle is polled or the next operation waits for it, so
+    /// `gate` must complete independently of this state. [SyncState::Clean] and
+    /// [SyncState::Pending] states never observe `gate`; composing callers must await it
+    /// separately.
     fn start_sync_after(
         &mut self,
         blob: &impl crate::Blob,

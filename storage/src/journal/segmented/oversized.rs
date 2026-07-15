@@ -362,37 +362,35 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 
     /// Sync both journals for the given `sections`.
-    ///
-    /// Values are made durable before the index is synced: recovery validates index entries
-    /// against the glob by byte range only, so an index entry that became durable ahead of its
-    /// value bytes would be adopted referencing lost or later-rewritten data.
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         let sections = sections.sections().collect::<Vec<_>>();
+
+        // Make values durable before the index: recovery validates index entries against
+        // the glob by byte range only, so an entry that became durable ahead of its value
+        // bytes would be adopted referencing lost or later-rewritten data.
         self.values.sync(&sections).await?;
         self.index.sync(&sections).await
     }
 
     /// Start syncing both journals for the given `sections`.
     ///
-    /// The returned handle completes once the values and then the index are durable: the index
-    /// sync is issued only after the values sync completes (see [Self::sync]), and a values
-    /// failure fails the handle without issuing it. Neither sync is awaited before returning.
-    /// The gated index sync progresses while the returned handle is polled or when a later
-    /// operation on the journal waits for it; a dropped, unobserved handle leaves the index
-    /// sync unissued until then.
+    /// The returned handle completes once both journals are durable and drives the sync
+    /// while polled; a dropped handle leaves completion to the journal's next operation.
     pub async fn start_sync(
         &mut self,
         sections: impl crate::Sections,
     ) -> Result<Handle<()>, Error> {
         let sections = sections.sections().collect::<Vec<_>>();
+
+        // Gate the index sync on the values sync (values go first, see Self::sync): a
+        // values failure fails the handle without the index sync ever being issued.
         let values = self.values.start_sync(&sections).await?;
         self.index.start_sync_after(&sections, values).await
     }
 
     /// Sync all sections.
-    ///
-    /// Values are made durable before the index is synced (see [Self::sync]).
     pub async fn sync_all(&mut self) -> Result<(), Error> {
+        // Values before the index (see Self::sync).
         self.values.sync_all().await?;
         self.index.sync_all().await
     }
@@ -413,11 +411,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// This rewinds the section to the given index size and removes all sections
     /// after the given section. The value size is derived from the last entry.
     ///
-    /// Both of `section`'s truncations are made durable before returning: freed value ranges
-    /// may be reused by later appends, so neither a dropped index entry nor the stale glob
-    /// bytes it pointed at may survive a crash once new data can occupy those offsets. The
-    /// values are synced before the index (see [Self::sync]), so a crash recovers to either
-    /// the pre-rewind or the post-rewind state. The removals of later sections carry the
+    /// Both of `section`'s truncations are durable before this returns: a crash recovers to
+    /// either the pre-rewind or the post-rewind state. Removals of later sections carry the
     /// storage layer's removal durability.
     pub async fn rewind(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
         // Rewind index first (this also removes sections after `section`)
@@ -436,13 +431,21 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             Err(e) => return Err(e),
         };
 
+        // Make retained values durable before their entries: the index sync below flushes
+        // retained entries whose values may still be buffered, and an entry must never be
+        // adoptable ahead of its value bytes.
+        self.values.sync(section).await?;
+
+        // Make the index truncation durable before the values are rewound: rewinding the
+        // values frees their ranges for reuse by later appends, and a dropped index entry
+        // that stayed durable would be adopted referencing whatever bytes a later append
+        // placed at its offsets. Ordering the truncation's durability before the in-memory
+        // values rewind keeps this safe even if this future is cancelled between the two.
+        self.index.sync(section).await?;
+
         // Rewind values (this also removes sections after `section`)
         self.values.rewind(section, value_size).await?;
-
-        // Make both truncations durable, values first: retained entries may reference
-        // still-buffered values, which must not become adoptable after them.
-        self.values.sync(section).await?;
-        self.index.sync(section).await
+        self.values.sync(section).await
     }
 
     /// Rewind only the given section to a specific index size.
@@ -468,12 +471,14 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             Err(e) => return Err(e),
         };
 
+        // Make retained values, then the index truncation, durable before the values are
+        // rewound (see Self::rewind).
+        self.values.sync(section).await?;
+        self.index.sync(section).await?;
+
         // Rewind values
         self.values.rewind_section(section, value_size).await?;
-
-        // Make both truncations durable, values first (see Self::rewind).
-        self.values.sync(section).await?;
-        self.index.sync(section).await
+        self.values.sync(section).await
     }
 
     /// Get index size for checkpoint.
@@ -933,9 +938,9 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Boot 2: the glob truncation cannot be made durable, so `rewind` must fail
-            // before the index truncation is issued, rather than let later appends reuse
-            // entry 1's still-durable value range.
+            // Boot 2: the glob cannot be synced, so `rewind` must fail before either
+            // truncation is made durable, rather than let later appends reuse entry 1's
+            // still-durable value range.
             let faulty_values = SyncFaultContext {
                 inner: context.child("second"),
                 fail_partition: "test-values".into(),
@@ -950,8 +955,7 @@ mod tests {
             );
         });
 
-        // Nothing of the failed rewind became durable: recovery surfaces the intact
-        // pre-rewind state.
+        // Neither truncation became durable, so recovery surfaces the pre-rewind state.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("third"), test_cfg(&context))

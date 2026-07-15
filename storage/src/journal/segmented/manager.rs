@@ -38,17 +38,13 @@ pub trait SectionBuffer: Send + Sync {
     fn start_sync(&mut self) -> impl Future<Output = Handle<()>> + Send;
 
     /// Start making data currently accepted by this buffer durable once `gate` resolves
-    /// successfully.
+    /// `Ok`.
     ///
-    /// Buffered writes are flushed immediately, but unlike [SectionBuffer::start_sync] the
-    /// underlying sync is not in flight when this returns: it is issued only after `gate`
-    /// resolves `Ok` (a gate failure fails it without issuing), and it progresses only while
-    /// the returned handle is polled or a later operation waits for it. `gate` must therefore
-    /// complete independently of this buffer, or the next operation deadlocks waiting for it.
-    ///
-    /// The gate orders only a sync started by this call: an already-pending sync (gated or
-    /// not) is reused as-is, and a buffer with nothing to sync resolves immediately, so
-    /// callers composing with `gate` must observe it separately.
+    /// Writes are flushed immediately, but the sync is issued only after `gate` resolves (a
+    /// failure fails it without issuing) and progresses only while the returned handle is
+    /// polled or a later operation waits for it, so `gate` must complete independently of
+    /// this buffer. An already-pending sync is reused and a clean buffer resolves
+    /// immediately, neither observing `gate`; composing callers must await it separately.
     fn start_sync_after(
         &mut self,
         gate: impl Future<Output = Result<(), RError>> + Send + 'static,
@@ -351,11 +347,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }))
     }
 
-    /// Start syncing the given `sections` to storage once `gate` resolves successfully.
+    /// Start syncing the given `sections` to storage once `gate` resolves `Ok`.
     ///
-    /// Each selected buffer follows [SectionBuffer::start_sync_after] semantics: nothing is
-    /// in flight when this returns, and the gated syncs progress only while the returned
-    /// handle is polled or a later operation on a selected section waits for them. The
+    /// Each selected buffer follows [SectionBuffer::start_sync_after] semantics. The
     /// returned handle completes once `gate` and every selected section's sync complete,
     /// failing with the first error encountered.
     pub async fn start_sync_after(

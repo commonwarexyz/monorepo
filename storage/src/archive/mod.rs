@@ -143,8 +143,10 @@ pub trait Archive: Send {
     /// Request that all pending writes are synced.
     ///
     /// The returned handle completes once every write accepted before this call is durable,
-    /// including writes covered by a sync that is still in flight. Implementations without a
-    /// non-blocking sync path may complete the sync before returning an already-finished handle.
+    /// including writes covered by a sync that is still in flight, and may need to be polled
+    /// to drive the sync: a dropped handle leaves completion to a later operation on the
+    /// [Archive]. Implementations without a non-blocking sync path may complete the sync
+    /// before returning an already-finished handle.
     fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
         async move {
             self.sync().await?;

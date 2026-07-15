@@ -364,13 +364,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.start_sync(sections).await
     }
 
-    /// Start syncing the given `sections` to storage once `gate` resolves successfully.
+    /// Start syncing the given `sections` to storage once `gate` resolves `Ok`.
     ///
-    /// The syncs are not in flight when this returns: they are issued only after `gate`
-    /// resolves `Ok` and progress only while the returned handle is polled or a later
-    /// operation on a selected section waits for them, so `gate` must complete independently
-    /// of this journal. The returned handle completes once `gate` and every selected
-    /// section's sync complete, failing with the first error encountered.
+    /// The syncs are issued only after `gate` resolves and progress only while the returned
+    /// handle is polled or a later operation on a selected section waits for them, so `gate`
+    /// must complete independently of this journal. The handle completes once `gate` and
+    /// every selected section's sync complete, failing with the first error encountered.
     pub async fn start_sync_after(
         &mut self,
         sections: impl crate::Sections,
