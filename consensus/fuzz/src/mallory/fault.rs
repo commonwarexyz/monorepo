@@ -11,7 +11,7 @@
 use crate::{
     mallory::{adversary::AdversaryRole, policy::ActionId},
     utils::SetPartition,
-    SniffChannel,
+    SniffChannel, N4F0C4,
 };
 use rand::{Rng, RngExt as _};
 use std::time::Duration;
@@ -22,9 +22,10 @@ use std::time::Duration;
 /// during the window, all progress stalls until the partition heals.
 const PARTITION_2_2: [usize; 3] = [5, 6, 7];
 
-/// Mallory fixes `n = 4` honest validators (see [`crate::mallory`]); a packet
-/// fault may target any of them, since all four run honest engines behind a pump.
-const MALLORY_N: usize = 4;
+/// The validator count Mallory samples packet-fault targets over: the
+/// [`N4F0C4`] node count, so it stays tied to the one configuration Mallory runs.
+/// All four run honest engines behind a pump, so any is a valid target.
+const MALLORY_N: usize = N4F0C4.n as usize;
 /// Sampled packet-delay bounds (ms): a sub-window per-packet slowdown, so delayed
 /// packets still arrive within the observation window and the channel recovers as
 /// soon as the fault heals.
@@ -85,7 +86,7 @@ const PACKET_REORDER_MAX: u32 = 8;
 ///
 /// PR8 appends the mid-episode Byzantine role switch, legal only in a byzantine
 /// episode (see [`legal_mask`]):
-/// - `SetRole = 11`
+/// - `SwapByzantineRole = 11`
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 // `NoFault` deliberately ends with the enum name: it is the RL "no-op fault" choice.
 #[allow(clippy::enum_variant_names)]
@@ -120,7 +121,7 @@ pub(crate) enum Fault {
     PacketReorder,
     /// Crash-stop the single faultable identity ([`crate::BYZANTINE_IDX`]): abort
     /// its engine and application tasks so they can never send again. PERMANENT but
-    /// NOT terminal. Node 0 stays down for the rest of the episode while Mallory keeps
+    /// NOT terminal. `BYZANTINE_IDX` stays down for the rest of the episode while Mallory keeps
     /// perturbing the surviving quorum (nodes 1-3). The crashed node is dropped from
     /// the reactive finalization set and the liveness watch, but its retained reporter
     /// (pre-crash history) stays in the safety set.
@@ -135,14 +136,14 @@ pub(crate) enum Fault {
     /// Byzantine amnesia. Counts as BYZANTINE: the node runs but is excluded from the
     /// honest safety and liveness sets for the rest of the episode. Not terminal.
     AmnesiaRestart,
-    /// Swap node 0's active Byzantine profile mid-episode to another of the six
+    /// Swap `BYZANTINE_IDX`'s active Byzantine profile mid-episode to another of the six
     /// Byzantine roles (see [`AdversaryRole`]). Legal ONLY in a byzantine episode
-    /// (node 0 is the adversary multiplexer) and only until the per-episode switch
+    /// (`BYZANTINE_IDX` is the adversary multiplexer) and only until the per-episode switch
     /// cap ([`MALLORY_MAX_ROLE_SWITCHES`]) is reached. Persists (not a heal-able
     /// transient): the new profile keys the role region of the Q-state for the
     /// remaining steps, so the learner can compose faults across views. Not
     /// terminal.
-    SetRole,
+    SwapByzantineRole,
 }
 
 /// Actions in [`ActionId`] order: index `i` has id `i`. Appended-to, never
@@ -159,14 +160,14 @@ pub(crate) const CATALOG: &[Fault] = &[
     Fault::CrashStop,
     Fault::CrashRestartDurable,
     Fault::AmnesiaRestart,
-    Fault::SetRole,
+    Fault::SwapByzantineRole,
 ];
 
 /// Number of Mallory faults (the Q-table's column count).
 pub(crate) const N_FAULTS: usize = CATALOG.len();
 
-/// Maximum [`Fault::SetRole`] role switches per byzantine episode. Bounds how many
-/// times node 0's Byzantine profile can be swapped so an episode composes a small
+/// Maximum [`Fault::SwapByzantineRole`] role switches per byzantine episode. Bounds how many
+/// times `BYZANTINE_IDX`'s Byzantine profile can be swapped so an episode composes a small
 /// number of faults across views rather than thrashing the multiplexer.
 pub(crate) const MALLORY_MAX_ROLE_SWITCHES: u32 = 3;
 
@@ -235,10 +236,10 @@ pub(crate) enum FaultPlan {
     /// validator, not the network; marks the node Byzantine for the rest of the
     /// episode.
     AmnesiaRestart,
-    /// Swap node 0's active Byzantine profile to this target role. Enacted against
+    /// Swap `BYZANTINE_IDX`'s active Byzantine profile to this target role. Enacted against
     /// the [`RoleMultiplexer`](crate::mallory::multiplexer::RoleMultiplexer), not the
     /// network; the target is always Byzantine (never Honest).
-    SetRole(AdversaryRole),
+    SwapByzantineRole(AdversaryRole),
 }
 
 impl FaultPlan {
@@ -280,13 +281,15 @@ impl FaultPlan {
             FaultPlan::CrashStop => "crash_stop(node=0)".to_string(),
             FaultPlan::CrashRestartDurable => "crash_restart_durable(node=0)".to_string(),
             FaultPlan::AmnesiaRestart => "amnesia_restart(node=0)".to_string(),
-            FaultPlan::SetRole(role) => format!("set_role(node=0, target={})", role.label()),
+            FaultPlan::SwapByzantineRole(role) => {
+                format!("swap_byzantine_role(node=0, target={})", role.label())
+            }
         }
     }
 
     /// Whether this plan installs a transient network/packet fault. The lifecycle
     /// faults ([`FaultPlan::CrashStop`], [`FaultPlan::CrashRestartDurable`],
-    /// [`FaultPlan::AmnesiaRestart`]) and the role switch ([`FaultPlan::SetRole`]) are
+    /// [`FaultPlan::AmnesiaRestart`]) and the role switch ([`FaultPlan::SwapByzantineRole`]) are
     /// NOT such faults, they are enacted against the managed validator or the
     /// multiplexer, not the network, and the role switch persists rather than being
     /// healed. Test-only: the runner classifies each plan directly via its heal-match
@@ -300,7 +303,7 @@ impl FaultPlan {
                 | FaultPlan::CrashStop
                 | FaultPlan::CrashRestartDurable
                 | FaultPlan::AmnesiaRestart
-                | FaultPlan::SetRole(_)
+                | FaultPlan::SwapByzantineRole(_)
         )
     }
 }
@@ -339,13 +342,13 @@ impl Fault {
     /// draws come from the runtime RNG so the pump applies a deterministic
     /// transform.
     ///
-    /// `exclude_node0` restricts the packet-fault target: node 0 is dropped from the
+    /// `exclude_node0` restricts the packet-fault target: `BYZANTINE_IDX` is dropped from the
     /// target set `{1, 2, 3}` (instead of all four) when it has no live pump / sniffer
     /// to match, i.e. when a Byzantine role owns it (RAW channels) or it is
     /// crash-stopped (no engine). Otherwise the target is drawn from all four exactly
     /// as before, so an Honest-episode replay is unperturbed.
     pub(crate) fn sample(self, rng: &mut impl Rng, exclude_node0: bool) -> FaultPlan {
-        // The lowest packet-fault target: node 0 is excluded when it has no live
+        // The lowest packet-fault target: `BYZANTINE_IDX` is excluded when it has no live
         // pump / sniffer (byzantine-owned or crashed). This does not draw RNG, so the
         // non-packet arms are unaffected.
         let node_lo = usize::from(exclude_node0);
@@ -393,17 +396,17 @@ impl Fault {
             // The role switch draws one target uniformly among the six Byzantine
             // roles (never Honest) from the runtime RNG, so the multiplexer applies a
             // deterministic swap on replay.
-            Fault::SetRole => FaultPlan::SetRole(AdversaryRole::sample_byzantine(rng)),
+            Fault::SwapByzantineRole => FaultPlan::SwapByzantineRole(AdversaryRole::sample_byzantine(rng)),
         }
     }
 }
 
 /// The per-step legal-fault mask: which catalog faults the policy may select
 /// this step. With an Honest faultable identity running, every catalog fault
-/// except [`Fault::SetRole`] (which needs a byzantine multiplexer) is legal, the
+/// except [`Fault::SwapByzantineRole`] (which needs a byzantine multiplexer) is legal, the
 /// loop heals every transient topology/packet fault before the next decision, so at
 /// most one is ever active without any masking, and all three lifecycle faults
-/// target the running managed node 0.
+/// target the running managed `BYZANTINE_IDX`.
 ///
 /// Once that node is crash-stopped (`node0_crashed`) the crash is PERMANENT for the
 /// episode, but the episode CONTINUES over the surviving quorum. The three lifecycle
@@ -412,32 +415,32 @@ impl Fault {
 /// (cutting off an already-dead node is a no-op). The transient
 /// [`Fault::PartitionWindow`] and
 /// packet faults stay legal, so Mallory can keep perturbing nodes 1-3 (their targets
-/// exclude node 0 at sample time). [`Fault::SetRole`] stays masked (a crashed Honest
-/// node 0 has no multiplexer). Because node 0 never returns, `node0_crashed` stays set
+/// exclude `BYZANTINE_IDX` at sample time). [`Fault::SwapByzantineRole`] stays masked (a crashed Honest
+/// node has no multiplexer). Because it never returns, `node0_crashed` stays set
 /// for every later step.
 ///
-/// When a Byzantine role owns node 0 (`role_active`) OR node 0 has become an
-/// amnesiac (`node0_amnesiac`, an empty-storage restart that may equivocate), node 0
-/// is now the single Byzantine identity, so ALL THREE lifecycle faults
+/// When a Byzantine role owns `BYZANTINE_IDX` (`role_active`) OR it has become an
+/// amnesiac (`node0_amnesiac`, an empty-storage restart that may equivocate), that
+/// node is now the single Byzantine identity, so ALL THREE lifecycle faults
 /// ([`Fault::CrashStop`], [`Fault::CrashRestartDurable`], [`Fault::AmnesiaRestart`])
 /// are masked out, this enforces the one-faultable-identity contract (no lifecycle
 /// fault on a second node; no further lifecycle fault on the already-Byzantine
-/// identity). Under a role node 0 is UNMANAGED, so there is no
+/// identity). Under a role `BYZANTINE_IDX` is UNMANAGED, so there is no
 /// [`ManagedValidator`](crate::ManagedValidator) to target at all. The topology
 /// faults stay legal and are complementary, [`Fault::IsolateNodeWindow`]
-/// temporarily MUTES the adversary by cutting node 0 off, and
+/// temporarily MUTES the adversary by cutting `BYZANTINE_IDX` off, and
 /// [`Fault::PartitionWindow`] still stalls progress. The packet faults stay legal
 /// too; under a role their target is restricted to the honest managed nodes at
-/// sample time (see [`Fault::sample`]), while post-amnesia node 0 still has a
+/// sample time (see [`Fault::sample`]), while post-amnesia `BYZANTINE_IDX` still has a
 /// pump/sniffer so it stays a valid packet target.
 ///
-/// [`Fault::SetRole`] is the inverse case: it is legal ONLY when a Byzantine role
-/// owns node 0 (`role_active`, so a [`RoleMultiplexer`](crate::mallory::multiplexer::RoleMultiplexer)
+/// [`Fault::SwapByzantineRole`] is the inverse case: it is legal ONLY when a Byzantine role
+/// owns `BYZANTINE_IDX` (`role_active`, so a [`RoleMultiplexer`](crate::mallory::multiplexer::RoleMultiplexer)
 /// exists to swap) AND the episode's switch cap is not yet reached
 /// (`role_switches_exhausted` is false, i.e. the count is below
 /// [`MALLORY_MAX_ROLE_SWITCHES`]). Under the Honest environment there is no
 /// multiplexer, so it is masked out; once the cap is hit it is masked out too. The
-/// swap only ever composes Byzantine profiles, so node 0 stays Byzantine throughout
+/// swap only ever composes Byzantine profiles, so `BYZANTINE_IDX` stays Byzantine throughout
 /// and the oracle treatment is unchanged.
 pub(crate) fn legal_mask(
     node0_crashed: bool,
@@ -446,15 +449,15 @@ pub(crate) fn legal_mask(
     role_switches_exhausted: bool,
 ) -> [bool; N_FAULTS] {
     if node0_crashed {
-        // Node 0 is permanently down, but the episode keeps perturbing nodes 1-3.
+        // `BYZANTINE_IDX` is permanently down, but the episode keeps perturbing nodes 1-3.
         // Legal: NoFault, PartitionWindow, and the five packet faults (targets exclude
-        // node 0). Masked: the three lifecycle faults, IsolateNodeWindow, and SetRole.
+        // `BYZANTINE_IDX`). Masked: the three lifecycle faults, IsolateNodeWindow, and SwapByzantineRole.
         let mut mask = [true; N_FAULTS];
         mask[Fault::CrashStop.id()] = false;
         mask[Fault::CrashRestartDurable.id()] = false;
         mask[Fault::AmnesiaRestart.id()] = false;
         mask[Fault::IsolateNodeWindow.id()] = false;
-        mask[Fault::SetRole.id()] = false;
+        mask[Fault::SwapByzantineRole.id()] = false;
         return mask;
     }
     let mut mask = [true; N_FAULTS];
@@ -463,10 +466,10 @@ pub(crate) fn legal_mask(
         mask[Fault::CrashRestartDurable.id()] = false;
         mask[Fault::AmnesiaRestart.id()] = false;
     }
-    // A role switch needs a byzantine multiplexer at node 0 and a remaining switch
+    // A role switch needs a byzantine multiplexer at `BYZANTINE_IDX` and a remaining switch
     // budget; illegal under Honest (no multiplexer) and once the cap is reached.
     if !role_active || role_switches_exhausted {
-        mask[Fault::SetRole.id()] = false;
+        mask[Fault::SwapByzantineRole.id()] = false;
     }
     mask
 }
@@ -505,7 +508,7 @@ mod tests {
         assert_eq!(Fault::CrashStop.id(), 8);
         assert_eq!(Fault::CrashRestartDurable.id(), 9);
         assert_eq!(Fault::AmnesiaRestart.id(), 10);
-        assert_eq!(Fault::SetRole.id(), 11);
+        assert_eq!(Fault::SwapByzantineRole.id(), 11);
         assert_eq!(Fault::from_id(0), Fault::NoFault);
         assert_eq!(Fault::from_id(1), Fault::IsolateNodeWindow);
         assert_eq!(Fault::from_id(2), Fault::PartitionWindow);
@@ -517,22 +520,22 @@ mod tests {
         assert_eq!(Fault::from_id(8), Fault::CrashStop);
         assert_eq!(Fault::from_id(9), Fault::CrashRestartDurable);
         assert_eq!(Fault::from_id(10), Fault::AmnesiaRestart);
-        assert_eq!(Fault::from_id(11), Fault::SetRole);
+        assert_eq!(Fault::from_id(11), Fault::SwapByzantineRole);
     }
 
     #[test]
-    fn legal_mask_running_is_all_true_but_set_role_and_sized() {
-        // Under the Honest running environment every fault except SetRole is legal:
-        // SetRole needs a byzantine multiplexer at node 0, which the Honest
+    fn legal_mask_running_is_all_true_but_swap_byzantine_role_and_sized() {
+        // Under the Honest running environment every fault except SwapByzantineRole is legal:
+        // SwapByzantineRole needs a byzantine multiplexer at `BYZANTINE_IDX`, which the Honest
         // environment never builds.
         let mask = legal_mask(false, false, false, false);
         assert_eq!(mask.len(), N_FAULTS);
         assert_eq!(mask.len(), 12);
         assert!(
-            !mask[Fault::SetRole.id()],
-            "SetRole is illegal under the Honest environment"
+            !mask[Fault::SwapByzantineRole.id()],
+            "SwapByzantineRole is illegal under the Honest environment"
         );
-        for &fault in CATALOG.iter().filter(|&&a| a != Fault::SetRole) {
+        for &fault in CATALOG.iter().filter(|&&a| a != Fault::SwapByzantineRole) {
             assert!(
                 mask[fault.id()],
                 "{fault:?} is legal while the faultable node is running"
@@ -545,7 +548,7 @@ mod tests {
         // A crash-stop is permanent but the episode continues over the surviving
         // quorum. NoFault, PartitionWindow, and the five packet faults stay legal;
         // the three lifecycle faults, IsolateNodeWindow (a no-op on a dead node), and
-        // SetRole are masked.
+        // SwapByzantineRole are masked.
         let mask = legal_mask(true, false, false, false);
         assert_eq!(mask.len(), N_FAULTS);
         let masked = [
@@ -553,7 +556,7 @@ mod tests {
             Fault::CrashRestartDurable,
             Fault::AmnesiaRestart,
             Fault::IsolateNodeWindow,
-            Fault::SetRole,
+            Fault::SwapByzantineRole,
         ];
         for &fault in CATALOG.iter() {
             let want = !masked.contains(&fault);
@@ -565,7 +568,7 @@ mod tests {
         }
     }
 
-    /// The three lifecycle faults are masked out whenever node 0 is the Byzantine
+    /// The three lifecycle faults are masked out whenever `BYZANTINE_IDX` is the Byzantine
     /// identity, under a byzantine role or once it is amnesiac, while the
     /// topology and packet faults stay legal. Shared by the role and amnesia cases,
     /// which impose the same one-faultable-identity masking.
@@ -593,7 +596,7 @@ mod tests {
 
     #[test]
     fn legal_mask_role_active_masks_lifecycle_keeps_topology_and_packet() {
-        // A byzantine role owns node 0 as an unmanaged adversary: the lifecycle
+        // A byzantine role owns `BYZANTINE_IDX` as an unmanaged adversary: the lifecycle
         // faults have no ManagedValidator to target and are masked, but the
         // topology and packet faults stay legal (isolation mutes the adversary; a
         // partition still stalls; packet faults retarget the honest nodes).
@@ -602,16 +605,16 @@ mod tests {
 
     #[test]
     fn legal_mask_amnesiac_masks_lifecycle_keeps_topology_and_packet() {
-        // After an amnesia restart node 0 is Running but Byzantine (empty storage,
+        // After an amnesia restart `BYZANTINE_IDX` is Running but Byzantine (empty storage,
         // may equivocate): the one-faultable-identity contract masks every lifecycle
         // fault (including a second amnesia restart), while the topology and packet
-        // faults stay legal, node 0 keeps its pump, so it is still a packet target.
+        // faults stay legal, `BYZANTINE_IDX` keeps its pump, so it is still a packet target.
         assert_lifecycle_masked_topology_and_packet_legal(legal_mask(false, false, true, false));
     }
 
     #[test]
     fn legal_mask_amnesia_only_under_honest_running() {
-        // AmnesiaRestart is legal ONLY when node 0 is an Honest, running managed
+        // AmnesiaRestart is legal ONLY when `BYZANTINE_IDX` is an Honest, running managed
         // node: masked once it is crashed, under a byzantine role, or once amnesiac.
         assert!(
             legal_mask(false, false, false, false)[Fault::AmnesiaRestart.id()],
@@ -623,36 +626,36 @@ mod tests {
     }
 
     #[test]
-    fn legal_mask_set_role_only_under_byzantine_role_below_cap() {
-        // SetRole is legal ONLY when a byzantine role owns node 0 and the switch cap
+    fn legal_mask_swap_byzantine_role_only_under_byzantine_role_below_cap() {
+        // SwapByzantineRole is legal ONLY when a byzantine role owns `BYZANTINE_IDX` and the switch cap
         // is not yet reached: masked under Honest (no multiplexer), under a crashed
         // node, under an amnesiac node (role_active is false there), and once the cap
         // is hit even while a role is active.
         assert!(
-            legal_mask(false, true, false, false)[Fault::SetRole.id()],
-            "SetRole legal under a byzantine role below the switch cap"
+            legal_mask(false, true, false, false)[Fault::SwapByzantineRole.id()],
+            "SwapByzantineRole legal under a byzantine role below the switch cap"
         );
         assert!(
-            !legal_mask(false, true, false, true)[Fault::SetRole.id()],
-            "SetRole masked once the switch cap is reached"
+            !legal_mask(false, true, false, true)[Fault::SwapByzantineRole.id()],
+            "SwapByzantineRole masked once the switch cap is reached"
         );
         assert!(
-            !legal_mask(false, false, false, false)[Fault::SetRole.id()],
-            "SetRole masked under the Honest environment"
+            !legal_mask(false, false, false, false)[Fault::SwapByzantineRole.id()],
+            "SwapByzantineRole masked under the Honest environment"
         );
         assert!(
-            !legal_mask(true, false, false, false)[Fault::SetRole.id()],
-            "SetRole masked once node 0 is crashed"
+            !legal_mask(true, false, false, false)[Fault::SwapByzantineRole.id()],
+            "SwapByzantineRole masked once node 0 is crashed"
         );
         assert!(
-            !legal_mask(false, false, true, false)[Fault::SetRole.id()],
-            "SetRole masked while node 0 is amnesiac (not role-owned)"
+            !legal_mask(false, false, true, false)[Fault::SwapByzantineRole.id()],
+            "SwapByzantineRole masked while node 0 is amnesiac (not role-owned)"
         );
     }
 
     #[test]
     fn packet_target_never_node0_under_role() {
-        // Under a byzantine role node 0 has no pump/sniffer, so every packet fault
+        // Under a byzantine role `BYZANTINE_IDX` has no pump/sniffer, so every packet fault
         // must target an honest managed node in {1, 2, 3}.
         let mut rng = FuzzRng::new(vec![0x24, 0x8b, 0xf1, 0x0e, 0x77, 0x35, 0xac, 0x51]);
         for _ in 0..256 {
@@ -715,31 +718,31 @@ mod tests {
     }
 
     #[test]
-    fn set_role_samples_a_byzantine_target() {
-        // SetRole samples a FaultPlan::SetRole whose target is always a Byzantine
+    fn swap_byzantine_role_samples_a_byzantine_target() {
+        // SwapByzantineRole samples a FaultPlan::SwapByzantineRole whose target is always a Byzantine
         // role (never Honest); it is not a heal-able transient fault; and over many
         // draws it reaches every one of the six Byzantine profiles.
         let mut rng = FuzzRng::new(vec![0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15]);
         let mut seen_disrupter = false;
         let mut seen_other = false;
         for _ in 0..256 {
-            let FaultPlan::SetRole(role) = Fault::SetRole.sample(&mut rng, true) else {
-                panic!("SetRole must sample a SetRole plan");
+            let FaultPlan::SwapByzantineRole(role) = Fault::SwapByzantineRole.sample(&mut rng, true) else {
+                panic!("SwapByzantineRole must sample a SwapByzantineRole plan");
             };
             assert!(
                 role.is_byzantine(),
-                "SetRole target must be byzantine, got {role:?}"
+                "SwapByzantineRole target must be byzantine, got {role:?}"
             );
             assert!(
-                !FaultPlan::SetRole(role).is_active(),
-                "SetRole persists, not a transient"
+                !FaultPlan::SwapByzantineRole(role).is_active(),
+                "SwapByzantineRole persists, not a transient"
             );
             seen_disrupter |= role == AdversaryRole::Disrupter;
             seen_other |= role != AdversaryRole::Disrupter;
         }
         assert!(
             seen_disrupter && seen_other,
-            "SetRole must reach multiple byzantine roles"
+            "SwapByzantineRole must reach multiple byzantine roles"
         );
     }
 
@@ -791,7 +794,7 @@ mod tests {
                 allowed.contains(&sp),
                 "PartitionWindow must only yield a balanced 2-2 split, got {sp:?}"
             );
-            // A 2-2 split has exactly two blocks: node 0 is connected to exactly
+            // A 2-2 split has exactly two blocks: `BYZANTINE_IDX` is connected to exactly
             // one other node, never isolated.
             let peers = (1..4).filter(|&j| sp.connected(0, j)).count();
             assert_eq!(peers, 1, "a 2-2 split pairs node 0 with exactly one node");

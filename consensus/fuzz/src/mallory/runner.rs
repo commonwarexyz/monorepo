@@ -1,4 +1,4 @@
-//! The Mallory episode loop and its fault choosers.
+//! The Mallory episode loop and its fault schedule.
 //!
 //! Each episode (from the Algorithm 1) first picks one adversary ENVIRONMENT
 //! for the faultable identity ([`BYZANTINE_IDX`]): honest, or one of Byzantine profiles
@@ -16,7 +16,7 @@
 //!
 //! Reporter membership and the episode-end oracle follow the environment. Under
 //! `Honest` all four validators are honest [`ManagedValidator`]s. Under a
-//! Byzantine role, node 0 is an unmanaged adversary excluded from the honest set
+//! Byzantine role, `BYZANTINE_IDX` is an unmanaged adversary excluded from the honest set
 //! ([`invariants::check_vote_invariants_with_byzantine`]). A crash-stopped node
 //! is dropped from liveness but kept in safety via its retained reporter; an
 //! amnesiac node (durable restart with fresh storage) is treated as Byzantine.
@@ -71,20 +71,20 @@ const MALLORY_EPISODE_STEPS: usize = 12;
 /// past its baseline, or, if the fault suppressed progress, after this
 /// deterministic timeout. Just when Mallory reacts, not a whole observation span.
 const MALLORY_STEP_TIMEOUT: Duration = Duration::from_secs(5);
-/// Brief deterministic settle run after a packet fault heals: the F3 quiescence
+/// Brief deterministic settle run after a packet fault heals: the quiescence
 /// barrier flushes the pump, then this lets the engine consume the just-flushed
 /// packets so the next-state fingerprint reflects THIS step's fault rather than
 /// bleeding into the next step. Fixed (no RNG) so a same-seed replay is identical.
 const MALLORY_SETTLE: Duration = Duration::from_millis(500);
 
-/// Env-tag bit folded into the Q-state / novelty fingerprints once node 0 has become
+/// Env-tag bit folded into the Q-state / novelty fingerprints once i has become
 /// amnesiac (Running but empty-storage, so Byzantine). A distinct nonzero constant,
 /// well-separated from every [`adversary::AdversaryRole::tag`], so post-amnesia states
 /// key distinct Q-rows and novelty slots from the pre-amnesia Honest states they would
 /// otherwise alias despite a different legality and fault model.
 const AMNESIA_TAG: u64 = 0xa3f1_9c2d_7b64_e850;
 
-/// Env-tag bit folded in once node 0 is permanently crash-stopped: the episode
+/// Env-tag bit folded in once `BYZANTINE_IDX` is permanently crash-stopped: the episode
 /// continues over the surviving quorum, but under a DIFFERENT legality (lifecycle /
 /// isolate-node-0 masked) and fault model (a bare quorum of three, no faultable
 /// identity left), so it must key distinct Q-rows / novelty slots from both the
@@ -109,8 +109,8 @@ enum Enactment {
 }
 
 /// The per-step environment tag folded into the Q-state and novelty fingerprints:
-/// the episode [`adversary::AdversaryRole`] tag XOR [`AMNESIA_TAG`] once node 0 is
-/// amnesiac XOR [`CRASHED_TAG`] once node 0 is permanently crash-stopped (the two
+/// the episode [`adversary::AdversaryRole`] tag XOR [`AMNESIA_TAG`] once `BYZANTINE_IDX` is
+/// amnesiac XOR [`CRASHED_TAG`] once `BYZANTINE_IDX` is permanently crash-stopped (the two
 /// lifecycle states are mutually exclusive). Under the Honest role with neither this
 /// is `0` (an identity mix, so the warm campaign's honest rows are unchanged).
 fn env_tag(role: adversary::AdversaryRole, node0_amnesiac: bool, node0_crashed: bool) -> u64 {
@@ -252,8 +252,8 @@ async fn wait_for_step_boundary(
 
 /// The real node indices currently live-correct: `managed` positions with
 /// `lifecycle() == Running`, mapped to node indices via `honest_indices`. Excludes a
-/// crash-stopped or amnesiac node 0 (and a byzantine-role node 0 is never in
-/// `managed`); a durably-restarted node 0 is `Running` and included. The step
+/// crash-stopped or amnesiac `BYZANTINE_IDX` (and a byzantine-role `BYZANTINE_IDX` is never in
+/// `managed`); a durably-restarted `BYZANTINE_IDX` is `Running` and included. The step
 /// baseline and the reactive step boundary observe exactly this set, refreshed each
 /// step so a lifecycle change is reflected immediately.
 fn live_correct_nodes<P: Simplex>(
@@ -269,7 +269,7 @@ fn live_correct_nodes<P: Simplex>(
 /// The post-heal liveness target every live correct node must reach: one view past the
 /// highest pre-heal frontier `max_baseline`, proving each caught up after the last
 /// fault/heal/restart, but never below the absolute `required_containers`. On overflow
-/// of `max_baseline + 1` the absolute target is kept (F2).
+/// of `max_baseline + 1` the absolute target is kept.
 fn liveness_target(required_containers: u64, max_baseline: u64) -> u64 {
     match max_baseline.checked_add(1) {
         Some(next) => required_containers.max(next),
@@ -300,7 +300,7 @@ fn enactment_of(plan: &fault::FaultPlan, matched: bool) -> Enactment {
         | fault::FaultPlan::CrashStop
         | fault::FaultPlan::CrashRestartDurable
         | fault::FaultPlan::AmnesiaRestart
-        | fault::FaultPlan::SetRole(_) => Enactment::Applied,
+        | fault::FaultPlan::SwapByzantineRole(_) => Enactment::Applied,
     }
 }
 
@@ -361,7 +361,7 @@ fn spawn_packet_pump<P: Simplex>(
 }
 
 /// Signal the pump for `(node, channel)` to drain its held reorder buffer in arrival
-/// order and finish any in-flight per-packet delay, and WAIT for its ack (the F3
+/// order and finish any in-flight per-packet delay, and WAIT for its ack (the
 /// quiescence barrier): once this returns, that pump holds no fault-injected packet, so
 /// the runner may clear the fault without step N's effects leaking into step N+1. Only
 /// the single active pump ever buffers (one fault at a time), so every other pump acks
@@ -530,7 +530,7 @@ async fn restart<P: Simplex>(
     flush_senders.push((node, SniffChannel::Resolver, resolver_flush));
 
     // (5) Rebuild engine+app under the node's NodeSubscriber dispatch so its events
-    //     stay attributed to node 0. Durable reuses the SAME partition and reporter
+    //     stay attributed to `BYZANTINE_IDX`. Durable reuses the SAME partition and reporter
     //     (journal replay + retained safety history); amnesia rebuilds on a FRESH
     //     partition derived from the bumped generation with a CLEAN-SLATE reporter
     //     (`None`), so the engine finds empty storage and forgets its signed votes.
@@ -678,10 +678,10 @@ async fn restart_amnesia<P: Simplex>(
 /// and held for the whole episode. Under the Honest role all four nodes are honest
 /// processes (Mallory perturbs only the network), all four are happens-before
 /// captured (empty ambiguous set), and all four are checked by the episode-end
-/// oracle. Under a Byzantine role node 0 ([`BYZANTINE_IDX`]) is replaced by a raw,
+/// oracle. Under a Byzantine role [`BYZANTINE_IDX`] is replaced by a raw,
 /// unmanaged adversary (no pump / sniffer / reporter / [`ManagedValidator`]); the
 /// three honest nodes form the N4F0C4 quorum of three, are happens-before captured
-/// (node 0 marked ambiguous), and safety excludes node 0's equivocation via
+/// (it is marked ambiguous), and safety excludes its equivocation via
 /// [`invariants::check_vote_invariants_with_byzantine`].
 ///
 /// The deterministic runtime is seeded from `FuzzRng::new(input.raw_bytes)`,
@@ -774,7 +774,7 @@ fn run_inner<P: Simplex>(
         });
         let byz = role.is_byzantine();
         // The MUTABLE per-step environment role. It starts at the sampled `role` and,
-        // in a byzantine episode, a `SetRole` step swaps it (via the multiplexer) to
+        // in a byzantine episode, a `SwapByzantineRole` step swaps it (via the multiplexer) to
         // another Byzantine profile. It keys the role region of the Q-state every step
         // (`env_tag(current_role, ..)`), so a switch connects the role regions of the
         // MDP. `byz`, `ambiguous`, and the role bandit's credit stay pinned to the
@@ -782,15 +782,15 @@ fn run_inner<P: Simplex>(
         // the bandit learns the role it selected).
         let mut current_role = role;
         // The byzantine node cannot send messages under another node's identity, so its messages are
-        // always correctly attributed to node 0, but a byzantine node (node with BYZANTINE_IDX)
+        // always correctly attributed to `BYZANTINE_IDX`, but a byzantine node
         // can attach a causal history that matches no honest execution, which is not sound to merge
         // into an honest node's fingerprint. So it is excluded from happens-before
         // sender attribution while byzantine; the honest nodes 1-3 stay captured. Under
         // the Honest role no node is ambiguous. This is fixed at setup (the sniffers are
-        // built once), so a LATER amnesia restart does not retroactively mark node 0
+        // built once), so a LATER amnesia restart does not retroactively mark `BYZANTINE_IDX`
         // ambiguous: its post-amnesia messages stay in the honest HB attribution. That
         // is acceptable, the HB log feeds only the reward/novelty fingerprint, never
-        // the safety oracle, which excludes an amnesiac node 0 via the `node0_byzantine`
+        // the safety oracle, which excludes an amnesiac `BYZANTINE_IDX` via the `node0_byzantine`
         // flag at episode end.
         let ambiguous: Arc<[u32]> = if byz {
             vec![BYZANTINE_IDX as u32].into()
@@ -812,21 +812,21 @@ fn run_inner<P: Simplex>(
             Vec::with_capacity(n * 3);
 
         // Each honest node's task handles are RETAINED in a `ManagedValidator` so
-        // the faultable identity (node 0, Honest role) can be crash-stopped or
+        // the faultable identity (`BYZANTINE_IDX`, Honest role) can be crash-stopped or
         // durably restarted at runtime; the reporter is Arc-backed, so a crashed
-        // node's safety history survives its abort. Under a byzantine role node 0 is
+        // node's safety history survives its abort. Under a byzantine role `BYZANTINE_IDX` is
         // NOT managed (it is the unmanaged adversary), so `managed` holds nodes 1-3
         // and `honest_indices[k]` recovers the node index of `managed[k]`.
         let mut managed: Vec<ManagedValidator<P>> = Vec::with_capacity(n);
-        // Under a byzantine role node 0 is owned by the adversary multiplexer, which
-        // spawns the current profile's raw actor and swaps it on a `SetRole` step.
+        // Under a byzantine role `BYZANTINE_IDX` is owned by the adversary multiplexer, which
+        // spawns the current profile's raw actor and swaps it on a `SwapByzantineRole` step.
         // `None` under the Honest environment. Only the byzantine branch sets it.
         let mut multiplexer: Option<multiplexer::RoleMultiplexer<P>> = None;
         for i in 0..n {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
 
-            // Byzantine role at node 0: hand its RAW channels to the multiplexer (no
+            // Byzantine role at `BYZANTINE_IDX`: hand its RAW channels to the multiplexer (no
             // pump, no SniffingReceiver, no reporter, no ManagedValidator). The
             // multiplexer is the single owner of those single-consumer mailboxes and
             // spawns the INITIAL profile's actor; nothing is pushed to `managed`. The
@@ -933,7 +933,7 @@ fn run_inner<P: Simplex>(
 
         // The honest managed validators are safety-checked by the episode-end
         // oracle. `reporters` is position-aligned with `managed` (and with
-        // `honest_indices`); under a byzantine role node 0 has no reporter, so this
+        // `honest_indices`); under a byzantine role `BYZANTINE_IDX` has no reporter, so this
         // IS the honest reporter set. Reporters are cloned once from the managed
         // validators; their Arc-backed maps reflect live state (and a durable restart
         // reuses the same reporter instance), so re-encoding each step gives the
@@ -947,8 +947,8 @@ fn run_inner<P: Simplex>(
         // synchronously (an authoritative cut, no intermediate forwarder). Subscribing
         // once (not per step) is required, `Reporter::subscribe` never prunes its
         // senders. A durable restart REUSES its reporter, so its monitor keeps
-        // delivering; an amnesia restart SWAPS node 0's reporter, so its monitor stops
-        // advancing, which is correct because node 0 is then Byzantine and excluded.
+        // delivering; an amnesia restart SWAPS `BYZANTINE_IDX`'s reporter, so its monitor stops
+        // advancing, which is correct because `BYZANTINE_IDX` is then Byzantine and excluded.
         let mut clock = FinalizationClock {
             latest: vec![0u64; n],
             monitors: Vec::with_capacity(managed.len()),
@@ -970,9 +970,9 @@ fn run_inner<P: Simplex>(
         // Observe before the first decision: the initial (empty-history) HB
         // fingerprint XOR the env tag (role plus amnesia / crashed bits) XOR the
         // horizon tag is the step-0 Q-state. The env tag keeps Honest, each byzantine
-        // role, a post-amnesia node 0, and a post-crash node 0 in distinct Q-rows; the
+        // role, a post-amnesia `BYZANTINE_IDX`, and a post-crash `BYZANTINE_IDX` in distinct Q-rows; the
         // horizon tag keeps a different remaining container budget distinct (folded
-        // into the Q-STATE only, never novelty). Node 0 cannot be amnesiac or crashed
+        // into the Q-STATE only, never novelty). `BYZANTINE_IDX` cannot be amnesiac or crashed
         // yet, so the env tag reduces to the role.
         let mut state = hb_log.summary().fingerprint()
             ^ env_tag(current_role, false, false)
@@ -1000,15 +1000,17 @@ fn run_inner<P: Simplex>(
             // amnesia THIS step is reflected in both membership and baseline.
             clock.drain();
 
-            // The per-step legal mask. Under the Honest role, while node 0 runs
-            // every fault is legal; once it is crash-stopped only NoFault is (a
-            // crash is terminal, so this is reached only defensively), and a durable
-            // restart re-opens the full mask. Once node 0 is amnesiac it is the
+            // The per-step legal mask. Under the Honest role, while `BYZANTINE_IDX` runs
+            // every fault is legal. Once it is crash-stopped the crash is PERMANENT and
+            // `BYZANTINE_IDX` never returns, but the episode CONTINUES over the surviving
+            // quorum (nodes 1-3): NoFault, PartitionWindow, and the five packet faults
+            // stay legal, while the three lifecycle faults, IsolateNodeWindow, and
+            // `SwapByzantineRole` are masked. Once `BYZANTINE_IDX` is amnesiac it is the
             // single Byzantine identity (Running but empty-storage), so the three
-            // lifecycle faults are masked out. Under a byzantine role node 0 is the
+            // lifecycle faults are masked out. Under a byzantine role `BYZANTINE_IDX` is the
             // unmanaged adversary (never "crashed"), and the lifecycle faults are
-            // likewise masked, there is no ManagedValidator at node 0 to crash. A
-            // `SetRole` swap is legal only under a byzantine role and only until the
+            // likewise masked, there is no ManagedValidator at `BYZANTINE_IDX` to crash. A
+            // `SwapByzantineRole` swap is legal only under a byzantine role and only until the
             // multiplexer's per-episode switch cap is reached.
             let node0_crashed =
                 !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Crashed);
@@ -1046,9 +1048,9 @@ fn run_inner<P: Simplex>(
             // The step's clock starts HERE so the observation window is measured from
             // the fault's start: a restart sleeps its downtime inside enact, and
             // folding that into the window keeps every step exactly one window long
-            // (F6) rather than a restart observing downtime + window.
+            // rather than a restart observing downtime + window.
             let step_start = context.current();
-            // Exclude node 0 as a packet target when it has no live pump / sniffer:
+            // Exclude `BYZANTINE_IDX` as a packet target when it has no live pump / sniffer:
             // a byzantine role owns it (raw channels) or it is crash-stopped.
             let plan = fault.sample(&mut context, byz || node0_crashed);
             let params = plan.describe();
@@ -1114,7 +1116,7 @@ fn run_inner<P: Simplex>(
                 fault::FaultPlan::CrashStop => {
                     // Crash-stop the faultable identity PERMANENTLY (but NOT terminal):
                     // abort+await both handles so the old engine/application tasks can
-                    // never send again. Node 0 stays `Crashed` for the rest of the
+                    // never send again. `BYZANTINE_IDX` stays `Crashed` for the rest of the
                     // episode, dropped from the reactive finalization / liveness sets
                     // and every subsequent step's legal mask (lifecycle and
                     // isolate-node-0 masked), while Mallory keeps perturbing the
@@ -1164,17 +1166,17 @@ fn run_inner<P: Simplex>(
                     )
                     .await;
                 }
-                fault::FaultPlan::SetRole(new_role) => {
-                    // Swap node 0's active Byzantine profile via the multiplexer:
-                    // abort+await the live actor, re-register node 0's channels, and
+                fault::FaultPlan::SwapByzantineRole(new_role) => {
+                    // Swap `BYZANTINE_IDX`'s active Byzantine profile via the multiplexer:
+                    // abort+await the live actor, re-register `BYZANTINE_IDX`'s channels, and
                     // spawn the new profile. `current_role` then keys the role region
                     // of the Q-state for the rest of the episode (see `next_tag`), so
                     // this step is the transition that connects the MDP's role regions.
-                    // Only reachable in a byzantine episode (SetRole is masked
+                    // Only reachable in a byzantine episode (SwapByzantineRole is masked
                     // otherwise), so the multiplexer is always present.
                     let mux = multiplexer
                         .as_mut()
-                        .expect("SetRole is only legal in a byzantine episode");
+                        .expect("SwapByzantineRole is only legal in a byzantine episode");
                     mux.set_role(*new_role, &mut context).await;
                     current_role = mux.current_role();
                 }
@@ -1182,7 +1184,7 @@ fn run_inner<P: Simplex>(
 
             // (f2) POST-enact observation set + baseline. The live-correct set is
             // recomputed HERE (not pre-enact) so a crash-stop / amnesia this step drops
-            // node 0 immediately, its stale events can never close the step. The
+            // `BYZANTINE_IDX` immediately, its stale events can never close the step. The
             // baseline is the pre-enact cut (`clock.latest`, not re-drained since (a))
             // restricted to that eligible set: new progress is a finalization past the
             // frontier that existed just before the fault, from a node still eligible.
@@ -1211,15 +1213,15 @@ fn run_inner<P: Simplex>(
                 StepBoundary::Timeout => ("timeout", None, None),
             };
 
-            // Node 0's POST-enact lifecycle (an amnesia restart THIS step already
+            // `BYZANTINE_IDX`'s POST-enact lifecycle (an amnesia restart THIS step already
             // flipped it to Amnesiac/Byzantine; a crash to Crashed). Stable from enact
             // through heal, so one env tag serves the effect AND the next state. Under a
-            // byzantine role node 0 is unmanaged, so both flags stay false.
+            // byzantine role `BYZANTINE_IDX` is unmanaged, so both flags stay false.
             let node0_crashed_now =
                 !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Crashed);
             let node0_amnesiac_now =
                 !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Amnesiac);
-            // The env tag uses the POST-enact `current_role`: a `SetRole` this step has
+            // The env tag uses the POST-enact `current_role`: a `SwapByzantineRole` this step has
             // already swapped it, so the effect / next fingerprints key the NEW role
             // region, the transition that connects the role regions of the MDP. A
             // crash this step also keys the post-crash region for every later step.
@@ -1248,14 +1250,14 @@ fn run_inner<P: Simplex>(
 
             // (i) Heal the transient fault before the next decision, so at most one
             // fault is ever active (v1 contract). A topology fault heals via the
-            // topology authority. A packet fault heals behind the F3 QUIESCENCE
+            // topology authority. A packet fault heals behind the QUIESCENCE
             // BARRIER: request-reply flush the target pump and WAIT for its ack, which
             // (single-threaded pump) implies its reorder buffer is drained and any
             // in-flight per-packet delay finished, so no fault-injected packet is left
             // buffered; then clear the cell and run a brief deterministic settle so the
             // engine consumes the just-flushed packets before next-state, keeping
             // this step's fault effect out of the next step. `matched` is read before
-            // the clear resets it. `enactment` is logging-only (F8): a packet fault
+            // the clear resets it. `enactment` is logging-only: a packet fault
             // that matched nothing is `NoEffect`, a lifecycle/topology fault is always
             // `Applied`. NoFault installs nothing, so there is nothing to heal.
             let (healed, matched_log, enactment) = match &plan {
@@ -1288,7 +1290,7 @@ fn run_inner<P: Simplex>(
                     // heal still runs so a restarted node can catch up.
                     ("lifecycle", "n/a".to_string(), Enactment::Applied)
                 }
-                fault::FaultPlan::SetRole(_) => {
+                fault::FaultPlan::SwapByzantineRole(_) => {
                     // A role switch is enacted against the multiplexer and PERSISTS:
                     // there is no transient fault to heal (the new profile keeps
                     // running into the next step).
@@ -1316,7 +1318,7 @@ fn run_inner<P: Simplex>(
 
             // (k) TD update (Learned only, `reward` already computed pre-heal). Terminal
             // when the episode ends here (no bootstrap); otherwise bootstrap over the
-            // faults legal at NEXT, recomputed from node 0's POST-enact lifecycle and
+            // faults legal at NEXT, recomputed from `BYZANTINE_IDX`'s POST-enact lifecycle and
             // switch count (so an amnesia restart or a switch-cap hit does not bootstrap
             // over now-illegal columns). `select` above used the pre-enact `legal`.
             let reward_log = match reward {
@@ -1346,7 +1348,7 @@ fn run_inner<P: Simplex>(
             // ended; `baseline` is the pre-fault honest frontier; `episode_remaining`
             // and `episode_end` expose the budget. `state_desc` is the pre-heal fault
             // effect; `next_state` the post-heal bootstrap state. `generation` /
-            // `lifecycle0` track node 0's incarnation and lifecycle ("unmanaged" under a
+            // `lifecycle0` track `BYZANTINE_IDX`'s incarnation and lifecycle ("unmanaged" under a
             // byzantine role), making the mid-episode Honest->Amnesiac flip observable.
             let generation = if byz { 0 } else { managed[0].generation() };
             let lifecycle0 = if byz {
@@ -1384,7 +1386,7 @@ fn run_inner<P: Simplex>(
 
         // Episode end: reach the synchronous phase. Heal unconditionally so any
         // last-step fault is cleared and every node, including an isolated
-        // node 0, can reconnect and catch up before the liveness check below.
+        // `BYZANTINE_IDX`, can reconnect and catch up before the liveness check below.
         // Clear the packet cell too, so every pump is a transparent relay during
         // catch-up.
         topology.heal().await;
@@ -1401,8 +1403,8 @@ fn run_inner<P: Simplex>(
             let _ = tx.send(ack_tx);
         }
 
-        // Unified "node 0 is Byzantine" flag, read HERE (episode end) so a late
-        // amnesia restart correctly flips the excluded set: node 0 is Byzantine iff
+        // Unified "`BYZANTINE_IDX` is Byzantine" flag, read HERE (episode end) so a late
+        // amnesia restart correctly flips the excluded set: `BYZANTINE_IDX` is Byzantine iff
         // the episode role owns it as an unmanaged adversary OR it became amnesiac
         // (Running but empty-storage, so it may equivocate). This single flag drives
         // both the safety byzantine set and the liveness exclusion below. Under the
@@ -1412,15 +1414,15 @@ fn run_inner<P: Simplex>(
         let node0_byzantine = byz || node0_amnesiac;
 
         // Liveness argument (relied on below): the honest nodes always form the
-        // N4F0C4 quorum of three. IsolateNodeWindow removes only node 0, so the
-        // other three keep finalizing while node 0 stalls and then catches up
+        // N4F0C4 quorum of three. IsolateNodeWindow removes only `BYZANTINE_IDX`, so the
+        // other three keep finalizing while `BYZANTINE_IDX` stalls and then catches up
         // post-heal via resolver backfill; PartitionWindow (2-2) leaves neither
         // side a quorum, so all progress stalls during the window and resumes once
-        // healed. Under the Honest role a crash-stop permanently removes node 0
+        // healed. Under the Honest role a crash-stop permanently removes `BYZANTINE_IDX`
         // (excluded from the liveness watch below) and a durable restart brings it
-        // back to catch up like the others. An amnesia restart leaves node 0 Running
+        // back to catch up like the others. An amnesia restart leaves `BYZANTINE_IDX` Running
         // but Byzantine, so it is excluded from the watch (it may equivocate) while
-        // the three honest nodes tolerate it (f = 1). Under a byzantine role node 0
+        // the three honest nodes tolerate it (f = 1). Under a byzantine role `BYZANTINE_IDX`
         // is the unmanaged adversary, never a watch target, and the three honest
         // nodes tolerate it too. Because Mallory heals after every window and again at
         // episode end, no live honest node permanently wedges, every one reaches
@@ -1430,9 +1432,9 @@ fn run_inner<P: Simplex>(
         // Keep only nodes still `Running`: a crash-stopped node (no engine) and an
         // amnesiac node (Running but Byzantine, excluded because it may equivocate)
         // are both filtered out, `Crashed` and `Amnesiac` are distinct from
-        // `Running`, so both are excluded here. Under a byzantine role node 0 is not
+        // `Running`, so both are excluded here. Under a byzantine role `BYZANTINE_IDX` is not
         // managed, so it never joins this watch. Together the excluded set is at most
-        // {node 0}. A crash-stopped node stays in the safety set below via its
+        // {`BYZANTINE_IDX`}. A crash-stopped node stays in the safety set below via its
         // retained reporter; an amnesiac node is Byzantine and excluded from safety.
         let live_positions: Vec<usize> = (0..managed.len())
             .filter(|&k| matches!(managed[k].lifecycle(), ValidatorLifecycle::Running))
@@ -1445,7 +1447,7 @@ fn run_inner<P: Simplex>(
             watch_targets.push((k, node, latest.get()));
             watcher_inputs.push((node, latest, monitor));
         }
-        // Require post-heal PROGRESS, not just the absolute frontier (F2): after a
+        // Require post-heal PROGRESS, not just the absolute frontier: after a
         // full episode the honest nodes are already well past `required_containers`,
         // so a node wedged by the LAST fault/heal/restart would pass instantly against
         // it. Instead every live correct node must reach one view past the HIGHEST
@@ -1495,18 +1497,18 @@ fn run_inner<P: Simplex>(
             );
         }
 
-        // Safety invariants over the honest reporters. Node 0's equivocation is
+        // Safety invariants over the honest reporters. `BYZANTINE_IDX`'s equivocation is
         // excluded from the vote-equivocation check exactly when it is Byzantine
         // (`node0_byzantine`): under a byzantine role its forged votes are recorded
         // in the honest reporters' vote maps, and post-amnesia its empty-storage
         // double-votes are too, `check_vote_invariants_with_byzantine(&{0}, ...)`
         // excludes both by sender identity across all reporters (the byzzfuzz
-        // treatment). When node 0 is honest (Honest role, no amnesia) the set is
+        // treatment). When `BYZANTINE_IDX` is honest (Honest role, no amnesia) the set is
         // empty and a crash-stopped node's retained reporter is safety-checked like
         // any other, a crashed node is NOT Byzantine (it never equivocated), so it
         // is excluded from liveness but not from the safety set. This is the same
         // unified flag used by the liveness exclusion, so a mid-episode amnesia flip
-        // consistently drops node 0 from BOTH sets.
+        // consistently drops `BYZANTINE_IDX` from BOTH sets.
         let byzantine: HashSet<usize> = if node0_byzantine {
             std::iter::once(BYZANTINE_IDX).collect()
         } else {
@@ -1609,7 +1611,7 @@ mod tests {
     fn env_tag_separates_post_amnesia_and_post_crash_from_every_other_environment() {
         use adversary::AdversaryRole::Honest;
         // The amnesia and crashed bits each key a distinct Q-state / novelty slot, so a
-        // post-amnesia or post-crash node 0 no longer aliases the pre-fault Honest
+        // post-amnesia or post-crash `BYZANTINE_IDX` no longer aliases the pre-fault Honest
         // environment, each other, or any role.
         assert_ne!(AMNESIA_TAG, 0, "the amnesia tag must be nonzero");
         assert_ne!(CRASHED_TAG, 0, "the crashed tag must be nonzero");
@@ -1704,7 +1706,7 @@ mod tests {
 
     #[test]
     fn amnesia_bootstrap_mask_excludes_lifecycle_columns() {
-        // The runner recomputes the NEXT-state legal mask from node 0's POST-enact
+        // The runner recomputes the NEXT-state legal mask from `BYZANTINE_IDX`'s POST-enact
         // lifecycle and passes THAT as the TD bootstrap mask. After an amnesia restart
         // that mask must exclude the three lifecycle columns the pre-enact running mask
         // includes, so the bootstrap max cannot span a now-illegal lifecycle fault.
@@ -1831,10 +1833,10 @@ mod tests {
     /// Acceptance criterion 3 (structural): the role is a MUTABLE Q-state component.
     /// The runner folds `env_tag(current_role, ..)` into every Q-state / novelty
     /// fingerprint, and each of the six Byzantine roles has a distinct tag, so a
-    /// SetRole swap changes the role component of the key, the post-switch steps key
+    /// SwapByzantineRole swap changes the role component of the key, the post-switch steps key
     /// a distinct role region of the MDP.
     #[test]
-    fn set_role_changes_the_q_state_role_component() {
+    fn swap_byzantine_role_changes_the_q_state_role_component() {
         let byz = [
             adversary::AdversaryRole::Disrupter,
             adversary::AdversaryRole::Conflicter,
@@ -1855,15 +1857,15 @@ mod tests {
     }
 
     /// Acceptance criterion 3 (learned): a learned campaign that runs byzantine
-    /// episodes moves the `SetRole` Q-column off zero, i.e. it learns a NON-ZERO
-    /// Q-value for some `(state, SetRole)` entry. Reuses the smoke seam (run learned
-    /// episodes, then inspect the campaign): with node 0 pinned to a Byzantine role
-    /// SetRole is legal every step, so the softmax selects and learns it, and by the
+    /// episodes moves the `SwapByzantineRole` Q-column off zero, i.e. it learns a NON-ZERO
+    /// Q-value for some `(state, SwapByzantineRole)` entry. Reuses the smoke seam (run learned
+    /// episodes, then inspect the campaign): with `BYZANTINE_IDX` pinned to a Byzantine role
+    /// SwapByzantineRole is legal every step, so the softmax selects and learns it, and by the
     /// later episodes the recurring view-relative fingerprints are non-novel, giving a
     /// nonzero reward that moves the column.
     #[test]
     #[ignore]
-    fn learned_set_role_learns_a_nonzero_qvalue() {
+    fn learned_swap_byzantine_role_learns_a_nonzero_qvalue() {
         policy::reset_campaign(fault::N_FAULTS);
         adversary::reset_role_bandit();
         for seed in 1u64..=8 {
@@ -1878,8 +1880,8 @@ mod tests {
             !policy::campaign(fault::N_FAULTS)
                 .lock()
                 .policy
-                .action_column_is_empty(fault::Fault::SetRole.id()),
-            "a learned byzantine campaign must learn a nonzero (state, SetRole) Q-value"
+                .action_column_is_empty(fault::Fault::SwapByzantineRole.id()),
+            "a learned byzantine campaign must learn a nonzero (state, SwapByzantineRole) Q-value"
         );
     }
 }

@@ -53,11 +53,10 @@ use std::{
     time::Duration,
 };
 
-/// The canonical `n = 4` partition `{{0},{1,2,3}}` that isolates node 0. Node 0
-/// is [`BYZANTINE_IDX`], the single faultable identity, so this leaves the other
-/// three, an N4F0C4 quorum, connected. Index 4 isolates node 0 specifically,
-/// which is correct only because the v1 contract fixes the faultable identity at
-/// index 0.
+/// The canonical `n = 4` partition `{{0},{1,2,3}}` that isolates [`BYZANTINE_IDX`],
+/// the single faultable identity, so this leaves the other three, an N4F0C4 quorum,
+/// connected. Index 4 isolates it specifically, which is correct only because the v1
+/// contract fixes the faultable identity at index 0.
 const ISOLATE_BYZANTINE: usize = 4;
 const _: () = assert!(
     BYZANTINE_IDX == 0,
@@ -85,9 +84,9 @@ impl<P: PublicKey, E: Clock> Topology<P, E> {
         }
     }
 
-    /// Isolate [`BYZANTINE_IDX`] (node 0) from the other three validators
+    /// Isolate [`BYZANTINE_IDX`] from the other three validators
     /// (`{{0},{1,2,3}}`). The remaining three still form the quorum of three, so
-    /// they keep finalizing; node 0 stalls and catches up after [`Self::heal`]
+    /// they keep finalizing; `BYZANTINE_IDX` stalls and catches up after [`Self::heal`]
     /// via resolver backfill.
     pub(crate) async fn isolate_byzantine(&self) {
         apply_partition(
@@ -112,7 +111,7 @@ impl<P: PublicKey, E: Clock> Topology<P, E> {
     }
 }
 
-/// The reply half a heal-time flush carries (the F3 quiescence barrier). The
+/// The reply half a heal-time flush carries (the quiescence barrier). The
 /// runner sends the [`oneshot::Sender`] to a [`pump`] and awaits its receiver; the
 /// pump replies with `()` only AFTER draining its held reorder buffer and finishing
 /// any in-flight per-packet delay, so once the runner's await returns that pump
@@ -367,7 +366,7 @@ fn reorder_step<P: PublicKey>(
 /// leaves that buffer empty, so the pump stays a direct FIFO relay. `flush_rx`
 /// carries the runner's heal-time flush requests, each a [`FlushAck`] the pump
 /// replies on: it drains the held buffer in order, then acks, so the runner can
-/// WAIT for quiescence before clearing the fault (the F3 barrier). The flush branch
+/// WAIT for quiescence before clearing the fault (the quiescence barrier). The flush branch
 /// is biased first so a pending flush drains promptly even under a steady packet
 /// stream, and a per-packet delay in the sim branch is polled to completion before
 /// the flush is handled, so the ack implies no in-flight delayed packet remains.
@@ -397,7 +396,7 @@ pub(crate) async fn pump<P, R, E>(
         select! {
             // Heal-time flush (biased first): drain any held reorder packets in
             // arrival order, then ACK so the runner's request-reply flush can wait
-            // for quiescence before clearing the fault (F3). `None` means the runner
+            // for quiescence before clearing the fault. `None` means the runner
             // dropped the flush sender at teardown. The ack is sent even if the
             // internal receiver has gone away, so the runner's await never hangs.
             ack = flush_rx.recv() => {
@@ -852,7 +851,7 @@ mod tests {
 
     #[test]
     fn flush_ack_implies_the_reorder_buffer_is_drained() {
-        // F3 request-reply barrier: the pump replies to a flush only AFTER draining
+        // Request-reply quiescence barrier: the pump replies to a flush only AFTER draining
         // its held reorder buffer, so once the runner's ack await returns, every held
         // packet is already queued for the engine, none remains buffered in the
         // pump to leak into the next decision step.

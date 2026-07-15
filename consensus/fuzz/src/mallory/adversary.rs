@@ -4,7 +4,7 @@
 //! replaces the single faultable identity ([`crate::BYZANTINE_IDX`]) with an
 //! explicit Byzantine actor for the WHOLE episode. The role is an environment
 //! property sampled once at setup, not a per-step policy fault, so it never
-//! enters the fault catalog and adds no catalog id. Node 0 then runs as a raw,
+//! enters the fault catalog and adds no catalog id. `BYZANTINE_IDX` then runs as a raw,
 //! unmanaged byzantine node: it gets its registered channels directly, with no
 //! packet pump, no [`SniffingReceiver`](crate::SniffingReceiver), no reporter, and
 //! no [`ManagedValidator`](crate::ManagedValidator). The other three nodes stay
@@ -29,7 +29,7 @@
 //! # Single-owner rule
 //!
 //! Each channel mailbox is single-consumer, so exactly one owner is spawned at
-//! node 0. The Disrupter consumes all three channels; the Equivocator consumes the
+//! `BYZANTINE_IDX`. The Disrupter consumes all three channels; the Equivocator consumes the
 //! vote and certificate channels (dropping resolver); the Conflicter, Nuller,
 //! Impersonator, and Outdated consume only the vote channel and explicitly drop the
 //! certificate and resolver channels (freeing those receivers rather than leaving a
@@ -48,7 +48,7 @@ use commonware_utils::sync::Mutex;
 use rand::{Rng, RngExt as _};
 use std::sync::{Arc, OnceLock};
 
-/// The Byzantine profile node 0 plays for a whole Mallory episode.
+/// The Byzantine profile `BYZANTINE_IDX` plays for a whole Mallory episode.
 ///
 /// Sampled once at setup from the runtime `FuzzRng` and held for the episode, so a
 /// replay reproduces it. Folded into the Q-state (via [`tag`](Self::tag)) so a
@@ -56,25 +56,25 @@ use std::sync::{Arc, OnceLock};
 /// are distinct Q-rows and novelty registries).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum AdversaryRole {
-    /// Node 0 is an honest [`ManagedValidator`](crate::ManagedValidator) like the
+    /// `BYZANTINE_IDX` is an honest [`ManagedValidator`](crate::ManagedValidator) like the
     /// other three (the pre-adversary environment).
     Honest,
-    /// Node 0 is a [`Disrupter`] emitting on all three
+    /// `BYZANTINE_IDX` is a [`Disrupter`] emitting on all three
     /// consensus channels.
     Disrupter,
-    /// Node 0 is a conflicter emitting conflicting notarize/finalize pairs on the
+    /// `BYZANTINE_IDX` is a conflicter emitting conflicting notarize/finalize pairs on the
     /// vote channel.
     Conflicter,
-    /// Node 0 is a nuller emitting nullify+finalize for the same view on the vote
+    /// `BYZANTINE_IDX` is a nuller emitting nullify+finalize for the same view on the vote
     /// channel.
     Nuller,
-    /// Node 0 is an equivocator sending different proposals to different nodes,
+    /// `BYZANTINE_IDX` is an equivocator sending different proposals to different nodes,
     /// consuming the vote and certificate channels.
     Equivocator,
-    /// Node 0 is an impersonator re-signing votes under a swapped signer index on
+    /// `BYZANTINE_IDX` is an impersonator re-signing votes under a swapped signer index on
     /// the vote channel.
     Impersonator,
-    /// Node 0 is an outdated adversary re-notarizing/finalizing a stale proposal on
+    /// `BYZANTINE_IDX` is an outdated adversary re-notarizing/finalizing a stale proposal on
     /// the vote channel.
     Outdated,
 }
@@ -101,7 +101,7 @@ impl AdversaryRole {
 
     /// Uniformly sample a BYZANTINE role from the runtime RNG, never
     /// [`Honest`](Self::Honest). The target of a per-step
-    /// [`SetRole`](super::fault::Fault::SetRole) role switch: the multiplexer
+    /// [`SwapByzantineRole`](super::fault::Fault::SwapByzantineRole) role switch: the multiplexer
     /// only ever hosts one of the six Byzantine profiles, so an
     /// Honest<->Byzantine transition (which would need an oracle flip) is out of
     /// scope. Drawn from the runtime RNG so a replay reproduces the target.
@@ -162,7 +162,7 @@ impl AdversaryRole {
         }
     }
 
-    /// Whether this role replaces node 0 with a Byzantine actor (everything except
+    /// Whether this role replaces `BYZANTINE_IDX` with a Byzantine actor (everything except
     /// [`Honest`](Self::Honest)).
     pub(crate) fn is_byzantine(self) -> bool {
         !matches!(self, AdversaryRole::Honest)
@@ -291,7 +291,7 @@ pub(crate) fn reset_role_bandit() {
     *role_bandit().lock() = RoleBandit::default();
 }
 
-/// Spawn the Byzantine actor for `role` at node 0 with its RAW registered channels
+/// Spawn the Byzantine actor for `role` at `BYZANTINE_IDX` with its RAW registered channels
 /// (no pump, no sniffer, no reporter, no [`ManagedValidator`](crate::ManagedValidator))
 /// and return its task [`Handle`].
 ///
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn sample_byzantine_is_deterministic_and_never_honest() {
-        // The SetRole target sampler covers all six Byzantine roles, never Honest,
+        // The SwapByzantineRole target sampler covers all six Byzantine roles, never Honest,
         // and a fixed seed reproduces the sequence (replay determinism).
         let seed = vec![0x24, 0x8b, 0xf1, 0x0e, 0x77, 0x35, 0xac, 0x51];
         let mut a = FuzzRng::new(seed.clone());

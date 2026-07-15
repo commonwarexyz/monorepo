@@ -88,8 +88,8 @@ impl QPolicy {
     }
 
     /// Whether every Q value in one action's COLUMN is still zero. Test-only: the
-    /// `SetRole` acceptance test asserts a learned campaign moved the SetRole column
-    /// off zero, i.e. some `(state, SetRole)` entry was learned.
+    /// `SwapByzantineRole` acceptance test asserts a learned campaign moved the SwapByzantineRole column
+    /// off zero, i.e. some `(state, SwapByzantineRole)` entry was learned.
     #[cfg(test)]
     pub fn action_column_is_empty(&self, action: ActionId) -> bool {
         assert!(action < self.n_actions, "action out of range");

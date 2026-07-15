@@ -1,9 +1,9 @@
 //! The adversary multiplexer for a byzantine Mallory episode.
 //!
-//! In a byzantine episode node 0 ([`crate::BYZANTINE_IDX`]) is an unmanaged
+//! In a byzantine episode `BYZANTINE_IDX` ([`crate::BYZANTINE_IDX`]) is an unmanaged
 //! Byzantine actor for the whole run. The [`RoleMultiplexer`] is the SINGLE owner
-//! of node 0's three raw consensus channels: it spawns the current Byzantine
-//! profile's actor and, on a per-step [`SetRole`](super::fault::Fault::SetRole),
+//! of `BYZANTINE_IDX`'s three raw consensus channels: it spawns the current Byzantine
+//! profile's actor and, on a per-step [`SwapByzantineRole`](super::fault::Fault::SwapByzantineRole),
 //! swaps to a different profile so the learner can compose faults across views
 //! (e.g. conflict at one view, equivocate at a later one).
 //!
@@ -18,17 +18,17 @@
 //!
 //! # Re-registration preserves connectivity
 //!
-//! Re-registration through the owned [`Oracle`] clone overwrites node 0's three
+//! Re-registration through the owned [`Oracle`] clone overwrites `BYZANTINE_IDX`'s three
 //! mailboxes, disconnecting the aborted actor's receivers, while leaving the
-//! honest<->node0 links intact, so the honest quorum keeps delivering to (and
-//! hearing from) node 0's fresh actor. This mirrors the durable-restart
+//! honest<->`BYZANTINE_IDX` links intact, so the honest quorum keeps delivering to (and
+//! hearing from) `BYZANTINE_IDX`'s fresh actor. This mirrors the durable-restart
 //! re-registration in [`crate::mallory::runner`].
 //!
 //! # Scope
 //!
-//! The multiplexer only ever hosts the six Byzantine profiles; node 0 stays
+//! The multiplexer only ever hosts the six Byzantine profiles; `BYZANTINE_IDX` stays
 //! Byzantine throughout the episode, so the oracle treatment is unchanged
-//! (`ambiguous = [0]`, safety excludes node 0). An Honest<->Byzantine mid-episode
+//! (`ambiguous = [0]`, safety excludes `BYZANTINE_IDX`). An Honest<->Byzantine mid-episode
 //! transition is out of scope (it would need an amnesia-style oracle flip).
 
 use super::adversary::{spawn_adversary, AdversaryRole};
@@ -39,20 +39,20 @@ use commonware_p2p::simulated::Oracle;
 use commonware_runtime::{deterministic, Handle, Supervisor as _};
 use std::sync::Arc;
 
-/// Owns node 0's Byzantine identity for a byzantine Mallory episode and swaps its
+/// Owns `BYZANTINE_IDX`'s Byzantine identity for a byzantine Mallory episode and swaps its
 /// active [`AdversaryRole`] on demand.
 ///
-/// Holds everything a role switch needs: node 0's public key and signing `scheme`,
+/// Holds everything a role switch needs: `BYZANTINE_IDX`'s public key and signing `scheme`,
 /// an [`Oracle`] clone for re-registration, the shared `relay` and `required_containers`
 /// the profiles need, the current active role, the live actor's task handle, and a
 /// switch counter. Exactly one actor is live between calls, so `handle` is always
 /// `Some` outside [`set_role`](Self::set_role).
 pub(crate) struct RoleMultiplexer<P: Simplex> {
-    /// Node 0's public key, re-registered on every role switch.
+    /// `BYZANTINE_IDX`'s public key, re-registered on every role switch.
     node0: PublicKeyOf<P>,
-    /// Node 0's signing scheme, cloned into each spawned actor.
+    /// `BYZANTINE_IDX`'s signing scheme, cloned into each spawned actor.
     scheme: P::Scheme,
-    /// Oracle clone used to re-register node 0's channels on a switch.
+    /// Oracle clone used to re-register `BYZANTINE_IDX`'s channels on a switch.
     oracle: Oracle<PublicKeyOf<P>, deterministic::Context>,
     /// Shared relay the [`AdversaryRole::Equivocator`] broadcasts through.
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
@@ -67,8 +67,8 @@ pub(crate) struct RoleMultiplexer<P: Simplex> {
 }
 
 impl<P: Simplex> RoleMultiplexer<P> {
-    /// Spawn the INITIAL Byzantine `role`'s actor on node 0's raw registered
-    /// `channels` and take ownership of node 0's identity for the episode.
+    /// Spawn the INITIAL Byzantine `role`'s actor on `BYZANTINE_IDX`'s raw registered
+    /// `channels` and take ownership of `BYZANTINE_IDX`'s identity for the episode.
     ///
     /// `role` must be Byzantine; the multiplexer never hosts
     /// [`Honest`](AdversaryRole::Honest).
@@ -111,11 +111,11 @@ impl<P: Simplex> RoleMultiplexer<P> {
         }
     }
 
-    /// Swap node 0's active Byzantine profile to `new_role`.
+    /// Swap `BYZANTINE_IDX`'s active Byzantine profile to `new_role`.
     ///
     /// Aborts and awaits the live actor FIRST (no double incarnation), re-registers
-    /// node 0's three channels through the owned oracle (disconnecting the aborted
-    /// actor's receivers while keeping the honest<->node0 links), then spawns the
+    /// `BYZANTINE_IDX`'s three channels through the owned oracle (disconnecting the aborted
+    /// actor's receivers while keeping the honest<->`BYZANTINE_IDX` links), then spawns the
     /// `new_role` actor on the fresh channels. Any parameters the new actor draws
     /// come from the runtime `context` RNG, so a replay reproduces the switch.
     ///
@@ -135,9 +135,9 @@ impl<P: Simplex> RoleMultiplexer<P> {
             handle.abort();
             let _ = handle.await;
         }
-        // (2) Re-register node 0's three channels: overwrites its mailboxes (which
+        // (2) Re-register `BYZANTINE_IDX`'s three channels: overwrites its mailboxes (which
         //     disconnects the aborted actor's receivers) and hands back fresh raw
-        //     channels, while the honest<->node0 links stay intact.
+        //     channels, while the honest<->`BYZANTINE_IDX` links stay intact.
         let mut fresh =
             crate::utils::register(&mut self.oracle, std::slice::from_ref(&self.node0)).await;
         let channels = fresh

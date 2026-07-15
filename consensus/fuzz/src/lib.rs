@@ -738,14 +738,17 @@ fn spawn_disrupter<P: simplex::Simplex>(
 
 /// Whether a [`ManagedValidator`]'s engine is running, has been crash-stopped, or
 /// was restarted with empty storage.
-/// A crash is terminal within the run: after [`Running`](Self::Running) transitions
-/// to [`Crashed`](Self::Crashed) the old engine/application tasks are aborted and
-/// never resurrected (a durable restart rebuilds fresh tasks and returns to
-/// `Running`; see `crate::mallory::lifecycle`). An [`Amnesiac`](Self::Amnesiac)
-/// node has a LIVE engine but was rebuilt on a fresh (empty) storage partition, so
-/// it has forgotten its durable state (including signed votes) and may equivocate:
-/// it is treated as Byzantine for the rest of the episode (excluded from the honest
-/// safety and liveness sets), not terminal.
+/// A crash-stop is permanent for the crashed INCARNATION but not terminal for the
+/// run: after [`Running`](Self::Running) transitions to [`Crashed`](Self::Crashed)
+/// the old engine/application tasks are aborted and never resurrected, yet the
+/// episode continues over the surviving quorum (the crashed node is dropped from the
+/// liveness watch; its retained reporter stays in the safety set). A durable restart
+/// is a separate fault that rebuilds fresh tasks and returns to `Running` in one
+/// step, so it never leaves the node in `Crashed` (see `crate::mallory::lifecycle`).
+/// An [`Amnesiac`](Self::Amnesiac) node has a LIVE engine but was rebuilt on a fresh
+/// (empty) storage partition, so it has forgotten its durable state (including signed
+/// votes) and may equivocate: it is treated as Byzantine for the rest of the episode
+/// (excluded from the honest safety and liveness sets), not terminal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ValidatorLifecycle {
     /// The engine and application tasks are live.

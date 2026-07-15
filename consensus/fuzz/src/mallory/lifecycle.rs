@@ -6,7 +6,8 @@
 //!
 //! - [`crash_stop`]: abort and await BOTH task handles so the old incarnation can
 //!   never send again, then mark it [`Crashed`](crate::ValidatorLifecycle::Crashed).
-//!   Terminal within the run, no re-registration, no rebuild.
+//!   Permanent within the run (no re-registration, no rebuild), but NOT terminal: the
+//!   episode continues over the surviving quorum.
 //! - [`abort_tasks`]: the shared abort+await step, also the FIRST step of the
 //!   runner's durable and amnesia restarts (so no second incarnation ever coexists
 //!   with the first).
@@ -42,8 +43,11 @@ pub(crate) fn amnesia_partition<PK: Display>(validator: &PK, generation: u32) ->
 /// Crash-stop the validator: abort and await both handles, then mark it crashed.
 ///
 /// After this returns the old engine and application tasks are terminated and can
-/// never send on the network again (the key safety property). Crash-stop is
-/// terminal within the run; the runner ends the episode after enacting it.
+/// never send on the network again (the key safety property). The crash is
+/// permanent within the run (the node is never rebuilt), but NOT terminal: the
+/// runner keeps perturbing the surviving quorum until the episode budget ends.
+/// The node's Arc-backed reporter is retained, so its pre-crash history still
+/// feeds the episode-end safety oracle.
 pub(crate) async fn crash_stop<P: Simplex>(mv: &mut ManagedValidator<P>) {
     abort_tasks(mv).await;
     mv.mark_crashed();
