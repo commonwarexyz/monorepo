@@ -120,8 +120,8 @@ where
 
     /// Set a key to a value.
     ///
-    /// The key must not already exist in the database or in any ancestor batch
-    /// in the chain. Setting a key that already exists causes undefined behavior.
+    /// If the key already exists in the database or an ancestor batch, reads
+    /// of it may return any of its written values.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.mutations.insert(key, value);
         self
