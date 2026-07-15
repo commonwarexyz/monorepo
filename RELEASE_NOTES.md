@@ -246,7 +246,9 @@ implementations should treat those requests as single-shot per run rather than
 per payload lifetime ([#4222]). The batcher submits batch vote verification and
 certificate recovery through the configured parallel strategy as spawned jobs,
 and certificates are assembled from owned votes via new `from_owned_notarizes`,
-`from_owned_nullifies`, and `from_owned_finalizes` constructors ([#4224]).
+`from_owned_nullifies`, and `from_owned_finalizes` constructors ([#4224]). View
+pruning also moved off the proposal critical path, so it overlaps proposal
+building and verification instead of delaying them ([#4254]).
 
 ### Tracing
 
@@ -373,9 +375,13 @@ struct-of-arrays per partition, with a spill guard so adversarial key-flooding
 degrades gracefully. The same change fixes a routing bug for variable-length
 keys shorter than the partition prefix, which in ordered Current QMDB databases
 could let a malicious proof provider forge an exclusion proof for a live key
-([#4079]). The `Ordered` trait also lost its `Iterator` associated type in favor
-of return-position `impl Iterator`, a breaking change for implementors
-([#3874]).
+([#4079]). Colliding values are now appended to their run rather than
+prepended, making repeated same-key inserts linear instead of quadratic, and
+collision iteration order is now documented as implementation-defined rather
+than newest-first ([#4252]). The spill guard also covers cursor-driven
+insertions during snapshot rebuild ([#4253]). The `Ordered` trait also lost its
+`Iterator` associated type in favor of return-position `impl Iterator`, a
+breaking change for implementors ([#3874]).
 
 `commonware-utils` gained `cache::Clock`, a fixed-capacity, no_std-compatible
 cache with CLOCK second-chance eviction whose hit path takes a shared reference
@@ -530,6 +536,9 @@ so allocator-sensitive workloads should link jemalloc or mimalloc directly
 [#4243]: https://github.com/commonwarexyz/monorepo/pull/4243
 [#4244]: https://github.com/commonwarexyz/monorepo/pull/4244
 [#4245]: https://github.com/commonwarexyz/monorepo/pull/4245
+[#4252]: https://github.com/commonwarexyz/monorepo/pull/4252
+[#4253]: https://github.com/commonwarexyz/monorepo/pull/4253
+[#4254]: https://github.com/commonwarexyz/monorepo/pull/4254
 
 ## v2026.5.0
 
