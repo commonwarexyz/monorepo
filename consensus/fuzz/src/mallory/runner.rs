@@ -3,15 +3,16 @@
 //! Each episode first picks one adversary ENVIRONMENT for the faultable identity
 //! ([`BYZANTINE_IDX`], node 0): honest, or one of six Byzantine profiles
 //! ([`adversary::AdversaryRole`] -- Disrupter, Conflicter, Nuller, Equivocator,
-//! Impersonator, Outdated). It then drives a fixed-length observe-orient-decide-
-//! act loop: each step observes the honest happens-before fingerprint (the
-//! Q-state, keyed by the environment) and a protocol-state descriptor, selects an
+//! Impersonator, Outdated). It then drives a reactive observe-orient-decide-act
+//! loop: each step observes the honest happens-before fingerprint (the Q-state,
+//! keyed by the environment) and a protocol-state descriptor, selects an
 //! [`action`] under a legal mask, enacts its [`action::FaultPlan`] -- a network
 //! (isolation, partition), packet (delay/loss/corrupt/duplicate/reorder), or
-//! lifecycle (crash-stop, durable restart, amnesia restart) fault -- runs one
-//! fixed deterministic-time window, heals the fault, and (for the learned
-//! chooser) applies a temporal-difference update rewarding novel state /
-//! happens-before fingerprints.
+//! lifecycle (crash-stop, durable restart, amnesia restart) fault -- waits for the
+//! first new honest finalization or a per-action timeout, heals the fault, and
+//! (for the learned chooser) applies a temporal-difference update rewarding novel
+//! state / happens-before fingerprints. The episode stops once it has observed
+//! `required_containers` distinct finalizations (or on crash-stop / step cap).
 //!
 //! Reporter membership and the episode-end oracle follow the environment. Under
 //! `Honest` all four validators are honest [`ManagedValidator`]s. Under a
@@ -21,8 +22,8 @@
 //! amnesiac node (durable restart with fresh storage) is treated as Byzantine.
 //!
 //! Both [`Chooser`]s share ALL of the wiring -- setup, catalog, parameter
-//! sampling, episode length, observation window, healing, state and reward
-//! extraction, and the episode-end oracle. Only selection differs:
+//! sampling, the reactive step boundary, the container budget, healing, state and
+//! reward extraction, and the episode-end oracle. Only selection differs:
 //! [`Chooser::Learned`] uses the campaign-persistent Q-policy (and an adaptive
 //! bandit for the episode's role) and learns; [`Chooser::Random`] samples
 //! uniformly from the runtime RNG and never touches the campaign, so it neither
@@ -52,18 +53,24 @@ use commonware_utils::{
     },
     FuzzRng,
 };
-use futures::future::join_all;
+use futures::future::{join_all, select_all};
 use rand::{Rng, RngExt as _};
-use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    fmt::Write as _,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 use tracing::{dispatcher, Dispatch};
 
-/// Number of policy decision steps in one Mallory episode.
+/// Base episode step count and the container-mode step floor: container mode allows
+/// `max(MALLORY_EPISODE_STEPS, required_containers)` steps so it can attempt the
+/// requested finalization budget.
 const MALLORY_EPISODE_STEPS: usize = 12;
-/// The single fixed deterministic-time observation window each step runs for.
-/// A FIXED window (not "next finalization or deadline") keeps the step reward
-/// from being biased toward progress-preserving actions: a step that suppresses
-/// progress is observed over the same span as one that does not.
-const MALLORY_WINDOW: Duration = Duration::from_secs(5);
+/// Per-action reactive boundary timeout: a step ends on the first honest finalization
+/// past its baseline, or -- if the fault suppressed progress -- after this
+/// deterministic timeout. Just when Mallory reacts, not a whole observation span.
+const MALLORY_STEP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Brief deterministic settle run after a packet fault heals: the F3 quiescence
 /// barrier flushes the pump, then this lets the engine consume the just-flushed
 /// packets so the next-state fingerprint reflects THIS step's fault rather than
@@ -102,13 +109,151 @@ fn env_tag(role: adversary::AdversaryRole, node0_amnesiac: bool) -> u64 {
     role.tag() ^ if node0_amnesiac { AMNESIA_TAG } else { 0 }
 }
 
-/// The remaining observation sleep so a step spans exactly [`MALLORY_WINDOW`] from its
-/// start regardless of any deterministic downtime already slept during enact (a
-/// restart's [`lifecycle::MALLORY_RESTART_DOWNTIME`]). Saturates to zero if enact
-/// already exceeded the window, so a restart observes `window - downtime` and totals
-/// exactly one window, matching every non-restart step (F6).
-fn observe_remaining(window: Duration, elapsed: Duration) -> Duration {
-    window.saturating_sub(elapsed)
+/// Coarse remaining-container horizon tag folded into the Q-STATE ONLY (never the
+/// novelty fingerprints), so transitions with a materially different remaining budget
+/// key distinct Q-rows without an identical protocol state being scored novel merely
+/// because the horizon changed. `remaining_bucket` is a small clamped index.
+fn horizon_tag(remaining_bucket: u64) -> u64 {
+    0xfdb9_7531_eca8_6420u64.wrapping_add(remaining_bucket.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+}
+
+/// Number of coarse remaining-budget buckets fed to [`horizon_tag`].
+const HORIZON_BUCKETS: u64 = 4;
+
+/// The coarse remaining-container bucket in `0..HORIZON_BUCKETS`: the finalizations
+/// still owed toward `required_containers`, clamped.
+fn remaining_bucket(finalization_budget: usize, observed: usize) -> u64 {
+    (finalization_budget.saturating_sub(observed) as u64).min(HORIZON_BUCKETS - 1)
+}
+
+/// Node-attributed finalization frontier read STRAIGHT from each initially-honest
+/// reporter's own subscription monitor (subscribed ONCE at setup because
+/// [`Reporter::subscribe`](commonware_consensus::Monitor::subscribe) never prunes its
+/// senders). The runner OWNS the monitors and drains them synchronously, so the cut
+/// is authoritative -- there is no intermediate forwarder task whose async copy could
+/// let a pre-cut finalization arrive after the next fault is enacted. `latest[node]`
+/// is the highest finalized view drained from `node` (0 for never-honest indices).
+struct FinalizationClock {
+    latest: Vec<u64>,
+    monitors: Vec<(usize, ViewReceiver<View>)>,
+}
+
+impl FinalizationClock {
+    /// Fold every event already queued in every SOURCE monitor into `latest`, without
+    /// blocking. This is the authoritative synchronous frontier snapshot.
+    fn drain(&mut self) {
+        for (node, monitor) in &mut self.monitors {
+            while let Ok(view) = monitor.try_recv() {
+                self.latest[*node] = self.latest[*node].max(view.get());
+            }
+        }
+    }
+
+    /// The step baseline: the highest finalized view across the given live-correct
+    /// set. Call [`drain`](Self::drain) first. `0` if the set is empty.
+    fn baseline(&self, live_correct: &HashSet<usize>) -> u64 {
+        live_correct
+            .iter()
+            .map(|node| self.latest[*node])
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// How a reactive step ended: a genuinely new honest finalization (a live-correct
+/// node reached a view past the step baseline), or the deterministic step timeout
+/// (the fault suppressed progress).
+#[derive(Clone, Copy, Debug)]
+enum StepBoundary {
+    Finalized { node: usize, view: u64 },
+    Timeout,
+}
+
+/// Wait until any node in `live_correct` finalizes a view strictly past `baseline`,
+/// or `deadline` expires. The boundary is "the first qualifying finalization the
+/// runner OBSERVES when it regains control" -- NOT an exact global emission order.
+/// Each iteration first takes an authoritative synchronous drain of every SOURCE
+/// monitor (finalization priority: an already-queued crossing wins even at the
+/// deadline); events from other nodes and views `<= baseline` fold into
+/// `clock.latest` but do not close the step. If nothing is queued, it races the
+/// monitors EVENT-DRIVEN against the deadline via [`select_all`], waking at the
+/// instant a monitor emits. When several finalizations accumulate while an awaited
+/// action was being enacted (e.g. a restart's downtime), or several monitors are
+/// ready at once, the choice among the ALREADY-QUEUED crossings is by monitor
+/// (vector) order, not exact emission order. This is an accepted approximation: every
+/// honest node finalizes the SAME views in Simplex, so the boundary VIEW (which the
+/// container budget counts and the reward keys on) is still the first new view; only
+/// the diagnostic `trigger_node` may name a later reporter. `live_correct` is the
+/// POST-enact set, so a crashed / amnesiac node's stale events never close the step.
+/// Waiting for EVERY honest node is exclusively an episode-end liveness
+/// responsibility; here one live-correct node closes the step.
+async fn wait_for_step_boundary(
+    context: &mut deterministic::Context,
+    clock: &mut FinalizationClock,
+    live_correct: &HashSet<usize>,
+    baseline: u64,
+    deadline: SystemTime,
+) -> StepBoundary {
+    loop {
+        for (node, monitor) in &mut clock.monitors {
+            while let Ok(view) = monitor.try_recv() {
+                let view = view.get();
+                clock.latest[*node] = clock.latest[*node].max(view);
+                if live_correct.contains(node) && view > baseline {
+                    return StepBoundary::Finalized { node: *node, view };
+                }
+            }
+        }
+        let Ok(remaining) = deadline.duration_since(context.current()) else {
+            return StepBoundary::Timeout;
+        };
+        if remaining.is_zero() {
+            return StepBoundary::Timeout;
+        }
+        // Race every source monitor against the deadline. The `select_all` future
+        // borrows the monitors, so the arm only extracts the woken `(node, view)` (a
+        // Copy value); the fold + crossing check run AFTER the borrow ends. A closed
+        // monitor (never expected mid-episode -- reporter `Arc`s are held) reads as a
+        // timeout rather than spinning.
+        let recvs: Vec<_> = clock
+            .monitors
+            .iter_mut()
+            .map(|(node, monitor)| {
+                let node = *node;
+                Box::pin(async move { (node, monitor.recv().await) })
+            })
+            .collect();
+        let woken: (usize, u64) = select! {
+            (fired, _, _) = select_all(recvs) => match fired {
+                (node, Some(view)) => (node, view.get()),
+                (_, None) => return StepBoundary::Timeout,
+            },
+            _ = context.sleep(remaining) => return StepBoundary::Timeout,
+        };
+        clock.latest[woken.0] = clock.latest[woken.0].max(woken.1);
+        if live_correct.contains(&woken.0) && woken.1 > baseline {
+            return StepBoundary::Finalized {
+                node: woken.0,
+                view: woken.1,
+            };
+        }
+    }
+}
+
+/// The real node indices currently live-correct: `managed` positions with
+/// `lifecycle() == Running`, mapped to node indices via `honest_indices`. Excludes a
+/// crash-stopped or amnesiac node 0 (and a byzantine-role node 0 is never in
+/// `managed`); a durably-restarted node 0 is `Running` and included. The step
+/// baseline and the reactive step boundary observe exactly this set, refreshed each
+/// step so a lifecycle change is reflected immediately.
+fn live_correct_nodes<P: Simplex>(
+    managed: &[ManagedValidator<P>],
+    honest_indices: &[usize],
+) -> HashSet<usize> {
+    (0..managed.len())
+        .filter(|&k| matches!(managed[k].lifecycle(), ValidatorLifecycle::Running))
+        .map(|k| honest_indices[k])
+        .collect()
 }
 
 /// The post-heal liveness target every live correct node must reach: one view past the
@@ -161,51 +306,6 @@ pub(crate) enum Chooser {
     /// (which dispatches only [`Chooser::Learned`]) never constructs it.
     #[allow(dead_code)]
     Random,
-    /// Force a fixed action id every step, bypassing the campaign. A test-only
-    /// seam used to drive a specific fault (isolation, partition) deterministically
-    /// rather than relying on RNG luck; like [`Chooser::Random`] it never learns.
-    #[cfg(test)]
-    Fixed(policy::ActionId),
-    /// Force a fixed action id on the FIRST step and [`action::Action::NoFault`] on
-    /// every subsequent step. A test-only seam for a one-shot lifecycle transition
-    /// that masks itself afterward (an amnesia restart), so the forced id stays legal
-    /// on step 0 while the episode still runs to full length -- letting a test
-    /// observe the non-terminal property (unlike a crash-stop).
-    #[cfg(test)]
-    FixedFirst(policy::ActionId),
-    /// Force [`action::Action::SetRole`] every step with a DETERMINISTIC target that
-    /// cycles through the byzantine roles by step (not the RNG-sampled target), so the
-    /// multiplexer provably hosts distinct profiles across views. A test-only seam:
-    /// asserting >= 2 distinct roles on the RNG-sampled target is a coincidence of the
-    /// input's RNG phase, so the demonstration forces the targets instead.
-    #[cfg(test)]
-    FixedSetRole,
-}
-
-/// How each step's observation window ends.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum WindowMode {
-    /// Observe a fixed [`MALLORY_WINDOW`] of deterministic time every step,
-    /// measured from the action's start so an in-enact restart downtime counts
-    /// toward it (F6). Bounded and RNG-independent.
-    Time,
-    /// Observe until the honest finalized frontier advances by the input's
-    /// `required_containers` past its value at the window's start, capped at
-    /// [`MALLORY_WINDOW`] so a fault that stalls quorum cannot hang the runtime.
-    /// A fast-finalizing step ends as soon as the container goal is met, so an
-    /// episode's wall-clock cost scales with the virtual time actually consumed
-    /// rather than a fixed window per step.
-    Container,
-}
-
-impl WindowMode {
-    /// Short label for the decision log's `window=` field.
-    fn label(self) -> &'static str {
-        match self {
-            WindowMode::Time => "time",
-            WindowMode::Container => "container",
-        }
-    }
 }
 
 /// Uniformly sample a LEGAL action id from the runtime RNG. The [`Chooser::Random`]
@@ -556,7 +656,7 @@ async fn restart_amnesia<P: Simplex>(
     .await;
 }
 
-/// Run one Mallory episode under the given [`WindowMode`].
+/// Run one Mallory episode.
 ///
 /// Builds its OWN setup by reusing the shared harness helpers directly
 /// ([`crate::setup_network`], [`build_validator`], the [`SniffingReceiver`]
@@ -581,24 +681,29 @@ async fn restart_amnesia<P: Simplex>(
 /// Disrupter role additionally draws from the shared RNG while running, coupling
 /// the stream to its timing -- still deterministic under the single-threaded
 /// scheduler since the role is fixed for the episode.
-pub fn run<P: Simplex>(input: crate::FuzzInput, chooser: Chooser, window: WindowMode)
+pub fn run<P: Simplex>(input: crate::FuzzInput, chooser: Chooser)
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
 {
-    run_with::<P>(input, chooser, MALLORY_EPISODE_STEPS, window);
+    // The hard step cap (truncation guard): allow at least the requested finalization
+    // budget so the episode can attempt its full container budget.
+    let steps = MALLORY_EPISODE_STEPS.max(input.required_containers as usize);
+    run_with::<P>(input, chooser, steps);
 }
 
-/// [`run`] with an explicit episode length, sampling the adversary role from the
-/// runtime RNG. Production runs [`MALLORY_EPISODE_STEPS`]; the ignored integration
-/// tests pass a short count so a full deterministic episode (runtime + window +
-/// liveness + invariants) finishes in seconds while exercising the same code paths.
-fn run_with<P: Simplex>(input: crate::FuzzInput, chooser: Chooser, steps: usize, window: WindowMode)
+/// [`run`] with an explicit hard step cap, sampling the adversary role from the
+/// runtime RNG. Production derives the cap from `required_containers` (see [`run`]);
+/// the ignored integration tests pass a short count so a full deterministic episode
+/// (runtime + reactive steps + liveness + invariants) finishes in seconds while
+/// exercising the same code paths. The episode still stops at its finalization budget
+/// before the cap.
+fn run_with<P: Simplex>(input: crate::FuzzInput, chooser: Chooser, steps: usize)
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
 {
-    run_inner::<P>(input, chooser, steps, None, window);
+    run_inner::<P>(input, chooser, steps, None);
 }
 
 /// [`run_with`] with an optional forced adversary role. `forced_role` is
@@ -611,7 +716,6 @@ fn run_inner<P: Simplex>(
     chooser: Chooser,
     steps: usize,
     forced_role: Option<adversary::AdversaryRole>,
-    window: WindowMode,
 ) where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
@@ -638,13 +742,7 @@ fn run_inner<P: Simplex>(
         // oracle and rebuilds an engine over the participant set.
         let (mut oracle, participants, schemes, mut registrations) =
             crate::setup_network::<P>(&mut context, &input).await;
-        crate::print_fuzz_input(
-            match window {
-                WindowMode::Time => crate::Mode::MalloryTime,
-                WindowMode::Container => crate::Mode::MalloryContainer,
-            },
-            &input,
-        );
+        crate::print_fuzz_input(crate::Mode::MalloryContainer, &input);
 
         let config = input.configuration;
         let n = config.n as usize;
@@ -834,38 +932,65 @@ fn run_inner<P: Simplex>(
         let mut reporters: Vec<MalloryReporter<P>> =
             managed.iter().map(|m| m.reporter()).collect();
 
-        // Drain clock: the first honest reporter's finalization monitor. Used to
-        // keep a current finalized frontier for the decision log and to keep the
-        // monitor from backing up across steps.
-        let (latest, mut monitor): (View, ViewReceiver<View>) = reporters[0].subscribe().await;
-        let mut finalized = latest.get();
+        // Persistent finalization clock: subscribe ONCE to every initially-honest
+        // reporter and KEEP the monitors in the runner so each step drains them
+        // synchronously (an authoritative cut, no intermediate forwarder). Subscribing
+        // once (not per step) is required -- `Reporter::subscribe` never prunes its
+        // senders. A durable restart REUSES its reporter, so its monitor keeps
+        // delivering; an amnesia restart SWAPS node 0's reporter, so its monitor stops
+        // advancing, which is correct because node 0 is then Byzantine and excluded.
+        let mut clock = FinalizationClock {
+            latest: vec![0u64; n],
+            monitors: Vec::with_capacity(managed.len()),
+        };
+        for k in 0..managed.len() {
+            let node = honest_indices[k];
+            let (latest0, monitor): (View, ViewReceiver<View>) =
+                managed[k].reporter().subscribe().await;
+            clock.latest[node] = latest0.get();
+            clock.monitors.push((node, monitor));
+        }
+
+        // Episode budget, captured ONCE: the episode stops once it has observed
+        // `required_containers` distinct finalization boundaries. The step count
+        // (`steps`) is a truncation guard.
+        let finalization_budget = required_containers as usize;
+        let mut observed_finalizations: HashSet<u64> = HashSet::new();
 
         // A crash-stop ends the episode; this flips true when node 0 is crashed so
         // the loop finishes after that step's TD update.
         let mut episode_terminal = false;
         // Observe before the first decision: the initial (empty-history) HB
-        // fingerprint is the step-0 Q-state, so there is no `state = 0` sentinel.
-        // The env tag (role plus an amnesia bit) is folded in so Honest, each
-        // byzantine role, and a post-amnesia node 0 key distinct Q-rows / novelty (a
-        // campaign never merges incompatible environments). Node 0 cannot be amnesiac
-        // yet, so this reduces to the (initial) role tag.
-        let mut state = hb_log.summary().fingerprint() ^ env_tag(current_role, false);
+        // fingerprint XOR the env tag (role plus an amnesia bit) XOR the horizon tag
+        // is the step-0 Q-state. The env tag keeps Honest, each byzantine role, and a
+        // post-amnesia node 0 in distinct Q-rows; the horizon tag keeps a different
+        // remaining container budget distinct (folded into the Q-STATE only, never
+        // novelty). Node 0 cannot be amnesiac yet, so the env tag reduces to the role.
+        let mut state = hb_log.summary().fingerprint()
+            ^ env_tag(current_role, false)
+            ^ horizon_tag(remaining_bucket(finalization_budget, 0));
         // Summed per-step novelty reward and the executed-step count. The role
-        // bandit's signal (Learned only) is their ratio -- the per-step AVERAGE.
-        // Normalizing matters because a crash-stop ends the episode early, so
-        // episodes have unequal lengths; the raw sum `N - 2*steps` would reward
-        // short unproductive episodes (a 1-step crash: -2) over long productive
-        // ones (a 12-step, mostly-novel episode: -4), making the bandit prefer
-        // whichever role can crash early. The ratio is in [-2, 0] and length-
-        // independent, so roles are ranked by novelty density.
+        // bandit's signal (Learned only) is their ratio -- the per-step AVERAGE, which
+        // is length-independent, so roles are ranked by novelty density rather than
+        // episode length (a short early-crash episode must not out-rank a long
+        // productive one).
         let mut episode_reward = 0.0;
         let mut executed_steps = 0usize;
-        for step in 0..steps {
+
+        // Budget-driven reactive loop. `steps` is the hard step cap (truncation
+        // guard); the episode also stops at its time or finalization budget. The end
+        // reason is recorded per step in the decision log (`episode_end=`).
+        let mut step = 0usize;
+        loop {
             executed_steps += 1;
-            // (a) Drain queued finalizations to the current frontier.
-            while let Ok(v) = monitor.try_recv() {
-                finalized = finalized.max(v.get());
-            }
+            // (a) Authoritative PRE-enact cut: drain the source monitors synchronously
+            // (select and sample below never await, so no finalization is processed
+            // between here and enactment). `clock.latest` now holds the causal baseline
+            // frontier; it is NOT re-drained until the boundary wait, so the baseline
+            // computed AFTER enactment still reflects this pre-enact cut. The eligible
+            // live-correct set is (re)computed after enactment (see below), so a crash /
+            // amnesia THIS step is reflected in both membership and baseline.
+            clock.drain();
 
             // The per-step legal mask. Under the Honest role, while node 0 runs
             // every action is legal; once it is crash-stopped only NoFault is (a
@@ -895,27 +1020,6 @@ fn run_inner<P: Simplex>(
                     .policy
                     .select(state, &legal, &mut context),
                 Chooser::Random => select_uniform_legal(&legal, &mut context),
-                #[cfg(test)]
-                Chooser::Fixed(id) => {
-                    assert!(legal[id], "forced action must be legal");
-                    id
-                }
-                #[cfg(test)]
-                Chooser::FixedFirst(id) => {
-                    let want = if step == 0 {
-                        id
-                    } else {
-                        action::Action::NoFault.id()
-                    };
-                    assert!(legal[want], "forced action must be legal");
-                    want
-                }
-                #[cfg(test)]
-                Chooser::FixedSetRole => {
-                    let id = action::Action::SetRole.id();
-                    assert!(legal[id], "forced SetRole must be legal");
-                    id
-                }
             };
             let action = action::Action::from_id(action_id);
             // The stable-order contract: the resolved action must project back to
@@ -937,17 +1041,6 @@ fn run_inner<P: Simplex>(
             // (F6) rather than a restart observing downtime + window.
             let step_start = context.current();
             let plan = action.sample(&mut context, byz);
-            // A `FixedSetRole` episode overrides the RNG-sampled target with a
-            // deterministic per-step cycle over the byzantine roles, so the switch
-            // provably reaches distinct profiles across views. Runs after `sample` so
-            // the RNG bookkeeping is identical to a real SetRole step.
-            #[cfg(test)]
-            let plan = match chooser {
-                Chooser::FixedSetRole => action::FaultPlan::SetRole(
-                    adversary::AdversaryRole::from_index(1 + step % 6),
-                ),
-                _ => plan,
-            };
             let params = plan.describe();
             match &plan {
                 action::FaultPlan::None => {}
@@ -1074,56 +1167,70 @@ fn run_inner<P: Simplex>(
                 }
             }
 
-            // (g) Run the observation window, measured from the action's start so a
-            // restart's in-enact downtime counts toward it (F6). Both modes cap the
-            // window at MALLORY_WINDOW from `step_start`, so a step never runs longer
-            // than the time-based window and a fault that stalls quorum cannot hang.
-            match window {
-                // A fixed MALLORY_WINDOW of deterministic time. A step whose enact
-                // already exceeded the window observes for zero more time.
-                WindowMode::Time => {
-                    let elapsed = context
-                        .current()
-                        .duration_since(step_start)
-                        .unwrap_or_default();
-                    context
-                        .sleep(observe_remaining(MALLORY_WINDOW, elapsed))
-                        .await;
-                }
-                // Observe until the honest frontier advances by `required_containers`
-                // past its value at the window's start, then stop early. `finalized`
-                // here is the frontier as of the step-start drain (h is below), so
-                // `goal` counts containers finalized across enact + observation. The
-                // MALLORY_WINDOW deadline (from `step_start`) is the safety cap.
-                WindowMode::Container => {
-                    let goal = finalized.saturating_add(required_containers);
-                    let deadline = step_start + MALLORY_WINDOW;
-                    while finalized < goal {
-                        // `duration_since` errors once the current time reaches the
-                        // deadline (the cap), which ends the observation.
-                        let Ok(remaining) = deadline.duration_since(context.current()) else {
-                            break;
-                        };
-                        if remaining.is_zero() {
-                            break;
-                        }
-                        select! {
-                            next = monitor.recv() => match next {
-                                Some(v) => finalized = finalized.max(v.get()),
-                                // The honest drain-clock reporter is gone: stop
-                                // observing (the episode-end oracle still runs).
-                                None => break,
-                            },
-                            _ = context.sleep(remaining) => break,
-                        }
-                    }
-                }
-            }
+            // (f2) POST-enact observation set + baseline. The live-correct set is
+            // recomputed HERE (not pre-enact) so a crash-stop / amnesia this step drops
+            // node 0 immediately -- its stale events can never close the step. The
+            // baseline is the pre-enact cut (`clock.latest`, not re-drained since (a))
+            // restricted to that eligible set: new progress is a finalization past the
+            // frontier that existed just before the fault, from a node still eligible.
+            let live_correct = live_correct_nodes(&managed, &honest_indices);
+            let baseline = clock.baseline(&live_correct);
 
-            // (h) Settle ready work queued during the window.
-            while let Ok(v) = monitor.try_recv() {
-                finalized = finalized.max(v.get());
-            }
+            // (g) Reactive step boundary: wait for the first genuinely new honest
+            // finalization (a live-correct node past `baseline`) or the deterministic
+            // per-action step timeout (the fault suppressed progress).
+            let step_deadline = step_start + MALLORY_STEP_TIMEOUT;
+            let boundary = wait_for_step_boundary(
+                &mut context,
+                &mut clock,
+                &live_correct,
+                baseline,
+                step_deadline,
+            )
+            .await;
+            let (boundary_label, trigger_node, trigger_view) = match boundary {
+                StepBoundary::Finalized { node, view } => {
+                    // Count this finalization boundary ONCE (container budget): a view
+                    // jump V->V+N, and duplicate reports of one view, each count once.
+                    observed_finalizations.insert(view);
+                    ("finalization", Some(node), Some(view))
+                }
+                StepBoundary::Timeout => ("timeout", None, None),
+            };
+
+            // Node 0's POST-enact lifecycle (an amnesia restart THIS step already
+            // flipped it to Amnesiac/Byzantine; a crash to Crashed). Stable from enact
+            // through heal, so one env tag serves the effect AND the next state. Under a
+            // byzantine role node 0 is unmanaged, so both flags stay false.
+            let node0_crashed_now =
+                !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Crashed);
+            let node0_amnesiac_now =
+                !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Amnesiac);
+            // The env tag uses the POST-enact `current_role`: a `SetRole` this step has
+            // already swapped it, so the effect / next fingerprints key the NEW role
+            // region -- the transition that connects the role regions of the MDP.
+            let tag = env_tag(current_role, node0_amnesiac_now);
+
+            // (h) FAULT-EFFECT fingerprints, captured BEFORE healing so recovery /
+            // settle work is not credited to the fault. The reward and its novelty use
+            // these. The protocol-state descriptor is over the CURRENT running reporters
+            // only (a crashed / amnesiac node excluded); the setup `reporters` clone is
+            // retained unchanged for the episode-end safety oracle.
+            let effect_hb = hb_log.summary().fingerprint() ^ tag;
+            let effect_reporters: Vec<MalloryReporter<P>> = (0..managed.len())
+                .filter(|&k| matches!(managed[k].lifecycle(), ValidatorLifecycle::Running))
+                .map(|k| reporters[k].clone())
+                .collect();
+            let effect_state = state::state_descriptor::<P>(&effect_reporters, n) ^ tag;
+            let reward = if matches!(chooser, Chooser::Learned) {
+                let campaign = policy::campaign(action::N_ACTIONS);
+                let mut c = campaign.lock();
+                let r = c.reward(effect_state, effect_hb);
+                episode_reward += r;
+                Some(r)
+            } else {
+                None
+            };
 
             // (i) Heal the transient fault before the next decision, so at most one
             // fault is ever active (v1 contract). A topology fault heals via the
@@ -1175,101 +1282,81 @@ fn run_inner<P: Simplex>(
                 }
             };
 
-            // The packet-fault settle above may have produced new finalizations;
-            // fold them into the frontier before next-state.
-            while let Ok(v) = monitor.try_recv() {
-                finalized = finalized.max(v.get());
-            }
-
-            // Node 0's POST-enact lifecycle: an amnesia restart THIS step flips it to
-            // Amnesiac (Byzantine), which changes both the environment tag folded into
-            // the next fingerprints (F5a) and the legal bootstrap mask (F4). Under a
-            // byzantine role node 0 is unmanaged, so both stay false (short-circuit).
-            let node0_crashed_next =
-                !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Crashed);
-            let node0_amnesiac_next =
-                !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Amnesiac);
-            // The env tag uses the POST-enact `current_role`: a `SetRole` this step has
-            // already swapped it, so `next_tag` (and thus the next `state` and the
-            // reward descriptor) key the NEW role region -- the transition that
-            // connects the role regions of the MDP.
-            let next_tag = env_tag(current_role, node0_amnesiac_next);
-
-            // (j) Next abstract state and the reward's protocol-state descriptor, each
-            // folded with the env tag so `select`, `reward`, and `learn` all key the
-            // environment-specific Q-row / novelty (see the initial `state`). The reward
-            // descriptor is over the CURRENT correct reporters only (F5b): a crash-
-            // stopped node (no live engine) and an amnesiac node 0 (now Byzantine, and
-            // whose setup-clone reporter is stale after `adopt_amnesiac`) are excluded,
-            // so the reward reflects honest protocol state. The setup `reporters` clone
-            // is retained unchanged for the episode-end safety oracle.
-            let hb_fp = (hb_log.summary().fingerprint()) ^ next_tag;
-            let reward_reporters: Vec<MalloryReporter<P>> = (0..managed.len())
-                .filter(|&k| matches!(managed[k].lifecycle(), ValidatorLifecycle::Running))
-                .map(|k| reporters[k].clone())
-                .collect();
-            let state_fp = state::state_descriptor::<P>(&reward_reporters, n) ^ next_tag;
-            // Terminal on the last step or when a crash-stop ended the episode.
-            let terminal = step + 1 == steps || episode_terminal;
-
-            // (k) TD update (Learned only). Terminal on the last step (no bootstrap);
-            // otherwise the bootstrap max is over the actions legal at NEXT --
-            // recomputed from node 0's POST-enact lifecycle so an amnesia restart, which
-            // flips the lifecycle faults illegal, does not bootstrap over now-illegal
-            // columns (F4). `select` above still used the pre-enact `legal`.
-            let reward_log = if matches!(chooser, Chooser::Learned) {
-                // Recompute the switch-cap flag from the POST-enact switch count so a
-                // `SetRole` that hit the cap this step does not bootstrap over a now-
-                // illegal SetRole column (mirrors the amnesia lifecycle-mask fix).
-                let role_switches_exhausted_next = multiplexer
-                    .as_ref()
-                    .is_some_and(|m| m.switches() >= action::MALLORY_MAX_ROLE_SWITCHES);
-                let legal_next = action::legal_mask(
-                    node0_crashed_next,
-                    byz,
-                    node0_amnesiac_next,
-                    role_switches_exhausted_next,
-                );
-                let campaign = policy::campaign(action::N_ACTIONS);
-                let mut c = campaign.lock();
-                let reward = c.reward(state_fp, hb_fp);
-                episode_reward += reward;
-                if terminal {
-                    c.policy.learn_terminal(state, action_id, reward);
-                } else {
-                    c.policy.learn(state, action_id, reward, hb_fp, &legal_next);
-                }
-                format!("{reward}")
+            // (i2) Episode budget check (item 13): does the episode end after this
+            // step, and why? A crash-stop is terminal; otherwise the hard step cap or
+            // the distinct-finalization budget can end it. `step` is this step's 0-based
+            // index; `step + 1` is the count.
+            let ended: Option<&'static str> = if episode_terminal {
+                Some("crash_stop")
+            } else if step + 1 >= steps {
+                Some("step_cap")
             } else {
-                "n/a".to_string()
+                (observed_finalizations.len() >= finalization_budget).then_some("budget")
             };
 
-            // (l) Log the full transition. The role recorded is the POST-enact
-            // `current_role`, i.e. the profile active during this step's window (a
-            // `SetRole` line shows the arrived-at role, with its target also in
-            // `params`), so a replay reproduces the environment and a role switch is
-            // visible as the `role=` field changing across lines. `generation` is
-            // node 0's incarnation counter and `lifecycle0` its lifecycle state, both
-            // meaningful only for the Honest faultable identity; under a byzantine
-            // role node 0 is an unmanaged adversary (generation 0, "unmanaged").
-            // `lifecycle0` makes the mid-episode honest->Amnesiac flip observable.
+            // (j) NEXT-decision Q-state, captured POST-heal + settle: the environment in
+            // which the next action is selected. The horizon tag folds in the remaining
+            // container budget AFTER this step (never into the effect novelty above).
+            let remaining_next =
+                remaining_bucket(finalization_budget, observed_finalizations.len());
+            let next_state = (hb_log.summary().fingerprint() ^ tag) ^ horizon_tag(remaining_next);
+
+            // (k) TD update (Learned only, `reward` already computed pre-heal). Terminal
+            // when the episode ends here (no bootstrap); otherwise bootstrap over the
+            // actions legal at NEXT, recomputed from node 0's POST-enact lifecycle and
+            // switch count (so an amnesia restart or a switch-cap hit does not bootstrap
+            // over now-illegal columns). `select` above used the pre-enact `legal`.
+            let reward_log = match reward {
+                Some(r) => {
+                    let role_switches_exhausted_next = multiplexer
+                        .as_ref()
+                        .is_some_and(|m| m.switches() >= action::MALLORY_MAX_ROLE_SWITCHES);
+                    let legal_next = action::legal_mask(
+                        node0_crashed_now,
+                        byz,
+                        node0_amnesiac_now,
+                        role_switches_exhausted_next,
+                    );
+                    let campaign = policy::campaign(action::N_ACTIONS);
+                    let mut c = campaign.lock();
+                    if ended.is_some() {
+                        c.policy.learn_terminal(state, action_id, r);
+                    } else {
+                        c.policy.learn(state, action_id, r, next_state, &legal_next);
+                    }
+                    format!("{r}")
+                }
+                None => "n/a".to_string(),
+            };
+
+            // (l) Log the full transition. `boundary`/`trigger_*` say why the step
+            // ended; `baseline` is the pre-action honest frontier; `episode_remaining`
+            // and `episode_end` expose the budget. `state_desc` is the pre-heal fault
+            // effect; `next_state` the post-heal bootstrap state. `generation` /
+            // `lifecycle0` track node 0's incarnation and lifecycle ("unmanaged" under a
+            // byzantine role), making the mid-episode Honest->Amnesiac flip observable.
             let generation = if byz { 0 } else { managed[0].generation() };
             let lifecycle0 = if byz {
                 "unmanaged".to_string()
             } else {
                 format!("{:?}", managed[0].lifecycle())
             };
+            let trigger_node_log = trigger_node.map_or_else(|| "none".to_string(), |x| x.to_string());
+            let trigger_view_log = trigger_view.map_or_else(|| "none".to_string(), |x| x.to_string());
+            let containers_remaining =
+                finalization_budget.saturating_sub(observed_finalizations.len());
             log::push(format!(
-                "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} action={action:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} finalized={finalized} next_state={hb_fp:#018x} state_desc={state_fp:#018x} reward={reward_log} window={} heal={healed} matched={matched_log}",
+                "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} action={action:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} next_state={next_state:#018x} state_desc={effect_state:#018x} reward={reward_log} boundary={boundary_label} trigger_node={trigger_node_log} trigger_view={trigger_view_log} baseline={baseline} containers_remaining={containers_remaining} episode_end={} heal={healed} matched={matched_log}",
                 current_role.label(),
-                window.label()
+                ended.unwrap_or("false"),
             ));
-            state = hb_fp;
+            state = next_state;
 
-            // A crash-stop is terminal: end the episode after its TD update.
-            if episode_terminal {
+            // (m) End or continue (item 14).
+            if ended.is_some() {
                 break;
             }
+            step += 1;
         }
 
         // Episode end: fold this episode's accumulated novelty into the campaign-
@@ -1456,46 +1543,12 @@ mod tests {
 
     /// Run a short episode with the role SAMPLED from the RNG, tolerating a panic so
     /// a same-seed outcome is captured identically, and drain the decision log.
-    fn mallory_trace(
-        input: FuzzInput,
-        chooser: Chooser,
-        window: WindowMode,
-    ) -> (bool, Vec<String>) {
+    fn mallory_trace(input: FuzzInput, chooser: Chooser) -> (bool, Vec<String>) {
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_with::<SimplexId>(input, chooser, TEST_STEPS, window);
+            run_with::<SimplexId>(input, chooser, TEST_STEPS);
         }))
         .is_ok();
         (ok, log::take())
-    }
-
-    /// [`mallory_trace`] with a forced adversary role. Pins the episode environment
-    /// so a test can drive a specific role (Honest for the lifecycle tests, a
-    /// byzantine profile for the per-role tests).
-    fn mallory_trace_role(
-        input: FuzzInput,
-        chooser: Chooser,
-        role: adversary::AdversaryRole,
-    ) -> (bool, Vec<String>) {
-        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_inner::<SimplexId>(input, chooser, TEST_STEPS, Some(role), WindowMode::Time);
-        }))
-        .is_ok();
-        (ok, log::take())
-    }
-
-    /// Run a forced-action episode in the Honest environment (node 0 managed) --
-    /// the world the action tests target. Pins the role so a sampled byzantine
-    /// profile never masks a lifecycle action or drops node 0 from the watch, and
-    /// keeps the schedule byte-identical to the pre-role baseline (a forced role
-    /// skips the RNG draw).
-    fn run_honest(input: FuzzInput, chooser: Chooser) {
-        run_inner::<SimplexId>(
-            input,
-            chooser,
-            TEST_STEPS,
-            Some(adversary::AdversaryRole::Honest),
-            WindowMode::Time,
-        );
     }
 
     #[test]
@@ -1516,65 +1569,8 @@ mod tests {
     }
 
     #[test]
-    fn observe_remaining_folds_downtime_into_the_window() {
-        // F6: a restart sleeps its downtime during enact, so the remaining
-        // observation is `window - downtime`; a plain step observes the full window;
-        // an over-budget enact observes nothing (saturating). Every step totals one
-        // window.
-        assert_eq!(
-            observe_remaining(MALLORY_WINDOW, Duration::ZERO),
-            MALLORY_WINDOW,
-            "a plain step observes the full window"
-        );
-        assert_eq!(
-            observe_remaining(MALLORY_WINDOW, lifecycle::MALLORY_RESTART_DOWNTIME),
-            MALLORY_WINDOW - lifecycle::MALLORY_RESTART_DOWNTIME,
-            "a restart observes the window minus its downtime"
-        );
-        assert_eq!(
-            observe_remaining(MALLORY_WINDOW, MALLORY_WINDOW * 2),
-            Duration::ZERO,
-            "an over-budget enact observes nothing"
-        );
-    }
-
-    #[test]
-    fn restart_and_plain_steps_span_the_same_window() {
-        // F6 in the deterministic runtime: a step that sleeps the restart downtime
-        // during enact then observes `observe_remaining` spans exactly one
-        // MALLORY_WINDOW from its start -- identical to a plain step with no downtime.
-        let executor = deterministic::Runner::seeded(1);
-        executor.start(|context| async move {
-            let start = context.current();
-            context.sleep(lifecycle::MALLORY_RESTART_DOWNTIME).await;
-            let elapsed = context.current().duration_since(start).unwrap();
-            context
-                .sleep(observe_remaining(MALLORY_WINDOW, elapsed))
-                .await;
-            let restart_span = context.current().duration_since(start).unwrap();
-
-            let plain_start = context.current();
-            let plain_elapsed = context.current().duration_since(plain_start).unwrap();
-            context
-                .sleep(observe_remaining(MALLORY_WINDOW, plain_elapsed))
-                .await;
-            let plain_span = context.current().duration_since(plain_start).unwrap();
-
-            assert_eq!(
-                restart_span, MALLORY_WINDOW,
-                "a restart step spans one window"
-            );
-            assert_eq!(plain_span, MALLORY_WINDOW, "a plain step spans one window");
-            assert_eq!(
-                restart_span, plain_span,
-                "a restart step and a plain step span the same total window"
-            );
-        });
-    }
-
-    #[test]
     fn liveness_target_requires_progress_past_the_frontier() {
-        // F2: the post-heal target is one view past the HIGHEST pre-heal frontier, so
+        // The post-heal target is one view past the HIGHEST pre-heal frontier, so
         // a node wedged by the last fault/heal/restart cannot pass by sitting at the
         // frontier; it never drops below required_containers, and stays there on
         // overflow.
@@ -1598,7 +1594,7 @@ mod tests {
 
     #[test]
     fn env_tag_separates_post_amnesia_from_every_other_environment() {
-        // F5a: the amnesia bit keys a distinct Q-state / novelty slot, so post-amnesia
+        // The amnesia bit keys a distinct Q-state / novelty slot, so post-amnesia
         // node 0 no longer aliases the pre-amnesia Honest environment (nor any role).
         assert_ne!(AMNESIA_TAG, 0, "the amnesia tag must be nonzero");
         assert_eq!(
@@ -1637,10 +1633,8 @@ mod tests {
 
     #[test]
     fn enactment_accounts_lifecycle_applied_and_ineffective_packet_noeffect() {
-        // F8 (logging only): a lifecycle fault always logs Applied (the old
-        // is_active()-driven field logged applied=false for it); a packet fault that
-        // matched no packet logs NoEffect (the old field logged applied=true);
-        // NoFault is NoEffect.
+        // A lifecycle fault always logs Applied; a packet fault that matched no packet
+        // logs NoEffect; NoFault is NoEffect.
         let loss = action::FaultPlan::PacketLoss {
             node: 1,
             channel: crate::SniffChannel::Vote,
@@ -1677,12 +1671,10 @@ mod tests {
 
     #[test]
     fn amnesia_bootstrap_mask_excludes_lifecycle_columns() {
-        // F4: the runner recomputes the NEXT-state legal mask from node 0's POST-enact
+        // The runner recomputes the NEXT-state legal mask from node 0's POST-enact
         // lifecycle and passes THAT as the TD bootstrap mask. After an amnesia restart
         // that mask must exclude the three lifecycle columns the pre-enact running mask
         // includes, so the bootstrap max cannot span a now-illegal lifecycle action.
-        // (The policy's exclusion of illegal columns from the bootstrap max is proven
-        // in `policy::tests::legal_mask_excludes_illegal_from_select_and_bootstrap`.)
         let running = action::legal_mask(false, false, false, false);
         let amnesiac = action::legal_mask(false, false, true, false);
         for id in [
@@ -1733,8 +1725,7 @@ mod tests {
         policy::reset_campaign(action::N_ACTIONS);
         adversary::reset_role_bandit();
         for seed in [1u64, 2, 3] {
-            let (learned_ok, learned_log) =
-                mallory_trace(mallory_input(seed), Chooser::Learned, WindowMode::Time);
+            let (learned_ok, learned_log) = mallory_trace(mallory_input(seed), Chooser::Learned);
             assert!(
                 learned_ok,
                 "learned chooser must complete and hold invariants (seed {seed})"
@@ -1744,10 +1735,8 @@ mod tests {
                 "the decision log must record the learned episode (seed {seed})"
             );
 
-            let (random_ok_a, random_log_a) =
-                mallory_trace(mallory_input(seed), Chooser::Random, WindowMode::Time);
-            let (random_ok_b, random_log_b) =
-                mallory_trace(mallory_input(seed), Chooser::Random, WindowMode::Time);
+            let (random_ok_a, random_log_a) = mallory_trace(mallory_input(seed), Chooser::Random);
+            let (random_ok_b, random_log_b) = mallory_trace(mallory_input(seed), Chooser::Random);
             assert!(
                 random_ok_a && random_ok_b,
                 "random chooser must complete and hold invariants (seed {seed})"
@@ -1759,33 +1748,26 @@ mod tests {
         }
     }
 
-    /// The container observation window is a drop-in alternative to the time window:
-    /// the same seed completes and holds the SAME liveness/safety oracle under both,
-    /// and each mode records its own window in the decision log. The container window
-    /// stops each step early once `required_containers` finalize (capped at
-    /// MALLORY_WINDOW), which the time window never does. Uses the campaign-independent
-    /// [`Chooser::Random`] so the test is hermetic (no Q-table mutation) and isolates
-    /// the window from the chooser.
+    /// The reactive container flow completes and holds the SAME liveness/safety oracle,
+    /// and every step records a reactive boundary (finalization or timeout). Uses the
+    /// campaign-independent [`Chooser::Random`] so the test is hermetic (no Q-table
+    /// mutation) and isolates the episode flow from the chooser.
     #[test]
     #[ignore]
-    fn container_window_completes_and_holds_the_oracle() {
+    fn container_flow_completes_and_holds_the_oracle() {
         for seed in [1u64, 2, 3] {
-            let (time_ok, time_log) =
-                mallory_trace(mallory_input(seed), Chooser::Random, WindowMode::Time);
-            let (container_ok, container_log) =
-                mallory_trace(mallory_input(seed), Chooser::Random, WindowMode::Container);
+            let (ok, logv) = mallory_trace(mallory_input(seed), Chooser::Random);
             assert!(
-                time_ok && container_ok,
-                "both windows must complete and hold the oracle (seed {seed})"
+                ok,
+                "the episode must complete and hold the oracle (seed {seed})"
             );
             assert!(
-                !container_log.is_empty()
-                    && container_log.iter().all(|l| l.contains("window=container")),
-                "container mode must record the container window every step (seed {seed}): {container_log:?}"
-            );
-            assert!(
-                time_log.iter().all(|l| l.contains("window=time")),
-                "time mode must record the time window every step (seed {seed})"
+                !logv.is_empty()
+                    && logv
+                        .iter()
+                        .all(|l| l.contains("boundary=finalization")
+                            || l.contains("boundary=timeout")),
+                "every step must record a reactive boundary (seed {seed}): {logv:?}"
             );
         }
     }
@@ -1801,12 +1783,7 @@ mod tests {
         policy::reset_campaign(action::N_ACTIONS);
         adversary::reset_role_bandit();
         for seed in [1u64, 2, 3] {
-            run_with::<SimplexId>(
-                mallory_input(seed),
-                Chooser::Learned,
-                TEST_STEPS,
-                WindowMode::Time,
-            );
+            run_with::<SimplexId>(mallory_input(seed), Chooser::Learned, TEST_STEPS);
         }
         assert!(
             !policy::campaign(action::N_ACTIONS).lock().policy.is_empty(),
@@ -1816,430 +1793,6 @@ mod tests {
             !adversary::role_bandit().lock().is_empty(),
             "learned episodes must move the role bandit off its uniform start"
         );
-    }
-
-    /// Force [`action::Action::IsolateNodeWindow`] every step: node 0
-    /// (BYZANTINE_IDX) is isolated for each window while the other three keep a
-    /// quorum. The episode must still complete -- node 0 catches up via resolver
-    /// backfill after the topology heals -- so all four reach `required_containers`
-    /// and the safety invariants hold. Completion (no panic) is the assertion.
-    #[test]
-    #[ignore]
-    fn forced_isolation_still_completes_and_catches_up() {
-        for seed in [1u64, 2, 3] {
-            run_honest(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::IsolateNodeWindow.id()),
-            );
-        }
-    }
-
-    /// Force [`action::Action::PartitionWindow`] every step: a balanced 2-2 split
-    /// stalls all progress during each window. The episode must still complete --
-    /// every node catches up once the topology heals after the window and at
-    /// episode end -- so all four reach `required_containers` and the safety
-    /// invariants hold.
-    #[test]
-    #[ignore]
-    fn forced_partition_still_completes_and_catches_up() {
-        for seed in [1u64, 2, 3] {
-            run_honest(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::PartitionWindow.id()),
-            );
-        }
-    }
-
-    /// Force [`action::Action::PacketLoss`] every step: a bounded number of
-    /// packets on a sampled `(node, channel)` are dropped below the sniffer for
-    /// each window, so they never reach the engine or the happens-before log. A
-    /// bounded loss does not kill liveness -- Simplex backfills the gap after the
-    /// fault heals -- so all four nodes still reach `required_containers` and the
-    /// safety invariants hold. Completion is the assertion here; the pump unit
-    /// tests in [`network`] assert the drop / absence property directly.
-    #[test]
-    #[ignore]
-    fn forced_packet_loss_still_completes() {
-        for seed in [1u64, 2, 3] {
-            run_honest(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::PacketLoss.id()),
-            );
-        }
-    }
-
-    /// Force [`action::Action::PacketDelay`] every step: a sampled `(node,
-    /// channel)` is slowed by a per-packet delay for each window. Delay is an
-    /// in-order FIFO slowdown -- never a drop or reorder -- so every delayed
-    /// packet is still delivered and observed by the engine; the episode
-    /// completes once the fault heals. The pump unit tests in [`network`] assert
-    /// the in-order property directly.
-    #[test]
-    #[ignore]
-    fn forced_packet_delay_still_completes() {
-        for seed in [1u64, 2, 3] {
-            run_honest(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::PacketDelay.id()),
-            );
-        }
-    }
-
-    /// Force [`action::Action::PacketCorrupt`] every step: a bounded number of
-    /// packets on a sampled `(node, channel)` are byte-mutated (without
-    /// re-signing) for each window, so each corrupted message fails to decode and
-    /// is rejected by the engine -- an effective loss. A bounded corrupt does not
-    /// kill liveness -- Simplex backfills the gap after the fault heals -- so all
-    /// four nodes still reach `required_containers` and the safety invariants hold.
-    /// The pump unit tests in [`network`] assert the byte-mutation property.
-    #[test]
-    #[ignore]
-    fn forced_packet_corrupt_still_completes() {
-        for seed in [1u64, 2, 3] {
-            run_honest(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::PacketCorrupt.id()),
-            );
-        }
-    }
-
-    /// Force [`action::Action::PacketDuplicate`] every step: each packet on a
-    /// sampled `(node, channel)` is delivered with a bounded number of extra
-    /// identical copies for each window. The engine's idempotent vote handling
-    /// tolerates the duplicates, so all four nodes still reach `required_containers`
-    /// and the safety invariants hold. The pump unit tests in [`network`] assert
-    /// the extra-copies property directly.
-    #[test]
-    #[ignore]
-    fn forced_packet_duplicate_still_completes() {
-        for seed in [1u64, 2, 3] {
-            run_honest(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::PacketDuplicate.id()),
-            );
-        }
-    }
-
-    /// Force [`action::Action::PacketReorder`] every step: a sampled `(node,
-    /// channel)` is reordered through a bounded per-pump buffer for each window,
-    /// and the buffer is flushed in order when the fault heals so no packet is
-    /// lost. The engine tolerates reordering, so all four nodes still reach
-    /// `required_containers` and the safety invariants hold. The pump unit tests in
-    /// [`network`] assert the reorder / bound / flush properties directly.
-    #[test]
-    #[ignore]
-    fn forced_packet_reorder_still_completes() {
-        for seed in [1u64, 2, 3] {
-            run_honest(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::PacketReorder.id()),
-            );
-        }
-    }
-
-    /// Force [`action::Action::CrashStop`] on the first step: node 0 (the single
-    /// faultable identity) is crash-stopped -- both its engine and application
-    /// tasks are aborted and awaited to termination, so the old incarnation can
-    /// never send again -- and the episode ENDS (crash-stop is terminal). The
-    /// other three nodes form the N4F0C4 quorum of three and reach
-    /// `required_containers`, and the safety invariants hold over ALL four
-    /// reporters (node 0's retained pre-crash reporter included). Completion is the
-    /// liveness+safety oracle; the single logged step is the behavioral proof that
-    /// the crash ended the episode after one step, with no node-0 engine left to
-    /// act.
-    #[test]
-    #[ignore]
-    fn forced_crash_stop_ends_episode_and_others_progress() {
-        for seed in [1u64, 2, 3] {
-            // Force the Honest role: a crash-stop targets node 0's ManagedValidator,
-            // which only the Honest environment provides (a byzantine role masks it).
-            let (ok, logv) = mallory_trace_role(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::CrashStop.id()),
-                adversary::AdversaryRole::Honest,
-            );
-            assert!(
-                ok,
-                "crash-stop episode must complete: the 3 live nodes reach \
-                 required_containers and safety holds over all 4 (seed {seed})"
-            );
-            assert_eq!(
-                logv.len(),
-                1,
-                "crash-stop is terminal: the episode ends after the crash step (seed {seed})"
-            );
-            assert!(
-                logv[0].contains("action=CrashStop"),
-                "the sole logged step must be the crash-stop (seed {seed}): {:?}",
-                logv[0]
-            );
-        }
-    }
-
-    /// Force [`action::Action::CrashRestartDurable`] every step: node 0 is crashed
-    /// and durably restarted in place on its EXISTING partition each step, losing
-    /// volatile state and replaying its journal. A durable restart is not terminal,
-    /// so the episode runs to full length; node 0 returns to running each time (its
-    /// generation increments per restart) and catches up via resolver backfill, so
-    /// ALL four nodes reach `required_containers` and the safety invariants hold.
-    /// Re-registration disconnects each prior incarnation's receivers, so a
-    /// restarted node never hears from its old self.
-    #[test]
-    #[ignore]
-    fn forced_crash_restart_durable_recovers_and_all_progress() {
-        for seed in [1u64, 2, 3] {
-            // Force the Honest role: a durable restart targets node 0's
-            // ManagedValidator, which only the Honest environment provides.
-            let (ok, logv) = mallory_trace_role(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::CrashRestartDurable.id()),
-                adversary::AdversaryRole::Honest,
-            );
-            assert!(
-                ok,
-                "durable-restart episode must complete: all 4 nodes (node 0 \
-                 restarted) reach required_containers and safety holds (seed {seed})"
-            );
-            assert_eq!(
-                logv.len(),
-                TEST_STEPS,
-                "a durable restart is not terminal: the episode runs full length (seed {seed})"
-            );
-            assert!(
-                logv.last()
-                    .unwrap()
-                    .contains(&format!("generation={TEST_STEPS}")),
-                "node 0 must return to running and restart every step, so its \
-                 generation reaches {TEST_STEPS} (seed {seed}): {:?}",
-                logv.last().unwrap()
-            );
-        }
-    }
-
-    /// Force [`action::Action::AmnesiaRestart`] on the FIRST step (then NoFault, as
-    /// amnesia masks itself): node 0 is crashed and restarted on a FRESH (empty)
-    /// storage partition, so it forgets its durable state (including signed votes)
-    /// and becomes Byzantine (`Amnesiac`) for the rest of the episode. Unlike a
-    /// crash-stop this is NOT terminal: the episode runs to full length. The three
-    /// honest nodes form the N4F0C4 quorum of three and reach `required_containers`,
-    /// and the safety oracle holds over the honest-only set -- node 0's post-amnesia
-    /// equivocation is excluded via the unified `node0_byzantine` flag. Its
-    /// generation bumps (evidence of the fresh partition, which
-    /// [`lifecycle::amnesia_partition`]'s unit test proves differs from the durable
-    /// one), and node 0 ends `Amnesiac`.
-    #[test]
-    #[ignore]
-    fn forced_amnesia_restart_flips_node0_byzantine_and_others_progress() {
-        for seed in [1u64, 2, 3] {
-            // Force the Honest role: an amnesia restart targets node 0's
-            // ManagedValidator, which only the Honest environment provides. FixedFirst
-            // fires amnesia once (it masks itself afterward) then runs NoFault, so the
-            // episode reaches full length and the non-terminal property is observable.
-            let (ok, logv) = mallory_trace_role(
-                mallory_input(seed),
-                Chooser::FixedFirst(action::Action::AmnesiaRestart.id()),
-                adversary::AdversaryRole::Honest,
-            );
-            assert!(
-                ok,
-                "amnesia-restart episode must complete: the 3 honest nodes reach \
-                 required_containers and safety holds over the honest-only set with \
-                 node 0 excluded (seed {seed})"
-            );
-            assert_eq!(
-                logv.len(),
-                TEST_STEPS,
-                "an amnesia restart is NOT terminal (unlike a crash-stop): the \
-                 episode runs full length (seed {seed}): {logv:?}"
-            );
-            assert!(
-                logv[0].contains("action=AmnesiaRestart"),
-                "step 0 must be the amnesia restart (seed {seed}): {:?}",
-                logv[0]
-            );
-            // The restart bumped the incarnation counter from 0 to 1: the fresh
-            // partition is derived from that new generation, so a bumped generation is
-            // the evidence the fresh partition differs from the durable one.
-            assert!(
-                logv[0].contains("generation=1"),
-                "the amnesia restart must bump node 0's generation to 1, from which \
-                 its fresh partition is derived (seed {seed}): {:?}",
-                logv[0]
-            );
-            // Node 0 flipped honest->Amnesiac mid-episode and STAYS amnesiac: every
-            // step from the restart on records lifecycle0=Amnesiac.
-            assert!(
-                logv.iter().all(|l| l.contains("lifecycle0=Amnesiac")),
-                "node 0 must end Amnesiac and stay so after the restart (seed {seed}): {logv:?}"
-            );
-        }
-    }
-
-    /// Drive one byzantine role at node 0 (with `NoFault` every step, so the only
-    /// perturbation is the adversary): the three honest nodes must still reach
-    /// `required_containers` and the safety oracle must hold with node 0's
-    /// equivocation excluded via `check_vote_invariants_with_byzantine(&{0}, ...)`.
-    /// Every decision line records the role, and the crash actions are masked out.
-    fn assert_byzantine_role_completes(role: adversary::AdversaryRole, label: &str) {
-        for seed in [1u64, 2, 3] {
-            let (ok, logv) = mallory_trace_role(
-                mallory_input(seed),
-                Chooser::Fixed(action::Action::NoFault.id()),
-                role,
-            );
-            assert!(
-                ok,
-                "{label} episode must complete: the 3 honest nodes reach \
-                 required_containers and safety holds over the honest-only set \
-                 (seed {seed})"
-            );
-            assert_eq!(
-                logv.len(),
-                TEST_STEPS,
-                "a byzantine role is not terminal: the episode runs full length (seed {seed})"
-            );
-            assert!(
-                logv.iter().all(|l| l.contains(&format!("role={label}"))),
-                "every decision line records the {label} role (seed {seed}): {logv:?}"
-            );
-            assert!(
-                logv.iter().all(|l| l.contains("legal=[true, true, true, true, true, true, true, true, false, false, false, true]")),
-                "the three lifecycle actions are masked and SetRole is legal under a byzantine role (seed {seed}): {:?}",
-                logv.first()
-            );
-        }
-    }
-
-    /// A [`adversary::AdversaryRole::Disrupter`] at node 0 (full byzantine engine on
-    /// all three channels) is tolerated: the three honest nodes reach
-    /// `required_containers` and safety holds over the honest-only set.
-    #[test]
-    #[ignore]
-    fn disrupter_role_completes_and_safety_holds() {
-        assert_byzantine_role_completes(adversary::AdversaryRole::Disrupter, "disrupter");
-    }
-
-    /// A [`adversary::AdversaryRole::Conflicter`] at node 0 (conflicting
-    /// notarize/finalize on the vote channel) is tolerated: the three honest nodes
-    /// reach `required_containers` and safety holds -- node 0's equivocation is
-    /// excluded from the vote-equivocation check.
-    #[test]
-    #[ignore]
-    fn conflicter_role_completes_and_safety_holds() {
-        assert_byzantine_role_completes(adversary::AdversaryRole::Conflicter, "conflicter");
-    }
-
-    /// A [`adversary::AdversaryRole::Nuller`] at node 0 (nullify+finalize for the
-    /// same view on the vote channel) is tolerated: the three honest nodes reach
-    /// `required_containers` and safety holds over the honest-only set.
-    #[test]
-    #[ignore]
-    fn nuller_role_completes_and_safety_holds() {
-        assert_byzantine_role_completes(adversary::AdversaryRole::Nuller, "nuller");
-    }
-
-    /// A [`adversary::AdversaryRole::Equivocator`] at node 0 (different proposals to
-    /// different nodes, consuming the vote and certificate channels) is tolerated:
-    /// the three honest nodes reach `required_containers` and safety holds over the
-    /// honest-only set -- node 0's equivocation is excluded from the vote check.
-    #[test]
-    #[ignore]
-    fn equivocator_role_completes_and_safety_holds() {
-        assert_byzantine_role_completes(adversary::AdversaryRole::Equivocator, "equivocator");
-    }
-
-    /// An [`adversary::AdversaryRole::Impersonator`] at node 0 (votes re-signed under
-    /// a swapped signer index on the vote channel) is tolerated: the three honest
-    /// nodes reach `required_containers` and safety holds over the honest-only set.
-    #[test]
-    #[ignore]
-    fn impersonator_role_completes_and_safety_holds() {
-        assert_byzantine_role_completes(adversary::AdversaryRole::Impersonator, "impersonator");
-    }
-
-    /// An [`adversary::AdversaryRole::Outdated`] at node 0 (re-notarizing/finalizing
-    /// a stale earlier-view proposal on the vote channel) is tolerated: the three
-    /// honest nodes reach `required_containers` and safety holds over the honest-only
-    /// set.
-    #[test]
-    #[ignore]
-    fn outdated_role_completes_and_safety_holds() {
-        assert_byzantine_role_completes(adversary::AdversaryRole::Outdated, "outdated");
-    }
-
-    /// The distinct `role=<label>` values recorded across a decision log, in first-seen
-    /// order. Used to prove a mid-episode role switch changed node 0's active profile.
-    fn distinct_roles_in_log(logv: &[String]) -> Vec<String> {
-        let mut roles: Vec<String> = Vec::new();
-        for line in logv {
-            let Some(rest) = line.split("role=").nth(1) else {
-                continue;
-            };
-            let label = rest.split(' ').next().unwrap_or("").to_string();
-            if !label.is_empty() && !roles.contains(&label) {
-                roles.push(label);
-            }
-        }
-        roles
-    }
-
-    /// Force [`action::Action::SetRole`] every step in a byzantine episode (initial
-    /// role Disrupter): node 0's multiplexer swaps its active Byzantine profile each
-    /// step, composing faults across views. The target cycles DETERMINISTICALLY over
-    /// the byzantine roles by step (via [`Chooser::FixedSetRole`]) rather than the
-    /// RNG-sampled target -- whether a sampled target reaches >= 2 distinct roles is a
-    /// coincidence of the input's RNG phase, so the demonstration forces them. Acceptance
-    /// criterion 2: (i) the decision log records >= 2 DISTINCT roles for node 0 in the
-    /// one episode; (ii) the episode completes -- the three honest nodes reach
-    /// `required_containers` and safety holds with node 0 excluded; (iii) the per-episode
-    /// switch cap is respected (SetRole is masked once the cap is hit, so the switch
-    /// count never exceeds it). With `TEST_STEPS == MALLORY_MAX_ROLE_SWITCHES` every step
-    /// is a legal SetRole and the episode reaches the cap exactly.
-    #[test]
-    #[ignore]
-    fn set_role_composes_byzantine_faults_across_views() {
-        assert_eq!(
-            TEST_STEPS as u32,
-            action::MALLORY_MAX_ROLE_SWITCHES,
-            "this test forces one SetRole per step up to the switch cap"
-        );
-        for seed in [1u64, 2, 3] {
-            let (ok, logv) = mallory_trace_role(
-                mallory_input(seed),
-                Chooser::FixedSetRole,
-                adversary::AdversaryRole::Disrupter,
-            );
-            // (ii) The episode completed: liveness over the 3 honest nodes and safety
-            // over the honest-only set (node 0 excluded) both held.
-            assert!(
-                ok,
-                "role-switching episode must complete: the 3 honest nodes reach \
-                 required_containers and safety holds with node 0 excluded (seed {seed})"
-            );
-            assert_eq!(
-                logv.len(),
-                TEST_STEPS,
-                "a role switch is not terminal: the episode runs full length (seed {seed}): {logv:?}"
-            );
-            // (iii) Every step was a SetRole and the count never exceeds the cap.
-            let switches = logv.iter().filter(|l| l.contains("action=SetRole")).count();
-            assert_eq!(
-                switches, TEST_STEPS,
-                "every forced step is a SetRole (seed {seed}): {logv:?}"
-            );
-            assert!(
-                switches as u32 <= action::MALLORY_MAX_ROLE_SWITCHES,
-                "the switch count must respect the cap (seed {seed})"
-            );
-            // (i) The log shows >= 2 distinct roles for node 0 in this one episode --
-            // the mid-episode composition of Byzantine faults across views.
-            let roles = distinct_roles_in_log(&logv);
-            assert!(
-                roles.len() >= 2,
-                "the decision log must record >= 2 distinct node-0 roles in the one \
-                 episode (seed {seed}): saw {roles:?} in {logv:?}"
-            );
-        }
     }
 
     /// Acceptance criterion 3 (structural): the role is a MUTABLE Q-state component.
@@ -2286,7 +1839,6 @@ mod tests {
                 Chooser::Learned,
                 MALLORY_EPISODE_STEPS,
                 Some(adversary::AdversaryRole::Disrupter),
-                WindowMode::Time,
             );
         }
         assert!(

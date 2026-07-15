@@ -2587,7 +2587,6 @@ pub enum Mode {
     FaultyMessaging,
     FaultyNet,
     Byzzfuzz,
-    MalloryTime,
     MalloryContainer,
 }
 
@@ -2751,40 +2750,34 @@ impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
 }
 
-/// **Mallory (time window)** - the dedicated adaptive-adversary runner over its own
-/// action catalog, with a fixed deterministic-time observation window per step. See
-/// [`MalloryContainer`] for the container-based window variant.
+/// **Mallory** - the dedicated adaptive-adversary runner over its own action catalog,
+/// bounded by a whole-episode CONTAINER (distinct-finalization) budget.
 ///
 /// Each episode selects one adversary environment for the faultable identity
 /// (node 0): honest, or one of six Byzantine profiles (Disrupter, Conflicter,
-/// Nuller, Equivocator, Impersonator, Outdated). It then drives a fixed-length
-/// episode of observe-orient-decide-act steps. Each step observes the honest
-/// happens-before fingerprint (the Q-state) and protocol-state descriptor,
-/// selects an action from the stable catalog (`mallory::action`) under a legal
-/// mask -- a network (isolation, partition), packet
-/// (delay/loss/corrupt/duplicate/reorder), or lifecycle (crash-stop, durable
-/// restart, amnesia restart) fault -- runs one FIXED deterministic-time window,
-/// heals it, and (for the learned chooser) applies a temporal-difference update
-/// rewarding novel state / happens-before fingerprints via the backend-agnostic
-/// Q-core in `mallory::policy`. Mallory does not reuse the ByzzFuzz fault
-/// machinery: it builds its own setup from the shared harness helpers and never
-/// samples ByzzFuzz `(c, d, r)`.
+/// Nuller, Equivocator, Impersonator, Outdated). It then drives a reactive loop of
+/// observe-orient-decide-act steps. Each step observes the honest happens-before
+/// fingerprint (the Q-state) and protocol-state descriptor, selects an action from
+/// the stable catalog (`mallory::action`) under a legal mask -- a network (isolation,
+/// partition), packet (delay/loss/corrupt/duplicate/reorder), or lifecycle
+/// (crash-stop, durable restart, amnesia restart) fault -- applies it, then reacts:
+/// the step ends on the first new honest finalization past its baseline, or a
+/// deterministic per-action timeout if the fault suppressed progress. The fault heals
+/// and (for the learned chooser) a temporal-difference update rewards novel state /
+/// happens-before fingerprints (the pre-heal fault effect) via the backend-agnostic
+/// Q-core in `mallory::policy`. The whole episode stops once it has observed the
+/// input's `required_containers` distinct finalization boundaries (each step counts at
+/// most one; view jumps and duplicate reports count once), a crash-stop ends it, or it
+/// hits the `max(MALLORY_EPISODE_STEPS, required_containers)` truncation cap. Mallory
+/// does not reuse the ByzzFuzz fault machinery: it builds its own setup from the shared
+/// harness helpers and never samples ByzzFuzz `(c, d, r)`.
 ///
-/// The episode-end oracle checks liveness (each live correct node must finalize
-/// past its pre-heal frontier) and the vote / state-extraction safety invariants
-/// over the episode's honest reporter set -- excluding an unmanaged Byzantine
-/// node 0, a crash-stopped node from liveness, and an amnesiac node from the
-/// honest set. See `mallory::runner::run`.
-pub struct MalloryTime;
-impl FuzzMode for MalloryTime {
-    const MODE: Mode = Mode::MalloryTime;
-}
-
-/// Mallory with a CONTAINER-based observation window: each step observes until the
-/// honest finalized frontier advances by the input's `required_containers` (capped at
-/// the same bound as [`MalloryTime`]'s fixed time window), so a fast-finalizing step
-/// ends early. Identical fault catalog, Q-learning, and oracle as [`MalloryTime`];
-/// only the per-step window differs. See `mallory::runner::WindowMode`.
+/// The episode-end oracle checks liveness (each live correct node must finalize past
+/// its pre-heal frontier) and the vote / state-extraction safety invariants over the
+/// episode's honest reporter set -- excluding an unmanaged Byzantine node 0, a
+/// crash-stopped node from liveness, and an amnesiac node from the honest set. The
+/// name is kept as `MalloryContainer` to avoid target / API churn. See
+/// `mallory::runner::run`.
 pub struct MalloryContainer;
 impl FuzzMode for MalloryContainer {
     const MODE: Mode = Mode::MalloryContainer;
@@ -2849,7 +2842,7 @@ fn install_mallory_panic_hook() {
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput) {
     if matches!(M::MODE, Mode::Byzzfuzz) {
         install_byzzfuzz_panic_hook();
-    } else if matches!(M::MODE, Mode::MalloryTime | Mode::MalloryContainer) {
+    } else if matches!(M::MODE, Mode::MalloryContainer) {
         install_mallory_panic_hook();
     } else {
         if matches!(M::MODE, Mode::FaultyNet) {
@@ -2880,19 +2873,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Mode::Byzzfuzz => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
         }
-        Mode::MalloryTime => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            mallory::runner::run::<P>(
-                input,
-                mallory::runner::Chooser::Learned,
-                mallory::runner::WindowMode::Time,
-            )
-        })),
         Mode::MalloryContainer => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            mallory::runner::run::<P>(
-                input,
-                mallory::runner::Chooser::Learned,
-                mallory::runner::WindowMode::Container,
-            )
+            mallory::runner::run::<P>(input, mallory::runner::Chooser::Learned)
         })),
     };
     match run_result {
@@ -2903,7 +2885,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
                 let _ = byzzfuzz::log::take();
             }
             // Same for the separate Mallory log.
-            if matches!(M::MODE, Mode::MalloryTime | Mode::MalloryContainer) {
+            if matches!(M::MODE, Mode::MalloryContainer) {
                 let _ = mallory::log::take();
             }
         }
