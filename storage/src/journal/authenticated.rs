@@ -358,11 +358,6 @@ where
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
     /// the Merkle structure is not durably persisted, so recovery may be required on startup in
     /// the event of a crash (use [Self::sync] for the stronger guarantee).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if preparing the commit fails; failures of the deferred durability work
-    /// surface on the returned handle and again on the next durability operation.
     pub async fn start_commit(&mut self) -> Result<Handle<()>, Error<F>> {
         // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
         // limit memory bloat.

@@ -106,9 +106,9 @@ pub trait DbAny<F: Family>:
 
     /// Begin durably persisting the database.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit];
-    /// use [Self::sync] to also eliminate recovery on startup. Failures of the deferred durability
-    /// work surface on the returned handle and again on the next durability operation.
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
+    /// for the state applied before the call; use [Self::sync] to also eliminate recovery on
+    /// startup.
     fn start_commit(&mut self) -> impl Future<Output = Result<Handle<()>, Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash.

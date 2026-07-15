@@ -300,13 +300,9 @@ pub trait Mutable: Contiguous + Send + Sync {
 
     /// Begin durably persisting the current state of the journal.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit];
-    /// use [Self::sync] to also guarantee that no recovery will be needed on startup.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if preparing the commit fails; failures of the deferred durability work
-    /// surface on the returned handle and again on the next durability operation.
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
+    /// for the state present when the call begins (later appends need their own commit); use
+    /// [Self::sync] to also guarantee that no recovery will be needed on startup.
     fn start_commit(
         &mut self,
     ) -> impl std::future::Future<Output = Result<Handle<()>, Error>> + Send;
