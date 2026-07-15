@@ -1,34 +1,46 @@
-//! io_uring event loop implementation.
+//! A single-threaded runtime driven by an io_uring event loop.
 //!
-//! This module provides a high-level interface for submitting logical requests to Linux's io_uring
-//! subsystem and receiving their results. The design centers around a single event loop that
-//! manages the submission queue (SQ) and completion queue (CQ) of an io_uring instance.
+//! This module provides a runtime whose executor and I/O driver share one thread: the
+//! thread that calls [crate::Runner::start] on [Runner] alternates between polling tasks
+//! and operating an io_uring event loop that services all storage and network I/O. When
+//! no task is runnable, the executor parks inside the event loop's wait primitives until
+//! a completion arrives, a timer fires, or another thread wakes a task.
 //!
-//! Work is submitted via [Handle], which pushes [Request]s into an MPSC queue and signals
-//! an internal wake source. The event loop blocks either in userspace futex wait
+//! This module is enabled by the `iouring` feature and is only available on Linux.
+//!
+//! # Event Loop
+//!
+//! The event loop provides a high-level interface for submitting logical requests to Linux's
+//! io_uring subsystem and receiving their results. The design centers around a single event loop
+//! that manages the submission queue (SQ) and completion queue (CQ) of an io_uring instance.
+//!
+//! Work is submitted via a crate-internal `Handle`, which pushes requests into an MPSC queue
+//! and signals an internal wake source. The event loop blocks either in userspace futex wait
 //! (when the ring is truly idle) or in `io_uring_enter` (when the ring has active
 //! waiters), and is woken by:
 //! - normal CQE progress in the ring
 //! - futex wake when new work is queued while fully idle
-//! - `eventfd` readiness when new work is queued or all submitters are dropped while
-//!   blocked in `submit_and_wait`
+//! - `eventfd` readiness when new work is queued, a task is woken from another thread,
+//!   or all submitters are dropped while blocked in `submit_and_wait`
+//!
+//! The runtime executor drives the loop by interleaving a non-blocking `turn` (drain
+//! completions, advance deadlines, stage and flush submissions) and a blocking `park`
+//! with task polling on the runtime thread.
 //!
 //! # Kernel Requirements
 //!
-//! - Baseline: Linux kernel 5.13 or newer (required for io_uring multishot poll
-//!   used by the internal `eventfd` wake path).
-//! - With [`Config::single_issuer`] enabled: Linux kernel 6.1 or newer, because
-//!   this implementation also enables `IORING_SETUP_DEFER_TASKRUN`.
-//! - Effective requirement for runtime io_uring network/storage backends: 6.1+,
-//!   since those backends enable [`Config::single_issuer`].
+//! This runtime requires Linux kernel 6.1 or newer: the ring is configured with
+//! `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN` (the runtime thread
+//! creates the ring and is the only submitter). The internal `eventfd` wake path also
+//! relies on io_uring multishot poll (Linux 5.13+).
 //!
 //! # Architecture
 //!
 //! ## Event Loop
 //!
-//! The core of this implementation is [IoUringLoop::run], which blocks its calling thread while
-//! operating an event loop that:
-//! 1. Drains logical requests from a bounded MPSC channel fed by [Handle]
+//! Each pass of the event loop (whether driven by the executor's `turn`/`park` cycle or a
+//! standalone `run`):
+//! 1. Drains logical requests from a bounded MPSC channel fed by `Handle`
 //! 2. Admits requests into the waiter table and submits their first SQE
 //! 3. Processes io_uring completion queue entries (CQEs), including internal wake CQEs
 //! 4. Handles partial progress and retryable errors by requeuing requests
@@ -59,8 +71,8 @@
 //! ## Work Tracking
 //!
 //! Each admitted request is assigned a waiter id that serves as the `user_data` field in its
-//! SQEs. The event loop maintains a flat `Waiters` store where each slot maps to an
-//! [Request] that owns all resources (buffers, FDs, progress state, completion sender)
+//! SQEs. The event loop maintains a flat `Waiters` store where each slot maps to a
+//! request that owns all resources (buffers, FDs, progress state, completion sender)
 //! needed for the request's lifetime.
 //!
 //! ## Timeout Handling
@@ -93,7 +105,7 @@
 //! ## Wake Handling
 //!
 //! The wake path uses one shared atomic state word plus an internal `eventfd`.
-//! - [Handle::enqueue] increments an atomic submission sequence
+//! - `Handle::enqueue` increments an atomic submission sequence
 //! - When the loop has no waiters, it sleeps in futex wait on that shared word
 //! - When the loop blocks in `submit_and_wait`, it keeps a multishot `PollAdd`
 //!   on the internal `eventfd`
@@ -170,16 +182,23 @@ use io_uring::{
     squeue::SubmissionQueue,
     types::{SubmitArgs, Timespec},
 };
-use request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest};
+pub(crate) use request::RawSocketAddr;
+use request::{
+    AcceptRequest, ConnectRequest, ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest,
+    WriteAtRequest,
+};
 use std::{
     collections::VecDeque,
     fs::File,
+    net::SocketAddr,
     os::fd::OwnedFd,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 mod request;
+mod runtime;
+pub use runtime::{Config, Context, Runner};
 mod timeout;
 use timeout::{Tick, TimeoutWheel};
 mod waiter;
@@ -190,7 +209,7 @@ mod spinner;
 pub use spinner::Config as SpinnerConfig;
 use spinner::Spinner;
 
-/// Maximum rounded ring size accepted by [`Config::size`].
+/// Maximum rounded ring size accepted by [`RingConfig::size`].
 ///
 /// Requested sizes are rounded up to the next power of two before validation.
 pub const MAX_RING_SIZE: u32 = HALF_SUBMISSION_SEQUENCE_DOMAIN / 2;
@@ -200,7 +219,7 @@ type UserData = u64;
 
 /// Tracks io_uring metrics.
 #[derive(Debug)]
-pub struct Metrics {
+pub(crate) struct Metrics {
     /// Number of active logical requests whose CQEs haven't yet been fully
     /// processed. Note this metric doesn't include timeouts, which are
     /// generated internally by the io_uring event loop.
@@ -210,7 +229,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(registry: &mut impl Register) -> Self {
+    pub(crate) fn new(registry: &mut impl Register) -> Self {
         Self {
             pending_operations: registry.register(
                 "pending_operations",
@@ -224,11 +243,11 @@ impl Metrics {
 /// Configuration for an io_uring instance.
 /// See `man io_uring`.
 #[derive(Clone, Debug)]
-pub struct Config {
+pub struct RingConfig {
     /// Requested size of the ring.
     ///
     /// This value is rounded up to the next power of two when constructing
-    /// [IoUringLoop], so the configured in-flight waiter capacity matches the
+    /// the event loop, so the configured in-flight waiter capacity matches the
     /// effective ring sizing behavior. After rounding, the maximum allowed size
     /// is [`MAX_RING_SIZE`], larger rounded sizes panic during construction.
     pub size: u32,
@@ -238,9 +257,8 @@ pub struct Config {
     /// Warning: when enabled, the same thread that creates the ring must be
     /// the only thread that submits work to it.
     ///
-    /// This loop creates the ring inside [IoUringLoop::run] and performs all
-    /// ring submissions from that same thread, so it is compatible with
-    /// `single_issuer` when `run` is executed on a dedicated thread.
+    /// The runtime always enables this: the runtime thread creates the ring
+    /// and performs all ring submissions.
     /// See IORING_SETUP_SINGLE_ISSUER in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
     pub single_issuer: bool,
     /// Maximum request timeout supported by the userspace timeout wheel.
@@ -265,7 +283,7 @@ pub struct Config {
     pub idle_spinner: SpinnerConfig,
 }
 
-impl Default for Config {
+impl Default for RingConfig {
     fn default() -> Self {
         Self {
             size: 128,
@@ -300,7 +318,7 @@ impl Drop for HandleInner {
 
 /// Handle for submitting requests to an [IoUringLoop].
 #[derive(Clone)]
-pub struct Handle {
+pub(crate) struct Handle {
     inner: Arc<HandleInner>,
 }
 
@@ -324,7 +342,6 @@ impl Handle {
     }
 
     /// Submit a logical send request and wait for its completion.
-    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
     pub async fn send(
         &self,
         fd: Arc<OwnedFd>,
@@ -346,7 +363,6 @@ impl Handle {
 
     /// Submit a logical recv request and wait for its completion.
     #[allow(clippy::result_large_err)]
-    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
     pub async fn recv(
         &self,
         fd: Arc<OwnedFd>,
@@ -386,9 +402,58 @@ impl Handle {
         })
     }
 
+    /// Begin a logical accept request, returning the completion receiver
+    /// without waiting.
+    ///
+    /// Enqueuing applies the same backpressure as every other request. The
+    /// returned receiver resolves once a connection is accepted, the deadline
+    /// expires, or the accept fails. Callers should treat [Error::Timeout] as
+    /// a cue to issue a fresh accept: the deadline exists so an abandoned
+    /// accept cannot occupy a waiter slot forever.
+    pub async fn start_accept(
+        &self,
+        fd: Arc<OwnedFd>,
+        deadline: Instant,
+    ) -> oneshot::Receiver<Result<(OwnedFd, SocketAddr), Error>> {
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Accept(AcceptRequest {
+            fd,
+            addr: RawSocketAddr::zeroed(),
+            deadline: Some(deadline),
+            result: None,
+            sender: tx,
+        });
+        if let Err(err) = self.enqueue(request).await {
+            let Request::Accept(request) = err.0 else {
+                unreachable!("accept enqueue returned wrong request variant");
+            };
+            let _ = request.sender.send(Err(Error::ConnectionFailed));
+        }
+        rx
+    }
+
+    /// Submit a logical connect request and wait for its completion.
+    pub async fn connect(
+        &self,
+        fd: Arc<OwnedFd>,
+        addr: SocketAddr,
+        deadline: Instant,
+    ) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.enqueue(Request::Connect(ConnectRequest {
+            fd,
+            addr: RawSocketAddr::boxed_from_socket_addr(&addr),
+            deadline: Some(deadline),
+            result: None,
+            sender: tx,
+        }))
+        .await
+        .map_err(|_| Error::ConnectionFailed)?;
+        rx.await.map_err(|_| Error::ConnectionFailed)?
+    }
+
     /// Submit a logical positioned read request and wait for its completion.
     #[allow(clippy::result_large_err)]
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub async fn read_at(
         &self,
         file: Arc<File>,
@@ -423,7 +488,6 @@ impl Handle {
     }
 
     /// Submit a logical positioned write request and wait for its completion.
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub async fn write_at(&self, file: Arc<File>, offset: u64, bufs: IoBufs) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         self.enqueue(Request::WriteAt(WriteAtRequest {
@@ -441,7 +505,6 @@ impl Handle {
     }
 
     /// Submit a logical positioned write with per-write sync and wait for its completion.
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub async fn write_at_sync(
         &self,
         file: Arc<File>,
@@ -464,7 +527,6 @@ impl Handle {
     }
 
     /// Submit a logical fsync request and wait for its completion.
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub async fn sync(&self, file: Arc<File>) -> Result<(), Error> {
         self.start_sync(file)
             .await
@@ -476,7 +538,6 @@ impl Handle {
     ///
     /// Enqueuing applies the same backpressure as every other request (it waits when the
     /// submission channel is full). The returned receiver resolves once the fsync completes.
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub async fn start_sync(&self, file: Arc<File>) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
         let request = Request::Sync(SyncRequest {
@@ -498,7 +559,7 @@ impl Handle {
 
 /// io_uring event loop state.
 pub(crate) struct IoUringLoop {
-    cfg: Config,
+    cfg: RingConfig,
     metrics: Arc<Metrics>,
     receiver: mpsc::Receiver<Request>,
     waiters: Waiters,
@@ -565,7 +626,7 @@ impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
     /// The loop allocates its own metrics, request channel, and internal `eventfd` wake source.
-    pub(crate) fn new(mut cfg: Config, registry: &mut impl Register) -> (Handle, Self) {
+    pub(crate) fn new(mut cfg: RingConfig, registry: &mut impl Register) -> (Handle, Self) {
         assert!(
             !cfg.max_request_timeout.is_zero(),
             "max_request_timeout must be non-zero for timeout wheel"
@@ -624,7 +685,10 @@ impl IoUringLoop {
 
     /// Runs the io_uring event loop until all submitters are dropped and in-flight work drains.
     ///
-    /// This method blocks the current thread.
+    /// This method blocks the current thread. Production code drives the loop
+    /// through [Self::turn] and [Self::park] on the runtime thread instead;
+    /// tests use this standalone mode to exercise the loop in isolation.
+    #[cfg(test)]
     pub(crate) fn run(mut self) {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
         loop {
@@ -708,6 +772,117 @@ impl IoUringLoop {
                 self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                     .expect("unable to submit to ring");
             }
+        }
+    }
+
+    /// Drive the event loop for one non-blocking pass.
+    ///
+    /// Drains available CQEs (completing or requeuing their requests), advances
+    /// userspace deadlines, stages as much inbound work as capacity allows, and
+    /// flushes staged SQEs to the kernel. Never blocks: the runtime executor
+    /// calls this between task-poll batches so completions wake tasks promptly
+    /// while submissions reach the kernel before the executor parks.
+    pub(crate) fn turn(&mut self, ring: &mut IoUring) {
+        loop {
+            // Process available completions.
+            for cqe in ring.completion() {
+                self.handle_cqe(cqe);
+            }
+
+            // Process due deadlines before staging new submissions so timed-out
+            // requests move to cancellation promptly and free capacity sooner.
+            self.advance_timeouts();
+
+            // Stage as much inbound work as capacity allows.
+            let fill_result = self.fill_submission_queue(ring);
+
+            // Update pending operations metric.
+            self.metrics.pending_operations.set(self.waiters.len() as _);
+
+            match fill_result {
+                FillResult::AtSubmissionQueueCapacity => {
+                    // Flush the staged batch into the kernel and stage more work.
+                    self.submit(ring).expect("unable to submit to ring");
+                    continue;
+                }
+                // Producer disconnect is handled by the executor's teardown
+                // (which drains the ring directly), so all remaining outcomes
+                // fall through to the flush below.
+                FillResult::Disconnected
+                | FillResult::AtWaiterCapacity
+                | FillResult::Drained => {}
+            }
+
+            // Without active waiters there is nothing to flush or reap: staged
+            // wake-poll rearms (the only waiter-less SQEs) are submitted by the
+            // next blocking park, and the futex park path does not need them.
+            if self.waiters.is_empty() {
+                return;
+            }
+
+            // Flush staged SQEs and reap completions without blocking. With
+            // `DEFER_TASKRUN`, completions are only posted during an
+            // `io_uring_enter` that requests events, so a zero-timeout wait
+            // doubles as the reap.
+            self.submit_and_wait(ring, 1, Some(Duration::ZERO))
+                .expect("unable to submit to ring");
+
+            // Process any completions the flush surfaced before returning.
+            if ring.completion().is_empty() {
+                return;
+            }
+        }
+    }
+
+    /// Park the calling thread until progress is possible or the earliest
+    /// deadline elapses.
+    ///
+    /// `limit` bounds the wait in addition to the loop's own timeout wheel; the
+    /// runtime executor passes the delay until its next sleeper alarm. Callers
+    /// must invoke [Self::turn] immediately before parking so the wake poll is
+    /// armed and staged work has been flushed.
+    ///
+    /// Wakes on CQE arrival, on a wake published by [Handle] submissions, or on
+    /// an out-of-band wake (e.g. a task woken from another thread).
+    pub(crate) fn park(&mut self, ring: &mut IoUring, limit: Option<Duration>) {
+        let deadline = match (self.timeout_wheel.next_deadline(), limit) {
+            (Some(wheel), Some(limit)) => Some(wheel.min(limit)),
+            (wheel, limit) => wheel.or(limit),
+        };
+
+        // If the ring is truly idle and no deadline is pending, avoid
+        // `io_uring_enter` entirely and wait on the shared wake state via
+        // futex until a producer publishes work or latches a wake. Before
+        // parking, spin briefly to avoid the futex round-trip when work is
+        // imminent.
+        if self.waiters.is_empty() && self.receiver.is_empty() && deadline.is_none() {
+            if self
+                .idle_spinner
+                .spin(|| self.waker.pending(self.processed_seq))
+            {
+                return;
+            }
+            if let Some(park_duration) = self.waker.park_idle(self.processed_seq) {
+                self.idle_spinner.on_wake(park_duration);
+            }
+            return;
+        }
+
+        // Otherwise, arm the eventfd-backed blocking path. Under
+        // waiter-capacity pressure, published-ahead submissions cannot be
+        // admitted until completions free capacity, so block unless an
+        // out-of-band wake (e.g. a task wake) is latched. Otherwise block only
+        // if the post-arm snapshot still looks idle (no published-ahead
+        // submissions and no latched wake).
+        let arm = self.waker.arm(self.processed_seq);
+        let may_block = if self.waiters.is_full() {
+            !arm.wake_latched()
+        } else {
+            arm.still_idle()
+        };
+        if may_block {
+            self.submit_and_wait(ring, 1, deadline)
+                .expect("unable to submit to ring");
         }
     }
 
@@ -1127,7 +1302,7 @@ impl IoUringLoop {
 }
 
 /// Build and configure an `io_uring` instance.
-fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
+pub(crate) fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
     let mut builder = &mut IoUring::builder();
     if cfg.io_poll {
         builder = builder.setup_iopoll();
@@ -1276,7 +1451,7 @@ mod tests {
     fn test_iouring_loop_rounds_ring_size_up_to_power_of_two() {
         // Ring size is rounded to the next power of two.
         let mut registry = Registry::default();
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 1_000,
             ..Default::default()
         };
@@ -1284,7 +1459,7 @@ mod tests {
         assert_eq!(iouring.cfg.size, 1_024);
 
         // Already-power-of-two size is preserved.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 1_024,
             ..Default::default()
         };
@@ -1300,7 +1475,7 @@ mod tests {
         // request channel size must therefore stay at or below
         // `MAX_RING_SIZE`.
         let mut registry = Registry::default();
-        let cfg = Config {
+        let cfg = RingConfig {
             size: MAX_RING_SIZE + 1,
             ..Default::default()
         };
@@ -1310,7 +1485,7 @@ mod tests {
     #[test]
     fn test_submit_and_wait_non_etime_error_is_not_misclassified() {
         // Verify `submit_and_wait` only treats `ETIME` as the bounded-wait timeout case.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (_submitter, iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
@@ -1332,7 +1507,7 @@ mod tests {
     fn test_new_ring_iopoll_builder_path_is_exercised() {
         // Verify the optional IOPOLL builder branch is reachable even on hosts
         // where the kernel rejects the resulting configuration.
-        let cfg = Config {
+        let cfg = RingConfig {
             io_poll: true,
             ..Default::default()
         };
@@ -1347,7 +1522,7 @@ mod tests {
     fn test_fill_submission_queue_returns_waiter_capacity_when_cancel_staging_fills_sq() {
         // Verify cancel staging reports waiter pressure when the waiter table
         // is already full, even if the SQ is also saturated.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 8,
             ..Default::default()
         };
@@ -1390,7 +1565,7 @@ mod tests {
     fn test_fill_submission_queue_returns_waiter_capacity_when_ready_staging_fills_sq() {
         // Verify requeued work reports waiter pressure when the waiter table is
         // already full, even if the SQ is also saturated.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 8,
             ..Default::default()
         };
@@ -1438,7 +1613,7 @@ mod tests {
         // - cancel staging fills the local SQ with AsyncCancel SQEs
         // - ready-queue staging fills the local SQ with restaged requests
         for path in [EarlyReturnPath::Cancel, EarlyReturnPath::Ready] {
-            let cfg = Config {
+            let cfg = RingConfig {
                 size: 8,
                 ..Default::default()
             };
@@ -1521,7 +1696,7 @@ mod tests {
     #[test]
     fn test_fill_submission_queue_returns_submission_queue_capacity_when_fresh_staging_fills_sq() {
         // Verify newly submitted work can fill the SQ before waiter capacity is exhausted.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 8,
             ..Default::default()
         };
@@ -1561,7 +1736,7 @@ mod tests {
     fn test_fill_submission_queue_returns_waiter_capacity_when_waiters_are_full() {
         // Verify staging reports waiter pressure even when the SQ itself still
         // has room.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 8,
             ..Default::default()
         };
@@ -1595,7 +1770,7 @@ mod tests {
     fn test_fill_submission_queue_returns_waiter_capacity_when_fresh_staging_fills_everything() {
         // Verify a full fresh staging pass reports waiter pressure when both
         // the SQ and waiter table saturate in the same iteration.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 8,
             ..Default::default()
         };
@@ -1634,7 +1809,7 @@ mod tests {
     fn test_fill_submission_queue_skips_cancel_for_ready_queue_timeout() {
         // Verify pending cancel entries are discarded once the waiter no longer
         // has an operation SQE in flight.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
@@ -1673,7 +1848,7 @@ mod tests {
     #[tokio::test]
     async fn test_fill_submission_queue_expired_deadline_completes_immediately() {
         // Verify already-expired requests are completed locally instead of being staged.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
@@ -1713,7 +1888,7 @@ mod tests {
     fn test_handle_recv_panics_on_invalid_buffer_bounds() {
         // Verify the public recv helper rejects impossible offset/len shapes
         // before it can enqueue a malformed request.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (handle, io_loop) = IoUringLoop::new(cfg, &mut registry);
         drop(io_loop);
@@ -1749,7 +1924,7 @@ mod tests {
     async fn test_timeout_slot_reuse_does_not_cancel_new_waiter_early() {
         // Verify stale timeout-wheel entries from an earlier generation do not
         // cancel a newly inserted waiter that reused the same slot.
-        let cfg = Config {
+        let cfg = RingConfig {
             // Keep ring size realistic; size=1 can deadlock progress in some setups.
             // Waiter slot reuse is still exercised because we complete op1 before op2.
             size: 8,
@@ -1809,7 +1984,7 @@ mod tests {
         // A stale ready-queue id should be treated as an internal logic error:
         // once a waiter is queued for restaging, no production path should
         // remove and reuse that slot before the queue entry is revisited.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
@@ -1865,7 +2040,7 @@ mod tests {
     #[test]
     fn test_advance_timeouts_ignores_stale_entry_after_slot_reuse() {
         // Verify timeout-wheel advancement ignores stale entries from a reused waiter slot.
-        let cfg = Config {
+        let cfg = RingConfig {
             max_request_timeout: Duration::from_secs(1),
             timeout_wheel_tick: Duration::from_millis(100),
             ..Default::default()
@@ -1933,7 +2108,7 @@ mod tests {
     #[test]
     fn test_cancel_completion_returns_saved_op_result() {
         // Verify a successful operation CQE still wins if it races with a timeout cancel.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
 
@@ -2001,7 +2176,7 @@ mod tests {
         //    requeueing.
         // 5. Finally, deliver the late cancel CQE and confirm it is ignored
         //    because the waiter was already removed by step 4.
-        let cfg = Config {
+        let cfg = RingConfig {
             max_request_timeout: Duration::from_millis(100),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
@@ -2082,7 +2257,7 @@ mod tests {
         // publish wakes the loop it should be admitted and complete promptly.
         // If the publish wake were lost, the second recv would stall until the
         // first recv was manually released.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 2,
             ..Default::default()
         };
@@ -2173,7 +2348,7 @@ mod tests {
         // local SQ is pre-filled before `fill_submission_queue()` runs, so the
         // reinstall attempt must fail without consuming the retry flag.
         {
-            let cfg = Config {
+            let cfg = RingConfig {
                 size: 8,
                 ..Default::default()
             };
@@ -2207,7 +2382,7 @@ mod tests {
         // reinstall SQE to stage. Because the loop is otherwise idle, it parks
         // on the futex path before entering the kernel, so the reinstall only
         // becomes live on a later non-idle iteration.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 2,
             ..Default::default()
         };
@@ -2307,7 +2482,7 @@ mod tests {
         // The waiter-full `submit_and_wait` shutdown path is covered separately
         // by `test_shutdown_timeout_when_waiters_full_and_channel_empty`.
         for scenario in [Scenario::DropOnly, Scenario::PublishThenDrop] {
-            let cfg = Config::default();
+            let cfg = RingConfig::default();
             let mut registry = Registry::default();
             let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
             let idle_waker = iouring.waker.clone();
@@ -2361,7 +2536,7 @@ mod tests {
     #[tokio::test]
     async fn test_timeout() {
         // Verify a timed recv completes with timeout once its deadline expires.
-        let cfg = Config {
+        let cfg = RingConfig {
             max_request_timeout: Duration::from_secs(1),
             ..Default::default()
         };
@@ -2393,7 +2568,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_no_timeout() {
         // Verify shutdown waits for the last in-flight request when no cutoff is configured.
-        let cfg = Config {
+        let cfg = RingConfig {
             shutdown_timeout: None,
             ..Default::default()
         };
@@ -2427,7 +2602,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_no_timeout_continues_deadline_processing() {
         // Verify shutdown-without-cutoff still advances deadlines until timed requests resolve.
-        let cfg = Config {
+        let cfg = RingConfig {
             max_request_timeout: Duration::from_millis(250),
             timeout_wheel_tick: Duration::from_millis(5),
             shutdown_timeout: None,
@@ -2468,7 +2643,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_timeout() {
         // Verify a bounded shutdown abandons requests that never complete.
-        let cfg = Config {
+        let cfg = RingConfig {
             shutdown_timeout: Some(Duration::from_secs(1)),
             ..Default::default()
         };
@@ -2515,7 +2690,7 @@ mod tests {
         // After that point each fill pass can return from the waiter-pressure
         // path without ever calling `try_recv()`. This is the exact shape that
         // previously hid producer disconnect forever.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 1,
             shutdown_timeout: Some(Duration::from_millis(50)),
             ..Default::default()
@@ -2568,7 +2743,7 @@ mod tests {
         // pressure is saturated, dropping the last submitter must not jump
         // straight to shutdown if there is still buffered channel work that
         // has not yet been admitted into the waiter table.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 1,
             shutdown_timeout: None,
             ..Default::default()
@@ -2649,7 +2824,7 @@ mod tests {
     async fn test_shutdown_timeout_preserves_deadline_result() {
         // Verify a bounded shutdown still lets an already-expiring request report timeout
         // when the deadline wins the race against the shutdown cutoff.
-        let cfg = Config {
+        let cfg = RingConfig {
             max_request_timeout: Duration::from_millis(250),
             timeout_wheel_tick: Duration::from_millis(5),
             shutdown_timeout: Some(Duration::from_millis(500)),
@@ -2691,7 +2866,7 @@ mod tests {
     async fn test_shutdown_timeout_abandons_timed_op_after_cutoff() {
         // Verify a bounded shutdown abandons even deadline-bearing requests
         // once the shutdown cutoff expires before the request deadline.
-        let cfg = Config {
+        let cfg = RingConfig {
             max_request_timeout: Duration::from_millis(750),
             timeout_wheel_tick: Duration::from_millis(5),
             shutdown_timeout: Some(Duration::from_millis(50)),
@@ -2737,7 +2912,7 @@ mod tests {
     async fn test_deadline_timeout_ensure_enough_capacity() {
         // Verify timed requests are still drained correctly when timeout-driven
         // cancel traffic exceeds the ring's SQ capacity in a single pass.
-        let cfg = Config {
+        let cfg = RingConfig {
             size: 8,
             max_request_timeout: Duration::from_millis(50),
             ..Default::default()
@@ -2789,7 +2964,7 @@ mod tests {
     async fn test_exact_recv_partial_progress() {
         // Exercise the exact=true recv path where the kernel returns partial
         // data and the loop must requeue for a follow-up SQE.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
@@ -2830,7 +3005,7 @@ mod tests {
     async fn test_shutdown_no_timeout_processes_ready_queue() {
         // Verify shutdown draining continues staging ready-queue work until a partially
         // completed logical request reaches its terminal result.
-        let cfg = Config {
+        let cfg = RingConfig {
             shutdown_timeout: None,
             ..Default::default()
         };
@@ -2896,7 +3071,7 @@ mod tests {
         // requeued must be completed with timeout if the deadline expires
         // before the ready queue entry is staged. Without this fix, the
         // request would leak in the waiter table forever.
-        let cfg = Config {
+        let cfg = RingConfig {
             max_request_timeout: Duration::from_millis(200),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
@@ -2939,7 +3114,7 @@ mod tests {
     fn test_ready_queue_timeout_skips_cancel_staging() {
         // Verify timeout processing does not enqueue AsyncCancel for requests
         // that already retired their last SQE and are only waiting in ready_queue.
-        let cfg = Config {
+        let cfg = RingConfig {
             max_request_timeout: Duration::from_millis(100),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
@@ -2989,7 +3164,7 @@ mod tests {
     fn test_drain_breaks_after_local_ready_queue_timeout_finishes_last_waiter() {
         // Verify shutdown drain exits immediately once ready-queue staging
         // finishes the final waiter locally instead of restaging another SQE.
-        let cfg = Config {
+        let cfg = RingConfig {
             shutdown_timeout: None,
             ..Default::default()
         };
@@ -3027,7 +3202,7 @@ mod tests {
     async fn test_fill_submission_queue_completes_cancelled_ready_queue_entry_locally() {
         // Verify a cancel-requested waiter parked in the ready queue completes
         // immediately with timeout instead of restaging another SQE.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
@@ -3063,7 +3238,7 @@ mod tests {
         // Verify dropping the caller before the loop stages the first SQE
         // retires both send and read-at requests locally instead of issuing
         // any I/O.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (handle, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
@@ -3125,7 +3300,7 @@ mod tests {
     async fn test_fill_submission_queue_orphans_closed_ready_queue_entry_locally() {
         // Verify an orphaned waiter parked in the ready queue retires
         // locally instead of staging another SQE.
-        let cfg = Config::default();
+        let cfg = RingConfig::default();
         let mut registry = Registry::default();
         let (_handle, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
@@ -3164,7 +3339,7 @@ mod tests {
     #[tokio::test]
     async fn test_single_issuer() {
         // Verify SINGLE_ISSUER still allows normal request submission and completion.
-        let cfg = Config {
+        let cfg = RingConfig {
             single_issuer: true,
             ..Default::default()
         };

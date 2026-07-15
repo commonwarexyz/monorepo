@@ -237,7 +237,6 @@ pub struct Config {
     read_buffer_size: usize,
 }
 
-#[cfg_attr(feature = "iouring-network", allow(dead_code))]
 impl Config {
     // Setters
     /// See [Config]

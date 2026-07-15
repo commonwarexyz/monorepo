@@ -1,0 +1,1113 @@
+//! Single-threaded executor that interleaves task polling with the io_uring
+//! event loop.
+//!
+//! The thread that calls [crate::Runner::start] runs both the task executor
+//! and the io_uring event loop: each iteration polls every ready task, then
+//! services the ring via [IoUringLoop::turn] so completions wake tasks and
+//! staged submissions reach the kernel. When nothing is runnable, the thread
+//! parks via [IoUringLoop::park] until a completion arrives, a timer fires, a
+//! producer enqueues work, or another thread wakes a task.
+//!
+//! Tasks spawned with [crate::Spawner::dedicated] or
+//! [crate::Spawner::shared] with `blocking == true` run on their own detached
+//! OS threads (driven by `futures::executor::block_on`) so they cannot starve
+//! the executor thread. They interact with the runtime through the same
+//! thread-safe primitives as executor tasks: ring submissions travel over the
+//! submission channel and task wakes latch the loop's wake state.
+
+#[cfg(feature = "external")]
+use crate::Pacer;
+use super::{new_ring, waker::Waker as RingWaker, IoUringLoop, RingConfig};
+use crate::{
+    child_label,
+    network::{
+        iouring::{Config as NetworkConfig, Network as IoUringNetwork},
+        metered::Network as MeteredNetwork,
+    },
+    prefixed_name,
+    process::metered::Metrics as MeteredProcess,
+    signal::Signal,
+    storage::{iouring::Storage as IoUringStorage, metered::Storage as MeteredStorage},
+    telemetry::metrics::{
+        add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
+        Register, Registered, Registry,
+    },
+    utils::{self, signal::Stopper, supervision::Tree, Panicker},
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Name, SinkOf, Spawner as _,
+    StreamOf, Supervisor as _, METRICS_PREFIX,
+};
+use commonware_macros::{select, stability};
+#[stability(BETA)]
+use commonware_parallel::Rayon;
+use commonware_utils::{channel::oneshot, sync::Mutex, sys_rng};
+use futures::task::{waker, ArcWake};
+use governor::clock::{Clock as GClock, ReasonablyRealtime};
+use rand_core::{Rng, TryCryptoRng, TryRng};
+#[stability(BETA)]
+use rayon::ThreadPoolBuilder;
+use std::{
+    collections::{BTreeMap, BinaryHeap},
+    convert::Infallible,
+    env,
+    future::Future,
+    mem::{replace, take},
+    net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    path::PathBuf,
+    pin::Pin,
+    sync::{Arc, Weak},
+    task::{self, Poll, Waker},
+    thread::JoinHandle,
+    time::{Duration, SystemTime},
+};
+
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        // Use a smaller ring in tests to reduce `io_uring_setup` failures
+        // under parallel test load due to mlock/resource limits.
+        const DEFAULT_RING_SIZE: u32 = 128;
+    } else {
+        const DEFAULT_RING_SIZE: u32 = 1024;
+    }
+}
+
+#[derive(Debug)]
+struct Metrics {
+    tasks_spawned: CounterFamily<Label>,
+    tasks_running: GaugeFamily<Label>,
+}
+
+impl Metrics {
+    pub fn init(registry: &mut impl Register) -> Self {
+        Self {
+            tasks_spawned: registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                raw::Family::default(),
+            ),
+            tasks_running: registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                raw::Family::default(),
+            ),
+        }
+    }
+}
+
+/// Configuration for the `iouring` runtime.
+#[derive(Clone)]
+pub struct Config {
+    /// Configuration for the runtime's io_uring instance.
+    ///
+    /// One ring serves all storage and network I/O, so its `size` bounds the
+    /// number of concurrently in-flight logical operations (each in-flight
+    /// send, recv, accept, connect, read, write, or sync consumes one slot).
+    /// `single_issuer` is always enabled by the runtime because the runtime
+    /// thread creates the ring and is its only submitter, and
+    /// `max_request_timeout` is raised to at least `read_write_timeout` and
+    /// `connect_timeout` so network deadlines are never clamped.
+    ring: RingConfig,
+
+    /// Whether or not to catch panics.
+    catch_panics: bool,
+
+    /// Base directory for all storage operations.
+    storage_directory: PathBuf,
+
+    /// Stack size to use for runtime-owned threads.
+    ///
+    /// Defaults to the system stack size when the current platform exposes it,
+    /// and otherwise falls back to Rust's default spawned-thread stack size.
+    ///
+    /// See [utils::thread::system_thread_stack_size].
+    thread_stack_size: usize,
+
+    /// Network configuration.
+    network_cfg: NetworkConfig,
+
+    /// Explicit buffer pool configuration for network I/O, if provided.
+    network_buffer_pool_cfg: Option<BufferPoolConfig>,
+
+    /// Explicit buffer pool configuration for storage I/O, if provided.
+    storage_buffer_pool_cfg: Option<BufferPoolConfig>,
+}
+
+impl Config {
+    /// Returns a new [Config] with default values.
+    pub fn new() -> Self {
+        let rng = sys_rng().next_u64();
+        let storage_directory = env::temp_dir().join(format!("commonware_iouring_runtime_{rng}"));
+        Self {
+            ring: RingConfig {
+                size: DEFAULT_RING_SIZE,
+                ..Default::default()
+            },
+            catch_panics: false,
+            storage_directory,
+            thread_stack_size: utils::thread::system_thread_stack_size(),
+            network_cfg: NetworkConfig::default(),
+            network_buffer_pool_cfg: None,
+            storage_buffer_pool_cfg: None,
+        }
+    }
+
+    // Setters
+    /// See [Config]
+    pub const fn with_ring(mut self, ring: RingConfig) -> Self {
+        self.ring = ring;
+        self
+    }
+    /// See [Config]
+    pub const fn with_catch_panics(mut self, b: bool) -> Self {
+        self.catch_panics = b;
+        self
+    }
+    /// See [Config]
+    pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
+        self.storage_directory = p.into();
+        self
+    }
+    /// See [Config]
+    pub const fn with_thread_stack_size(mut self, n: usize) -> Self {
+        self.thread_stack_size = n;
+        self
+    }
+    /// See [Config]
+    pub const fn with_connect_timeout(mut self, d: Duration) -> Self {
+        self.network_cfg.connect_timeout = d;
+        self
+    }
+    /// See [Config]
+    pub const fn with_read_write_timeout(mut self, d: Duration) -> Self {
+        self.network_cfg.read_write_timeout = d;
+        self
+    }
+    /// See [Config]
+    pub const fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
+        self.network_cfg.tcp_nodelay = n;
+        self
+    }
+    /// See [Config]
+    pub const fn with_zero_linger(mut self, l: bool) -> Self {
+        self.network_cfg.zero_linger = l;
+        self
+    }
+    /// See [Config]
+    pub const fn with_read_buffer_size(mut self, n: usize) -> Self {
+        self.network_cfg.read_buffer_size = n;
+        self
+    }
+    /// See [Config]
+    pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+        self.network_buffer_pool_cfg = Some(cfg);
+        self
+    }
+    /// See [Config]
+    pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+        self.storage_buffer_pool_cfg = Some(cfg);
+        self
+    }
+
+    // Getters
+    /// See [Config]
+    pub const fn ring(&self) -> &RingConfig {
+        &self.ring
+    }
+    /// See [Config]
+    pub const fn catch_panics(&self) -> bool {
+        self.catch_panics
+    }
+    /// See [Config]
+    pub const fn storage_directory(&self) -> &PathBuf {
+        &self.storage_directory
+    }
+    /// See [Config]
+    pub const fn thread_stack_size(&self) -> usize {
+        self.thread_stack_size
+    }
+    /// See [Config]
+    pub const fn read_write_timeout(&self) -> Duration {
+        self.network_cfg.read_write_timeout
+    }
+    /// See [Config]
+    pub const fn tcp_nodelay(&self) -> Option<bool> {
+        self.network_cfg.tcp_nodelay
+    }
+    /// See [Config]
+    pub const fn zero_linger(&self) -> bool {
+        self.network_cfg.zero_linger
+    }
+    /// See [Config]
+    pub const fn read_buffer_size(&self) -> usize {
+        self.network_cfg.read_buffer_size
+    }
+
+    /// Returns the network buffer pool config, using the network default when
+    /// not explicitly configured.
+    fn resolved_network_buffer_pool_config(&self) -> BufferPoolConfig {
+        self.network_buffer_pool_cfg
+            .clone()
+            .unwrap_or_else(BufferPoolConfig::for_network)
+    }
+
+    /// Returns the storage buffer pool config, using the storage default when
+    /// not explicitly configured.
+    fn resolved_storage_buffer_pool_config(&self) -> BufferPoolConfig {
+        self.storage_buffer_pool_cfg
+            .clone()
+            .unwrap_or_else(BufferPoolConfig::for_storage)
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Runtime state shared by every [Context].
+pub struct Executor {
+    registry: Registry,
+    metrics: Arc<Metrics>,
+    tasks: Arc<Tasks>,
+    sleeping: Mutex<BinaryHeap<Alarm>>,
+    shutdown: Mutex<Stopper>,
+    panicker: Panicker,
+    /// Runtime-owned threads (dedicated and blocking tasks), joined at
+    /// shutdown after their tasks have been aborted.
+    threads: Mutex<Vec<JoinHandle<()>>>,
+    thread_stack_size: usize,
+}
+
+impl Executor {
+    /// Register a sleeper alarm.
+    ///
+    /// If the alarm becomes the earliest deadline, the runtime thread is woken
+    /// so a park in progress recomputes its timeout: without this, an alarm
+    /// registered from another thread while the runtime is parked would not
+    /// fire until the previous park deadline elapsed.
+    fn register_alarm(&self, alarm: Alarm) {
+        let earliest = {
+            let mut sleeping = self.sleeping.lock();
+            let earliest = sleeping.peek().is_none_or(|next| alarm.time < next.time);
+            sleeping.push(alarm);
+            earliest
+        };
+        if earliest {
+            self.tasks.unpark.wake();
+        }
+    }
+
+    /// Wake any sleepers whose deadlines have elapsed.
+    fn wake_ready_sleepers(&self, current: SystemTime) {
+        let mut sleeping = self.sleeping.lock();
+        while let Some(next) = sleeping.peek() {
+            if next.time <= current {
+                let sleeper = sleeping.pop().unwrap();
+                sleeper.waker.wake();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Return the delay until the next sleeper alarm, if any.
+    fn next_alarm(&self) -> Option<Duration> {
+        let sleeping = self.sleeping.lock();
+        sleeping.peek().map(|alarm| {
+            alarm
+                .time
+                .duration_since(SystemTime::now())
+                .unwrap_or(Duration::ZERO)
+        })
+    }
+}
+
+/// Implementation of [crate::Runner] for the `iouring` runtime.
+pub struct Runner {
+    cfg: Config,
+}
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+impl Runner {
+    /// Initialize a new `iouring` runtime with the given configuration.
+    pub const fn new(cfg: Config) -> Self {
+        Self { cfg }
+    }
+}
+
+impl crate::Runner for Runner {
+    type Context = Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
+    where
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future,
+    {
+        // Create a new registry
+        let mut registry = Registry::new();
+        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
+
+        // Initialize metrics and panicker
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
+        let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
+
+        // Initialize buffer pools
+        let network_buffer_pool = BufferPool::new(
+            self.cfg.resolved_network_buffer_pool_config(),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            self.cfg.resolved_storage_buffer_pool_config(),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
+        );
+
+        // Make any storage a prior process left in the page cache crash-durable before we open it,
+        // so the data read during init is durable.
+        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
+            panic!(
+                "failed to sync storage filesystem at startup ({}): {e}",
+                self.cfg.storage_directory.display()
+            );
+        }
+
+        // Initialize the io_uring event loop and create the ring on this
+        // thread. The runtime thread is the ring's only submitter, so single
+        // issuer mode is always sound here.
+        let mut ring_cfg = self.cfg.ring.clone();
+        ring_cfg.single_issuer = true;
+        ring_cfg.max_request_timeout = ring_cfg
+            .max_request_timeout
+            .max(self.cfg.network_cfg.read_write_timeout)
+            .max(self.cfg.network_cfg.connect_timeout);
+        let (io, mut ioloop) =
+            IoUringLoop::new(ring_cfg, &mut runtime_registry.sub_registry("iouring"));
+        let mut ring = new_ring(&ioloop.cfg).expect("unable to create io_uring instance");
+
+        // Initialize storage
+        let storage = MeteredStorage::new(
+            IoUringStorage::new(
+                self.cfg.storage_directory.clone(),
+                io.clone(),
+                storage_buffer_pool.clone(),
+            ),
+            &mut runtime_registry,
+        );
+
+        // Initialize network
+        let network = MeteredNetwork::new(
+            IoUringNetwork::new(
+                self.cfg.network_cfg.clone(),
+                io.clone(),
+                network_buffer_pool.clone(),
+            ),
+            &mut runtime_registry,
+        );
+
+        // Initialize executor
+        let executor = Arc::new(Executor {
+            registry,
+            metrics,
+            tasks: Arc::new(Tasks::new(ioloop.waker.clone())),
+            sleeping: Mutex::new(BinaryHeap::new()),
+            shutdown: Mutex::new(Stopper::default()),
+            panicker,
+            threads: Mutex::new(Vec::new()),
+            thread_stack_size: self.cfg.thread_stack_size,
+        });
+
+        // Collect process metrics.
+        //
+        // We prefer to collect process metrics outside of `Context` because
+        // we are using `runtime_registry` rather than the one provided by `Context`.
+        let process = MeteredProcess::init(&mut runtime_registry);
+        let process_executor = Arc::downgrade(&executor);
+        Tasks::register_work(
+            &executor.tasks,
+            Box::pin(process.collect(move |duration| Sleeper {
+                executor: process_executor.clone(),
+                time: SystemTime::now() + duration,
+                registered: false,
+            })),
+        );
+
+        // Get metrics
+        let label = Label::root();
+        executor.metrics.tasks_spawned.get_or_create(&label).inc();
+        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
+
+        // Build the root context and pin the root task to the heap
+        let root_tree = Tree::root();
+        let context = Context {
+            name: label.name(),
+            attributes: Vec::new(),
+            executor: Arc::downgrade(&executor),
+            storage,
+            network,
+            network_buffer_pool,
+            storage_buffer_pool,
+            tree: root_tree.clone(),
+            execution: Execution::default(),
+        };
+        let mut root = Box::pin(panicked.interrupt(f(context)));
+
+        // Register the root task
+        Tasks::register_root(&executor.tasks);
+
+        // Process tasks until the root task completes.
+        // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
+        let result = catch_unwind(AssertUnwindSafe(|| loop {
+            // Drain all ready tasks. Wakes that arrive while this snapshot is
+            // being polled land in the next snapshot.
+            let queue = executor.tasks.drain();
+            let mut output = None;
+            for id in queue {
+                // Lookup the task (it may have completed already)
+                let Some(t) = executor.tasks.get(id) else {
+                    continue;
+                };
+
+                // Prepare task for polling
+                let waker = waker(Arc::new(TaskWaker {
+                    id,
+                    tasks: Arc::downgrade(&executor.tasks),
+                }));
+                let mut cx = task::Context::from_waker(&waker);
+
+                // Poll the task
+                match &t.mode {
+                    Mode::Root => {
+                        if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
+                            output = Some(result);
+                            break;
+                        }
+                    }
+                    Mode::Work(future) => {
+                        // Get the future (if it still exists)
+                        let mut fut_opt = future.lock();
+                        let Some(fut) = fut_opt.as_mut() else {
+                            executor.tasks.remove(id);
+                            continue;
+                        };
+
+                        // Poll the task
+                        if fut.as_mut().poll(&mut cx).is_ready() {
+                            executor.tasks.remove(id);
+                            *fut_opt = None;
+                        }
+                    }
+                }
+            }
+
+            // If the root task has completed, exit as soon as possible
+            if let Some(output) = output {
+                break output;
+            }
+
+            // Service the ring: completions wake tasks and staged submissions
+            // reach the kernel before the executor considers parking.
+            ioloop.turn(&mut ring);
+
+            // Wake sleepers whose deadlines have elapsed.
+            executor.wake_ready_sleepers(SystemTime::now());
+
+            // If any task became ready, keep polling instead of parking.
+            if executor.tasks.ready() != 0 {
+                continue;
+            }
+
+            // Park until a completion arrives, a wake is published, or the
+            // next timer (ring timeout wheel or sleeper alarm) is due.
+            ioloop.park(&mut ring, executor.next_alarm());
+
+            // Fire any sleepers that became due while parked.
+            executor.wake_ready_sleepers(SystemTime::now());
+        }));
+
+        // Abort every task spawned under the root context. This wakes tasks
+        // parked on dedicated threads so their `block_on` calls observe the
+        // abort and return.
+        root_tree.abort();
+
+        // Clear remaining tasks from the executor before joining threads:
+        // dropping task futures releases resources (e.g. rayon pools) that
+        // runtime-owned threads may be blocked on.
+        //
+        // It is critical that we wait to drop the strong reference to executor
+        // until after we have dropped all tasks (as they may attempt to
+        // upgrade their weak reference to the executor during drop).
+        executor.sleeping.lock().clear();
+        let tasks = executor.tasks.clear();
+        for t in tasks {
+            let Mode::Work(future) = &t.mode else {
+                continue;
+            };
+            *future.lock() = None;
+        }
+
+        // Drop the root task to release any Context references it may still hold.
+        drop(root);
+
+        // Join runtime-owned threads. Threads spawned while joining (e.g. by a
+        // dedicated task that spawns another dedicated task while shutting
+        // down) are joined as well.
+        loop {
+            let threads = {
+                let mut threads = executor.threads.lock();
+                take(&mut *threads)
+            };
+            if threads.is_empty() {
+                break;
+            }
+            for thread in threads {
+                let _ = thread.join();
+            }
+        }
+
+        // Drop the runtime's own submission handle and drain in-flight ring
+        // work (bounded by the ring's `shutdown_timeout`) so kernel-owned
+        // buffers and descriptors are released before the ring is destroyed.
+        drop(io);
+        ioloop.drain(&mut ring);
+
+        // Assert the context doesn't escape the start() function (behavior
+        // is undefined in this case)
+        assert!(
+            Arc::weak_count(&executor) == 0,
+            "executor still has weak references"
+        );
+
+        // Handle the result — resume the original panic after cleanup if one was caught.
+        let output = match result {
+            Ok(output) => output,
+            Err(payload) => resume_unwind(payload),
+        };
+        gauge.dec();
+
+        output
+    }
+}
+
+/// The mode of a [Task].
+enum Mode {
+    Root,
+    Work(Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>),
+}
+
+/// A future being executed by the [Executor].
+struct Task {
+    mode: Mode,
+}
+
+/// A waker for a [Task].
+struct TaskWaker {
+    id: u128,
+    tasks: Weak<Tasks>,
+}
+
+impl ArcWake for TaskWaker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        // Upgrade the weak reference to re-enqueue this task.
+        // If upgrade fails, the task queue has been dropped and no action is required.
+        //
+        // This can happen if some data is passed into the runtime and it drops after the runtime exits.
+        if let Some(tasks) = arc_self.tasks.upgrade() {
+            tasks.queue(arc_self.id);
+        }
+    }
+}
+
+/// A collection of [Task]s that are being executed by the [Executor].
+struct Tasks {
+    /// The next task id.
+    counter: Mutex<u128>,
+    /// Tasks ready to be polled.
+    ready: Mutex<Vec<u128>>,
+    /// All running tasks.
+    running: Mutex<BTreeMap<u128, Arc<Task>>>,
+    /// Wakes the runtime thread when a task becomes ready.
+    ///
+    /// Latches the event loop's out-of-band wake state so a parked executor
+    /// (futex or `submit_and_wait`) observes the enqueue from any thread.
+    unpark: RingWaker,
+}
+
+impl Tasks {
+    /// Create a new task queue.
+    const fn new(unpark: RingWaker) -> Self {
+        Self {
+            counter: Mutex::new(0),
+            ready: Mutex::new(Vec::new()),
+            running: Mutex::new(BTreeMap::new()),
+            unpark,
+        }
+    }
+
+    /// Increment the task counter and return the old value.
+    fn increment(&self) -> u128 {
+        let mut counter = self.counter.lock();
+        let old = *counter;
+        *counter = counter.checked_add(1).expect("task counter overflow");
+        old
+    }
+
+    /// Register the root task.
+    fn register_root(arc_self: &Arc<Self>) {
+        let id = arc_self.increment();
+        arc_self.register(id, Arc::new(Task { mode: Mode::Root }));
+    }
+
+    /// Register a non-root task to be executed.
+    fn register_work(
+        arc_self: &Arc<Self>,
+        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    ) {
+        let id = arc_self.increment();
+        arc_self.register(
+            id,
+            Arc::new(Task {
+                mode: Mode::Work(Mutex::new(Some(future))),
+            }),
+        );
+    }
+
+    /// Register a new task to be executed.
+    fn register(&self, id: u128, task: Arc<Task>) {
+        // Track as running until completion
+        self.running.lock().insert(id, task);
+
+        // Add to ready
+        self.queue(id);
+    }
+
+    /// Enqueue an already registered task to be executed.
+    fn queue(&self, id: u128) {
+        self.ready.lock().push(id);
+
+        // Wake the runtime thread in case it is parked. Wakes from the runtime
+        // thread itself only latch the (already awake) wake state.
+        self.unpark.wake();
+    }
+
+    /// Drain all ready tasks.
+    fn drain(&self) -> Vec<u128> {
+        let mut queue = self.ready.lock();
+        let len = queue.len();
+        replace(&mut *queue, Vec::with_capacity(len))
+    }
+
+    /// The number of ready tasks.
+    fn ready(&self) -> usize {
+        self.ready.lock().len()
+    }
+
+    /// Lookup a task.
+    ///
+    /// We must return cloned here because we cannot hold the running lock while polling a task (will
+    /// deadlock if [Self::register_work] is called).
+    fn get(&self, id: u128) -> Option<Arc<Task>> {
+        let running = self.running.lock();
+        running.get(&id).cloned()
+    }
+
+    /// Remove a task.
+    fn remove(&self, id: u128) {
+        self.running.lock().remove(&id);
+    }
+
+    /// Clear all tasks.
+    fn clear(&self) -> Vec<Arc<Task>> {
+        // Clear ready
+        self.ready.lock().clear();
+
+        // Clear running tasks
+        let running: BTreeMap<u128, Arc<Task>> = {
+            let mut running = self.running.lock();
+            take(&mut *running)
+        };
+        running.into_values().collect()
+    }
+}
+
+type Storage = MeteredStorage<IoUringStorage>;
+type Network = MeteredNetwork<IoUringNetwork>;
+
+/// Implementation of [crate::Spawner], [crate::Clock],
+/// [crate::Network], and [crate::Storage] for the `iouring`
+/// runtime.
+pub struct Context {
+    name: String,
+    attributes: Vec<(String, String)>,
+    executor: Weak<Executor>,
+    storage: Storage,
+    network: Network,
+    network_buffer_pool: BufferPool,
+    storage_buffer_pool: BufferPool,
+    tree: Arc<Tree>,
+    execution: Execution,
+}
+
+impl Context {
+    /// Upgrade the weak reference to the [Executor].
+    fn executor(&self) -> Arc<Executor> {
+        self.executor.upgrade().expect("executor already dropped")
+    }
+
+    /// Access the [Metrics] of the runtime.
+    fn metrics(&self) -> Arc<Metrics> {
+        self.executor().metrics.clone()
+    }
+}
+
+impl crate::Spawner for Context {
+    fn dedicated(mut self) -> Self {
+        self.execution = Execution::Dedicated;
+        self
+    }
+
+    fn shared(mut self, blocking: bool) -> Self {
+        self.execution = Execution::Shared(blocking);
+        self
+    }
+
+    fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Get metrics
+        let (_, metric) = spawn_metrics!(self);
+
+        // Track supervision before resetting configuration
+        let parent = Arc::clone(&self.tree);
+        let past = self.execution;
+        self.execution = Execution::default();
+        let (child, aborted) = Tree::child(&parent);
+        if aborted {
+            return Handle::closed(metric);
+        }
+        self.tree = child;
+
+        // Spawn the task
+        let executor = self.executor();
+        let future = f(self);
+        let (f, handle) = Handle::init(
+            future,
+            metric,
+            executor.panicker.clone(),
+            Arc::clone(&parent),
+        );
+
+        match past {
+            Execution::Shared(false) => {
+                Tasks::register_work(&executor.tasks, Box::pin(f));
+            }
+            // The single-threaded executor cannot absorb blocking work, so
+            // blocking-hinted and dedicated tasks each run on their own
+            // runtime-owned thread.
+            Execution::Shared(true) | Execution::Dedicated => {
+                let thread = utils::thread::spawn(executor.thread_stack_size, move || {
+                    futures::executor::block_on(f);
+                });
+                executor.threads.lock().push(thread);
+            }
+        }
+
+        // Register the task on the parent
+        if let Some(aborter) = handle.aborter() {
+            parent.register(aborter);
+        }
+
+        handle
+    }
+
+    async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
+        let stop_resolved = {
+            let executor = self.executor();
+            let mut shutdown = executor.shutdown.lock();
+            shutdown.stop(value)
+        };
+
+        // Wait for all tasks to complete or the timeout to fire
+        let timeout_future = timeout.map_or_else(
+            || futures::future::Either::Right(futures::future::pending()),
+            |duration| futures::future::Either::Left(self.sleep(duration)),
+        );
+        select! {
+            result = stop_resolved => {
+                result.map_err(|_| Error::Closed)?;
+                Ok(())
+            },
+            _ = timeout_future => Err(Error::Timeout),
+        }
+    }
+
+    fn stopped(&self) -> Signal {
+        self.executor().shutdown.lock().stopped()
+    }
+}
+
+#[stability(BETA)]
+impl crate::Strategizer for Context {
+    fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(parallelism.get())
+            .spawn_handler(move |thread| {
+                // Tasks spawned in a thread pool are expected to run longer than any single
+                // task and thus should be provisioned as a dedicated thread.
+                self.child("rayon_thread")
+                    .dedicated()
+                    .spawn(move |_| async move { thread.run() });
+                Ok(())
+            })
+            .build()
+            .expect("failed to create io_uring Rayon thread pool");
+        Rayon::with_pool(Arc::new(pool))
+    }
+}
+
+impl crate::Supervisor for Context {
+    fn child(&self, label: &'static str) -> Self {
+        let (tree, _) = Tree::child(&self.tree);
+        Self {
+            name: child_label(&self.name, label),
+            attributes: self.attributes.clone(),
+            executor: self.executor.clone(),
+            storage: self.storage.clone(),
+            network: self.network.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
+            tree,
+            execution: Execution::default(),
+        }
+    }
+
+    fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
+        validate_label(key);
+
+        // Add the attribute to the list of attributes
+        add_attribute(&mut self.attributes, key, value);
+        self
+    }
+
+    fn name(&self) -> Name {
+        Name {
+            label: self.name.clone(),
+            attributes: self.attributes.clone(),
+        }
+    }
+}
+
+impl crate::Metrics for Context {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
+        let name = name.into();
+        let help = help.into();
+        let metric = Arc::new(metric);
+        self.executor().registry.register(
+            prefixed_name(&self.name, &name),
+            help,
+            self.attributes.clone(),
+            metric,
+        )
+    }
+
+    fn encode(&self) -> String {
+        self.executor().registry.encode()
+    }
+}
+
+/// A future that resolves once a wall-clock deadline has passed.
+struct Sleeper {
+    executor: Weak<Executor>,
+    time: SystemTime,
+    registered: bool,
+}
+
+struct Alarm {
+    time: SystemTime,
+    waker: Waker,
+}
+
+impl PartialEq for Alarm {
+    fn eq(&self, other: &Self) -> bool {
+        self.time.eq(&other.time)
+    }
+}
+
+impl Eq for Alarm {}
+
+impl PartialOrd for Alarm {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Alarm {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse the ordering for min-heap
+        other.time.cmp(&self.time)
+    }
+}
+
+impl Future for Sleeper {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        if SystemTime::now() >= self.time {
+            return Poll::Ready(());
+        }
+        if !self.registered {
+            self.registered = true;
+            let executor = self.executor.upgrade().expect("executor already dropped");
+            executor.register_alarm(Alarm {
+                time: self.time,
+                waker: cx.waker().clone(),
+            });
+        }
+        Poll::Pending
+    }
+}
+
+impl Clock for Context {
+    fn current(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        let deadline = self
+            .current()
+            .checked_add(duration)
+            .expect("overflow when setting wake time");
+        self.sleep_until(deadline)
+    }
+
+    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+        Sleeper {
+            executor: self.executor.clone(),
+            time: deadline,
+            registered: false,
+        }
+    }
+}
+
+#[cfg(feature = "external")]
+impl Pacer for Context {
+    fn pace<'a, F, T>(
+        &'a self,
+        _latency: Duration,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'a
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        // Execute the future immediately
+        future
+    }
+}
+
+impl GClock for Context {
+    type Instant = SystemTime;
+
+    fn now(&self) -> Self::Instant {
+        self.current()
+    }
+}
+
+impl ReasonablyRealtime for Context {}
+
+impl crate::Network for Context {
+    type Listener = <Network as crate::Network>::Listener;
+
+    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
+        self.network.bind(socket).await
+    }
+
+    async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
+        self.network.dial(socket).await
+    }
+}
+
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        // Uses the host's DNS configuration via the system's libc resolver.
+        // `getaddrinfo` is blocking, so resolution runs on a short-lived
+        // helper thread.
+        //
+        // The `:0` port is required by `to_socket_addrs` but is not used for
+        // DNS resolution.
+        let host_port = format!("{host}:0");
+        let (tx, rx) = oneshot::channel();
+        utils::thread::spawn(self.executor().thread_stack_size, move || {
+            let result = std::net::ToSocketAddrs::to_socket_addrs(host_port.as_str())
+                .map(|addrs| addrs.map(|addr| addr.ip()).collect::<Vec<_>>())
+                .map_err(|e| Error::ResolveFailed(e.to_string()));
+            let _ = tx.send(result);
+        });
+        rx.await
+            .map_err(|_| Error::ResolveFailed("resolver thread exited".into()))?
+    }
+}
+
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(sys_rng().next_u32())
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(sys_rng().next_u64())
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        sys_rng().fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl TryCryptoRng for Context {}
+
+impl crate::Storage for Context {
+    type Blob = <Storage as crate::Storage>::Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        self.storage.open_versioned(partition, name, versions).await
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.storage.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.storage.scan(partition).await
+    }
+}
+
+impl crate::BufferPooler for Context {
+    fn network_buffer_pool(&self) -> &BufferPool {
+        &self.network_buffer_pool
+    }
+
+    fn storage_buffer_pool(&self) -> &BufferPool {
+        &self.storage_buffer_pool
+    }
+}

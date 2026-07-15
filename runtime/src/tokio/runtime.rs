@@ -1,34 +1,30 @@
 #[cfg(feature = "external")]
 use crate::Pacer;
-#[cfg(not(feature = "iouring-network"))]
-use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
-#[cfg(feature = "iouring-storage")]
-use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
-#[cfg(not(feature = "iouring-storage"))]
-use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    Spawner as _, StreamOf, Supervisor as _, child_label,
-    network::metered::Network as MeteredNetwork,
+    child_label,
+    network::{
+        metered::Network as MeteredNetwork,
+        tokio::{Config as TokioNetworkConfig, Network as TokioNetwork},
+    },
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
-    storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::{
-        CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
-        task::Label, validate_label,
+    storage::{
+        metered::Storage as MeteredStorage,
+        tokio::{Config as TokioStorageConfig, Storage as TokioStorage},
     },
-    utils::{self, Panicker, signal::Stopper, supervision::Tree},
-};
-#[cfg(feature = "iouring-network")]
-use crate::{
-    iouring,
-    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
+    telemetry::metrics::{
+        add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
+        Register, Registered, Registry,
+    },
+    utils::{self, signal::Stopper, supervision::Tree, Panicker},
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Name, SinkOf, Spawner as _,
+    StreamOf, Supervisor as _, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
-use commonware_utils::{NZUsize, sync::Mutex, sys_rng};
+use commonware_utils::{sync::Mutex, sys_rng, NZUsize};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
@@ -44,17 +40,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
-
-#[cfg(feature = "iouring-network")]
-cfg_if::cfg_if! {
-    if #[cfg(test)] {
-        // Use a smaller ring in tests to reduce `io_uring_setup` failures
-        // under parallel test load due to mlock/resource limits.
-        const IOURING_NETWORK_SIZE: u32 = 128;
-    } else {
-        const IOURING_NETWORK_SIZE: u32 = 1024;
-    }
-}
 
 #[derive(Debug)]
 struct Metrics {
@@ -417,76 +402,28 @@ impl crate::Runner for Runner {
         }
 
         // Initialize storage
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "iouring-storage")] {
-                let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
-                let storage = MeteredStorage::new(
-                    IoUringStorage::start(
-                        IoUringConfig {
-                            storage_directory: self.cfg.storage_directory.clone(),
-                            iouring_config: Default::default(),
-                            thread_stack_size: self.cfg.thread_stack_size,
-                        },
-                        &mut iouring_registry,
-                        storage_buffer_pool.clone(),
-                    ),
-                    &mut runtime_registry,
-                );
-            } else {
-                let storage = MeteredStorage::new(
-                    TokioStorage::new(
-                        TokioStorageConfig::new(
-                            self.cfg.storage_directory.clone(),
-                            self.cfg.maximum_buffer_size,
-                        ),
-                        storage_buffer_pool.clone(),
-                    ),
-                    &mut runtime_registry,
-                );
-            }
-        }
+        let storage = MeteredStorage::new(
+            TokioStorage::new(
+                TokioStorageConfig::new(
+                    self.cfg.storage_directory.clone(),
+                    self.cfg.maximum_buffer_size,
+                ),
+                storage_buffer_pool.clone(),
+            ),
+            &mut runtime_registry,
+        );
 
         // Initialize network
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "iouring-network")] {
-                let mut iouring_registry = runtime_registry.sub_registry("iouring_network");
-                let config = IoUringNetworkConfig {
-                    tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
-                    zero_linger: self.cfg.network_cfg.zero_linger,
-                    connect_timeout: self.cfg.network_cfg.connect_timeout,
-                    read_write_timeout: self.cfg.network_cfg.read_write_timeout,
-                    iouring_config: iouring::Config {
-                        // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
-                        size: IOURING_NETWORK_SIZE,
-                        max_request_timeout: self.cfg.network_cfg.read_write_timeout,
-                        shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
-                        ..Default::default()
-                    },
-                    thread_stack_size: self.cfg.thread_stack_size,
-                    ..Default::default()
-                };
-                let network = MeteredNetwork::new(
-                    IoUringNetwork::start(
-                        config,
-                        &mut iouring_registry,
-                        network_buffer_pool.clone(),
-                    )
-                    .unwrap(),
-                    &mut runtime_registry,
-                );
-            } else {
-                let config = TokioNetworkConfig::default()
-                    .with_connect_timeout(self.cfg.network_cfg.connect_timeout)
-                    .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
-                    .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
-                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
-                    .with_zero_linger(self.cfg.network_cfg.zero_linger);
-                let network = MeteredNetwork::new(
-                    TokioNetwork::new(config, network_buffer_pool.clone()),
-                    &mut runtime_registry,
-                );
-            }
-        }
+        let config = TokioNetworkConfig::default()
+            .with_connect_timeout(self.cfg.network_cfg.connect_timeout)
+            .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+            .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+            .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
+            .with_zero_linger(self.cfg.network_cfg.zero_linger);
+        let network = MeteredNetwork::new(
+            TokioNetwork::new(config, network_buffer_pool.clone()),
+            &mut runtime_registry,
+        );
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -522,21 +459,8 @@ impl crate::Runner for Runner {
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "iouring-storage")] {
-        type Storage = MeteredStorage<IoUringStorage>;
-    } else {
-        type Storage = MeteredStorage<TokioStorage>;
-    }
-}
-
-cfg_if::cfg_if! {
-    if #[cfg(feature = "iouring-network")] {
-        type Network = MeteredNetwork<IoUringNetwork>;
-    } else {
-        type Network = MeteredNetwork<TokioNetwork>;
-    }
-}
+type Storage = MeteredStorage<TokioStorage>;
+type Network = MeteredNetwork<TokioNetwork>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`

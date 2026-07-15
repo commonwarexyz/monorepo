@@ -28,9 +28,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-storage"
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-network"
+            flags: "--features commonware-runtime/iouring"
           - os: ubuntu-latest
             flags: ""
           - os: windows-latest
@@ -103,20 +101,15 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         partition: [1, 2]
         flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
+          - "--features commonware-runtime/iouring"
           - "--no-default-features"
           - ""
         exclude:
-          # Only run io_uring features on Ubuntu
+          # Only run the io_uring runtime on Ubuntu
           - os: windows-latest
-            flags: "--features commonware-runtime/iouring-storage"
+            flags: "--features commonware-runtime/iouring"
           - os: macos-latest
-            flags: "--features commonware-runtime/iouring-storage"
-          - os: windows-latest
-            flags: "--features commonware-runtime/iouring-network"
-          - os: macos-latest
-            flags: "--features commonware-runtime/iouring-network"
+            flags: "--features commonware-runtime/iouring"
           # Only run --no-default-features on Ubuntu
           - os: windows-latest
             flags: "--no-default-features"

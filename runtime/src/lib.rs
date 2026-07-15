@@ -39,8 +39,8 @@ stability_scope!(ALPHA {
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod benchmarks;
 });
-stability_scope!(ALPHA, cfg(any(feature = "iouring-storage", feature = "iouring-network")) {
-    mod iouring;
+stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring")) {
+    pub mod iouring;
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
@@ -3260,5 +3260,541 @@ mod tests {
                     .all(|class| class.max_buffers.get() == expected_storage_max_per_class)
             );
         });
+    }
+
+    #[test]
+    fn test_deterministic_buffer_pooler() {
+        test_buffer_pooler(deterministic::Runner::default(), 4096, 64);
+
+        let runner = deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        );
+        test_buffer_pooler(runner, 64, 8);
+    }
+
+    #[test]
+    fn test_tokio_buffer_pooler() {
+        test_buffer_pooler(tokio::Runner::default(), 4096, 64);
+
+        let runner = tokio::Runner::new(
+            tokio::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        );
+        test_buffer_pooler(runner, 64, 8);
+    }
+    #[cfg(feature = "iouring")]
+    mod iouring_tests {
+        use super::*;
+
+        #[test]
+        fn test_iouring_network_echo() {
+            // Exercise bind, accept, dial, send, and recv end-to-end on the
+            // runtime's own ring (all connection setup goes through io_uring).
+            let executor = iouring::Runner::default();
+            executor.start(|context| async move {
+                let mut listener = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let addr = listener.local_addr().unwrap();
+
+                let server = context.child("server").spawn(move |_| async move {
+                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                    let msg = stream.recv(5).await.unwrap();
+                    assert_eq!(msg.coalesce(), b"hello");
+                    sink.send(IoBuf::from(b"world")).await.unwrap();
+                });
+
+                let (mut sink, mut stream) = context.dial(addr).await.unwrap();
+                sink.send(IoBuf::from(b"hello")).await.unwrap();
+                let response = stream.recv(5).await.unwrap();
+                assert_eq!(response.coalesce(), b"world");
+                server.await.unwrap();
+            });
+        }
+
+        #[test]
+        fn test_iouring_cross_thread_wake() {
+            // Verify a task on a dedicated thread can wake the runtime thread
+            // out of its park: the sleep gives the runtime time to park (so
+            // the alarm is registered from another thread against a parked
+            // runtime), and the oneshot send must then unblock the root task.
+            let executor = iouring::Runner::default();
+            executor.start(|context| async move {
+                let start = std::time::Instant::now();
+                let (tx, rx) = oneshot::channel();
+                context
+                    .child("worker")
+                    .dedicated()
+                    .spawn(move |context| async move {
+                        context.sleep(Duration::from_millis(50)).await;
+                        tx.send(42).unwrap();
+                    });
+                assert_eq!(rx.await.unwrap(), 42);
+
+                // The wake must arrive promptly after the 50ms sleep, not at
+                // the runtime's next unrelated park deadline.
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "cross-thread wake took {:?}",
+                    start.elapsed()
+                );
+            });
+        }
+
+        #[test]
+        fn test_iouring_metrics_with_attribute() {
+            let runner = iouring::Runner::default();
+            test_metrics_with_attribute(runner);
+        }
+
+        #[test]
+        fn test_iouring_metrics_attribute_with_nested_label() {
+            let runner = iouring::Runner::default();
+            test_metrics_attribute_with_nested_label(runner);
+        }
+
+        #[test]
+        fn test_iouring_metrics_attributes_isolated_between_contexts() {
+            let runner = iouring::Runner::default();
+            test_metrics_attributes_isolated_between_contexts(runner);
+        }
+
+        #[test]
+        fn test_iouring_metrics_spawn_attribute_cardinality() {
+            let runner = iouring::Runner::default();
+            test_metrics_spawn_attribute_cardinality(runner);
+        }
+
+        #[test]
+        fn test_iouring_metrics_attributes_sorted_deterministically() {
+            let runner = iouring::Runner::default();
+            test_metrics_attributes_sorted_deterministically(runner);
+        }
+
+        #[test]
+        fn test_iouring_metrics_nested_labels_with_attributes() {
+            let runner = iouring::Runner::default();
+            test_metrics_nested_labels_with_attributes(runner);
+        }
+
+        #[test]
+        fn test_iouring_metrics_family_with_attributes() {
+            let runner = iouring::Runner::default();
+            test_metrics_family_with_attributes(runner);
+        }
+
+        #[test]
+        fn test_iouring_register_and_encode() {
+            let runner = iouring::Runner::default();
+            test_register_and_encode(runner);
+        }
+
+        #[test]
+        fn test_iouring_register_drop_removes_metrics() {
+            let runner = iouring::Runner::default();
+            test_register_drop_removes_metrics(runner);
+        }
+
+        #[test]
+        fn test_iouring_register_with_attributes() {
+            let runner = iouring::Runner::default();
+            test_register_with_attributes(runner);
+        }
+
+        #[test]
+        fn test_iouring_reregister_after_drop() {
+            let runner = iouring::Runner::default();
+            test_reregister_after_drop(runner);
+        }
+
+        #[test]
+        fn test_iouring_register_clone_keeps_metric_alive() {
+            let runner = iouring::Runner::default();
+            test_register_clone_keeps_metric_alive(runner);
+        }
+
+        #[test]
+        fn test_iouring_encode_single_eof() {
+            let runner = iouring::Runner::default();
+            test_encode_single_eof(runner);
+        }
+
+        #[test]
+        fn test_iouring_family_with_attributes() {
+            let runner = iouring::Runner::default();
+            test_family_with_attributes(runner);
+        }
+
+        #[test]
+        fn test_iouring_error_future() {
+            let runner = iouring::Runner::default();
+            test_error_future(runner);
+        }
+
+        #[test]
+        fn test_iouring_clock_sleep() {
+            let executor = iouring::Runner::default();
+            test_clock_sleep(executor);
+        }
+
+        #[test]
+        fn test_iouring_clock_sleep_until() {
+            let executor = iouring::Runner::default();
+            test_clock_sleep_until(executor);
+        }
+
+        #[test]
+        fn test_iouring_clock_sleep_until_far_future() {
+            let executor = iouring::Runner::default();
+            test_clock_sleep_until_far_future(executor);
+        }
+
+        #[test]
+        fn test_iouring_clock_timeout() {
+            let executor = iouring::Runner::default();
+            test_clock_timeout(executor);
+        }
+
+        #[test]
+        fn test_iouring_root_finishes() {
+            let executor = iouring::Runner::default();
+            test_root_finishes(executor);
+        }
+
+        #[test]
+        fn test_iouring_spawn_after_abort() {
+            let executor = iouring::Runner::default();
+            test_spawn_after_abort(executor);
+        }
+
+        #[test]
+        fn test_iouring_spawn_abort() {
+            let executor = iouring::Runner::default();
+            test_spawn_abort(executor, false, false);
+        }
+
+        #[test]
+        #[should_panic(expected = "blah")]
+        fn test_iouring_panic_aborts_root() {
+            let executor = iouring::Runner::default();
+            test_panic_aborts_root(executor);
+        }
+
+        #[test]
+        #[should_panic(expected = "blah")]
+        fn test_iouring_panic_aborts_root_caught() {
+            let cfg = iouring::Config::default().with_catch_panics(true);
+            let executor = iouring::Runner::new(cfg);
+            test_panic_aborts_root(executor);
+        }
+
+        #[test]
+        #[should_panic(expected = "blah")]
+        fn test_iouring_panic_aborts_spawn() {
+            let executor = iouring::Runner::default();
+            test_panic_aborts_spawn(executor);
+        }
+
+        #[test]
+        fn test_iouring_panic_aborts_spawn_caught() {
+            let cfg = iouring::Config::default().with_catch_panics(true);
+            let executor = iouring::Runner::new(cfg);
+            test_panic_aborts_spawn_caught(executor);
+        }
+
+        #[test]
+        #[should_panic(expected = "boom")]
+        fn test_iouring_multiple_panics() {
+            let executor = iouring::Runner::default();
+            test_multiple_panics(executor);
+        }
+
+        #[test]
+        fn test_iouring_multiple_panics_caught() {
+            let cfg = iouring::Config::default().with_catch_panics(true);
+            let executor = iouring::Runner::new(cfg);
+            test_multiple_panics_caught(executor);
+        }
+
+        #[test]
+        fn test_iouring_select() {
+            let executor = iouring::Runner::default();
+            test_select(executor);
+        }
+
+        #[test]
+        fn test_iouring_select_loop() {
+            let executor = iouring::Runner::default();
+            test_select_loop(executor);
+        }
+
+        #[test]
+        fn test_iouring_storage_operations() {
+            let executor = iouring::Runner::default();
+            test_storage_operations(executor);
+        }
+
+        #[test]
+        fn test_iouring_blob_read_write() {
+            let executor = iouring::Runner::default();
+            test_blob_read_write(executor);
+        }
+
+        #[test]
+        fn test_iouring_blob_resize() {
+            let executor = iouring::Runner::default();
+            test_blob_resize(executor);
+        }
+
+        #[test]
+        fn test_iouring_many_partition_read_write() {
+            let executor = iouring::Runner::default();
+            test_many_partition_read_write(executor);
+        }
+
+        #[test]
+        fn test_iouring_blob_read_past_length() {
+            let executor = iouring::Runner::default();
+            test_blob_read_past_length(executor);
+        }
+
+        #[test]
+        fn test_iouring_blob_clone_and_concurrent_read() {
+            // Run test
+            let executor = iouring::Runner::default();
+            test_blob_clone_and_concurrent_read(executor);
+        }
+
+        #[test]
+        fn test_iouring_shutdown() {
+            let executor = iouring::Runner::default();
+            test_shutdown(executor);
+        }
+
+        #[test]
+        fn test_iouring_shutdown_multiple_signals() {
+            let executor = iouring::Runner::default();
+            test_shutdown_multiple_signals(executor);
+        }
+
+        #[test]
+        fn test_iouring_shutdown_timeout() {
+            let executor = iouring::Runner::default();
+            test_shutdown_timeout(executor);
+        }
+
+        #[test]
+        fn test_iouring_shutdown_multiple_stop_calls() {
+            let executor = iouring::Runner::default();
+            test_shutdown_multiple_stop_calls(executor);
+        }
+
+        #[test]
+        fn test_iouring_unfulfilled_shutdown() {
+            let executor = iouring::Runner::default();
+            test_unfulfilled_shutdown(executor);
+        }
+
+        #[test]
+        fn test_iouring_spawn_dedicated() {
+            let executor = iouring::Runner::default();
+            test_spawn_dedicated(executor);
+        }
+
+        #[test]
+        fn test_iouring_spawn() {
+            let runner = iouring::Runner::default();
+            test_spawn(runner);
+        }
+
+        #[test]
+        fn test_iouring_spawn_abort_on_parent_abort() {
+            let runner = iouring::Runner::default();
+            test_spawn_abort_on_parent_abort(runner);
+        }
+
+        #[test]
+        fn test_iouring_spawn_abort_on_parent_completion() {
+            let runner = iouring::Runner::default();
+            test_spawn_abort_on_parent_completion(runner);
+        }
+
+        #[test]
+        fn test_iouring_spawn_cascading_abort() {
+            let runner = iouring::Runner::default();
+            test_spawn_cascading_abort(runner);
+        }
+
+        #[test]
+        fn test_iouring_child_survives_sibling_completion() {
+            let runner = iouring::Runner::default();
+            test_child_survives_sibling_completion(runner);
+        }
+
+        #[test]
+        fn test_iouring_spawn_clone_chain() {
+            let runner = iouring::Runner::default();
+            test_spawn_clone_chain(runner);
+        }
+
+        #[test]
+        fn test_iouring_spawn_sparse_clone_chain() {
+            let runner = iouring::Runner::default();
+            test_spawn_sparse_clone_chain(runner);
+        }
+
+        #[test]
+        fn test_iouring_spawn_blocking() {
+            for dedicated in [false, true] {
+                let executor = iouring::Runner::default();
+                test_spawn_blocking(executor, dedicated);
+            }
+        }
+
+        #[test]
+        #[should_panic(expected = "blocking task panicked")]
+        fn test_iouring_spawn_blocking_panic() {
+            for dedicated in [false, true] {
+                let executor = iouring::Runner::default();
+                test_spawn_blocking_panic(executor, dedicated);
+            }
+        }
+
+        #[test]
+        fn test_iouring_spawn_blocking_panic_caught() {
+            for dedicated in [false, true] {
+                let cfg = iouring::Config::default().with_catch_panics(true);
+                let executor = iouring::Runner::new(cfg);
+                test_spawn_blocking_panic_caught(executor, dedicated);
+            }
+        }
+
+        #[test]
+        fn test_iouring_spawn_blocking_abort() {
+            for (dedicated, blocking) in [(false, true), (true, false)] {
+                let executor = iouring::Runner::default();
+                test_spawn_abort(executor, dedicated, blocking);
+            }
+        }
+
+        #[test]
+        fn test_iouring_circular_reference_prevents_cleanup() {
+            let executor = iouring::Runner::default();
+            test_circular_reference_prevents_cleanup(executor);
+        }
+
+        #[test]
+        fn test_iouring_late_waker() {
+            let executor = iouring::Runner::default();
+            test_late_waker(executor);
+        }
+
+        #[test]
+        fn test_iouring_metrics() {
+            let executor = iouring::Runner::default();
+            test_metrics(executor);
+        }
+
+        #[test]
+        fn test_iouring_process_rss_metric() {
+            let executor = iouring::Runner::default();
+            executor.start(|context| async move {
+                loop {
+                    // Wait for RSS metric to be available
+                    let metrics = context.encode();
+                    if !metrics.contains("runtime_process_rss") {
+                        context.sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+
+                    // Verify the RSS value is eventually populated (greater than 0)
+                    for line in metrics.lines() {
+                        if line.starts_with("runtime_process_rss")
+                            && !line.starts_with("runtime_process_rss{")
+                        {
+                            let parts: Vec<&str> = line.split_whitespace().collect();
+                            if parts.len() >= 2 {
+                                let rss_value: i64 =
+                                    parts[1].parse().expect("Failed to parse RSS value");
+                                if rss_value > 0 {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn test_iouring_resolver() {
+            let executor = iouring::Runner::default();
+            executor.start(|context| async move {
+                let addrs = context.resolve("localhost").await.unwrap();
+                assert!(!addrs.is_empty());
+                for addr in addrs {
+                    assert!(
+                        addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                            || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn test_strategy_iouring() {
+            let executor = iouring::Runner::default();
+            executor.start(|context| async move {
+                // Create a strategy backed by a pool with 4 threads.
+                let strategy = context.child("pool").strategy(NZUsize!(4));
+                assert_eq!(strategy.manual().parallelism(), 4);
+
+                // Use the strategy to sum a vector of numbers.
+                let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
+                assert_eq!(sum, 10000 * 9999 / 2);
+            });
+        }
+
+        #[test]
+        fn test_iouring_nested_strategy_runs_inline() {
+            let executor = iouring::Runner::default();
+            executor.start(|context| async move {
+                let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
+
+                let output = strategy
+                    .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                    .await;
+
+                assert_eq!(output, vec![1, 2]);
+            });
+        }
+
+        #[test]
+        fn test_iouring_buffer_pooler() {
+            test_buffer_pooler(iouring::Runner::default(), 4096, 64);
+
+            let runner = iouring::Runner::new(
+                iouring::Config::default()
+                    .with_network_buffer_pool_config(
+                        BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                    )
+                    .with_storage_buffer_pool_config(
+                        BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                    ),
+            );
+            test_buffer_pooler(runner, 64, 8);
+        }
     }
 }

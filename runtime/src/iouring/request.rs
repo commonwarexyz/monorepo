@@ -11,7 +11,8 @@ use commonware_utils::channel::oneshot;
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
-    os::fd::{AsRawFd, OwnedFd},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::Arc,
     time::Instant,
 };
@@ -97,15 +98,12 @@ impl WriteBuffers {
 unsafe impl Send for Request {}
 
 pub(super) enum Request {
-    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
     Send(SendRequest),
-    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
     Recv(RecvRequest),
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    Accept(AcceptRequest),
+    Connect(ConnectRequest),
     ReadAt(ReadAtRequest),
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     WriteAt(WriteAtRequest),
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     Sync(SyncRequest),
 }
 
@@ -115,6 +113,8 @@ impl Request {
         match self {
             Self::Send(r) => r.deadline,
             Self::Recv(r) => r.deadline,
+            Self::Accept(r) => r.deadline,
+            Self::Connect(r) => r.deadline,
             Self::ReadAt(_) | Self::WriteAt(_) | Self::Sync(_) => None,
         }
     }
@@ -132,6 +132,8 @@ impl Request {
         match self {
             Self::Send(s) => s.sender.is_closed(),
             Self::Recv(r) => r.sender.is_closed(),
+            Self::Accept(a) => a.sender.is_closed(),
+            Self::Connect(c) => c.sender.is_closed(),
             Self::ReadAt(r) => r.sender.is_closed(),
             // Keep storage write/sync behavior aligned with `storage/tokio/unix.rs`,
             // where spawned blocking work continues running after caller drop.
@@ -144,6 +146,8 @@ impl Request {
         let sqe = match self {
             Self::Send(s) => s.build_sqe(),
             Self::Recv(r) => r.build_sqe(),
+            Self::Accept(a) => a.build_sqe(),
+            Self::Connect(c) => c.build_sqe(),
             Self::ReadAt(r) => r.build_sqe(),
             Self::WriteAt(w) => w.build_sqe(),
             Self::Sync(s) => s.build_sqe(),
@@ -159,6 +163,8 @@ impl Request {
         match self {
             Self::Send(s) => s.on_cqe(state, result),
             Self::Recv(r) => r.on_cqe(state, result),
+            Self::Accept(a) => a.on_cqe(state, result),
+            Self::Connect(c) => c.on_cqe(state, result),
             Self::ReadAt(r) => r.on_cqe(state, result),
             Self::WriteAt(w) => w.on_cqe(state, result),
             Self::Sync(s) => s.on_cqe(state, result),
@@ -177,6 +183,16 @@ impl Request {
                     Err(err) => Err((r.buf, err)),
                 };
                 let _ = r.sender.send(result);
+            }
+            Self::Accept(a) => {
+                let _ = a
+                    .sender
+                    .send(a.result.unwrap_or(Err(Error::ConnectionFailed)));
+            }
+            Self::Connect(c) => {
+                let _ = c
+                    .sender
+                    .send(c.result.unwrap_or(Err(Error::ConnectionFailed)));
             }
             Self::ReadAt(r) => {
                 let result = match r.result.unwrap_or(Err(Error::ReadFailed)) {
@@ -203,6 +219,12 @@ impl Request {
             }
             Self::Recv(r) => {
                 let _ = r.sender.send(Err((r.buf, Error::Timeout)));
+            }
+            Self::Accept(a) => {
+                let _ = a.sender.send(Err(Error::Timeout));
+            }
+            Self::Connect(c) => {
+                let _ = c.sender.send(Err(Error::Timeout));
             }
             Self::ReadAt(r) => {
                 let _ = r.sender.send(Err((r.buf, Error::Timeout)));
@@ -591,6 +613,266 @@ impl WriteAtRequest {
                 } else {
                     false
                 }
+            }
+        }
+    }
+}
+
+/// Raw socket address storage passed to the kernel.
+///
+/// Requests box this so the pointers handed to the kernel stay stable for the
+/// request lifetime. Serves as an output parameter for accept and getsockname,
+/// and an input parameter for connect and bind.
+pub(crate) struct RawSocketAddr {
+    storage: libc::sockaddr_storage,
+    len: libc::socklen_t,
+}
+
+impl RawSocketAddr {
+    /// Return zeroed scratch for the kernel to fill.
+    pub(crate) const fn new_zeroed() -> Self {
+        Self {
+            // SAFETY: `sockaddr_storage` is plain old data for which zeroes are
+            // a valid (if empty) representation.
+            storage: unsafe { std::mem::zeroed() },
+            len: size_of::<libc::sockaddr_storage>() as libc::socklen_t,
+        }
+    }
+
+    /// Return boxed zeroed scratch for the kernel to fill during accept.
+    pub(super) fn zeroed() -> Box<Self> {
+        Box::new(Self::new_zeroed())
+    }
+
+    /// Return a pointer to the underlying `sockaddr` for kernel reads.
+    pub(crate) const fn as_sockaddr_ptr(&self) -> *const libc::sockaddr {
+        (&raw const self.storage).cast::<libc::sockaddr>()
+    }
+
+    /// Return a pointer to the underlying `sockaddr` for kernel writes.
+    pub(crate) const fn as_sockaddr_mut_ptr(&mut self) -> *mut libc::sockaddr {
+        (&raw mut self.storage).cast::<libc::sockaddr>()
+    }
+
+    /// Return the encoded address length.
+    pub(crate) const fn len(&self) -> libc::socklen_t {
+        self.len
+    }
+
+    /// Return a mutable reference to the address length for kernel writes.
+    pub(crate) const fn len_mut(&mut self) -> &mut libc::socklen_t {
+        &mut self.len
+    }
+
+    /// Encode `addr` for the kernel to read during connect or bind.
+    pub(crate) fn boxed_from_socket_addr(addr: &SocketAddr) -> Box<Self> {
+        Box::new(Self::from_socket_addr(addr))
+    }
+
+    /// Encode `addr` for the kernel to read during connect or bind.
+    pub(crate) const fn from_socket_addr(addr: &SocketAddr) -> Self {
+        let mut raw = Self::new_zeroed();
+        match addr {
+            SocketAddr::V4(v4) => {
+                let sin = libc::sockaddr_in {
+                    sin_family: libc::AF_INET as libc::sa_family_t,
+                    sin_port: v4.port().to_be(),
+                    sin_addr: libc::in_addr {
+                        // `s_addr` is stored in network byte order, which the
+                        // octets already are.
+                        s_addr: u32::from_ne_bytes(v4.ip().octets()),
+                    },
+                    sin_zero: [0; 8],
+                };
+                // SAFETY: `sockaddr_in` fits within `sockaddr_storage` and the
+                // destination is valid for writes.
+                unsafe {
+                    std::ptr::write((&raw mut raw.storage).cast::<libc::sockaddr_in>(), sin);
+                }
+                raw.len = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            }
+            SocketAddr::V6(v6) => {
+                let sin6 = libc::sockaddr_in6 {
+                    sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                    sin6_port: v6.port().to_be(),
+                    sin6_flowinfo: v6.flowinfo(),
+                    sin6_addr: libc::in6_addr {
+                        s6_addr: v6.ip().octets(),
+                    },
+                    sin6_scope_id: v6.scope_id(),
+                };
+                // SAFETY: `sockaddr_in6` fits within `sockaddr_storage` and the
+                // destination is valid for writes.
+                unsafe {
+                    std::ptr::write((&raw mut raw.storage).cast::<libc::sockaddr_in6>(), sin6);
+                }
+                raw.len = size_of::<libc::sockaddr_in6>() as libc::socklen_t;
+            }
+        }
+        raw
+    }
+
+    /// Decode the kernel-written address, if it is a valid TCP peer address.
+    pub(crate) fn to_socket_addr(&self) -> Option<SocketAddr> {
+        match i32::from(self.storage.ss_family) {
+            libc::AF_INET => {
+                if (self.len as usize) < size_of::<libc::sockaddr_in>() {
+                    return None;
+                }
+                // SAFETY: the family and length checks above guarantee the
+                // storage holds an initialized `sockaddr_in`.
+                let sin =
+                    unsafe { &*(&raw const self.storage).cast::<libc::sockaddr_in>() };
+                Some(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()),
+                    u16::from_be(sin.sin_port),
+                )))
+            }
+            libc::AF_INET6 => {
+                if (self.len as usize) < size_of::<libc::sockaddr_in6>() {
+                    return None;
+                }
+                // SAFETY: the family and length checks above guarantee the
+                // storage holds an initialized `sockaddr_in6`.
+                let sin6 =
+                    unsafe { &*(&raw const self.storage).cast::<libc::sockaddr_in6>() };
+                Some(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::from(sin6.sin6_addr.s6_addr),
+                    u16::from_be(sin6.sin6_port),
+                    sin6.sin6_flowinfo,
+                    sin6.sin6_scope_id,
+                )))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Logical accept request and its in-loop state.
+pub(super) struct AcceptRequest {
+    /// Listening socket used by the accept SQE.
+    pub(super) fd: Arc<OwnedFd>,
+    /// Peer address scratch filled by the kernel on completion.
+    pub(super) addr: Box<RawSocketAddr>,
+    /// Absolute deadline for the whole logical request.
+    ///
+    /// Accept callers treat expiry as a cue to re-issue the accept, so the
+    /// deadline also bounds how long an abandoned accept can occupy a waiter
+    /// slot.
+    pub(super) deadline: Option<Instant>,
+    /// Terminal result captured by `on_cqe` and delivered by `complete`.
+    pub(super) result: Option<Result<(OwnedFd, SocketAddr), Error>>,
+    /// Completion channel for the top-level caller.
+    pub(super) sender: oneshot::Sender<Result<(OwnedFd, SocketAddr), Error>>,
+}
+
+impl AcceptRequest {
+    /// Build the accept SQE for this request.
+    fn build_sqe(&mut self) -> SqueueEntry {
+        let fd = Fd(self.fd.as_raw_fd());
+        // The kernel treats the address length as an in/out parameter, so it
+        // must be reset before every submission.
+        self.addr.len = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        opcode::Accept::new(
+            fd,
+            (&raw mut self.addr.storage).cast::<libc::sockaddr>(),
+            &raw mut self.addr.len,
+        )
+        .flags(libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK)
+        .build()
+    }
+
+    /// Classify one accept CQE and decide whether the logical request
+    /// completes or needs another SQE.
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+        // A non-negative result is a newly accepted descriptor. Take ownership
+        // immediately, even when cancellation raced the completion, so an
+        // accepted connection is never leaked.
+        if result >= 0 {
+            // SAFETY: a non-negative accept CQE result is a fresh descriptor
+            // owned by no one else.
+            let fd = unsafe { OwnedFd::from_raw_fd(result) };
+            self.result = Some(
+                self.addr
+                    .to_socket_addr()
+                    .map_or_else(|| Err(Error::ConnectionFailed), |addr| Ok((fd, addr))),
+            );
+            return true;
+        }
+        match CqeResult::from_raw(result, state) {
+            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
+                self.result = Some(Err(Error::Timeout));
+                true
+            }
+            CqeResult::Retry => false,
+            CqeResult::Cancelled => {
+                self.result = Some(Err(Error::Timeout));
+                true
+            }
+            CqeResult::Error(_) => {
+                self.result = Some(Err(Error::ConnectionFailed));
+                true
+            }
+            CqeResult::Zero | CqeResult::Positive(_) => {
+                unreachable!("non-negative accept results are handled above")
+            }
+        }
+    }
+}
+
+/// Logical connect request and its in-loop state.
+pub(super) struct ConnectRequest {
+    /// Socket being connected by the connect SQE.
+    pub(super) fd: Arc<OwnedFd>,
+    /// Target address read by the kernel.
+    pub(super) addr: Box<RawSocketAddr>,
+    /// Absolute deadline for the whole logical request.
+    pub(super) deadline: Option<Instant>,
+    /// Terminal result captured by `on_cqe` and delivered by `complete`.
+    pub(super) result: Option<Result<(), Error>>,
+    /// Completion channel for the top-level caller.
+    pub(super) sender: oneshot::Sender<Result<(), Error>>,
+}
+
+impl ConnectRequest {
+    /// Build the connect SQE for this request.
+    fn build_sqe(&mut self) -> SqueueEntry {
+        let fd = Fd(self.fd.as_raw_fd());
+        opcode::Connect::new(
+            fd,
+            (&raw const self.addr.storage).cast::<libc::sockaddr>(),
+            self.addr.len,
+        )
+        .build()
+    }
+
+    /// Classify one connect CQE and decide whether the logical request
+    /// completes or needs another SQE.
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+        match CqeResult::from_raw(result, state) {
+            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
+                self.result = Some(Err(Error::Timeout));
+                true
+            }
+            CqeResult::Retry => false,
+            // A reissued connect may observe the previous attempt still in
+            // progress or already established. Neither is terminal failure.
+            CqeResult::Error(code) if code == -libc::EALREADY => false,
+            CqeResult::Error(code) if code == -libc::EISCONN => {
+                self.result = Some(Ok(()));
+                true
+            }
+            CqeResult::Cancelled => {
+                self.result = Some(Err(Error::Timeout));
+                true
+            }
+            CqeResult::Error(_) => {
+                self.result = Some(Err(Error::ConnectionFailed));
+                true
+            }
+            CqeResult::Zero | CqeResult::Positive(_) => {
+                self.result = Some(Ok(()));
+                true
             }
         }
     }

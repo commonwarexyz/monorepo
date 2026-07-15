@@ -3,8 +3,8 @@
 //!
 //! ## Architecture
 //!
-//! I/O operations are submitted through an io_uring [Handle][crate::iouring::Handle] to a
-//! dedicated event loop running in another thread.
+//! I/O operations are submitted through an io_uring `Handle` to the event loop that services
+//! the ring, which the `iouring` runtime drives on the runtime thread.
 //!
 //! ## Memory Safety
 //!
@@ -13,7 +13,7 @@
 //!
 //! ## Feature Flag
 //!
-//! This implementation is enabled by using the `iouring-storage` feature.
+//! This implementation is enabled by using the `iouring` feature.
 //!
 //! ## Linux Only
 //!
@@ -22,10 +22,8 @@
 
 use super::Header;
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
     iouring::{self},
-    telemetry::metrics::Register,
-    utils,
+    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
@@ -57,17 +55,6 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
-/// Configuration for a [Storage].
-#[derive(Clone, Debug)]
-pub struct Config {
-    /// Where to store blobs.
-    pub storage_directory: PathBuf,
-    /// Configuration for the iouring instance.
-    pub iouring_config: iouring::Config,
-    /// Stack size for the dedicated io_uring worker thread.
-    pub thread_stack_size: usize,
-}
-
 #[derive(Clone)]
 pub struct Storage {
     lock: Arc<Mutex<()>>,
@@ -77,31 +64,18 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Returns a new `Storage` instance.
-    pub(crate) fn start(cfg: Config, registry: &mut impl Register, pool: BufferPool) -> Self {
-        let Config {
-            storage_directory,
-            mut iouring_config,
-            thread_stack_size,
-        } = cfg;
-
-        // Optimize performance by hinting the kernel that a single task will
-        // submit requests. This is safe because each iouring instance runs in a
-        // dedicated thread, which guarantees that the same thread that creates
-        // the ring is the only thread submitting work to it.
-        iouring_config.single_issuer = true;
-
-        let (io_handle, iouring_loop) = iouring::IoUringLoop::new(iouring_config, registry);
-
-        let storage = Self {
+    /// Returns a new `Storage` instance that submits I/O through `io_handle`.
+    pub(crate) fn new(
+        storage_directory: PathBuf,
+        io_handle: iouring::Handle,
+        pool: BufferPool,
+    ) -> Self {
+        Self {
             lock: Arc::new(Mutex::new(())),
             storage_directory,
             io_handle,
             pool,
-        };
-
-        utils::thread::spawn(thread_stack_size, move || iouring_loop.run());
-        storage
+        }
     }
 }
 
@@ -423,8 +397,10 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
+        storage::tests::run_storage_tests,
+        telemetry::metrics::{Register, Registry},
+        utils::thread,
         Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
-        storage::tests::run_storage_tests, telemetry::metrics::Registry, utils::thread,
     };
     use std::{
         env,
@@ -442,6 +418,18 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
     }
 
+    /// Start a standalone io_uring event loop on its own thread and return a
+    /// submission handle, mirroring how the runtime hands storage a handle to
+    /// the runtime-driven loop.
+    fn start_test_loop(registry: &mut impl Register) -> iouring::Handle {
+        let (handle, iouring_loop) =
+            iouring::IoUringLoop::new(iouring::RingConfig::default(), registry);
+        thread::spawn(thread::system_thread_stack_size(), move || {
+            iouring_loop.run()
+        });
+        handle
+    }
+
     /// Build a fresh storage instance rooted in a unique temporary directory.
     fn create_test_storage() -> (Storage, PathBuf) {
         let storage_directory = env::temp_dir().join(format!(
@@ -453,15 +441,8 @@ mod tests {
 
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
-        let storage = Storage::start(
-            Config {
-                storage_directory: storage_directory.clone(),
-                iouring_config: Default::default(),
-                thread_stack_size: thread::system_thread_stack_size(),
-            },
-            &mut registry.sub_registry("storage"),
-            pool,
-        );
+        let io_handle = start_test_loop(&mut registry.sub_registry("storage"));
+        let storage = Storage::new(storage_directory.clone(), io_handle, pool);
         (storage, storage_directory)
     }
 
@@ -599,10 +580,9 @@ mod tests {
             .await
             .err()
             .expect("bad magic should fail");
-        assert!(
-            err.to_string()
-                .starts_with("blob corrupt: partition/6261645f6d61676963 reason: invalid magic")
-        );
+        assert!(err
+            .to_string()
+            .starts_with("blob corrupt: partition/6261645f6d61676963 reason: invalid magic"));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -846,15 +826,8 @@ mod tests {
         // filesystem setup path under realistic wrapper code.
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
-        let storage = Storage::start(
-            Config {
-                storage_directory: storage_root.clone(),
-                iouring_config: Default::default(),
-                thread_stack_size: utils::thread::system_thread_stack_size(),
-            },
-            &mut registry.sub_registry("storage"),
-            pool,
-        );
+        let io_handle = start_test_loop(&mut registry.sub_registry("storage"));
+        let storage = Storage::new(storage_root.clone(), io_handle, pool);
 
         let err = storage
             .open("partition", b"blob")
@@ -881,25 +854,17 @@ mod tests {
 
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
-        let storage = Storage::start(
-            Config {
-                storage_directory: storage_directory.clone(),
-                iouring_config: Default::default(),
-                thread_stack_size: utils::thread::system_thread_stack_size(),
-            },
-            &mut registry.sub_registry("storage"),
-            pool,
-        );
+        let io_handle = start_test_loop(&mut registry.sub_registry("storage"));
+        let storage = Storage::new(storage_directory.clone(), io_handle, pool);
 
         let err = storage
             .open("partition", b"blob")
             .await
             .err()
             .expect("opening a directory as a blob should fail");
-        assert!(
-            err.to_string()
-                .starts_with(&format!("blob open failed: partition/{blob_name} error:"))
-        );
+        assert!(err
+            .to_string()
+            .starts_with(&format!("blob open failed: partition/{blob_name} error:")));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -945,7 +910,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::Config::default(),
+            iouring::RingConfig::default(),
             &mut registry.sub_registry("iouring"),
         );
         drop(io_loop);
@@ -997,7 +962,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::Config::default(),
+            iouring::RingConfig::default(),
             &mut registry.sub_registry("iouring"),
         );
         drop(io_loop);
@@ -1029,7 +994,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::Config::default(),
+            iouring::RingConfig::default(),
             &mut registry.sub_registry("iouring"),
         );
         drop(io_loop);
@@ -1065,7 +1030,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::Config::default(),
+            iouring::RingConfig::default(),
             &mut registry.sub_registry("iouring"),
         );
         drop(io_loop);
@@ -1096,7 +1061,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::Config::default(),
+            iouring::RingConfig::default(),
             &mut registry.sub_registry("iouring"),
         );
         let handle = std::thread::spawn(move || io_loop.run());

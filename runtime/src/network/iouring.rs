@@ -3,9 +3,9 @@
 //!
 //! ## Architecture
 //!
-//! Network operations are submitted through an io_uring [Handle][crate::iouring::Handle] to a
-//! dedicated event loop running in a separate thread. This implementation uses two separate
-//! io_uring instances: one for send operations and one for receive operations.
+//! Network operations (including accept and connect) are submitted through an io_uring `Handle`
+//! to the event loop that services the ring, which the `iouring` runtime drives on the runtime
+//! thread. Socket creation and bind are cheap non-blocking syscalls performed inline.
 //!
 //! ## Memory Safety
 //!
@@ -14,7 +14,7 @@
 //!
 //! ## Feature Flag
 //!
-//! This implementation is enabled by using the `iouring-network` feature.
+//! This implementation is enabled by using the `iouring` feature.
 //!
 //! ## Linux Only
 //!
@@ -22,25 +22,25 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use crate::{
+    iouring::{self, RawSocketAddr},
     Buf, BufferPool, Error, IoBufMut, IoBufs,
-    iouring::{self},
-    telemetry::metrics::Register,
-    utils,
 };
+use commonware_utils::channel::oneshot;
 use std::{
     net::SocketAddr,
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::Arc,
     time::{Duration, Instant},
-};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    time::timeout,
 };
 use tracing::warn;
 
 /// Default read buffer size (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Listen backlog requested for bound sockets.
+///
+/// The kernel caps this at `net.core.somaxconn`.
+const LISTEN_BACKLOG: libc::c_int = 1024;
 
 /// Configuration for the io_uring network backend.
 #[derive(Clone, Debug)]
@@ -59,34 +59,144 @@ pub struct Config {
     ///
     /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
     pub connect_timeout: Duration,
-    /// Timeout budget applied to each top-level send/recv call.
+    /// Timeout budget applied to each top-level send/recv call and to each
+    /// in-flight accept (which is transparently reissued on expiry).
     ///
     /// This is a network-level policy and is independent from io_uring loop
-    /// tuning. At startup, the loop timeout horizon is raised as needed so this
-    /// value is never clamped by `iouring_config.max_request_timeout`.
+    /// tuning. The runtime raises the loop timeout horizon as needed so this
+    /// value is never clamped by the ring's `max_request_timeout`.
     pub read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     ///
     /// A larger buffer reduces syscall overhead by reading more data per call,
     /// but uses more memory per connection. Defaults to 64 KB.
     pub read_buffer_size: usize,
-    /// Configuration for the iouring instance.
-    pub iouring_config: iouring::Config,
-    /// Stack size for the dedicated send and receive io_uring threads.
-    pub thread_stack_size: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        let iouring_config = iouring::Config::default();
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
             connect_timeout: Duration::from_secs(10),
-            read_write_timeout: iouring_config.max_request_timeout,
-            iouring_config,
+            read_write_timeout: iouring::RingConfig::default().max_request_timeout,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
-            thread_stack_size: utils::thread::system_thread_stack_size(),
+        }
+    }
+}
+
+/// Create a non-blocking TCP socket for the given address family.
+fn new_socket(addr: &SocketAddr) -> Result<OwnedFd, std::io::Error> {
+    let domain = match addr {
+        SocketAddr::V4(_) => libc::AF_INET,
+        SocketAddr::V6(_) => libc::AF_INET6,
+    };
+    // SAFETY: `socket` allocates a new descriptor and touches no caller memory.
+    let fd = unsafe {
+        libc::socket(
+            domain,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a freshly created descriptor owned by no one else.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Set or clear `TCP_NODELAY` on a socket.
+fn set_tcp_nodelay(fd: &OwnedFd, enable: bool) -> Result<(), std::io::Error> {
+    let value: libc::c_int = libc::c_int::from(enable);
+    // SAFETY: `fd` owns a live descriptor and `value` is a valid `c_int`
+    // read-only input of the provided length.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            (&raw const value).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Set `SO_LINGER` to zero on a socket so close causes an immediate RST.
+fn set_zero_linger(fd: &OwnedFd) -> Result<(), std::io::Error> {
+    let value = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    // SAFETY: `fd` owns a live descriptor and `value` is a valid `linger`
+    // read-only input of the provided length.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&raw const value).cast(),
+            size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    if rc == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Set `SO_REUSEADDR` on a socket so rebinding does not wait out `TIME_WAIT`.
+fn set_reuseaddr(fd: &OwnedFd) -> Result<(), std::io::Error> {
+    let value: libc::c_int = 1;
+    // SAFETY: `fd` owns a live descriptor and `value` is a valid `c_int`
+    // read-only input of the provided length.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            (&raw const value).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Return the local address a socket is bound to.
+fn local_addr(fd: &OwnedFd) -> Result<SocketAddr, std::io::Error> {
+    let mut raw = RawSocketAddr::new_zeroed();
+    // SAFETY: `fd` owns a live descriptor and the pointers reference scratch
+    // sized for any socket address (with `len` set to its capacity).
+    let rc = unsafe {
+        libc::getsockname(fd.as_raw_fd(), raw.as_sockaddr_mut_ptr(), raw.len_mut())
+    };
+    if rc == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    raw.to_socket_addr()
+        .ok_or_else(|| std::io::Error::other("unsupported socket address family"))
+}
+
+/// Apply configured per-connection socket options, logging failures.
+fn configure_socket(fd: &OwnedFd, tcp_nodelay: Option<bool>, zero_linger: bool) {
+    // Set TCP_NODELAY if configured
+    if let Some(tcp_nodelay) = tcp_nodelay {
+        if let Err(err) = set_tcp_nodelay(fd, tcp_nodelay) {
+            warn!(?err, "failed to set TCP_NODELAY");
+        }
+    }
+
+    // Set SO_LINGER to zero if configured
+    if zero_linger {
+        if let Err(err) = set_zero_linger(fd) {
+            warn!(?err, "failed to set SO_LINGER");
         }
     }
 }
@@ -99,13 +209,12 @@ pub struct Network {
     tcp_nodelay: Option<bool>,
     /// Whether to set `SO_LINGER` to zero on the socket.
     zero_linger: bool,
-    /// Used to submit send operations to the send io_uring event loop.
-    send_handle: iouring::Handle,
-    /// Used to submit recv operations to the recv io_uring event loop.
-    recv_handle: iouring::Handle,
+    /// Used to submit operations to the io_uring event loop.
+    handle: iouring::Handle,
     /// Timeout for establishing an outbound TCP connection.
     connect_timeout: Duration,
-    /// Timeout budget applied to each send/recv call.
+    /// Timeout budget applied to each send/recv call and each in-flight
+    /// accept.
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
@@ -114,51 +223,22 @@ pub struct Network {
 }
 
 impl Network {
-    /// Returns a new [Network] instance.
-    /// This function creates two io_uring instances, one for sending and one for receiving.
-    /// This function spawns two threads to run the io_uring event loops.
-    /// The threads run until the work submission channel is closed or an error occurs.
-    /// The caller should take special care to ensure the io_uring `size` given in `cfg` is
+    /// Returns a new [Network] instance that submits operations through `handle`.
+    ///
+    /// The caller should take special care to ensure the ring backing `handle` is
     /// large enough, given the number of connections that will be maintained.
-    /// Each ongoing send/recv to/from each connection will consume a slot in the io_uring.
-    /// The io_uring `size` should be a multiple of the number of expected connections.
-    pub(crate) fn start(
-        mut cfg: Config,
-        registry: &mut impl Register,
-        pool: BufferPool,
-    ) -> Result<Self, Error> {
-        // Optimize performance by hinting the kernel that a single task will
-        // submit requests. This is safe because each iouring instance runs in a
-        // dedicated thread, which guarantees that the same thread that creates
-        // the ring is the only thread submitting work to it.
-        cfg.iouring_config.single_issuer = true;
-        cfg.iouring_config.max_request_timeout = cfg
-            .iouring_config
-            .max_request_timeout
-            .max(cfg.read_write_timeout);
-
-        // Create an io_uring instance to handle send operations.
-        let mut sender_registry = registry.sub_registry("iouring_sender");
-        let (send_handle, send_loop) =
-            iouring::IoUringLoop::new(cfg.iouring_config.clone(), &mut sender_registry);
-        utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
-
-        // Create an io_uring instance to handle receive operations.
-        let mut receiver_registry = registry.sub_registry("iouring_receiver");
-        let (recv_handle, recv_loop) =
-            iouring::IoUringLoop::new(cfg.iouring_config, &mut receiver_registry);
-        utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
-
-        Ok(Self {
+    /// Each in-flight send/recv to/from each connection consumes a ring slot, as
+    /// does each in-flight accept and connect.
+    pub(crate) const fn new(cfg: Config, handle: iouring::Handle, pool: BufferPool) -> Self {
+        Self {
             tcp_nodelay: cfg.tcp_nodelay,
             zero_linger: cfg.zero_linger,
-            send_handle,
-            recv_handle,
+            handle,
             connect_timeout: cfg.connect_timeout,
             read_write_timeout: cfg.read_write_timeout,
             read_buffer_size: cfg.read_buffer_size,
             pool,
-        })
+        }
     }
 }
 
@@ -166,18 +246,34 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        let listener = TcpListener::bind(socket)
-            .await
-            .map_err(|_| Error::BindFailed)?;
+        // Create the listening socket inline: socket setup, bind, and listen
+        // are cheap non-blocking syscalls.
+        let fd = new_socket(&socket).map_err(|_| Error::BindFailed)?;
+        set_reuseaddr(&fd).map_err(|_| Error::BindFailed)?;
+        let raw = RawSocketAddr::from_socket_addr(&socket);
+        // SAFETY: `fd` owns a live descriptor and the pointer references an
+        // encoded address of the provided length.
+        let rc = unsafe { libc::bind(fd.as_raw_fd(), raw.as_sockaddr_ptr(), raw.len()) };
+        if rc == -1 {
+            return Err(Error::BindFailed);
+        }
+        // SAFETY: `fd` owns a live descriptor; `listen` touches no caller memory.
+        let rc = unsafe { libc::listen(fd.as_raw_fd(), LISTEN_BACKLOG) };
+        if rc == -1 {
+            return Err(Error::BindFailed);
+        }
+        let local_addr = local_addr(&fd).map_err(|_| Error::BindFailed)?;
+
         Ok(Listener {
             tcp_nodelay: self.tcp_nodelay,
             zero_linger: self.zero_linger,
-            inner: listener,
-            send_handle: self.send_handle.clone(),
-            recv_handle: self.recv_handle.clone(),
+            fd: Arc::new(fd),
+            local_addr,
+            handle: self.handle.clone(),
             read_write_timeout: self.read_write_timeout,
             read_buffer_size: self.read_buffer_size,
             pool: self.pool.clone(),
+            pending: None,
         })
     }
 
@@ -185,43 +281,21 @@ impl crate::Network for Network {
         &self,
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
-        let stream = timeout(self.connect_timeout, TcpStream::connect(socket))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::ConnectionFailed)?;
+        let fd = Arc::new(new_socket(&socket).map_err(|_| Error::ConnectionFailed)?);
 
-        // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay
-            && let Err(err) = stream.set_nodelay(tcp_nodelay)
-        {
-            warn!(?err, "failed to set TCP_NODELAY");
-        }
+        // Apply socket options before connecting.
+        configure_socket(&fd, self.tcp_nodelay, self.zero_linger);
 
-        // Set SO_LINGER to zero if configured
-        if self.zero_linger
-            && let Err(err) = stream.set_zero_linger()
-        {
-            warn!(?err, "failed to set SO_LINGER");
-        }
+        // Connect through the ring. Deadline expiry cancels the in-flight
+        // connect and resolves the dial with [Error::Timeout].
+        let deadline = Instant::now() + self.connect_timeout;
+        self.handle.connect(fd.clone(), socket, deadline).await?;
 
-        // Convert the stream to a std::net::TcpStream
-        let stream = stream.into_std().map_err(|_| Error::ConnectionFailed)?;
-
-        // Explicitly set non-blocking mode to true
-        stream
-            .set_nonblocking(true)
-            .map_err(|_| Error::ConnectionFailed)?;
-
-        let fd = Arc::new(OwnedFd::from(stream));
         Ok((
-            Sink::new(
-                fd.clone(),
-                self.send_handle.clone(),
-                self.read_write_timeout,
-            ),
+            Sink::new(fd.clone(), self.handle.clone(), self.read_write_timeout),
             Stream::new(
                 fd,
-                self.recv_handle.clone(),
+                self.handle.clone(),
                 self.read_write_timeout,
                 self.read_buffer_size,
                 self.pool.clone(),
@@ -237,17 +311,38 @@ pub struct Listener {
     tcp_nodelay: Option<bool>,
     /// Whether to set `SO_LINGER` to zero on the socket.
     zero_linger: bool,
-    inner: TcpListener,
-    /// Used to submit send operations to the send io_uring event loop.
-    send_handle: iouring::Handle,
-    /// Used to submit recv operations to the recv io_uring event loop.
-    recv_handle: iouring::Handle,
-    /// Timeout budget applied to each send/recv call.
+    /// Listening socket descriptor, shared with in-flight accept requests.
+    fd: Arc<OwnedFd>,
+    /// Address the listener is bound to.
+    local_addr: SocketAddr,
+    /// Used to submit operations to the io_uring event loop.
+    handle: iouring::Handle,
+    /// Timeout budget applied to each in-flight accept and inherited by
+    /// accepted connections.
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
+    /// In-flight accept, retained so a cancelled accept future resumes the
+    /// same request instead of losing an accepted connection.
+    #[allow(clippy::type_complexity)]
+    pending: Option<oneshot::Receiver<Result<(OwnedFd, SocketAddr), Error>>>,
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        // Best-effort disconnect so an in-flight accept fails promptly instead
+        // of occupying a ring slot until its deadline expires. On Linux,
+        // shutdown on a listening socket disconnects it even though the call
+        // itself reports ENOTCONN.
+        //
+        // SAFETY: `self.fd` owns a live descriptor for the lifetime of the
+        // listener. `shutdown` does not take ownership of the descriptor.
+        unsafe {
+            libc::shutdown(self.fd.as_raw_fd(), libc::SHUT_RDWR);
+        }
+    }
 }
 
 impl crate::Listener for Listener {
@@ -255,55 +350,44 @@ impl crate::Listener for Listener {
     type Sink = Sink;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (stream, remote_addr) = self
-            .inner
-            .accept()
-            .await
-            .map_err(|_| Error::ConnectionFailed)?;
+        loop {
+            // Issue a fresh accept if none is in flight.
+            if self.pending.is_none() {
+                let deadline = Instant::now() + self.read_write_timeout;
+                self.pending = Some(self.handle.start_accept(self.fd.clone(), deadline).await);
+            }
 
-        // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay
-            && let Err(err) = stream.set_nodelay(tcp_nodelay)
-        {
-            warn!(?err, "failed to set TCP_NODELAY");
+            // Wait on the in-flight accept. If this future is dropped, the
+            // receiver stays in `self.pending` and the next call resumes it.
+            let receiver = self.pending.as_mut().expect("pending accept was just set");
+            let result = receiver.await;
+            self.pending = None;
+            match result.map_err(|_| Error::ConnectionFailed)? {
+                Ok((fd, remote_addr)) => {
+                    let fd = Arc::new(fd);
+                    configure_socket(&fd, self.tcp_nodelay, self.zero_linger);
+                    return Ok((
+                        remote_addr,
+                        Sink::new(fd.clone(), self.handle.clone(), self.read_write_timeout),
+                        Stream::new(
+                            fd,
+                            self.handle.clone(),
+                            self.read_write_timeout,
+                            self.read_buffer_size,
+                            self.pool.clone(),
+                        ),
+                    ));
+                }
+                // The deadline exists so an abandoned accept cannot occupy a
+                // ring slot forever; an expired accept is simply reissued.
+                Err(Error::Timeout) => continue,
+                Err(err) => return Err(err),
+            }
         }
-
-        // Set SO_LINGER to zero if configured
-        if self.zero_linger
-            && let Err(err) = stream.set_zero_linger()
-        {
-            warn!(?err, "failed to set SO_LINGER");
-        }
-
-        // Convert the stream to a std::net::TcpStream
-        let stream = stream.into_std().map_err(|_| Error::ConnectionFailed)?;
-
-        // Explicitly set non-blocking mode to true
-        stream
-            .set_nonblocking(true)
-            .map_err(|_| Error::ConnectionFailed)?;
-
-        let fd = Arc::new(OwnedFd::from(stream));
-
-        Ok((
-            remote_addr,
-            Sink::new(
-                fd.clone(),
-                self.send_handle.clone(),
-                self.read_write_timeout,
-            ),
-            Stream::new(
-                fd,
-                self.recv_handle.clone(),
-                self.read_write_timeout,
-                self.read_buffer_size,
-                self.pool.clone(),
-            ),
-        ))
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
-        self.inner.local_addr()
+        Ok(self.local_addr)
     }
 }
 
@@ -571,21 +655,22 @@ impl crate::Stream for Stream {
 
 #[cfg(test)]
 mod tests {
-    use super::{Sink, Stream};
+    use super::{RawSocketAddr, Sink, Stream, local_addr, new_socket};
     use crate::{
-        BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
-        Sink as _, Stream as _, iouring,
+        iouring,
         network::{
             iouring::{Config, Network},
             tests,
         },
         telemetry::metrics::{Register, Registry},
-        thread,
+        thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
+        Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::{select, test_group};
     use std::{
         io::{Read, Write},
-        os::unix::net::UnixStream,
+        net::SocketAddr,
+        os::{fd::AsRawFd, unix::net::UnixStream},
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -594,21 +679,27 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_network(), scope)
     }
 
-    /// Start a test network with a single shared registry scoped into
-    /// `pool` and `network` sub-prefixes so both components register into
-    /// the same registry.
-    fn test_network(cfg: Config) -> Result<Network, Error> {
+    /// Start a test network backed by a standalone io_uring event loop on its
+    /// own thread, mirroring how the runtime hands the network a handle to the
+    /// runtime-driven loop.
+    fn test_network_with_ring(cfg: Config, mut ring: iouring::RingConfig) -> Network {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
-        Network::start(cfg, &mut registry.sub_registry("network"), pool)
+        // Match the runtime's startup behavior so network deadlines are never
+        // clamped by the ring's timeout horizon.
+        ring.max_request_timeout = ring
+            .max_request_timeout
+            .max(cfg.read_write_timeout)
+            .max(cfg.connect_timeout);
+        let (handle, io_loop) =
+            iouring::IoUringLoop::new(ring, &mut registry.sub_registry("network"));
+        thread::spawn(thread::system_thread_stack_size(), move || io_loop.run());
+        Network::new(cfg, handle, pool)
     }
 
-    #[test]
-    fn test_default_thread_stack_size_uses_system_default() {
-        assert_eq!(
-            Config::default().thread_stack_size,
-            thread::system_thread_stack_size()
-        );
+    /// [test_network_with_ring] with the default ring configuration.
+    fn test_network(cfg: Config) -> Network {
+        test_network_with_ring(cfg, iouring::RingConfig::default())
     }
 
     #[tokio::test]
@@ -619,21 +710,44 @@ mod tests {
                 read_write_timeout: Duration::from_secs(15),
                 ..Default::default()
             })
-            .expect("Failed to start io_uring")
         })
         .await;
     }
 
-    #[tokio::test]
-    async fn test_connect_timeout() {
+    #[test]
+    fn test_connect_timeout() {
         let connect_timeout = Duration::from_millis(100);
-        let network = test_network(Config {
+        let (mut harness, network) = test_network(Config {
             connect_timeout,
             ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+        });
 
-        tests::test_network_connect_timeout(network, connect_timeout).await;
+        // Create a loopback listener with the smallest possible accept queue
+        // and fill it with one unaccepted connection, so the dial below stays
+        // pending until its timeout fires. Mirrors the shared
+        // `test_network_connect_timeout` helper, which needs a tokio reactor.
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let fd = new_socket(&addr).expect("failed to create listener socket");
+        let raw = RawSocketAddr::from_socket_addr(&addr);
+        // SAFETY: `fd` owns a live descriptor and the pointer references an
+        // encoded address of the provided length.
+        let rc = unsafe { libc::bind(fd.as_raw_fd(), raw.as_sockaddr_ptr(), raw.len()) };
+        assert!(rc != -1, "failed to bind listener socket");
+        // SAFETY: `fd` owns a live descriptor; `listen` touches no caller memory.
+        let rc = unsafe { libc::listen(fd.as_raw_fd(), 0) };
+        assert!(rc != -1, "failed to listen on socket");
+        let listener_addr = local_addr(&fd).expect("failed to read listener address");
+        let _queued_connection = std::net::TcpStream::connect(listener_addr)
+            .expect("failed to fill listener accept queue");
+
+        let start = Instant::now();
+        let result = harness.block_on(network.dial(listener_addr));
+        assert!(matches!(result, Err(Error::Timeout)));
+
+        // Confirm the dial remained pending for the configured budget and
+        // the timed-out connect released its waiter slot.
+        assert!(start.elapsed() >= connect_timeout);
+        assert_eq!(harness.tracked(), 0, "connect timeout leaked waiter slots");
     }
 
     #[test_group("slow")]
@@ -641,14 +755,13 @@ mod tests {
     async fn test_stress_trait() {
         // Exercise the io_uring backend under the shared stress suite.
         tests::stress_test_network_trait(|| {
-            test_network(Config {
-                iouring_config: iouring::Config {
+            test_network_with_ring(
+                Config::default(),
+                iouring::RingConfig {
                     size: 256,
                     ..Default::default()
                 },
-                ..Default::default()
-            })
-            .expect("Failed to start io_uring")
+            )
         })
         .await;
     }
@@ -656,7 +769,7 @@ mod tests {
     #[tokio::test]
     async fn test_small_send_read_quickly() {
         // Verify a small message is delivered promptly through the buffered recv path.
-        let network = test_network(Config::default()).expect("Failed to start io_uring");
+        let network = test_network(Config::default());
 
         // Bind a listener
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -690,8 +803,7 @@ mod tests {
         let network = test_network(Config {
             read_write_timeout: op_timeout,
             ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+        });
 
         // Bind a listener
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -729,8 +841,7 @@ mod tests {
         let network = test_network(Config {
             read_buffer_size: 0,
             ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+        });
 
         // Bind a listener
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -779,8 +890,7 @@ mod tests {
         let network = test_network(Config {
             read_write_timeout: op_timeout,
             ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+        });
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -815,7 +925,7 @@ mod tests {
     async fn test_peek_with_buffered_data() {
         // Verify buffered recv calls leave unread bytes visible via peek().
         // Use default buffer size to enable buffering
-        let network = test_network(Config::default()).expect("Failed to start io_uring");
+        let network = test_network(Config::default());
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -863,7 +973,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::Config::default(),
+            iouring::RingConfig::default(),
             &mut registry.sub_registry("iouring"),
         );
         let handle = std::thread::spawn(move || io_loop.run());
@@ -902,7 +1012,7 @@ mod tests {
         // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
         let mut registry = Registry::default();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::RingConfig::default(), &mut registry);
         let handle = std::thread::spawn(move || io_loop.run());
 
         let (left, mut right) = UnixStream::pair().unwrap();
@@ -933,7 +1043,7 @@ mod tests {
         // Verify empty sends return locally without depending on a live io_uring loop.
         let mut registry = Registry::default();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::RingConfig::default(), &mut registry);
         drop(io_loop);
 
         // Construct a sink whose handle would fail immediately if the wrapper
@@ -953,8 +1063,7 @@ mod tests {
         let network = test_network(Config {
             read_buffer_size: 8,
             ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+        });
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -982,8 +1091,7 @@ mod tests {
             tcp_nodelay: Some(true),
             zero_linger: true,
             ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+        });
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1005,8 +1113,7 @@ mod tests {
             tcp_nodelay: None,
             zero_linger: false,
             ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+        });
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1025,7 +1132,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::Config::default(),
+            iouring::RingConfig::default(),
             &mut registry.sub_registry("iouring"),
         );
         let recv_handle = submitter.clone();

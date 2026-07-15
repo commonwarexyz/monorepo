@@ -22,22 +22,42 @@ use crate::{
     filesystem::{cleanup_root, prepare_root},
     workload::run_benchmark,
 };
-use commonware_runtime::{Runner as _, tokio};
+use commonware_runtime::Runner as _;
 
 fn main() -> Result<()> {
     let mut cfg = Config::parse();
     cfg.root = prepare_root(&cfg.root)?;
 
-    let mut runtime_cfg = tokio::Config::default()
-        .with_worker_threads(cfg.worker_threads)
-        .with_storage_directory(cfg.root.clone());
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "iouring")] {
+            // The io_uring runtime is single-threaded, so the tokio-specific
+            // `worker_threads` and `global_queue_interval` knobs are ignored.
+            // Size the ring generously relative to the requested concurrency
+            // so in-flight operations never contend for waiter slots.
+            use commonware_runtime::iouring;
+            let ring = iouring::RingConfig {
+                size: (cfg.inflight as u32).saturating_mul(2).max(1024),
+                ..Default::default()
+            };
+            let runtime_cfg = iouring::Config::default()
+                .with_ring(ring)
+                .with_storage_directory(cfg.root.clone());
+            let report = iouring::Runner::new(runtime_cfg)
+                .start(|context| async { run_benchmark(&cfg, context).await });
+        } else {
+            use commonware_runtime::tokio;
+            let mut runtime_cfg = tokio::Config::default()
+                .with_worker_threads(cfg.worker_threads)
+                .with_storage_directory(cfg.root.clone());
 
-    if let Some(global_queue_interval) = cfg.global_queue_interval {
-        runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
+            if let Some(global_queue_interval) = cfg.global_queue_interval {
+                runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
+            }
+
+            let report = tokio::Runner::new(runtime_cfg)
+                .start(|context| async { run_benchmark(&cfg, context).await });
+        }
     }
-
-    let report = tokio::Runner::new(runtime_cfg)
-        .start(|context| async { run_benchmark(&cfg, context).await });
 
     cleanup_root(&cfg.root)?;
 

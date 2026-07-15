@@ -7,10 +7,10 @@ stability_scope!(ALPHA {
 stability_scope!(BETA {
     pub(crate) mod metered;
 });
-stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network"))) {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod tokio;
 });
-stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-network")) {
+stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring")) {
     pub(crate) mod iouring;
 });
 

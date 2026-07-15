@@ -21,7 +21,7 @@ use std::{fs::OpenOptions, os::fd::AsRawFd};
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
 pub const fn backend_name() -> &'static str {
-    if cfg!(feature = "iouring-storage") {
+    if cfg!(feature = "iouring") {
         "iouring"
     } else {
         "tokio"

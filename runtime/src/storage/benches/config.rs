@@ -135,7 +135,7 @@ impl fmt::Display for SyncMode {
     name = "storage_bench",
     about = "Benchmark the runtime storage backend",
     after_help = "The storage backend is selected at build time.\n\
-                  Build normally for Tokio storage, or with `--features iouring-storage` for io_uring storage.",
+                  Build normally for Tokio storage, or with `--features iouring` for io_uring storage.",
     styles = Styles::styled(),
 )]
 pub struct Config {
