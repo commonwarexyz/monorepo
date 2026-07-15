@@ -435,13 +435,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_byzzfuzz_qlearn"
-path = "fuzz_targets/simplex_id_byzzfuzz_qlearn.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simplex_id_mallory_time"
 path = "fuzz_targets/simplex_id_mallory_time.rs"
 test = false

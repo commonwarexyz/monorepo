@@ -7,19 +7,16 @@
 use super::BYZANTINE_IDX;
 use crate::{
     byzzfuzz::{
-        catalog::{self, FaultAction},
-        fault::{NetworkFault, ProcessAction, ProcessFault},
+        fault::ProcessFault,
         forwarder,
         injector::ByzzFuzzInjector,
         intercept::{self, FaultGate, SenderViewCell},
         log,
         mutator::ByzzFuzzMutator,
         observed::ObservedState,
-        sampling,
-        scope::{self, MessageScope},
         ByzzFuzz,
     },
-    happens_before, invariants, mallory,
+    happens_before, invariants,
     simplex::Simplex,
     sniff_sink, spawn_honest_validator,
     utils::Partition,
@@ -43,16 +40,6 @@ use futures::future::join_all;
 use rand::RngExt as _;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 use tracing::{dispatcher, Dispatch};
-
-/// Number of policy decision steps in one Q-learning episode (Algorithm 1's
-/// inner `repeat until S steps`).
-const QLEARN_EPISODE_STEPS: usize = 12;
-/// Per-step boundary: how long a step waits for the next finalization before
-/// accepting a no-progress boundary (the fault suppressed progress). Bounds each
-/// episode together with [`QLEARN_EPISODE_STEPS`].
-const QLEARN_STEP_DEADLINE: Duration = Duration::from_secs(5);
-/// Upper bound on the crash-action silence window, in views.
-const QLEARN_CRASH_MAX_VIEWS: u64 = 5;
 
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
@@ -78,13 +65,7 @@ fn sample_byzzfuzz_certify(context: &mut deterministic::Context) -> CertifyChoic
 struct EngineSetup<P: Simplex> {
     reporters: Vec<ByzzReporter<P>>,
     byzantine_view: SenderViewCell,
-    /// Round cells of the honest senders, tracking each one's `rnd(m)` (max view
-    /// sent or received). Their max is the honest execution frontier, which the
-    /// Q-learner targets with network partitions -- the finalized frontier lags
-    /// it whenever honest nodes advance through timeout/nullification.
-    honest_views: Vec<SenderViewCell>,
     proc_schedule: Arc<Mutex<Vec<ProcessFault<PublicKeyOf<P>>>>>,
-    net_schedule: Arc<Mutex<Vec<NetworkFault>>>,
     participants: Vec<PublicKeyOf<P>>,
     post_gst_fault_views: u64,
 }
@@ -96,7 +77,7 @@ fn genesis_payload() -> Sha256Digest {
 }
 
 /// Sample `(c, d, r)` from `context` and build the per-validator
-/// forwarder/receiver/injector wiring used by [`run`] and [`run_qlearn`]. The
+/// forwarder/receiver/injector wiring used by [`run`]. The
 /// returned reporters are already running; `gate` lets the caller reach GST
 /// after the fault phase. Byzantine process faults are not gated by GST.
 ///
@@ -170,8 +151,8 @@ where
     ));
 
     let participants_arc: Arc<[PublicKeyOf<P>]> = Arc::from(participants.clone());
-    // Live-mutable so the Q-learning policy can append `Partition` faults during
-    // an episode; `run` never mutates it after setup.
+    // Shared (read-only after setup) by every forwarder, which consults the
+    // sampled network-fault schedule per message.
     let network_schedule = Arc::new(Mutex::new(network_schedule_vec));
     let proc_schedule_arc = Arc::new(Mutex::new(proc_faults));
     let empty_proc_schedule: Arc<Mutex<Vec<ProcessFault<PublicKeyOf<P>>>>> =
@@ -194,7 +175,6 @@ where
     let mut reporters = Vec::new();
     let config = input.configuration;
     let mut byzantine_view = None;
-    let mut honest_views = Vec::new();
 
     // Cloned byzantine vote sender for the injector. Grabbed BEFORE
     // split_with so injector emissions bypass the forwarder. Cert and
@@ -216,8 +196,6 @@ where
         let sender_view = intercept::SenderViewCell::new();
         if i == BYZANTINE_IDX {
             byzantine_view = Some(sender_view.clone());
-        } else {
-            honest_views.push(sender_view.clone());
         }
 
         let proc_for_sender = if i == BYZANTINE_IDX {
@@ -374,17 +352,14 @@ where
     EngineSetup {
         reporters,
         byzantine_view: byzantine_view.expect("byzantine sender view captured"),
-        honest_views,
         proc_schedule: proc_schedule_arc,
-        net_schedule: network_schedule,
         participants,
         post_gst_fault_views: r_post_gst,
     }
 }
 
-/// Reach GST and require post-GST honest liveness, shared by [`run`] (when the
-/// fault phase did not already finish) and [`run_qlearn`] (unconditionally at
-/// episode end). Prunes process faults past the byzantine's current round, then
+/// Reach GST and require post-GST honest liveness, used by [`run`] when the
+/// fault phase did not already finish. Prunes process faults past the byzantine's current round, then
 /// appends a fresh post-GST omit/mutate budget so the byzantine stays
 /// adversarial after the network heals. GST disables partition drops (network
 /// faults), so any partition-wedged honest node recovers; process faults never
@@ -587,252 +562,6 @@ where
     });
 }
 
-/// Run one Q-learning ByzzFuzz episode (`Mode::ByzzfuzzQLearn`).
-///
-/// Reuses `setup_engines` (with honest-only happens-before capture), then
-/// clears the i.i.d. fault schedule and lets a campaign-persistent Q-policy
-/// produce the process- and network-fault schedule step by step. Every
-/// stochastic choice -- softmax action sampling and the target/scope/receiver/
-/// partition/crash-duration fill of a chosen action -- draws from the
-/// deterministic runtime `context`, which is seeded from the fuzz input
-/// (`FuzzRng`); the campaign Q-table is the only cross-input state. Because that
-/// state persists, replaying identical bytes can yield a different schedule than
-/// the first time (online RL over libFuzzer); each chosen action is pushed to
-/// the ByzzFuzz decision log so a crashing episode is reproducible.
-///
-/// The safety + liveness oracle is identical to [`run`]: a single
-/// `reach_gst_and_check_liveness` heal at episode end (process faults never
-/// wedge the three-honest quorum; only partitions can, and GST disables them),
-/// then the same invariant checks.
-pub fn run_qlearn<P: Simplex>(mut input: crate::FuzzInput)
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
-    input.configuration = N4F0C4;
-    input.partition = Partition::Connected;
-    input.degraded_network = false;
-
-    log::clear();
-
-    let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
-    let executor = deterministic::Runner::new(cfg);
-    let hb_log = happens_before::capture::EventLog::new();
-
-    executor.start(|mut context| async move {
-        let gate = FaultGate::new();
-        let setup = setup_engines::<P>(
-            &mut context,
-            &mut input,
-            gate.clone(),
-            "byzzfuzz_qlearn",
-            Some(hb_log.clone()),
-        )
-        .await;
-        crate::print_fuzz_input(crate::Mode::ByzzfuzzQLearn, &input);
-
-        let mut reporters = setup.reporters;
-        let byzantine_view = setup.byzantine_view;
-        let honest_views = setup.honest_views;
-        let proc_schedule = setup.proc_schedule;
-        let net_schedule = setup.net_schedule;
-        let participants = setup.participants;
-        let post_gst_fault_views = setup.post_gst_fault_views;
-        let config = input.configuration;
-        let n = config.n as usize;
-        let required_containers = input.required_containers;
-
-        // Replace ByzzFuzz's i.i.d. fault schedule with a purely policy-driven
-        // one: the learner produces every process and network fault below.
-        proc_schedule.lock().clear();
-        net_schedule.lock().clear();
-
-        let non_byzantine: Vec<usize> = (0..n).filter(|i| *i != BYZANTINE_IDX).collect();
-        let candidates: Vec<PublicKeyOf<P>> = sampling::receiver_candidates(&participants);
-        // Honest reporters cloned once; their Arc-backed maps reflect live state,
-        // so re-encoding each step gives the current cumulative snapshot.
-        let honest_reporters: Vec<ByzzReporter<P>> =
-            non_byzantine.iter().map(|&i| reporters[i].clone()).collect();
-
-        // Step clock: the first honest reporter's finalization monitor. Its
-        // latest finalized view both schedules network partitions at the view the
-        // honest quorum is actually executing (a byzantine-lagged view would never
-        // match a honest sender's round) and gates each step on genuine progress
-        // past the pre-action frontier (draining stale queued notifications).
-        let clock_idx = non_byzantine[0];
-        let (latest, mut monitor): (View, ViewReceiver<View>) =
-            reporters[clock_idx].subscribe().await;
-        let mut honest_finalized = latest.get();
-
-        // ByzzFuzz's five actions are always available, so the policy sees an
-        // all-legal mask every step.
-        let legal = [true; catalog::N_ACTIONS];
-        let campaign = mallory::policy::campaign(catalog::N_ACTIONS);
-        // Observe before the first decision: the initial (empty-history) HB
-        // fingerprint is the step-0 Q-state, so there is no `state = 0` sentinel.
-        let mut state = hb_log.summary().fingerprint();
-        for step in 0..QLEARN_EPISODE_STEPS {
-            // Drain every already-queued finalization to the current frontier
-            // before deciding, so this step's progress baseline is the max
-            // pre-action finalized view. Otherwise a finalization queued before
-            // this step's action ran could immediately satisfy the next step and
-            // credit its action for progress it did not cause.
-            while let Ok(v) = monitor.try_recv() {
-                honest_finalized = honest_finalized.max(v.get());
-            }
-
-            let byz_view = byzantine_view.get();
-            let action_id = campaign.lock().policy.select(state, &legal, &mut context);
-            let action = FaultAction::from_id(action_id);
-
-            // Resolve the chosen action into concrete faults on the live schedule,
-            // recording the fully-sampled fault so the decision log reproduces the
-            // exact schedule (not just the action type).
-            let enacted = match action {
-                FaultAction::NoFault => "no_fault".to_string(),
-                FaultAction::Process(proc_action) => {
-                    if candidates.is_empty() {
-                        "process_skipped_no_candidates".to_string()
-                    } else {
-                        let receivers = sampling::sample_receivers(&candidates, &mut context);
-                        // MutateVote only executes on the vote channel, so it must
-                        // not draw a certificate-only scope (a guaranteed no-op).
-                        let scope = match proc_action {
-                            ProcessAction::MutateVote => scope::sample_vote(&mut context),
-                            ProcessAction::Omit => scope::sample(&mut context),
-                        };
-                        let fault_view = byz_view.saturating_add(1);
-                        let targets: Vec<usize> = receivers
-                            .iter()
-                            .filter_map(|r| participants.iter().position(|p| p == r))
-                            .collect();
-                        proc_schedule.lock().push(ProcessFault {
-                            view: fault_view,
-                            receivers,
-                            action: proc_action,
-                            scope,
-                        });
-                        format!("process action={proc_action:?} view={fault_view} targets={targets:?} scope={scope:?}")
-                    }
-                }
-                FaultAction::Partition => {
-                    // Target the honest execution frontier: the max honest
-                    // sender round `rnd(m)`, which network faults match by exact
-                    // equality. This tracks nodes that advanced through
-                    // timeout/nullification without finalizing, which the
-                    // finalized frontier (and the byzantine's lagging round) miss.
-                    let honest_rnd = honest_views
-                        .iter()
-                        .map(|c| c.get())
-                        .max()
-                        .unwrap_or(honest_finalized);
-                    let fault_view = honest_rnd.saturating_add(1);
-                    let partition = sampling::sample_partition(&mut context);
-                    net_schedule.lock().push(NetworkFault {
-                        view: View::new(fault_view),
-                        partition,
-                    });
-                    format!("partition view={fault_view} partition={partition:?}")
-                }
-                FaultAction::Crash => {
-                    if candidates.is_empty() {
-                        "crash_skipped_no_candidates".to_string()
-                    } else {
-                        // Byzantine silent from its current view onward for a small
-                        // span. NOTE: process faults match a message's carried view,
-                        // so old-view rebroadcasts within the span still escape and
-                        // the engine stays alive -- this is multi-view outbound
-                        // omission, not a true crash-stop.
-                        let span = context.random_range(2..=QLEARN_CRASH_MAX_VIEWS);
-                        let first = byz_view;
-                        let last = byz_view.saturating_add(span.saturating_sub(1));
-                        let mut schedule = proc_schedule.lock();
-                        for v in first..=last {
-                            schedule.push(ProcessFault {
-                                view: v,
-                                receivers: candidates.clone(),
-                                action: ProcessAction::Omit,
-                                scope: MessageScope::Any,
-                            });
-                        }
-                        format!("crash views={first}..={last}")
-                    }
-                }
-            };
-            log::push(format!(
-                "byzzfuzz_qlearn: step={step} byzantine_view={byz_view} honest_finalized={honest_finalized} action={action:?} enacted=[{enacted}] state={state:#018x}"
-            ));
-
-            // Wait for a finalization strictly past the pre-action frontier,
-            // draining stale queued notifications, or a bounded deadline; a
-            // timeout is a valid boundary (the fault suppressed progress).
-            let baseline = honest_finalized;
-            loop {
-                select! {
-                    msg = monitor.recv() => {
-                        match msg {
-                            Some(v) => {
-                                let v = v.get();
-                                if v > baseline {
-                                    honest_finalized = v;
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    },
-                    _ = context.sleep(QLEARN_STEP_DEADLINE) => break,
-                }
-            }
-
-            // Q-state and HB novelty key on the view-relative happens-before
-            // pair-set (its tokens are relative to each node's current view, so
-            // the same interleaving at different absolute views shares a Q-row),
-            // stored in the policy's fixed-size table. The protocol-state term
-            // uses the view-relative descriptor for the same reason.
-            let hb_fp = hb_log.summary().fingerprint();
-            let state_fp = mallory::state::state_descriptor::<P>(&honest_reporters, n);
-            let terminal = step + 1 == QLEARN_EPISODE_STEPS;
-            {
-                let mut c = campaign.lock();
-                let reward = c.reward(state_fp, hb_fp);
-                if terminal {
-                    c.policy.learn_terminal(state, action_id, reward);
-                } else {
-                    c.policy.learn(state, action_id, reward, hb_fp, &legal);
-                }
-            }
-            state = hb_fp;
-        }
-
-        // Single GST heal + post-GST liveness, shared with `run`.
-        reach_gst_and_check_liveness::<P>(
-            &mut context,
-            &mut reporters,
-            &non_byzantine,
-            required_containers,
-            &byzantine_view,
-            &proc_schedule,
-            &participants,
-            post_gst_fault_views,
-            &gate,
-        )
-        .await;
-
-        // Same safety + liveness oracle as `run`.
-        let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
-        invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
-        let correct_reporters = reporters
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter))
-            .collect();
-        let states = invariants::extract(correct_reporters, n);
-        invariants::check::<P>(config.n, states);
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,7 +572,7 @@ mod tests {
     use commonware_consensus::simplex::ForwardingPolicy;
     use std::num::NonZeroUsize;
 
-    fn qlearn_input(seed: u64) -> FuzzInput {
+    fn baseline_input(seed: u64) -> FuzzInput {
         let mut raw_bytes = seed.to_le_bytes().to_vec();
         raw_bytes.extend_from_slice(&[0x5au8; 96]);
         FuzzInput {
@@ -862,24 +591,6 @@ mod tests {
         }
     }
 
-    // Full deterministic episodes (runtime + GST + invariants); ignored so the
-    // default `just test` stays fast. Run with `--ignored` to validate wiring.
-    #[test]
-    #[ignore]
-    fn run_qlearn_smoke_completes_and_learns() {
-        mallory::policy::reset_campaign(catalog::N_ACTIONS);
-        for seed in [1u64, 2, 3] {
-            run_qlearn::<SimplexId>(qlearn_input(seed));
-        }
-        assert!(
-            !mallory::policy::campaign(catalog::N_ACTIONS)
-                .lock()
-                .policy
-                .is_empty(),
-            "episodes must populate the campaign Q-table"
-        );
-    }
-
     /// Run the plain ByzzFuzz baseline and drain its decision log, tolerating a
     /// panic so a same-seed liveness violation is still captured identically.
     fn baseline_trace(input: FuzzInput) -> (bool, Vec<String>) {
@@ -890,15 +601,15 @@ mod tests {
         (ok, log::take())
     }
 
-    // Same-seed determinism regression for the extracted Q-core: `run` never
-    // touches the campaign, so two runs of one fixed input must produce a
+    // Same-seed determinism regression: the i.i.d. baseline draws only from the
+    // input-seeded `FuzzRng`, so two runs of one fixed input must produce a
     // byte-identical decision log (the full sampled process/network schedule)
     // and the same completion outcome. This fixed input finalizes in the fault
     // phase, so it stays within the fast-test budget.
     #[test]
     fn run_baseline_is_deterministic_for_fixed_input() {
-        let (ok_first, first) = baseline_trace(qlearn_input(7));
-        let (ok_second, second) = baseline_trace(qlearn_input(7));
+        let (ok_first, first) = baseline_trace(baseline_input(7));
+        let (ok_second, second) = baseline_trace(baseline_input(7));
         assert_eq!(
             ok_first, ok_second,
             "same seed must reach the same completion outcome"

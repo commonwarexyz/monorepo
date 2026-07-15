@@ -673,14 +673,17 @@ fn run_inner<P: Simplex>(
         // INITIAL `role` (all six profiles are Byzantine, so `byz` never changes, and
         // the bandit learns the role it selected).
         let mut current_role = role;
-        // Under a byzantine role, node 0's forged messages create no honest causal
-        // edges, so it is excluded from happens-before sender attribution; the honest
-        // nodes 1-3 stay captured. Under the Honest role no node is ambiguous. This is
-        // fixed at setup (the sniffers are built once), so a LATER amnesia restart
-        // does not retroactively mark node 0 ambiguous: its post-amnesia messages
-        // stay in the honest HB attribution. That is acceptable -- the HB log feeds
-        // only the reward/novelty fingerprint, never the safety oracle, which
-        // excludes an amnesiac node 0 via the `node0_byzantine` flag at episode end.
+        // The byzantine node cannot send messages under another node's identity, so its messages are
+        // always correctly attributed to node 0 -- but a byzantine node (node with BYZANTINE_IDX)
+        // can attach a causal history that matches no honest execution, which is not sound to merge
+        // into an honest node's fingerprint. So it is excluded from happens-before
+        // sender attribution while byzantine; the honest nodes 1-3 stay captured. Under
+        // the Honest role no node is ambiguous. This is fixed at setup (the sniffers are
+        // built once), so a LATER amnesia restart does not retroactively mark node 0
+        // ambiguous: its post-amnesia messages stay in the honest HB attribution. That
+        // is acceptable -- the HB log feeds only the reward/novelty fingerprint, never
+        // the safety oracle, which excludes an amnesiac node 0 via the `node0_byzantine`
+        // flag at episode end.
         let ambiguous: Arc<[u32]> = if byz {
             vec![BYZANTINE_IDX as u32].into()
         } else {

@@ -94,19 +94,6 @@ pub fn sample(rng: &mut impl Rng) -> MessageScope {
     }
 }
 
-/// Sample a scope restricted to the vote channel: `Any` or a `Vote(_)` kind,
-/// weighted by [`ANY_SCOPE_WEIGHT`] / [`VOTE_SCOPE_WEIGHT`]. Used for the
-/// `MutateVote` action, which only executes on the vote channel; the general
-/// [`sample`] can return a certificate-only scope that a vote fault can never
-/// match, wasting the decision on a guaranteed no-op.
-pub fn sample_vote(rng: &mut impl Rng) -> MessageScope {
-    if rng.random_range(0..ANY_SCOPE_WEIGHT + VOTE_SCOPE_WEIGHT) < ANY_SCOPE_WEIGHT {
-        MessageScope::Any
-    } else {
-        MessageScope::Vote(VOTE_KINDS[rng.random_range(0..VOTE_KINDS.len())])
-    }
-}
-
 pub fn vote_kind<S, P>(vote: &Vote<S, Sha256Digest>) -> VoteKind
 where
     S: commonware_consensus::simplex::scheme::Scheme<Sha256Digest, PublicKey = P>,
@@ -128,24 +115,5 @@ where
         Certificate::Notarization(_) => CertificateKind::Notarization,
         Certificate::Nullification(_) => CertificateKind::Nullification,
         Certificate::Finalization(_) => CertificateKind::Finalization,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_utils::FuzzRng;
-
-    #[test]
-    fn sample_vote_never_certificate() {
-        // MutateVote executes only on the vote channel; a certificate-only scope
-        // would make it a guaranteed no-op.
-        let mut rng = FuzzRng::new(vec![0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15]);
-        for _ in 0..1000 {
-            assert!(!matches!(
-                sample_vote(&mut rng),
-                MessageScope::Certificate(_)
-            ));
-        }
     }
 }

@@ -1,13 +1,12 @@
 //! Mallory: the backend-agnostic adaptive-adversary core for the Simplex fuzz
 //! harness.
 //!
-//! This module owns the ByzzFuzz-agnostic Q-learning core (Mallory-style,
+//! This module owns the backend-agnostic Q-learning core (Mallory-style,
 //! arXiv:2305.02601): a bounded tabular Q-policy over a numeric
 //! [`ActionId`](policy::ActionId) boundary ([`policy`]) plus the protocol-state
-//! observation it rewards ([`state`]). Any backend that presents a fixed,
-//! ordered action catalog and an exact state / happens-before fingerprint can
-//! drive it. PR1 wires only the existing ByzzFuzz backend onto it (see
-//! `crate::byzzfuzz::run_qlearn`).
+//! observation it rewards ([`state`]). The core sees only numeric action ids, so
+//! any fixed, ordered action catalog with an exact state / happens-before
+//! fingerprint can drive it; the Mallory runner ([`runner`]) is its sole driver.
 //!
 //! The Mallory runner ([`runner`]) drives the episode loop over a stable
 //! action catalog ([`action`]) under the backend-agnostic Q-core. The catalog

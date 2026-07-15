@@ -2587,7 +2587,6 @@ pub enum Mode {
     FaultyMessaging,
     FaultyNet,
     Byzzfuzz,
-    ByzzfuzzQLearn,
     MalloryTime,
     MalloryContainer,
 }
@@ -2752,24 +2751,6 @@ impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
 }
 
-/// **ByzzfuzzQLearn mode** - ByzzFuzz with a Q-learning adaptive fault scheduler.
-///
-/// Same four-honest engine setup and safety+liveness oracle as [`Byzzfuzz`], but
-/// the per-episode fault schedule is produced by a campaign-persistent tabular
-/// Q-policy (Mallory-style, arXiv:2305.02601) instead of being sampled i.i.d.
-/// Each libFuzzer input drives one episode of bounded steps; each step picks a
-/// ByzzFuzz fault action by softmax over the observed state's Q-row (via the
-/// backend-agnostic Q-core in the `mallory` module),
-/// enacts it on the live fault schedule, runs to the next finalization boundary,
-/// and applies a temporal-difference update rewarding novel protocol-state and
-/// happens-before fingerprints. The learned policy persists across inputs, so
-/// later iterations are steered toward rare interleavings. See
-/// [`byzzfuzz::run_qlearn`].
-pub struct ByzzfuzzQLearn;
-impl FuzzMode for ByzzfuzzQLearn {
-    const MODE: Mode = Mode::ByzzfuzzQLearn;
-}
-
 /// **Mallory (time window)** - the dedicated adaptive-adversary runner over its own
 /// action catalog, with a fixed deterministic-time observation window per step. See
 /// [`MalloryContainer`] for the container-based window variant.
@@ -2784,10 +2765,10 @@ impl FuzzMode for ByzzfuzzQLearn {
 /// (delay/loss/corrupt/duplicate/reorder), or lifecycle (crash-stop, durable
 /// restart, amnesia restart) fault -- runs one FIXED deterministic-time window,
 /// heals it, and (for the learned chooser) applies a temporal-difference update
-/// rewarding novel state / happens-before fingerprints via the same
-/// backend-agnostic Q-core as [`ByzzfuzzQLearn`]. Unlike that mode, Mallory does
-/// not reuse the ByzzFuzz fault machinery: it builds its own setup from the
-/// shared harness helpers and never samples ByzzFuzz `(c, d, r)`.
+/// rewarding novel state / happens-before fingerprints via the backend-agnostic
+/// Q-core in `mallory::policy`. Mallory does not reuse the ByzzFuzz fault
+/// machinery: it builds its own setup from the shared harness helpers and never
+/// samples ByzzFuzz `(c, d, r)`.
 ///
 /// The episode-end oracle checks liveness (each live correct node must finalize
 /// past its pre-heal frontier) and the vote / state-extraction safety invariants
@@ -2866,7 +2847,7 @@ fn install_mallory_panic_hook() {
 }
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput) {
-    if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzQLearn) {
+    if matches!(M::MODE, Mode::Byzzfuzz) {
         install_byzzfuzz_panic_hook();
     } else if matches!(M::MODE, Mode::MalloryTime | Mode::MalloryContainer) {
         install_mallory_panic_hook();
@@ -2899,9 +2880,6 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Mode::Byzzfuzz => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
         }
-        Mode::ByzzfuzzQLearn => {
-            panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run_qlearn::<P>(input)))
-        }
         Mode::MalloryTime => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             mallory::runner::run::<P>(
                 input,
@@ -2921,7 +2899,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Ok(()) => {
             // Drain the byzzfuzz log on success too so a *next* run (Byzzfuzz
             // or otherwise) starts clean. This is cheap when the log is empty.
-            if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzQLearn) {
+            if matches!(M::MODE, Mode::Byzzfuzz) {
                 let _ = byzzfuzz::log::take();
             }
             // Same for the separate Mallory log.

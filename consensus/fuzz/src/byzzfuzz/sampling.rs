@@ -42,9 +42,8 @@ pub(crate) fn sample_receivers<P: PublicKey>(candidates: &[P], rng: &mut impl Rn
 
 /// Sample one of the 14 non-trivial set partitions of `{0,1,2,3}`. They live at
 /// `N4[1..15]`; index 0 is the trivial single-block partition (equals a fully
-/// connected network) and is excluded. Shared by [`ByzzFuzz::network_faults`]
-/// and the Q-learning `Partition` action so both build a
-/// [`super::fault::NetworkFault`] through one path.
+/// connected network) and is excluded. Used by [`ByzzFuzz::network_faults`] to
+/// build a [`super::fault::NetworkFault`].
 pub(crate) fn sample_partition(rng: &mut impl Rng) -> SetPartition {
     SetPartition::n4(rng.random_range(1..15))
 }

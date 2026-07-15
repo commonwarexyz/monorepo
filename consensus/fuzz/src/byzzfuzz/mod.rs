@@ -21,7 +21,6 @@
 //!   Byzantine process faults remain active;
 //! - [`log`] stores the bounded decision trace drained on panic.
 
-mod catalog;
 mod fault;
 mod forwarder;
 mod injector;
@@ -34,5 +33,5 @@ mod sampling;
 mod scope;
 
 pub(crate) use crate::BYZANTINE_IDX;
-pub use runner::{run, run_qlearn};
+pub use runner::run;
 pub(crate) use sampling::ByzzFuzz;
