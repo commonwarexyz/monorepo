@@ -46,6 +46,16 @@
 //! require reading all values). Value checksums are verified lazily when values are
 //! read via `get_value()`. If the underlying storage is corrupted, `get_value()` will
 //! return a checksum error even though the index entry exists._
+//!
+//! # Limitations
+//!
+//! Recovery trusts any entry whose byte range the glob covers. On storage that can persist
+//! an unsynced index entry together with the glob's length but not the value bytes (no
+//! write-ordering guarantees, e.g. writeback-mode metadata journaling), recovery can adopt
+//! an entry whose reads permanently fail their checksum. Such an entry was never
+//! acknowledged as durable, but it occupies its position until externally repaired.
+//! Eliminating this would require recovery to consult a durably recorded publication bound
+//! instead of blob lengths, which this journal does not maintain.
 
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -375,7 +385,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// Start syncing both journals for the given `sections`.
     ///
     /// The returned handle completes once both journals are durable and drives the sync
-    /// while polled; a dropped handle leaves completion to the journal's next operation.
+    /// while polled; a dropped handle defers completion until a later operation reaches the
+    /// underlying blobs (appends absorbed by the write buffers do not).
     pub async fn start_sync(
         &mut self,
         sections: impl crate::Sections,
@@ -955,7 +966,9 @@ mod tests {
             );
         });
 
-        // Neither truncation became durable, so recovery surfaces the pre-rewind state.
+        // Neither truncation was synced, so the deterministic crash model recovers the
+        // exact pre-rewind state. A real backend may incidentally persist the truncations
+        // and recover the post-rewind state instead; both are consistent.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("third"), test_cfg(&context))
