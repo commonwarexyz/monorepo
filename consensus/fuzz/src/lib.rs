@@ -2496,6 +2496,19 @@ fn run_twins<P: simplex::Simplex>(
             // global-agreement / equivocation invariants would reject valid Twins
             // configurations.
             if config.is_valid() {
+                // Observe the happens-before interleaving BEFORE the invariant checks,
+                // so a run that panics in an invariant still credits the interleaving
+                // that found the bug (matching the standard path). Twins force a valid
+                // configuration, so this gate always holds here.
+                if let Some(log) = &hb_log {
+                    let summary = log.summary();
+                    let mut tokens = summary.tokens();
+                    if let Some(bucket) = summary.dispersion_bucket() {
+                        tokens.insert(format!("hb:dispersion={bucket}"));
+                    }
+                    tokens.extend(summary.lsh_tokens());
+                    state_cov::observe_tokens(tokens);
+                }
                 let honest_reporters = &reporters[honest_start..];
                 invariants::check_vote_invariants_with_byzantine(&compromised, honest_reporters);
                 if state_coverage {
@@ -2527,17 +2540,10 @@ fn run_twins<P: simplex::Simplex>(
         execute(None);
     }
 
-    // Twins force a valid configuration, so tokens are observed unconditionally.
-    let hb_summary = hb_log.as_ref().map(|log| log.summary());
-    if let Some(summary) = &hb_summary {
-        let mut tokens = summary.tokens();
-        if let Some(bucket) = summary.dispersion_bucket() {
-            tokens.insert(format!("hb:dispersion={bucket}"));
-        }
-        tokens.extend(summary.lsh_tokens());
-        state_cov::observe_tokens(tokens);
-    }
-    hb_summary
+    // Tokens are observed inside `execute` (before the invariant checks) so a
+    // bug-finding panic still credits its interleaving. Here we only surface the
+    // summary for the return value.
+    hb_log.as_ref().map(|log| log.summary())
 }
 
 fn run_fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput)
