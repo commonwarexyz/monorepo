@@ -143,15 +143,10 @@ impl crate::Storage for Storage {
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
         let (blob_version, logical_size) = if Header::missing(len) {
-            // New or partially-created blob: reset it and write a fresh header.
-            // Truncate to *empty* before writing the header (rather than extending to
-            // header size first and then writing the magic), so blob creation is
-            // crash-atomic. If an unclean shutdown interrupts this, the file is left
-            // either empty or shorter than a header, both of which this branch treats
-            // as new and rewrites on the next open. Extending to header size first and
-            // then writing the magic would instead leave a header-sized, all-zero file
-            // if the process died in between, which the "existing blob" branch below
-            // rejects as corrupt.
+            // New or partially-created blob: reset it and write a fresh header. The
+            // file grows only as header bytes are written, so a create interrupted by
+            // a process crash leaves some prefix of the header, which the next open
+            // resets here instead of rejecting as corrupt below.
             let (header, blob_version) = Header::new(&versions);
             file.set_len(0)
                 .await
@@ -443,16 +438,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    /// A create interrupted by an unclean shutdown must never leave a blob that a
-    /// later open rejects as corrupt. Because the header is written in a single write
-    /// (no prior file extension), any interrupted create leaves the file shorter than
-    /// a header, which reopen treats as new and rewrites. Every such prefix length
-    /// must therefore recover to a valid, empty blob rather than a header-sized,
-    /// all-zero file (which `test_blob_magic_mismatch` shows would be fatal).
+    /// Any file shorter than a header must reset to a valid, empty blob on open
+    /// rather than fail as corrupt.
     #[tokio::test]
-    async fn test_interrupted_create_is_recoverable() {
+    async fn test_blob_partial_header_reset() {
         let storage_directory =
-            env::temp_dir().join(format!("test_interrupted_create_{}", rand::random::<u64>()));
+            env::temp_dir().join(format!("test_partial_header_reset_{}", random_suffix()));
         let storage = Storage::new(
             Config {
                 storage_directory: storage_directory.clone(),
@@ -464,10 +455,9 @@ mod tests {
         std::fs::create_dir_all(&partition_path).unwrap();
 
         for prefix_len in 0..Header::SIZE {
-            let name = format!("torn_{prefix_len}");
+            let name = format!("short_{prefix_len}");
             let path = partition_path.join(hex(name.as_bytes()));
-            // Simulate a create interrupted after `prefix_len` of the header's bytes
-            // reached disk (a create can never leave more than a partial header).
+            // Seed a file shorter than a full header.
             std::fs::write(&path, vec![0u8; prefix_len]).unwrap();
 
             let (blob, size) = storage
@@ -479,7 +469,11 @@ mod tests {
 
             // The recovered blob is a valid header-only file and reopens cleanly.
             let raw = std::fs::read(&path).unwrap();
-            assert_eq!(raw.len(), Header::SIZE, "recovered blob should be header-only");
+            assert_eq!(
+                raw.len(),
+                Header::SIZE,
+                "recovered blob should be header-only"
+            );
             assert_eq!(&raw[..Header::MAGIC_LENGTH], &Header::MAGIC);
             storage
                 .open("partition", name.as_bytes())
