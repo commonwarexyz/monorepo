@@ -411,6 +411,7 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                         leader: me.clone(),
                         parent: (View::new(parent.height().get()), parent.digest()),
                     };
+                    let round = propose_context.round;
                     let rx = inline.propose(propose_context).await;
                     if await_result {
                         let result = select! {
@@ -418,9 +419,10 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                             _ = context.sleep(EVENT_SETTLE) => None,
                         };
                         if let Some(digest) = result {
+                            let _ = inline.broadcast(digest, Plan::Propose { round });
                             assert!(
                                 marshal.get_block(&digest).await.is_some(),
-                                "inline propose returned a digest that marshal cannot serve"
+                                "inline proposal is unavailable after relay"
                             );
                         }
                     }
