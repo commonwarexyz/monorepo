@@ -683,11 +683,7 @@ pub fn release_pending_syncs(pending: &PendingSyncs) {
     }
 }
 
-/// Drive `fut` to completion, releasing every sync parked on `pending` as it appears.
-///
-/// Opening storage under [DelayedSyncContext] can otherwise hang: initialization durably
-/// persists recovered state, and those syncs park before the caller can observe or release
-/// them.
+/// Drive `fut` to completion.
 pub async fn drive_pending_syncs<T>(pending: &PendingSyncs, fut: impl Future<Output = T>) -> T {
     let mut fut = std::pin::pin!(fut);
     loop {
