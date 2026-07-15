@@ -2196,7 +2196,8 @@ pub(super) mod test {
     /// Same key set across two sequential applied batches. This breaks the key-uniqueness
     /// invariant, so reads may return any of the written values. `get()` must still return one
     /// of them, live and across a restart, and after pruning every other version it returns the
-    /// survivor.
+    /// survivor. The prune check runs on a never-restarted db so the snapshot still holds both
+    /// locations and `get()` must skip the pruned one within the bucket.
     ///
     /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
     /// so pruning is per-item.
@@ -2246,21 +2247,38 @@ pub(super) mod test {
         assert!(live == v1 || live == v2);
 
         // A restart must also serve one of the written values.
-        db.sync().await.unwrap();
+        db.commit().await.unwrap();
         drop(db);
-        let mut db = open_db_small_sections(context.child("reopen")).await;
+        let db = open_db_small_sections(context.child("reopen")).await;
         let reopened = db.get(&key).await.unwrap().unwrap();
         assert!(reopened == v1 || reopened == v2);
+        db.destroy().await.unwrap();
 
-        // Raise the floor so pruning past the first Set is allowed.
-        // Layout continues: 5=Commit(floor=4)
-        db.apply_batch(db.new_batch().merkleize(&db, None, Location::new(4)).await)
-            .await
-            .unwrap();
+        // Rebuild the same history on a fresh db without restarting, so the
+        // snapshot bucket holds both locations. Floor=4 permits prune(2).
+        // Layout: 0=initial commit, 1=Set(key,v1), 2=Commit, 3=Set(key,v2),
+        // 4=Commit(floor=4)
+        let mut db = open_db_small_sections(context.child("prune")).await;
+        db.apply_batch(
+            db.new_batch()
+                .set(key, v1)
+                .merkleize(&db, None, Location::new(0))
+                .await,
+        )
+        .await
+        .unwrap();
+        db.apply_batch(
+            db.new_batch()
+                .set(key, v2)
+                .merkleize(&db, None, Location::new(4))
+                .await,
+        )
+        .await
+        .unwrap();
 
-        // Prune past the first Set (loc 1). With items_per_section=1,
-        // pruning to loc 2 should remove the blob containing loc 1, leaving
-        // v2 as the only retrievable version.
+        // Prune past the first Set (loc 1). With items_per_section=1, pruning
+        // to loc 2 removes the blob containing loc 1. get() must skip the
+        // pruned location within the bucket and serve the survivor.
         db.prune(Location::new(2)).await.unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v2));
 
@@ -3210,6 +3228,7 @@ pub(super) mod test {
 
         // Commit A: Set(key, v1) with floor=0.
         commit_sets(&mut db, [(key, v1)], None).await;
+        let first_size = db.bounds().end;
 
         // Commit B: Set(key, v2) with floor=0. Either written value may be served.
         commit_sets(&mut db, [(key, v2)], None).await;
@@ -3231,6 +3250,11 @@ pub(super) mod test {
         db.rewind(second_size).await.unwrap();
         let rewound = db.get(&key).await.unwrap().unwrap();
         assert!(rewound == v1 || rewound == v2);
+
+        // Rewind further to commit A: the v2 entry is dropped and get() must
+        // serve v1, proving the gap fill restored the v1 location.
+        db.rewind(first_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         db.destroy().await.unwrap();
     }
@@ -3283,6 +3307,11 @@ pub(super) mod test {
         db.rewind(second_size).await.unwrap();
         let rewound = db.get(&key).await.unwrap().unwrap();
         assert!(rewound == v1 || rewound == v2);
+
+        // Rewind further to commit A: the v2 entry is dropped and get() must
+        // serve v1, proving the gap fill restored the v1 location.
+        db.rewind(first_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         db.destroy().await.unwrap();
     }
