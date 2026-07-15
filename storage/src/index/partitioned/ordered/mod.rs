@@ -29,6 +29,10 @@
 //! lookup. Every index that resolves collisions pays this (the flat `crate::index::ordered::Index`
 //! included); `M` stays near 1 only when the indexed `P + N`-byte prefix is well-distributed, so
 //! use enough prefix bytes and high-entropy keys.
+//!
+//! A caller-held cursor can temporarily grow an inline partition to the spill threshold. The next
+//! index mutation of that partition spills it before access. [`Unordered::insert_and_retain`]
+//! performs the check after releasing its internal cursor.
 
 mod cursor;
 mod partition;
@@ -247,6 +251,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
+        self.maybe_spill(i);
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);
             if run.is_empty() {
@@ -288,6 +293,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     ) -> Option<Self::Cursor<'a>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
+        self.maybe_spill(i);
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);
             if !run.is_empty() {
@@ -338,6 +344,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     fn insert(&mut self, key: &[u8], value: Self::Value) {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
+        self.maybe_spill(i);
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);
             let new_key = run.is_empty();
@@ -378,6 +385,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         value: Self::Value,
         should_retain: impl Fn(&Self::Value) -> bool,
     ) {
+        let (i, _) = partition_index_and_sub_key::<P>(key);
         if let Some(mut cursor) = self.get_mut(key) {
             cursor.retain(&should_retain);
             if should_retain(&value) {
@@ -386,11 +394,13 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         } else if should_retain(&value) {
             self.insert(key, value);
         }
+        self.maybe_spill(i);
     }
 
     fn remove(&mut self, key: &[u8]) {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
+        self.maybe_spill(i);
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);
             if run.is_empty() {
@@ -651,6 +661,35 @@ mod tests {
                 index.get(&[0x20, 0x05]).copied().collect::<Vec<_>>(),
                 vec![5]
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_spill_after_cursor_growth() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index_spilling(context);
+            let key = [0x10, 0x01];
+
+            index.insert(&key, 1);
+            {
+                let mut cursor = index.get_mut(&key).unwrap();
+                assert_eq!(cursor.next().copied(), Some(1));
+                assert_eq!(cursor.next(), None);
+                cursor.insert(2);
+            }
+            assert_eq!(index.spilled_count(), 0);
+
+            // The next index mutation spills before modifying the over-full inline partition.
+            index.insert(&key, 3);
+            assert_eq!(index.spilled_count(), 1);
+            assert_eq!(index.get(&key).copied().collect::<Vec<_>>(), vec![3, 1, 2]);
+
+            // Mutations that own their cursor can spill as soon as they release it.
+            let other = [0x20, 0x01];
+            index.insert(&other, 4);
+            index.insert_and_retain(&other, 5, |_| true);
+            assert_eq!(index.spilled_count(), 2);
+            assert_eq!(index.get(&other).copied().collect::<Vec<_>>(), vec![4, 5]);
         });
     }
 
