@@ -1,10 +1,10 @@
 //! Episode-level Byzantine adversary profiles for Mallory.
 //!
-//! Where [`action`](super::action) perturbs only the network, an adversary *role*
+//! Where [`fault`](super::fault) perturbs only the network, an adversary *role*
 //! replaces the single faultable identity ([`crate::BYZANTINE_IDX`]) with an
 //! explicit Byzantine actor for the WHOLE episode. The role is an environment
-//! property sampled once at setup, not a per-step policy action, so it never
-//! enters the action catalog and adds no catalog id. Node 0 then runs as a raw,
+//! property sampled once at setup, not a per-step policy fault, so it never
+//! enters the fault catalog and adds no catalog id. Node 0 then runs as a raw,
 //! unmanaged byzantine node: it gets its registered channels directly, with no
 //! packet pump, no [`SniffingReceiver`](crate::SniffingReceiver), no reporter, and
 //! no [`ManagedValidator`](crate::ManagedValidator). The other three nodes stay
@@ -101,7 +101,7 @@ impl AdversaryRole {
 
     /// Uniformly sample a BYZANTINE role from the runtime RNG, never
     /// [`Honest`](Self::Honest). The target of a per-step
-    /// [`SetRole`](super::action::Action::SetRole) role switch: the multiplexer
+    /// [`SetRole`](super::fault::Fault::SetRole) role switch: the multiplexer
     /// only ever hosts one of the six Byzantine profiles, so an
     /// Honest<->Byzantine transition (which would need an oracle flip) is out of
     /// scope. Drawn from the runtime RNG so a replay reproduces the target.
@@ -197,7 +197,7 @@ const ROLE_BANDIT_TEMPERATURE: f64 = 1.0;
 ///
 /// Persisted for the whole libFuzzer campaign like the per-step
 /// [`Campaign`](super::policy::Campaign), but SEPARATE from it: this picks the
-/// episode's fixed environment (the role), not a per-step action. Only the learned
+/// episode's fixed environment (the role), not a per-step fault. Only the learned
 /// chooser selects through it and updates it; the random and fixed choosers keep the
 /// campaign-independent uniform [`AdversaryRole::sample`], so the A/B baseline stays
 /// campaign-independent.

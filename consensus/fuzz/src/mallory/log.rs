@@ -1,6 +1,6 @@
 //! On-panic decision log for Mallory runs.
 //!
-//! The Mallory runner pushes one line per OODA step (the selected action, its
+//! The Mallory runner pushes one line per OODA step (the selected fault, its
 //! legal mask, sampled parameters, applied status, previous/next state, reward,
 //! and heal result). The buffer is bounded and quiet by default -- entries are
 //! only surfaced by [`take`], which `fuzz()` calls in its panic-catching path.

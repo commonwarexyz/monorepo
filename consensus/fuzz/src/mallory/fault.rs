@@ -1,12 +1,12 @@
-//! The Mallory backend's stable action catalog, per-step legal mask, and the
+//! The Mallory backend's stable fault catalog, per-step legal mask, and the
 //! concrete [`FaultPlan`] the runner enacts.
 //!
-//! The Q-core is action-agnostic (it sees only numeric ids); this catalog is the
-//! Mallory binding of those ids to concrete adversarial actions. Selection is
-//! split in two: [`Action::sample`] draws an action's concrete parameters from
+//! The Q-core is fault-agnostic (it sees only numeric ids); this catalog is the
+//! Mallory binding of those ids to concrete adversarial faults. Selection is
+//! split in two: [`Fault::sample`] draws a fault's concrete parameters from
 //! the runtime RNG synchronously and returns a [`FaultPlan`], and the runner then
 //! enacts that plan against the network asynchronously. Later PRs append packet,
-//! lifecycle, and adversary-profile actions to the END of [`CATALOG`].
+//! lifecycle, and adversary-profile faults to the END of [`CATALOG`].
 
 use crate::{
     mallory::{adversary::AdversaryRole, policy::ActionId},
@@ -55,14 +55,14 @@ const PACKET_DUPLICATE_MAX: u32 = 3;
 const PACKET_REORDER_MIN: u32 = 2;
 const PACKET_REORDER_MAX: u32 = 8;
 
-/// The adversarial action the policy chooses per step.
+/// The adversarial fault the policy chooses per step.
 ///
 /// # Stable catalog order (contract)
 ///
-/// [`CATALOG`] fixes each action's [`ActionId`]: index `i` has id `i`. That order
+/// [`CATALOG`] fixes each fault's [`ActionId`]: index `i` has id `i`. That order
 /// is the contract between the runner's `select` and its enactment, and it is the
 /// column layout of a Q-table persisted across the whole libFuzzer campaign, so
-/// it MUST NOT change. New actions are APPENDED after the last existing entry;
+/// it MUST NOT change. New faults are APPENDED after the last existing entry;
 /// existing ids never move (so a growing catalog reuses a warm Q-table). PR4a:
 /// - `NoFault = 0`
 /// - `IsolateNodeWindow = 1`
@@ -87,7 +87,9 @@ const PACKET_REORDER_MAX: u32 = 8;
 /// episode (see [`legal_mask`]):
 /// - `SetRole = 11`
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Action {
+// `NoFault` deliberately ends with the enum name: it is the RL "no-op fault" choice.
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum Fault {
     /// Enact nothing and heal nothing for this step.
     NoFault,
     /// Isolate the single faultable identity ([`crate::BYZANTINE_IDX`]) from the
@@ -144,31 +146,31 @@ pub(crate) enum Action {
 }
 
 /// Actions in [`ActionId`] order: index `i` has id `i`. Appended-to, never
-/// reordered (see [`Action`]).
-pub(crate) const CATALOG: &[Action] = &[
-    Action::NoFault,
-    Action::IsolateNodeWindow,
-    Action::PartitionWindow,
-    Action::PacketDelay,
-    Action::PacketLoss,
-    Action::PacketCorrupt,
-    Action::PacketDuplicate,
-    Action::PacketReorder,
-    Action::CrashStop,
-    Action::CrashRestartDurable,
-    Action::AmnesiaRestart,
-    Action::SetRole,
+/// reordered (see [`Fault`]).
+pub(crate) const CATALOG: &[Fault] = &[
+    Fault::NoFault,
+    Fault::IsolateNodeWindow,
+    Fault::PartitionWindow,
+    Fault::PacketDelay,
+    Fault::PacketLoss,
+    Fault::PacketCorrupt,
+    Fault::PacketDuplicate,
+    Fault::PacketReorder,
+    Fault::CrashStop,
+    Fault::CrashRestartDurable,
+    Fault::AmnesiaRestart,
+    Fault::SetRole,
 ];
 
-/// Number of Mallory actions (the Q-table's column count).
-pub(crate) const N_ACTIONS: usize = CATALOG.len();
+/// Number of Mallory faults (the Q-table's column count).
+pub(crate) const N_FAULTS: usize = CATALOG.len();
 
-/// Maximum [`Action::SetRole`] role switches per byzantine episode. Bounds how many
+/// Maximum [`Fault::SetRole`] role switches per byzantine episode. Bounds how many
 /// times node 0's Byzantine profile can be swapped so an episode composes a small
 /// number of faults across views rather than thrashing the multiplexer.
 pub(crate) const MALLORY_MAX_ROLE_SWITCHES: u32 = 3;
 
-/// A concrete, enactable fault: the result of sampling an [`Action`]'s
+/// A concrete, enactable fault: the result of sampling an [`Fault`]'s
 /// parameters. A topology fault (`IsolateByzantine`, `Partition`) is installed
 /// via [`crate::mallory::network::Topology`]; a packet fault (`PacketDelay`,
 /// `PacketLoss`, `PacketCorrupt`, `PacketDuplicate`, `PacketReorder`) is installed
@@ -313,25 +315,25 @@ fn sample_channel(rng: &mut impl Rng) -> SniffChannel {
     }
 }
 
-impl Action {
-    /// The action an [`ActionId`] the policy returned maps to.
+impl Fault {
+    /// The fault an [`ActionId`] the policy returned maps to.
     pub(crate) fn from_id(id: ActionId) -> Self {
         CATALOG[id]
     }
 
-    /// This action's stable [`ActionId`] (its index in [`CATALOG`]).
+    /// This fault's stable [`ActionId`] (its index in [`CATALOG`]).
     pub(crate) fn id(self) -> ActionId {
         CATALOG
             .iter()
             .position(|&a| a == self)
-            .expect("action is in the catalog")
+            .expect("fault is in the catalog")
     }
 
-    /// Sample this action's concrete parameters from the runtime RNG, producing a
-    /// [`FaultPlan`] the runner enacts. [`Action::NoFault`] and
-    /// [`Action::IsolateNodeWindow`] have a fixed shape and draw no `FuzzRng`
-    /// bytes; [`Action::PartitionWindow`] draws one uniform choice among the 2-2
-    /// splits; the packet actions draw a target node, a target channel, and a
+    /// Sample this fault's concrete parameters from the runtime RNG, producing a
+    /// [`FaultPlan`] the runner enacts. [`Fault::NoFault`] and
+    /// [`Fault::IsolateNodeWindow`] have a fixed shape and draw no `FuzzRng`
+    /// bytes; [`Fault::PartitionWindow`] draws one uniform choice among the 2-2
+    /// splits; the packet faults draw a target node, a target channel, and a
     /// bounded intensity (a per-packet delay, a drop / corrupt count, a corrupt
     /// offset and mask, a duplicate count, or a reorder-buffer capacity). All
     /// draws come from the runtime RNG so the pump applies a deterministic
@@ -348,57 +350,57 @@ impl Action {
         // non-packet arms are unaffected.
         let node_lo = usize::from(exclude_node0);
         match self {
-            Action::NoFault => FaultPlan::None,
-            Action::IsolateNodeWindow => FaultPlan::IsolateByzantine,
-            Action::PartitionWindow => {
+            Fault::NoFault => FaultPlan::None,
+            Fault::IsolateNodeWindow => FaultPlan::IsolateByzantine,
+            Fault::PartitionWindow => {
                 let idx = PARTITION_2_2[rng.random_range(0..PARTITION_2_2.len())];
                 FaultPlan::Partition(SetPartition::n4(idx))
             }
-            Action::PacketDelay => FaultPlan::PacketDelay {
+            Fault::PacketDelay => FaultPlan::PacketDelay {
                 node: rng.random_range(node_lo..MALLORY_N),
                 channel: sample_channel(rng),
                 per_packet: Duration::from_millis(
                     rng.random_range(PACKET_DELAY_MS_MIN..=PACKET_DELAY_MS_MAX),
                 ),
             },
-            Action::PacketLoss => FaultPlan::PacketLoss {
+            Fault::PacketLoss => FaultPlan::PacketLoss {
                 node: rng.random_range(node_lo..MALLORY_N),
                 channel: sample_channel(rng),
                 drop_count: rng.random_range(PACKET_LOSS_MIN..=PACKET_LOSS_MAX),
             },
-            Action::PacketCorrupt => FaultPlan::PacketCorrupt {
+            Fault::PacketCorrupt => FaultPlan::PacketCorrupt {
                 node: rng.random_range(node_lo..MALLORY_N),
                 channel: sample_channel(rng),
                 count: rng.random_range(PACKET_CORRUPT_MIN..=PACKET_CORRUPT_MAX),
                 offset: rng.random_range(0..PACKET_CORRUPT_OFFSET_MAX),
                 mask: rng.random_range(PACKET_CORRUPT_MASK_MIN..=PACKET_CORRUPT_MASK_MAX),
             },
-            Action::PacketDuplicate => FaultPlan::PacketDuplicate {
+            Fault::PacketDuplicate => FaultPlan::PacketDuplicate {
                 node: rng.random_range(node_lo..MALLORY_N),
                 channel: sample_channel(rng),
                 extra: rng.random_range(PACKET_DUPLICATE_MIN..=PACKET_DUPLICATE_MAX),
             },
-            Action::PacketReorder => FaultPlan::PacketReorder {
+            Fault::PacketReorder => FaultPlan::PacketReorder {
                 node: rng.random_range(node_lo..MALLORY_N),
                 channel: sample_channel(rng),
                 buffer: rng.random_range(PACKET_REORDER_MIN..=PACKET_REORDER_MAX),
             },
             // The lifecycle faults have a fixed target (BYZANTINE_IDX) and draw no
             // parameters, so a same-seed replay is unperturbed by their presence.
-            Action::CrashStop => FaultPlan::CrashStop,
-            Action::CrashRestartDurable => FaultPlan::CrashRestartDurable,
-            Action::AmnesiaRestart => FaultPlan::AmnesiaRestart,
+            Fault::CrashStop => FaultPlan::CrashStop,
+            Fault::CrashRestartDurable => FaultPlan::CrashRestartDurable,
+            Fault::AmnesiaRestart => FaultPlan::AmnesiaRestart,
             // The role switch draws one target uniformly among the six Byzantine
             // roles (never Honest) from the runtime RNG, so the multiplexer applies a
             // deterministic swap on replay.
-            Action::SetRole => FaultPlan::SetRole(AdversaryRole::sample_byzantine(rng)),
+            Fault::SetRole => FaultPlan::SetRole(AdversaryRole::sample_byzantine(rng)),
         }
     }
 }
 
-/// The per-step legal-action mask: which catalog actions the policy may select
-/// this step. With an Honest faultable identity running, every catalog action
-/// except [`Action::SetRole`] (which needs a byzantine multiplexer) is legal -- the
+/// The per-step legal-fault mask: which catalog faults the policy may select
+/// this step. With an Honest faultable identity running, every catalog fault
+/// except [`Fault::SetRole`] (which needs a byzantine multiplexer) is legal -- the
 /// loop heals every transient topology/packet fault before the next decision, so at
 /// most one is ever active without any masking, and all three lifecycle faults
 /// target the running managed node 0.
@@ -406,30 +408,30 @@ impl Action {
 /// Once that node is crash-stopped (`node0_crashed`) the crash is PERMANENT for the
 /// episode, but the episode CONTINUES over the surviving quorum. The three lifecycle
 /// faults are masked (no re-crash of a dead node, and no resurrection, since a
-/// crash-stop is permanent within the episode) and so is [`Action::IsolateNodeWindow`]
+/// crash-stop is permanent within the episode) and so is [`Fault::IsolateNodeWindow`]
 /// (cutting off an already-dead node is a no-op). The transient
-/// [`Action::PartitionWindow`] and
+/// [`Fault::PartitionWindow`] and
 /// packet faults stay legal, so Mallory can keep perturbing nodes 1-3 (their targets
-/// exclude node 0 at sample time). [`Action::SetRole`] stays masked (a crashed Honest
+/// exclude node 0 at sample time). [`Fault::SetRole`] stays masked (a crashed Honest
 /// node 0 has no multiplexer). Because node 0 never returns, `node0_crashed` stays set
 /// for every later step.
 ///
 /// When a Byzantine role owns node 0 (`role_active`) OR node 0 has become an
 /// amnesiac (`node0_amnesiac`, an empty-storage restart that may equivocate), node 0
 /// is now the single Byzantine identity, so ALL THREE lifecycle faults
-/// ([`Action::CrashStop`], [`Action::CrashRestartDurable`], [`Action::AmnesiaRestart`])
+/// ([`Fault::CrashStop`], [`Fault::CrashRestartDurable`], [`Fault::AmnesiaRestart`])
 /// are masked out -- this enforces the one-faultable-identity contract (no lifecycle
 /// fault on a second node; no further lifecycle fault on the already-Byzantine
 /// identity). Under a role node 0 is UNMANAGED, so there is no
 /// [`ManagedValidator`](crate::ManagedValidator) to target at all. The topology
-/// faults stay legal and are complementary -- [`Action::IsolateNodeWindow`]
+/// faults stay legal and are complementary -- [`Fault::IsolateNodeWindow`]
 /// temporarily MUTES the adversary by cutting node 0 off, and
-/// [`Action::PartitionWindow`] still stalls progress. The packet faults stay legal
+/// [`Fault::PartitionWindow`] still stalls progress. The packet faults stay legal
 /// too; under a role their target is restricted to the honest managed nodes at
-/// sample time (see [`Action::sample`]), while post-amnesia node 0 still has a
+/// sample time (see [`Fault::sample`]), while post-amnesia node 0 still has a
 /// pump/sniffer so it stays a valid packet target.
 ///
-/// [`Action::SetRole`] is the inverse case: it is legal ONLY when a Byzantine role
+/// [`Fault::SetRole`] is the inverse case: it is legal ONLY when a Byzantine role
 /// owns node 0 (`role_active`, so a [`RoleMultiplexer`](crate::mallory::multiplexer::RoleMultiplexer)
 /// exists to swap) AND the episode's switch cap is not yet reached
 /// (`role_switches_exhausted` is false, i.e. the count is below
@@ -442,29 +444,29 @@ pub(crate) fn legal_mask(
     role_active: bool,
     node0_amnesiac: bool,
     role_switches_exhausted: bool,
-) -> [bool; N_ACTIONS] {
+) -> [bool; N_FAULTS] {
     if node0_crashed {
         // Node 0 is permanently down, but the episode keeps perturbing nodes 1-3.
         // Legal: NoFault, PartitionWindow, and the five packet faults (targets exclude
         // node 0). Masked: the three lifecycle faults, IsolateNodeWindow, and SetRole.
-        let mut mask = [true; N_ACTIONS];
-        mask[Action::CrashStop.id()] = false;
-        mask[Action::CrashRestartDurable.id()] = false;
-        mask[Action::AmnesiaRestart.id()] = false;
-        mask[Action::IsolateNodeWindow.id()] = false;
-        mask[Action::SetRole.id()] = false;
+        let mut mask = [true; N_FAULTS];
+        mask[Fault::CrashStop.id()] = false;
+        mask[Fault::CrashRestartDurable.id()] = false;
+        mask[Fault::AmnesiaRestart.id()] = false;
+        mask[Fault::IsolateNodeWindow.id()] = false;
+        mask[Fault::SetRole.id()] = false;
         return mask;
     }
-    let mut mask = [true; N_ACTIONS];
+    let mut mask = [true; N_FAULTS];
     if role_active || node0_amnesiac {
-        mask[Action::CrashStop.id()] = false;
-        mask[Action::CrashRestartDurable.id()] = false;
-        mask[Action::AmnesiaRestart.id()] = false;
+        mask[Fault::CrashStop.id()] = false;
+        mask[Fault::CrashRestartDurable.id()] = false;
+        mask[Fault::AmnesiaRestart.id()] = false;
     }
     // A role switch needs a byzantine multiplexer at node 0 and a remaining switch
     // budget; illegal under Honest (no multiplexer) and once the cap is reached.
     if !role_active || role_switches_exhausted {
-        mask[Action::SetRole.id()] = false;
+        mask[Fault::SetRole.id()] = false;
     }
     mask
 }
@@ -476,13 +478,13 @@ mod tests {
 
     #[test]
     fn catalog_ids_round_trip() {
-        assert_eq!(N_ACTIONS, 12);
-        assert_eq!(N_ACTIONS, CATALOG.len());
-        for (id, &action) in CATALOG.iter().enumerate() {
-            assert_eq!(action.id(), id, "catalog index must equal the action id");
+        assert_eq!(N_FAULTS, 12);
+        assert_eq!(N_FAULTS, CATALOG.len());
+        for (id, &fault) in CATALOG.iter().enumerate() {
+            assert_eq!(fault.id(), id, "catalog index must equal the fault id");
             assert_eq!(
-                Action::from_id(id),
-                action,
+                Fault::from_id(id),
+                fault,
                 "from_id must invert id for every catalog entry"
             );
         }
@@ -492,48 +494,48 @@ mod tests {
     fn catalog_order_is_stable() {
         // The stable-order contract: existing ids never move as the catalog
         // grows, so a warm Q-table's columns stay valid.
-        assert_eq!(Action::NoFault.id(), 0);
-        assert_eq!(Action::IsolateNodeWindow.id(), 1);
-        assert_eq!(Action::PartitionWindow.id(), 2);
-        assert_eq!(Action::PacketDelay.id(), 3);
-        assert_eq!(Action::PacketLoss.id(), 4);
-        assert_eq!(Action::PacketCorrupt.id(), 5);
-        assert_eq!(Action::PacketDuplicate.id(), 6);
-        assert_eq!(Action::PacketReorder.id(), 7);
-        assert_eq!(Action::CrashStop.id(), 8);
-        assert_eq!(Action::CrashRestartDurable.id(), 9);
-        assert_eq!(Action::AmnesiaRestart.id(), 10);
-        assert_eq!(Action::SetRole.id(), 11);
-        assert_eq!(Action::from_id(0), Action::NoFault);
-        assert_eq!(Action::from_id(1), Action::IsolateNodeWindow);
-        assert_eq!(Action::from_id(2), Action::PartitionWindow);
-        assert_eq!(Action::from_id(3), Action::PacketDelay);
-        assert_eq!(Action::from_id(4), Action::PacketLoss);
-        assert_eq!(Action::from_id(5), Action::PacketCorrupt);
-        assert_eq!(Action::from_id(6), Action::PacketDuplicate);
-        assert_eq!(Action::from_id(7), Action::PacketReorder);
-        assert_eq!(Action::from_id(8), Action::CrashStop);
-        assert_eq!(Action::from_id(9), Action::CrashRestartDurable);
-        assert_eq!(Action::from_id(10), Action::AmnesiaRestart);
-        assert_eq!(Action::from_id(11), Action::SetRole);
+        assert_eq!(Fault::NoFault.id(), 0);
+        assert_eq!(Fault::IsolateNodeWindow.id(), 1);
+        assert_eq!(Fault::PartitionWindow.id(), 2);
+        assert_eq!(Fault::PacketDelay.id(), 3);
+        assert_eq!(Fault::PacketLoss.id(), 4);
+        assert_eq!(Fault::PacketCorrupt.id(), 5);
+        assert_eq!(Fault::PacketDuplicate.id(), 6);
+        assert_eq!(Fault::PacketReorder.id(), 7);
+        assert_eq!(Fault::CrashStop.id(), 8);
+        assert_eq!(Fault::CrashRestartDurable.id(), 9);
+        assert_eq!(Fault::AmnesiaRestart.id(), 10);
+        assert_eq!(Fault::SetRole.id(), 11);
+        assert_eq!(Fault::from_id(0), Fault::NoFault);
+        assert_eq!(Fault::from_id(1), Fault::IsolateNodeWindow);
+        assert_eq!(Fault::from_id(2), Fault::PartitionWindow);
+        assert_eq!(Fault::from_id(3), Fault::PacketDelay);
+        assert_eq!(Fault::from_id(4), Fault::PacketLoss);
+        assert_eq!(Fault::from_id(5), Fault::PacketCorrupt);
+        assert_eq!(Fault::from_id(6), Fault::PacketDuplicate);
+        assert_eq!(Fault::from_id(7), Fault::PacketReorder);
+        assert_eq!(Fault::from_id(8), Fault::CrashStop);
+        assert_eq!(Fault::from_id(9), Fault::CrashRestartDurable);
+        assert_eq!(Fault::from_id(10), Fault::AmnesiaRestart);
+        assert_eq!(Fault::from_id(11), Fault::SetRole);
     }
 
     #[test]
     fn legal_mask_running_is_all_true_but_set_role_and_sized() {
-        // Under the Honest running environment every action except SetRole is legal:
+        // Under the Honest running environment every fault except SetRole is legal:
         // SetRole needs a byzantine multiplexer at node 0, which the Honest
         // environment never builds.
         let mask = legal_mask(false, false, false, false);
-        assert_eq!(mask.len(), N_ACTIONS);
+        assert_eq!(mask.len(), N_FAULTS);
         assert_eq!(mask.len(), 12);
         assert!(
-            !mask[Action::SetRole.id()],
+            !mask[Fault::SetRole.id()],
             "SetRole is illegal under the Honest environment"
         );
-        for &action in CATALOG.iter().filter(|&&a| a != Action::SetRole) {
+        for &fault in CATALOG.iter().filter(|&&a| a != Fault::SetRole) {
             assert!(
-                mask[action.id()],
-                "{action:?} is legal while the faultable node is running"
+                mask[fault.id()],
+                "{fault:?} is legal while the faultable node is running"
             );
         }
     }
@@ -545,20 +547,20 @@ mod tests {
         // the three lifecycle faults, IsolateNodeWindow (a no-op on a dead node), and
         // SetRole are masked.
         let mask = legal_mask(true, false, false, false);
-        assert_eq!(mask.len(), N_ACTIONS);
+        assert_eq!(mask.len(), N_FAULTS);
         let masked = [
-            Action::CrashStop,
-            Action::CrashRestartDurable,
-            Action::AmnesiaRestart,
-            Action::IsolateNodeWindow,
-            Action::SetRole,
+            Fault::CrashStop,
+            Fault::CrashRestartDurable,
+            Fault::AmnesiaRestart,
+            Fault::IsolateNodeWindow,
+            Fault::SetRole,
         ];
-        for &action in CATALOG.iter() {
-            let want = !masked.contains(&action);
+        for &fault in CATALOG.iter() {
+            let want = !masked.contains(&fault);
             assert_eq!(
-                mask[action.id()],
+                mask[fault.id()],
                 want,
-                "{action:?} legality once node 0 is crashed"
+                "{fault:?} legality once node 0 is crashed"
             );
         }
     }
@@ -567,25 +569,25 @@ mod tests {
     /// identity -- under a byzantine role or once it is amnesiac -- while the
     /// topology and packet faults stay legal. Shared by the role and amnesia cases,
     /// which impose the same one-faultable-identity masking.
-    fn assert_lifecycle_masked_topology_and_packet_legal(mask: [bool; N_ACTIONS]) {
-        assert_eq!(mask.len(), N_ACTIONS);
-        assert!(!mask[Action::CrashStop.id()], "CrashStop masked");
+    fn assert_lifecycle_masked_topology_and_packet_legal(mask: [bool; N_FAULTS]) {
+        assert_eq!(mask.len(), N_FAULTS);
+        assert!(!mask[Fault::CrashStop.id()], "CrashStop masked");
         assert!(
-            !mask[Action::CrashRestartDurable.id()],
+            !mask[Fault::CrashRestartDurable.id()],
             "CrashRestartDurable masked"
         );
-        assert!(!mask[Action::AmnesiaRestart.id()], "AmnesiaRestart masked");
-        for action in [
-            Action::NoFault,
-            Action::IsolateNodeWindow,
-            Action::PartitionWindow,
-            Action::PacketDelay,
-            Action::PacketLoss,
-            Action::PacketCorrupt,
-            Action::PacketDuplicate,
-            Action::PacketReorder,
+        assert!(!mask[Fault::AmnesiaRestart.id()], "AmnesiaRestart masked");
+        for fault in [
+            Fault::NoFault,
+            Fault::IsolateNodeWindow,
+            Fault::PartitionWindow,
+            Fault::PacketDelay,
+            Fault::PacketLoss,
+            Fault::PacketCorrupt,
+            Fault::PacketDuplicate,
+            Fault::PacketReorder,
         ] {
-            assert!(mask[action.id()], "{action:?} stays legal");
+            assert!(mask[fault.id()], "{fault:?} stays legal");
         }
     }
 
@@ -612,12 +614,12 @@ mod tests {
         // AmnesiaRestart is legal ONLY when node 0 is an Honest, running managed
         // node: masked once it is crashed, under a byzantine role, or once amnesiac.
         assert!(
-            legal_mask(false, false, false, false)[Action::AmnesiaRestart.id()],
+            legal_mask(false, false, false, false)[Fault::AmnesiaRestart.id()],
             "AmnesiaRestart legal under Honest + Running"
         );
-        assert!(!legal_mask(true, false, false, false)[Action::AmnesiaRestart.id()]);
-        assert!(!legal_mask(false, true, false, false)[Action::AmnesiaRestart.id()]);
-        assert!(!legal_mask(false, false, true, false)[Action::AmnesiaRestart.id()]);
+        assert!(!legal_mask(true, false, false, false)[Fault::AmnesiaRestart.id()]);
+        assert!(!legal_mask(false, true, false, false)[Fault::AmnesiaRestart.id()]);
+        assert!(!legal_mask(false, false, true, false)[Fault::AmnesiaRestart.id()]);
     }
 
     #[test]
@@ -627,23 +629,23 @@ mod tests {
         // node, under an amnesiac node (role_active is false there), and once the cap
         // is hit even while a role is active.
         assert!(
-            legal_mask(false, true, false, false)[Action::SetRole.id()],
+            legal_mask(false, true, false, false)[Fault::SetRole.id()],
             "SetRole legal under a byzantine role below the switch cap"
         );
         assert!(
-            !legal_mask(false, true, false, true)[Action::SetRole.id()],
+            !legal_mask(false, true, false, true)[Fault::SetRole.id()],
             "SetRole masked once the switch cap is reached"
         );
         assert!(
-            !legal_mask(false, false, false, false)[Action::SetRole.id()],
+            !legal_mask(false, false, false, false)[Fault::SetRole.id()],
             "SetRole masked under the Honest environment"
         );
         assert!(
-            !legal_mask(true, false, false, false)[Action::SetRole.id()],
+            !legal_mask(true, false, false, false)[Fault::SetRole.id()],
             "SetRole masked once node 0 is crashed"
         );
         assert!(
-            !legal_mask(false, false, true, false)[Action::SetRole.id()],
+            !legal_mask(false, false, true, false)[Fault::SetRole.id()],
             "SetRole masked while node 0 is amnesiac (not role-owned)"
         );
     }
@@ -654,24 +656,24 @@ mod tests {
         // must target an honest managed node in {1, 2, 3}.
         let mut rng = FuzzRng::new(vec![0x24, 0x8b, 0xf1, 0x0e, 0x77, 0x35, 0xac, 0x51]);
         for _ in 0..256 {
-            for action in [
-                Action::PacketDelay,
-                Action::PacketLoss,
-                Action::PacketCorrupt,
-                Action::PacketDuplicate,
-                Action::PacketReorder,
+            for fault in [
+                Fault::PacketDelay,
+                Fault::PacketLoss,
+                Fault::PacketCorrupt,
+                Fault::PacketDuplicate,
+                Fault::PacketReorder,
             ] {
-                let node = match action.sample(&mut rng, true) {
+                let node = match fault.sample(&mut rng, true) {
                     FaultPlan::PacketDelay { node, .. }
                     | FaultPlan::PacketLoss { node, .. }
                     | FaultPlan::PacketCorrupt { node, .. }
                     | FaultPlan::PacketDuplicate { node, .. }
                     | FaultPlan::PacketReorder { node, .. } => node,
-                    other => panic!("{action:?} must sample a packet plan, got {other:?}"),
+                    other => panic!("{fault:?} must sample a packet plan, got {other:?}"),
                 };
                 assert!(
                     (1..MALLORY_N).contains(&node),
-                    "{action:?} must target an honest node under a role, got node {node}"
+                    "{fault:?} must target an honest node under a role, got node {node}"
                 );
             }
         }
@@ -682,15 +684,15 @@ mod tests {
         // CrashStop / CrashRestartDurable / AmnesiaRestart target BYZANTINE_IDX with
         // no sampled parameters, so they must not advance the RNG (a same-seed replay
         // is unperturbed by their presence in the catalog).
-        for action in [
-            Action::CrashStop,
-            Action::CrashRestartDurable,
-            Action::AmnesiaRestart,
+        for fault in [
+            Fault::CrashStop,
+            Fault::CrashRestartDurable,
+            Fault::AmnesiaRestart,
         ] {
             let seed = vec![0xa5, 0x5a, 0xc3, 0x3c, 0x0f, 0xf0, 0x99, 0x66];
             let mut consumed = FuzzRng::new(seed.clone());
             let mut untouched = FuzzRng::new(seed);
-            let plan = action.sample(&mut consumed, false);
+            let plan = fault.sample(&mut consumed, false);
             assert!(
                 matches!(
                     plan,
@@ -698,7 +700,7 @@ mod tests {
                         | FaultPlan::CrashRestartDurable
                         | FaultPlan::AmnesiaRestart
                 ),
-                "a lifecycle action samples a lifecycle plan, got {plan:?}"
+                "a lifecycle fault samples a lifecycle plan, got {plan:?}"
             );
             assert!(
                 !plan.is_active(),
@@ -707,7 +709,7 @@ mod tests {
             assert_eq!(
                 consumed.random_range(0u64..u64::MAX),
                 untouched.random_range(0u64..u64::MAX),
-                "{action:?} must not consume any FuzzRng bytes"
+                "{fault:?} must not consume any FuzzRng bytes"
             );
         }
     }
@@ -721,7 +723,7 @@ mod tests {
         let mut seen_disrupter = false;
         let mut seen_other = false;
         for _ in 0..256 {
-            let FaultPlan::SetRole(role) = Action::SetRole.sample(&mut rng, true) else {
+            let FaultPlan::SetRole(role) = Fault::SetRole.sample(&mut rng, true) else {
                 panic!("SetRole must sample a SetRole plan");
             };
             assert!(
@@ -746,7 +748,7 @@ mod tests {
         let seed = vec![0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15];
         let mut consumed = FuzzRng::new(seed.clone());
         let mut untouched = FuzzRng::new(seed);
-        let plan = Action::NoFault.sample(&mut consumed, false);
+        let plan = Fault::NoFault.sample(&mut consumed, false);
         assert!(matches!(plan, FaultPlan::None));
         assert!(!plan.is_active());
         // NoFault must not advance the RNG, so a subsequent draw matches an
@@ -764,7 +766,7 @@ mod tests {
         let mut consumed = FuzzRng::new(seed.clone());
         let mut untouched = FuzzRng::new(seed);
         for _ in 0..32 {
-            let plan = Action::IsolateNodeWindow.sample(&mut consumed, false);
+            let plan = Fault::IsolateNodeWindow.sample(&mut consumed, false);
             assert!(matches!(plan, FaultPlan::IsolateByzantine));
             assert!(plan.is_active());
         }
@@ -782,7 +784,7 @@ mod tests {
         let allowed: Vec<SetPartition> =
             PARTITION_2_2.iter().map(|&i| SetPartition::n4(i)).collect();
         for _ in 0..256 {
-            let FaultPlan::Partition(sp) = Action::PartitionWindow.sample(&mut rng, false) else {
+            let FaultPlan::Partition(sp) = Fault::PartitionWindow.sample(&mut rng, false) else {
                 panic!("PartitionWindow must sample a Partition plan");
             };
             assert!(
@@ -806,7 +808,7 @@ mod tests {
             )
         };
         for _ in 0..256 {
-            let delay = Action::PacketDelay.sample(&mut rng, false);
+            let delay = Fault::PacketDelay.sample(&mut rng, false);
             assert!(delay.is_active(), "PacketDelay installs a transient fault");
             let FaultPlan::PacketDelay {
                 node,
@@ -824,7 +826,7 @@ mod tests {
                 "per-packet delay {ms}ms out of bounds"
             );
 
-            let loss = Action::PacketLoss.sample(&mut rng, false);
+            let loss = Fault::PacketLoss.sample(&mut rng, false);
             assert!(loss.is_active(), "PacketLoss installs a transient fault");
             let FaultPlan::PacketLoss {
                 node,
@@ -841,7 +843,7 @@ mod tests {
                 "drop count {drop_count} out of bounds"
             );
 
-            let corrupt = Action::PacketCorrupt.sample(&mut rng, false);
+            let corrupt = Fault::PacketCorrupt.sample(&mut rng, false);
             assert!(
                 corrupt.is_active(),
                 "PacketCorrupt installs a transient fault"
@@ -874,7 +876,7 @@ mod tests {
                 "corrupt mask must be nonzero so a byte always changes"
             );
 
-            let duplicate = Action::PacketDuplicate.sample(&mut rng, false);
+            let duplicate = Fault::PacketDuplicate.sample(&mut rng, false);
             assert!(
                 duplicate.is_active(),
                 "PacketDuplicate installs a transient fault"
@@ -897,7 +899,7 @@ mod tests {
                 "duplicate extra {extra} out of bounds"
             );
 
-            let reorder = Action::PacketReorder.sample(&mut rng, false);
+            let reorder = Fault::PacketReorder.sample(&mut rng, false);
             assert!(
                 reorder.is_active(),
                 "PacketReorder installs a transient fault"

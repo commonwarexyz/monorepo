@@ -22,7 +22,7 @@
 //! unbounded internal FIFO, applying the single active packet fault held in the
 //! shared [`PacketFaultCell`]. With no matching fault the pump is a transparent
 //! in-order relay, so liveness and order are unchanged. All randomness is sampled
-//! by the runner at enact time (see [`crate::mallory::action`]); the pump applies
+//! by the runner at enact time (see [`crate::mallory::fault`]); the pump applies
 //! a deterministic, param-driven transform and draws none of its own, so a
 //! replayed input relays identically. Exactly one fault is active at a time (the
 //! runner heals every step), and each pump acts only on the fault whose
@@ -100,7 +100,7 @@ impl<P: PublicKey, E: Clock> Topology<P, E> {
     }
 
     /// Apply an arbitrary set partition. Mallory only passes the balanced 2-2
-    /// splits here (see [`crate::mallory::action`]).
+    /// splits here (see [`crate::mallory::fault`]).
     pub(crate) async fn partition(&self, sp: &SetPartition) {
         apply_partition(&self.oracle, &self.participants, Some(sp), &self.link).await;
     }
@@ -122,7 +122,7 @@ pub(crate) type FlushAck = oneshot::Sender<()>;
 
 /// The deterministic, param-driven transform a [`pump`] applies to one honest
 /// node's one channel. Every parameter is sampled by the runner from the runtime
-/// RNG (see [`crate::mallory::action`]); the pump draws none, so a replayed input
+/// RNG (see [`crate::mallory::fault`]); the pump draws none, so a replayed input
 /// relays identically.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PacketFaultKind {

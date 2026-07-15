@@ -3,7 +3,7 @@
 //! In a byzantine episode node 0 ([`crate::BYZANTINE_IDX`]) is an unmanaged
 //! Byzantine actor for the whole run. The [`RoleMultiplexer`] is the SINGLE owner
 //! of node 0's three raw consensus channels: it spawns the current Byzantine
-//! profile's actor and, on a per-step [`SetRole`](super::action::Action::SetRole),
+//! profile's actor and, on a per-step [`SetRole`](super::fault::Fault::SetRole),
 //! swaps to a different profile so the learner can compose faults across views
 //! (e.g. conflict at one view, equivocate at a later one).
 //!

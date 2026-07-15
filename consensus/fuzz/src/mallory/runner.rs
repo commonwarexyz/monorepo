@@ -1,15 +1,14 @@
-//! The Mallory OODA episode loop and its action choosers.
+//! The Mallory episode loop and its fault choosers.
 //!
-//! Each episode first picks one adversary ENVIRONMENT for the faultable identity
-//! ([`BYZANTINE_IDX`], node 0): honest, or one of six Byzantine profiles
-//! ([`adversary::AdversaryRole`] -- Disrupter, Conflicter, Nuller, Equivocator,
-//! Impersonator, Outdated). It then drives a reactive observe-orient-decide-act
+//! Each episode (from the Algorithm 1) first picks one adversary ENVIRONMENT
+//! for the faultable identity ([`BYZANTINE_IDX`]): honest, or one of Byzantine profiles
+//! ([`adversary::AdversaryRole`]). It then drives a reactive observe-orient-decide-act
 //! loop: each step observes the honest happens-before fingerprint (the Q-state,
-//! keyed by the environment) and a protocol-state descriptor, selects an
-//! [`action`] under a legal mask, and enacts its [`action::FaultPlan`]. The action
+//! keyed by the environment) and a protocol-state descriptor, selects a
+//! [`fault`] under a legal mask, and enacts its [`fault::FaultPlan`]. The fault
 //! is a network (isolation, partition), packet (delay/loss/corrupt/duplicate/reorder),
 //! or lifecycle (crash-stop, durable restart, amnesia restart) fault. It then waits
-//! for the first new honest finalization or a per-action timeout, heals the fault,
+//! for the first new honest finalization or a per-fault timeout, heals the fault,
 //! and (for the learned chooser) applies a temporal-difference update rewarding novel
 //! state / happens-before fingerprints. The episode stops once it has observed
 //! `required_containers` distinct finalizations, or on the step cap. A crash-stop is
@@ -30,7 +29,7 @@
 //! uniformly from the runtime RNG and never touches the campaign, so it neither
 //! learns nor pollutes the shared novelty registries -- the controlled baseline.
 
-use super::{action, adversary, lifecycle, log, multiplexer, network, policy, state};
+use super::{adversary, fault, lifecycle, log, multiplexer, network, policy, state};
 use crate::{
     build_validator, build_validator_with_reporter, happens_before, invariants, simplex::Simplex,
     sniff_sink, CertCfgOf, CertifyChoice, ManagedValidator, PublicKeyOf, SniffChannel,
@@ -68,7 +67,7 @@ use tracing::{dispatcher, Dispatch};
 /// `max(MALLORY_EPISODE_STEPS, required_containers)` steps so it can attempt the
 /// requested finalization budget.
 const MALLORY_EPISODE_STEPS: usize = 12;
-/// Per-action reactive boundary timeout: a step ends on the first honest finalization
+/// Per-fault reactive boundary timeout: a step ends on the first honest finalization
 /// past its baseline, or -- if the fault suppressed progress -- after this
 /// deterministic timeout. Just when Mallory reacts, not a whole observation span.
 const MALLORY_STEP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,15 +95,15 @@ const CRASHED_TAG: u64 = 0x5c8b_2e71_d4a0_936f;
 type MalloryReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
 
-/// Whether a step's sampled action actually perturbed the run. Logging / observability
+/// Whether a step's sampled fault actually perturbed the run. Logging / observability
 /// ONLY (the decision log's `applied` field); it never gates learning -- a `NoEffect`
-/// action still receives its TD credit, which is the correct RL treatment of a no-op.
+/// fault still receives its TD credit, which is the correct RL treatment of a no-op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Enactment {
-    /// The action perturbed the run: a lifecycle or topology fault (which always take
+    /// The fault perturbed the run: a lifecycle or topology fault (which always take
     /// effect), or a packet fault the pump actually matched a packet on.
     Applied,
-    /// The action installed but changed nothing: [`action::Action::NoFault`], or a
+    /// The fault installed but changed nothing: [`fault::Fault::NoFault`], or a
     /// packet fault whose pump matched no packet this window.
     NoEffect,
 }
@@ -189,7 +188,7 @@ enum StepBoundary {
 /// `clock.latest` but do not close the step. If nothing is queued, it races the
 /// monitors EVENT-DRIVEN against the deadline via [`select_all`], waking at the
 /// instant a monitor emits. When several finalizations accumulate while an awaited
-/// action was being enacted (e.g. a restart's downtime), or several monitors are
+/// fault was being enacted (e.g. a restart's downtime), or several monitors are
 /// ready at once, the choice among the ALREADY-QUEUED crossings is by monitor
 /// (vector) order, not exact emission order. This is an accepted approximation: every
 /// honest node finalizes the SAME views in Simplex, so the boundary VIEW (which the
@@ -280,38 +279,38 @@ fn liveness_target(required_containers: u64, max_baseline: u64) -> u64 {
 
 /// The decision-log effect of enacting `plan`, given whether its packet pump matched a
 /// packet. Logging only (see [`Enactment`]): a lifecycle or topology fault always takes
-/// effect; a packet fault takes effect iff the pump matched; [`action::FaultPlan::None`]
+/// effect; a packet fault takes effect iff the pump matched; [`fault::FaultPlan::None`]
 /// never does. `matched` is ignored for the non-packet arms.
-fn enactment_of(plan: &action::FaultPlan, matched: bool) -> Enactment {
+fn enactment_of(plan: &fault::FaultPlan, matched: bool) -> Enactment {
     match plan {
-        action::FaultPlan::None => Enactment::NoEffect,
-        action::FaultPlan::PacketDelay { .. }
-        | action::FaultPlan::PacketLoss { .. }
-        | action::FaultPlan::PacketCorrupt { .. }
-        | action::FaultPlan::PacketDuplicate { .. }
-        | action::FaultPlan::PacketReorder { .. } => {
+        fault::FaultPlan::None => Enactment::NoEffect,
+        fault::FaultPlan::PacketDelay { .. }
+        | fault::FaultPlan::PacketLoss { .. }
+        | fault::FaultPlan::PacketCorrupt { .. }
+        | fault::FaultPlan::PacketDuplicate { .. }
+        | fault::FaultPlan::PacketReorder { .. } => {
             if matched {
                 Enactment::Applied
             } else {
                 Enactment::NoEffect
             }
         }
-        action::FaultPlan::IsolateByzantine
-        | action::FaultPlan::Partition(_)
-        | action::FaultPlan::CrashStop
-        | action::FaultPlan::CrashRestartDurable
-        | action::FaultPlan::AmnesiaRestart
-        | action::FaultPlan::SetRole(_) => Enactment::Applied,
+        fault::FaultPlan::IsolateByzantine
+        | fault::FaultPlan::Partition(_)
+        | fault::FaultPlan::CrashStop
+        | fault::FaultPlan::CrashRestartDurable
+        | fault::FaultPlan::AmnesiaRestart
+        | fault::FaultPlan::SetRole(_) => Enactment::Applied,
     }
 }
 
-/// Which action-selection policy an episode uses.
+/// Which fault-selection policy an episode uses.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Chooser {
     /// Masked softmax over the campaign-persistent Q-row, with a temporal-
     /// difference update per step.
     Learned,
-    /// Uniform over the legal actions from the runtime RNG; never consults or
+    /// Uniform over the legal faults from the runtime RNG; never consults or
     /// updates the campaign. The A/B baseline: exercised by the runner's A/B
     /// test and given its own fuzz target in a later PR, so the library build
     /// (which dispatches only [`Chooser::Learned`]) never constructs it.
@@ -319,9 +318,9 @@ pub(crate) enum Chooser {
     Random,
 }
 
-/// Uniformly sample a LEGAL action id from the runtime RNG. The [`Chooser::Random`]
+/// Uniformly sample a LEGAL fault id from the runtime RNG. The [`Chooser::Random`]
 /// selection: it never consults the campaign, so it neither learns nor pollutes
-/// the shared novelty registries. At least one action must be legal.
+/// the shared novelty registries. At least one fault must be legal.
 fn select_uniform_legal(legal: &[bool], rng: &mut impl Rng) -> policy::ActionId {
     let legal_ids: Vec<policy::ActionId> = legal
         .iter()
@@ -330,7 +329,7 @@ fn select_uniform_legal(legal: &[bool], rng: &mut impl Rng) -> policy::ActionId 
         .collect();
     assert!(
         !legal_ids.is_empty(),
-        "select requires at least one legal action"
+        "select requires at least one legal fault"
     );
     legal_ids[rng.random_range(0..legal_ids.len())]
 }
@@ -585,7 +584,7 @@ async fn restart<P: Simplex>(
 }
 
 /// Durably restart the crashed faultable identity in place
-/// ([`action::FaultPlan::CrashRestartDurable`]): rebuild on its EXISTING storage
+/// ([`fault::FaultPlan::CrashRestartDurable`]): rebuild on its EXISTING storage
 /// partition, reusing the reporter, and return to `Running`. See [`restart`].
 #[allow(clippy::too_many_arguments)]
 async fn restart_durable<P: Simplex>(
@@ -626,7 +625,7 @@ async fn restart_durable<P: Simplex>(
 }
 
 /// Amnesia-restart the crashed faultable identity
-/// ([`action::FaultPlan::AmnesiaRestart`]): rebuild on a FRESH (empty) storage
+/// ([`fault::FaultPlan::AmnesiaRestart`]): rebuild on a FRESH (empty) storage
 /// partition with a clean-slate reporter, so it forgets its durable state and
 /// becomes `Amnesiac` (Byzantine for the rest of the episode). See [`restart`].
 #[allow(clippy::too_many_arguments)]
@@ -1002,7 +1001,7 @@ fn run_inner<P: Simplex>(
             clock.drain();
 
             // The per-step legal mask. Under the Honest role, while node 0 runs
-            // every action is legal; once it is crash-stopped only NoFault is (a
+            // every fault is legal; once it is crash-stopped only NoFault is (a
             // crash is terminal, so this is reached only defensively), and a durable
             // restart re-opens the full mask. Once node 0 is amnesiac it is the
             // single Byzantine identity (Running but empty-storage), so the three
@@ -1017,24 +1016,24 @@ fn run_inner<P: Simplex>(
                 !byz && matches!(managed[0].lifecycle(), ValidatorLifecycle::Amnesiac);
             let role_switches_exhausted = multiplexer
                 .as_ref()
-                .is_some_and(|m| m.switches() >= action::MALLORY_MAX_ROLE_SWITCHES);
+                .is_some_and(|m| m.switches() >= fault::MALLORY_MAX_ROLE_SWITCHES);
             let legal =
-                action::legal_mask(node0_crashed, byz, node0_amnesiac, role_switches_exhausted);
+                fault::legal_mask(node0_crashed, byz, node0_amnesiac, role_switches_exhausted);
 
             // (b)/(c)/(d) Current abstract state is `state`; select under the
             // legal mask. Learned consults the campaign; Random does not.
             let action_id = match chooser {
-                Chooser::Learned => policy::campaign(action::N_ACTIONS)
+                Chooser::Learned => policy::campaign(fault::N_FAULTS)
                     .lock()
                     .policy
                     .select(state, &legal, &mut context),
                 Chooser::Random => select_uniform_legal(&legal, &mut context),
             };
-            let action = action::Action::from_id(action_id);
-            // The stable-order contract: the resolved action must project back to
+            let fault = fault::Fault::from_id(action_id);
+            // The stable-order contract: the resolved fault must project back to
             // the selected column, so a broken catalog mapping is caught here
             // rather than mislabeling a Q-table update.
-            debug_assert_eq!(action.id(), action_id, "catalog id round-trip");
+            debug_assert_eq!(fault.id(), action_id, "catalog id round-trip");
 
             // (e)/(f) Sample concrete params and enact. A topology fault goes
             // through the sole topology authority (`apply_partition` panics on an
@@ -1045,19 +1044,19 @@ fn run_inner<P: Simplex>(
             // never stack (v1 contract).
             //
             // The step's clock starts HERE so the observation window is measured from
-            // the action's start: a restart sleeps its downtime inside enact, and
+            // the fault's start: a restart sleeps its downtime inside enact, and
             // folding that into the window keeps every step exactly one window long
             // (F6) rather than a restart observing downtime + window.
             let step_start = context.current();
             // Exclude node 0 as a packet target when it has no live pump / sniffer:
             // a byzantine role owns it (raw channels) or it is crash-stopped.
-            let plan = action.sample(&mut context, byz || node0_crashed);
+            let plan = fault.sample(&mut context, byz || node0_crashed);
             let params = plan.describe();
             match &plan {
-                action::FaultPlan::None => {}
-                action::FaultPlan::IsolateByzantine => topology.isolate_byzantine().await,
-                action::FaultPlan::Partition(sp) => topology.partition(sp).await,
-                action::FaultPlan::PacketDelay {
+                fault::FaultPlan::None => {}
+                fault::FaultPlan::IsolateByzantine => topology.isolate_byzantine().await,
+                fault::FaultPlan::Partition(sp) => topology.partition(sp).await,
+                fault::FaultPlan::PacketDelay {
                     node,
                     channel,
                     per_packet,
@@ -1068,7 +1067,7 @@ fn run_inner<P: Simplex>(
                         per_packet: *per_packet,
                     },
                 }),
-                action::FaultPlan::PacketLoss {
+                fault::FaultPlan::PacketLoss {
                     node,
                     channel,
                     drop_count,
@@ -1079,7 +1078,7 @@ fn run_inner<P: Simplex>(
                         drop_count: *drop_count,
                     },
                 }),
-                action::FaultPlan::PacketCorrupt {
+                fault::FaultPlan::PacketCorrupt {
                     node,
                     channel,
                     count,
@@ -1094,7 +1093,7 @@ fn run_inner<P: Simplex>(
                         mask: *mask,
                     },
                 }),
-                action::FaultPlan::PacketDuplicate {
+                fault::FaultPlan::PacketDuplicate {
                     node,
                     channel,
                     extra,
@@ -1103,7 +1102,7 @@ fn run_inner<P: Simplex>(
                     channel: *channel,
                     kind: network::PacketFaultKind::Duplicate { extra: *extra },
                 }),
-                action::FaultPlan::PacketReorder {
+                fault::FaultPlan::PacketReorder {
                     node,
                     channel,
                     buffer,
@@ -1112,7 +1111,7 @@ fn run_inner<P: Simplex>(
                     channel: *channel,
                     kind: network::PacketFaultKind::Reorder { buffer: *buffer },
                 }),
-                action::FaultPlan::CrashStop => {
+                fault::FaultPlan::CrashStop => {
                     // Crash-stop the faultable identity PERMANENTLY (but NOT terminal):
                     // abort+await both handles so the old engine/application tasks can
                     // never send again. Node 0 stays `Crashed` for the rest of the
@@ -1124,7 +1123,7 @@ fn run_inner<P: Simplex>(
                     // topology / packet layers are untouched (no heal below).
                     lifecycle::crash_stop(&mut managed[0]).await;
                 }
-                action::FaultPlan::CrashRestartDurable => {
+                fault::FaultPlan::CrashRestartDurable => {
                     // Crash then durably restart the faultable identity in place on
                     // its existing partition. Not terminal: the node replays its
                     // journal and catches up via resolver backfill, and the episode
@@ -1144,7 +1143,7 @@ fn run_inner<P: Simplex>(
                     )
                     .await;
                 }
-                action::FaultPlan::AmnesiaRestart => {
+                fault::FaultPlan::AmnesiaRestart => {
                     // Crash then restart the faultable identity on a FRESH (empty)
                     // partition with a clean-slate reporter: it forgets its durable
                     // state (including signed votes) and becomes Amnesiac -- Byzantine
@@ -1165,7 +1164,7 @@ fn run_inner<P: Simplex>(
                     )
                     .await;
                 }
-                action::FaultPlan::SetRole(new_role) => {
+                fault::FaultPlan::SetRole(new_role) => {
                     // Swap node 0's active Byzantine profile via the multiplexer:
                     // abort+await the live actor, re-register node 0's channels, and
                     // spawn the new profile. `current_role` then keys the role region
@@ -1192,7 +1191,7 @@ fn run_inner<P: Simplex>(
 
             // (g) Reactive step boundary: wait for the first genuinely new honest
             // finalization (a live-correct node past `baseline`) or the deterministic
-            // per-action step timeout (the fault suppressed progress).
+            // per-fault step timeout (the fault suppressed progress).
             let step_deadline = step_start + MALLORY_STEP_TIMEOUT;
             let boundary = wait_for_step_boundary(
                 &mut context,
@@ -1238,7 +1237,7 @@ fn run_inner<P: Simplex>(
                 .collect();
             let effect_state = state::state_descriptor::<P>(&effect_reporters, n) ^ tag;
             let reward = if matches!(chooser, Chooser::Learned) {
-                let campaign = policy::campaign(action::N_ACTIONS);
+                let campaign = policy::campaign(fault::N_FAULTS);
                 let mut c = campaign.lock();
                 let r = c.reward(effect_state, effect_hb);
                 episode_reward += r;
@@ -1260,16 +1259,16 @@ fn run_inner<P: Simplex>(
             // that matched nothing is `NoEffect`, a lifecycle/topology fault is always
             // `Applied`. NoFault installs nothing, so there is nothing to heal.
             let (healed, matched_log, enactment) = match &plan {
-                action::FaultPlan::None => ("none", "n/a".to_string(), Enactment::NoEffect),
-                action::FaultPlan::IsolateByzantine | action::FaultPlan::Partition(_) => {
+                fault::FaultPlan::None => ("none", "n/a".to_string(), Enactment::NoEffect),
+                fault::FaultPlan::IsolateByzantine | fault::FaultPlan::Partition(_) => {
                     topology.heal().await;
                     ("mesh", "n/a".to_string(), Enactment::Applied)
                 }
-                action::FaultPlan::PacketDelay { node, channel, .. }
-                | action::FaultPlan::PacketLoss { node, channel, .. }
-                | action::FaultPlan::PacketCorrupt { node, channel, .. }
-                | action::FaultPlan::PacketDuplicate { node, channel, .. }
-                | action::FaultPlan::PacketReorder { node, channel, .. } => {
+                fault::FaultPlan::PacketDelay { node, channel, .. }
+                | fault::FaultPlan::PacketLoss { node, channel, .. }
+                | fault::FaultPlan::PacketCorrupt { node, channel, .. }
+                | fault::FaultPlan::PacketDuplicate { node, channel, .. }
+                | fault::FaultPlan::PacketReorder { node, channel, .. } => {
                     let matched = packet_cell.matched();
                     flush_pump_and_wait(&flush_senders, *node, *channel).await;
                     packet_cell.clear();
@@ -1280,16 +1279,16 @@ fn run_inner<P: Simplex>(
                         enactment_of(&plan, matched),
                     )
                 }
-                action::FaultPlan::CrashStop
-                | action::FaultPlan::CrashRestartDurable
-                | action::FaultPlan::AmnesiaRestart => {
+                fault::FaultPlan::CrashStop
+                | fault::FaultPlan::CrashRestartDurable
+                | fault::FaultPlan::AmnesiaRestart => {
                     // A lifecycle fault is enacted against the managed validator,
                     // not the network: there is no topology or packet fault to heal
                     // (re-meshing links does not un-crash a node). The episode-end
                     // heal still runs so a restarted node can catch up.
                     ("lifecycle", "n/a".to_string(), Enactment::Applied)
                 }
-                action::FaultPlan::SetRole(_) => {
+                fault::FaultPlan::SetRole(_) => {
                     // A role switch is enacted against the multiplexer and PERSISTS:
                     // there is no transient fault to heal (the new profile keeps
                     // running into the next step).
@@ -1309,7 +1308,7 @@ fn run_inner<P: Simplex>(
             };
 
             // (j) NEXT-decision Q-state, captured POST-heal + settle: the environment in
-            // which the next action is selected. The horizon tag folds in the remaining
+            // which the next fault is selected. The horizon tag folds in the remaining
             // container budget AFTER this step (never into the effect novelty above).
             let remaining_next =
                 remaining_bucket(finalization_budget, observed_finalizations.len());
@@ -1317,21 +1316,21 @@ fn run_inner<P: Simplex>(
 
             // (k) TD update (Learned only, `reward` already computed pre-heal). Terminal
             // when the episode ends here (no bootstrap); otherwise bootstrap over the
-            // actions legal at NEXT, recomputed from node 0's POST-enact lifecycle and
+            // faults legal at NEXT, recomputed from node 0's POST-enact lifecycle and
             // switch count (so an amnesia restart or a switch-cap hit does not bootstrap
             // over now-illegal columns). `select` above used the pre-enact `legal`.
             let reward_log = match reward {
                 Some(r) => {
                     let role_switches_exhausted_next = multiplexer
                         .as_ref()
-                        .is_some_and(|m| m.switches() >= action::MALLORY_MAX_ROLE_SWITCHES);
-                    let legal_next = action::legal_mask(
+                        .is_some_and(|m| m.switches() >= fault::MALLORY_MAX_ROLE_SWITCHES);
+                    let legal_next = fault::legal_mask(
                         node0_crashed_now,
                         byz,
                         node0_amnesiac_now,
                         role_switches_exhausted_next,
                     );
-                    let campaign = policy::campaign(action::N_ACTIONS);
+                    let campaign = policy::campaign(fault::N_FAULTS);
                     let mut c = campaign.lock();
                     if ended.is_some() {
                         c.policy.learn_terminal(state, action_id, r);
@@ -1344,7 +1343,7 @@ fn run_inner<P: Simplex>(
             };
 
             // (l) Log the full transition. `boundary`/`trigger_*` say why the step
-            // ended; `baseline` is the pre-action honest frontier; `episode_remaining`
+            // ended; `baseline` is the pre-fault honest frontier; `episode_remaining`
             // and `episode_end` expose the budget. `state_desc` is the pre-heal fault
             // effect; `next_state` the post-heal bootstrap state. `generation` /
             // `lifecycle0` track node 0's incarnation and lifecycle ("unmanaged" under a
@@ -1360,7 +1359,7 @@ fn run_inner<P: Simplex>(
             let containers_remaining =
                 finalization_budget.saturating_sub(observed_finalizations.len());
             log::push(format!(
-                "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} action={action:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} next_state={next_state:#018x} state_desc={effect_state:#018x} reward={reward_log} boundary={boundary_label} trigger_node={trigger_node_log} trigger_view={trigger_view_log} baseline={baseline} containers_remaining={containers_remaining} episode_end={} heal={healed} matched={matched_log}",
+                "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} fault={fault:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} next_state={next_state:#018x} state_desc={effect_state:#018x} reward={reward_log} boundary={boundary_label} trigger_node={trigger_node_log} trigger_view={trigger_view_log} baseline={baseline} containers_remaining={containers_remaining} episode_end={} heal={healed} matched={matched_log}",
                 current_role.label(),
                 ended.unwrap_or("false"),
             ));
@@ -1570,8 +1569,8 @@ mod tests {
         // Both selection paths must respect the legal mask. The masked-softmax
         // path is exercised over a seeded Q-row; the uniform path over the same
         // mask. Pure (no runtime), so this stays in the fast suite.
-        let legal = action::legal_mask(false, false, false, false);
-        let mut policy = policy::QPolicy::new(action::N_ACTIONS);
+        let legal = fault::legal_mask(false, false, false, false);
+        let mut policy = policy::QPolicy::new(fault::N_FAULTS);
         policy.learn_terminal(0, 0, 5.0);
         let mut rng = FuzzRng::new(vec![0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15]);
         for _ in 0..64 {
@@ -1669,7 +1668,7 @@ mod tests {
     fn enactment_accounts_lifecycle_applied_and_ineffective_packet_noeffect() {
         // A lifecycle fault always logs Applied; a packet fault that matched no packet
         // logs NoEffect; NoFault is NoEffect.
-        let loss = action::FaultPlan::PacketLoss {
+        let loss = fault::FaultPlan::PacketLoss {
             node: 1,
             channel: crate::SniffChannel::Vote,
             drop_count: 3,
@@ -1685,10 +1684,10 @@ mod tests {
             "a packet fault that matched nothing is NoEffect"
         );
         for plan in [
-            action::FaultPlan::CrashStop,
-            action::FaultPlan::CrashRestartDurable,
-            action::FaultPlan::AmnesiaRestart,
-            action::FaultPlan::IsolateByzantine,
+            fault::FaultPlan::CrashStop,
+            fault::FaultPlan::CrashRestartDurable,
+            fault::FaultPlan::AmnesiaRestart,
+            fault::FaultPlan::IsolateByzantine,
         ] {
             assert_eq!(
                 enactment_of(&plan, false),
@@ -1697,7 +1696,7 @@ mod tests {
             );
         }
         assert_eq!(
-            enactment_of(&action::FaultPlan::None, false),
+            enactment_of(&fault::FaultPlan::None, false),
             Enactment::NoEffect,
             "NoFault is NoEffect"
         );
@@ -1708,13 +1707,13 @@ mod tests {
         // The runner recomputes the NEXT-state legal mask from node 0's POST-enact
         // lifecycle and passes THAT as the TD bootstrap mask. After an amnesia restart
         // that mask must exclude the three lifecycle columns the pre-enact running mask
-        // includes, so the bootstrap max cannot span a now-illegal lifecycle action.
-        let running = action::legal_mask(false, false, false, false);
-        let amnesiac = action::legal_mask(false, false, true, false);
+        // includes, so the bootstrap max cannot span a now-illegal lifecycle fault.
+        let running = fault::legal_mask(false, false, false, false);
+        let amnesiac = fault::legal_mask(false, false, true, false);
         for id in [
-            action::Action::CrashStop.id(),
-            action::Action::CrashRestartDurable.id(),
-            action::Action::AmnesiaRestart.id(),
+            fault::Fault::CrashStop.id(),
+            fault::Fault::CrashRestartDurable.id(),
+            fault::Fault::AmnesiaRestart.id(),
         ] {
             assert!(
                 running[id],
@@ -1727,12 +1726,12 @@ mod tests {
         }
         // The two masks differ EXACTLY on the lifecycle columns, so the fix changes
         // the bootstrap only for amnesia and leaves every other step untouched.
-        for id in 0..action::N_ACTIONS {
+        for id in 0..fault::N_FAULTS {
             let is_lifecycle = matches!(
-                action::Action::from_id(id),
-                action::Action::CrashStop
-                    | action::Action::CrashRestartDurable
-                    | action::Action::AmnesiaRestart
+                fault::Fault::from_id(id),
+                fault::Fault::CrashStop
+                    | fault::Fault::CrashRestartDurable
+                    | fault::Fault::AmnesiaRestart
             );
             assert_eq!(
                 running[id] != amnesiac[id],
@@ -1756,7 +1755,7 @@ mod tests {
     #[test]
     #[ignore]
     fn learned_random_ab_baseline() {
-        policy::reset_campaign(action::N_ACTIONS);
+        policy::reset_campaign(fault::N_FAULTS);
         adversary::reset_role_bandit();
         for seed in [1u64, 2, 3] {
             let (learned_ok, learned_log) = mallory_trace(mallory_input(seed), Chooser::Learned);
@@ -1814,13 +1813,13 @@ mod tests {
     #[test]
     #[ignore]
     fn run_mallory_smoke_completes_and_learns() {
-        policy::reset_campaign(action::N_ACTIONS);
+        policy::reset_campaign(fault::N_FAULTS);
         adversary::reset_role_bandit();
         for seed in [1u64, 2, 3] {
             run_with::<SimplexId>(mallory_input(seed), Chooser::Learned, TEST_STEPS);
         }
         assert!(
-            !policy::campaign(action::N_ACTIONS).lock().policy.is_empty(),
+            !policy::campaign(fault::N_FAULTS).lock().policy.is_empty(),
             "learned episodes must populate the campaign Q-table"
         );
         assert!(
@@ -1865,7 +1864,7 @@ mod tests {
     #[test]
     #[ignore]
     fn learned_set_role_learns_a_nonzero_qvalue() {
-        policy::reset_campaign(action::N_ACTIONS);
+        policy::reset_campaign(fault::N_FAULTS);
         adversary::reset_role_bandit();
         for seed in 1u64..=8 {
             run_inner::<SimplexId>(
@@ -1876,10 +1875,10 @@ mod tests {
             );
         }
         assert!(
-            !policy::campaign(action::N_ACTIONS)
+            !policy::campaign(fault::N_FAULTS)
                 .lock()
                 .policy
-                .action_column_is_empty(action::Action::SetRole.id()),
+                .action_column_is_empty(fault::Fault::SetRole.id()),
             "a learned byzantine campaign must learn a nonzero (state, SetRole) Q-value"
         );
     }

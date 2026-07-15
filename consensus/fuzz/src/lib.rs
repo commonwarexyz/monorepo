@@ -2756,18 +2756,18 @@ impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
 }
 
-/// **Mallory** - the dedicated adaptive-adversary runner over its own action catalog,
+/// **Mallory** - the dedicated adaptive-adversary runner over its own fault catalog,
 /// bounded by a whole-episode CONTAINER (distinct-finalization) budget.
 ///
 /// Each episode selects one adversary environment for the faultable identity
 /// (node 0): honest, or one of six Byzantine profiles (Disrupter, Conflicter,
 /// Nuller, Equivocator, Impersonator, Outdated). It then drives a reactive loop of
 /// observe-orient-decide-act steps. Each step observes the honest happens-before
-/// fingerprint (the Q-state) and protocol-state descriptor, then selects an action
-/// from the stable catalog (`mallory::action`) under a legal mask. The action is a
+/// fingerprint (the Q-state) and protocol-state descriptor, then selects a fault
+/// from the stable catalog (`mallory::fault`) under a legal mask. The fault is a
 /// network (isolation, partition), packet (delay/loss/corrupt/duplicate/reorder), or
 /// lifecycle (crash-stop, durable restart, amnesia restart) fault. It applies the
-/// action, then reacts: the step ends on the first new honest finalization past its
+/// fault, then reacts: the step ends on the first new honest finalization past its
 /// baseline, or a deterministic per-action timeout if the fault suppressed progress.
 /// The fault heals and (for the learned chooser) a temporal-difference update rewards
 /// novel state and happens-before fingerprints (the pre-heal fault effect) via the
