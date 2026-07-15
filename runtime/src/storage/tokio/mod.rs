@@ -4,7 +4,7 @@ use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
-use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
+use std::{io::ErrorKind, ops::RangeInclusive, path::PathBuf, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -199,7 +199,10 @@ impl crate::Storage for Storage {
             let blob_path = path.join(hex(name));
             fs::remove_file(blob_path)
                 .await
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+                .map_err(|e| match e.kind() {
+                    ErrorKind::NotFound => Error::BlobMissing(partition.into(), hex(name)),
+                    _ => Error::BlobRemoveFailed(partition.into(), hex(name), e.into()),
+                })?;
 
             // Sync the partition directory to ensure the removal is durable.
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
@@ -209,7 +212,10 @@ impl crate::Storage for Storage {
         } else {
             fs::remove_dir_all(&path)
                 .await
-                .map_err(|_| Error::PartitionMissing(partition.into()))?;
+                .map_err(|e| match e.kind() {
+                    ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                    _ => Error::PartitionRemovalFailed(partition.into(), e.into()),
+                })?;
 
             // Sync the storage directory to ensure the removal is durable.
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
@@ -405,6 +411,45 @@ mod tests {
 
         // Cleanup
         drop(blob3);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_remove_distinguishes_missing_from_failed() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_remove_errors_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+        let storage = Storage::new(config, test_pool());
+
+        // A genuinely absent target is reported as missing.
+        std::fs::create_dir_all(storage_directory.join("partition")).unwrap();
+        let err = storage
+            .remove("partition", Some(b"missing"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::BlobMissing(_, _)), "{err:?}");
+        let err = storage.remove("absent", None).await.unwrap_err();
+        assert!(matches!(err, Error::PartitionMissing(_)), "{err:?}");
+
+        // A removal that fails with the target still present must not be
+        // reported as missing. A directory at the blob path makes
+        // `remove_file` fail with a non-NotFound error.
+        std::fs::create_dir_all(storage_directory.join("partition").join(hex(b"blob"))).unwrap();
+        let err = storage
+            .remove("partition", Some(b"blob"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::BlobRemoveFailed(_, _, _)), "{err:?}");
+
+        // A file at the partition path makes `remove_dir_all` fail the same
+        // way.
+        std::fs::write(storage_directory.join("filepart"), b"x").unwrap();
+        let err = storage.remove("filepart", None).await.unwrap_err();
+        assert!(
+            matches!(err, Error::PartitionRemovalFailed(_, _)),
+            "{err:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
