@@ -152,6 +152,24 @@ where
     }
 }
 
+impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            db: self.db.clone(),
+        }
+    }
+}
+
 impl<F, E, V, C, H, S> KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,

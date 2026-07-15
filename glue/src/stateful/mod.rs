@@ -272,6 +272,9 @@ where
     /// a crash after this hook runs but before the marshal acknowledgement is
     /// durable may cause the same block to be reported again after restart.
     ///
+    /// This hook may run on a clone of the application. Share state needed by
+    /// other callbacks behind a handle.
+    ///
     /// # Panics
     ///
     /// Implementations should panic if post-finalization maintenance fails.
