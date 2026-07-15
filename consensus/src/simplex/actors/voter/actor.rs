@@ -1096,6 +1096,12 @@ impl<
                     self.state.set_certify_handle(view, handle);
                 }
 
+                // Prune views below the activity floor. To lower view latency,
+                // this runs after the automaton dispatches above so pruning
+                // overlaps proposal building and verification instead of
+                // delaying them.
+                self.prune_views().await;
+
                 // Prepare waiters
                 let propose_wait = Waiter(&mut pending_propose);
                 let verify_wait = Waiter(&mut pending_verify);
@@ -1219,10 +1225,6 @@ impl<
                 // This runs after notify so the finalization broadcast and the
                 // report into the application still nest under the view span.
                 self.state.close_decided_spans();
-
-                // After sending all required messages, prune any views
-                // we no longer need
-                self.prune_views().await;
 
                 // Update the batcher if we have moved to a new view
                 let current_view = self.state.current_view();
