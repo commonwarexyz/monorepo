@@ -2561,7 +2561,8 @@ mod tests {
         }
         assert_eq!(index.keys(), 1);
         assert_eq!(index.items(), ITEMS);
-        assert_eq!(index.get(b"").count(), ITEMS);
+        let expected: Vec<u64> = (0..ITEMS as u64).collect();
+        assert_values(index, b"", &expected);
     }
 
     #[test_traced]
