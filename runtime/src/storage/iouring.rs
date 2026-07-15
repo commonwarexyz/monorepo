@@ -145,9 +145,17 @@ impl crate::Storage for Storage {
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
         let (blob_version, logical_len) = if Header::missing(raw_len) {
-            // New (or corrupted) blob - truncate and write header with latest version
+            // New or partially-created blob: reset it and write a fresh header.
+            // Truncate to *empty* before writing the header (rather than extending to
+            // header size first and then writing the magic), so blob creation is
+            // crash-atomic. If an unclean shutdown interrupts this, the file is left
+            // either empty or shorter than a header, both of which this branch treats
+            // as new and rewrites on the next open. Extending to header size first and
+            // then writing the magic would instead leave a header-sized, all-zero file
+            // if the process died in between, which the "existing blob" branch below
+            // rejects as corrupt.
             let (header, blob_version) = Header::new(&versions);
-            file.set_len(Header::SIZE_U64)
+            file.set_len(0)
                 .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
             file.seek(SeekFrom::Start(0))
                 .map_err(|_| Error::WriteFailed)?;
