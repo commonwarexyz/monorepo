@@ -29,7 +29,7 @@
 //!
 //! - [`Journal`] tracks which positions are readable (`bounds`), maps each position to a blob
 //!   and byte offset, and remembers which blobs have writes that are not yet fsynced
-//!   (`dirty_from_blob`) so commit/sync only fsync what changed.
+//!   (`dirty_from_blob`) so sync only fsyncs what changed.
 //!
 //! - `Writable` owns the files: the contiguous sealed blobs plus the one writable tail.
 //!
@@ -61,7 +61,7 @@
 //! # Consistency
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
-//! to determine when to force pending data to be durably written using `commit` or `sync`.
+//! to determine when to force pending data to be durably written using `sync`.
 //!
 //! # Pruning
 //!
@@ -297,7 +297,7 @@ pub struct Journal<E: Context, A> {
     /// The readable positions; `bounds.end` is the next append position.
     bounds: Range<u64>,
 
-    /// Earliest blob modified since the last `commit()` or `sync()`.
+    /// Earliest blob modified since the last `sync()`.
     dirty_from_blob: Option<u64>,
 
     /// The maximum number of items per blob.
@@ -585,38 +585,21 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.blobs.sync_from(start_blob).await
     }
 
-    /// Stage the durability of every dirty blob with `batch`.
+    /// Stage the durability of every dirty blob and the checkpoint's pruning
+    /// boundary with `batch`, so blob data and the boundary record land in
+    /// ONE batch.
     ///
     /// Dirty tracking resets immediately: the caller must apply the batch
     /// (storage failures are fatal, so an abandoned batch has no recovery
     /// path anyway).
-    pub(super) async fn commit_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
+    pub(super) async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
         if let Some(start_blob) = self.dirty_from_blob {
             self.blobs.sync_from_into(start_blob, batch).await?;
             self.dirty_from_blob = None;
         }
-        Ok(())
-    }
-
-    /// [Self::commit_into], also staging the checkpoint's pruning boundary
-    /// so blob data and the boundary record land in ONE batch.
-    pub(super) async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
-        self.commit_into(batch).await?;
         self.checkpoint
             .persist_into(self.items_per_blob.get(), self.bounds.start, batch)
             .await
-    }
-
-    /// Durably persists the current state of the structure.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        let _timer = self.metrics.commit_timer();
-        self.metrics.commit_calls.inc();
-        if self.dirty_from_blob.is_none() {
-            return Ok(());
-        }
-        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
-        self.commit_into(&mut batch).await?;
-        batch.apply_sync().await.map_err(Error::Runtime)
     }
 
     /// Durably persist the current state of the structure, including the checkpoint's pruning
@@ -787,7 +770,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Warnings
     ///
-    /// * This operation is not guaranteed to survive restarts until `commit()` or `sync()` is
+    /// * This operation is not guaranteed to survive restarts until `sync()` is
     ///   called.
     /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
     ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
@@ -1237,10 +1220,6 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         Self::rewind(self, size).await
-    }
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        Self::commit(self).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -2392,7 +2371,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rewind_commit_reopen() {
+    fn test_fixed_journal_rewind_sync_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -2409,7 +2388,7 @@ mod tests {
             journal.sync().await.expect("failed to sync journal");
 
             journal.rewind(7).await.expect("failed to rewind journal");
-            journal.commit().await.expect("failed to commit journal");
+            journal.sync().await.expect("failed to sync journal");
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -2428,11 +2407,11 @@ mod tests {
         });
     }
 
-    /// A crash after rewind but before commit recovers an intermediate state: blobs above the
+    /// A crash after rewind but before sync recovers an intermediate state: blobs above the
     /// rewind target were durably removed, but the target blob's truncation was not yet synced.
     /// The recovered size lands between the rewind target and the pre-rewind size.
     #[test_traced]
-    fn test_fixed_journal_rewind_crash_before_commit() {
+    fn test_fixed_journal_rewind_crash_before_sync() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -2466,7 +2445,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rewind_append_commit_reopen() {
+    fn test_fixed_journal_rewind_append_sync_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -2489,7 +2468,7 @@ mod tests {
                     .await
                     .expect("failed to append data");
             }
-            journal.commit().await.expect("failed to commit journal");
+            journal.sync().await.expect("failed to sync journal");
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -3336,7 +3315,7 @@ mod tests {
             for i in 0..5u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.commit().await.unwrap();
+            journal.sync().await.unwrap();
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -3387,7 +3366,7 @@ mod tests {
             for i in 0..3u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.commit().await.unwrap();
+            journal.sync().await.unwrap();
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -3396,34 +3375,6 @@ mod tests {
             let bounds = journal.bounds();
             assert_eq!(bounds.start, 7);
             assert_eq!(bounds.end, 10);
-            journal.destroy().await.unwrap();
-        });
-    }
-    #[test_traced]
-    fn test_fixed_journal_sync_crash_meta_mid_to_aligned_becomes_stale() {
-        // Old meta = Some(mid), new boundary = aligned.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let mut journal =
-                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
-            for i in 0..10u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            assert_eq!(journal.size(), 17);
-            journal.prune(10).await.unwrap();
-
-            journal.commit().await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.start, 10);
-            assert_eq!(bounds.end, 17);
             journal.destroy().await.unwrap();
         });
     }
@@ -3451,10 +3402,10 @@ mod tests {
         });
     }
 
-    /// Prune flushes every dirty blob and clears the dirty state, so a commit issued right
+    /// Prune flushes every dirty blob and clears the dirty state, so a sync issued right
     /// after must not attempt to sync the removed blobs.
     #[test_traced]
-    fn test_fixed_journal_commit_after_prune() {
+    fn test_fixed_journal_sync_after_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -3468,9 +3419,9 @@ mod tests {
 
             journal.prune(5).await.unwrap();
             journal
-                .commit()
+                .sync()
                 .await
-                .expect("commit should not try to sync pruned blobs");
+                .expect("sync should not try to sync pruned blobs");
             assert_eq!(journal.bounds(), 5..12);
             journal.destroy().await.unwrap();
         });
@@ -4077,7 +4028,6 @@ mod tests {
             let items: Vec<_> = (0..5).map(test_digest).collect();
             journal.append_many(Many::Flat(&items)).await.unwrap();
             journal.append(&test_digest(5)).await.unwrap();
-            journal.commit().await.unwrap();
             journal.sync().await.unwrap();
             journal.snapshot().await.unwrap().read(0).await.unwrap();
             journal.snapshot().await.unwrap().try_read_sync(0).unwrap();
@@ -4102,13 +4052,11 @@ mod tests {
                 "fixed_metrics_read_calls_total 1",
                 "fixed_metrics_read_many_calls_total 1",
                 "fixed_metrics_items_read_total 5",
-                "fixed_metrics_commit_calls_total 1",
                 "fixed_metrics_sync_calls_total 1",
                 "fixed_metrics_append_duration_count 1",
                 "fixed_metrics_append_many_duration_count 1",
                 "fixed_metrics_read_duration_count 0",
                 "fixed_metrics_read_many_duration_count 1",
-                "fixed_metrics_commit_duration_count 1",
                 "fixed_metrics_sync_duration_count 1",
                 "fixed_metrics_cache_hits_total",
                 "fixed_metrics_cache_misses_total",

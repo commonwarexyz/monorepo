@@ -352,14 +352,14 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Durably persist the journal. This is faster than `sync()` but does not guarantee that the
-    /// Merkle structure is durably persisted, meaning recovery may be required on startup in the
-    /// event of a crash.
+    /// Durably persist the journal's items without persisting the Merkle structure, which is
+    /// re-derived from the journal on startup. This is faster than [Self::sync] (one storage
+    /// commit instead of two) at the cost of that realignment work on reopen.
     pub async fn commit(&mut self) -> Result<(), Error<F>> {
         // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
         // limit memory bloat.
         try_join!(
-            self.journal.commit().map_err(Error::Journal),
+            self.journal.sync().map_err(Error::Journal),
             self.merkle.flush().map_err(Error::Merkle)
         )?;
 
@@ -558,10 +558,10 @@ where
         // Sync the Merkle structure before pruning the journal, otherwise its last element could
         // end up behind the journal's first element after a crash, and there would be no way to
         // replay the items between the structure's last element and the journal's first element.
-        // Commit the journal alongside: the prune target may be justified by a buffered append
+        // Sync the journal alongside: the prune target may be justified by a buffered append
         // (e.g. a commit operation), and pruning does not guarantee buffered appends are durable.
         try_join!(
-            self.journal.commit().map_err(Error::Journal),
+            self.journal.sync().map_err(Error::Journal),
             self.merkle.sync().map_err(Error::Merkle)
         )?;
 
@@ -682,7 +682,8 @@ where
         Ok(())
     }
 
-    /// Durably persist the journal, ensuring no recovery is required on startup.
+    /// Durably persist the journal's items and the Merkle structure, ensuring no realignment
+    /// is required on startup.
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
@@ -950,10 +951,6 @@ where
 
     async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
         self.rewind(size).await.map_err(Self::map_error)
-    }
-
-    async fn commit(&mut self) -> Result<(), JournalError> {
-        Self::commit(self).await.map_err(Self::map_error)
     }
 
     async fn sync(&mut self) -> Result<(), JournalError> {

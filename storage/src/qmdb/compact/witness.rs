@@ -112,16 +112,6 @@ impl<F: Family, D: Digest> VerifiedWitness<F, D> {
 /// The contiguous variable journal that backs a witness [`Store`].
 pub(crate) type Journal<E, F, D> = variable::Journal<E, Witness<F, D>>;
 
-/// How a persisted witness entry is made durable.
-#[derive(Clone, Copy)]
-enum Durability {
-    /// Commit the journal: appended entries survive a crash, but journal recovery may be
-    /// required on reopen.
-    Commit,
-    /// Sync the journal and all of its metadata, minimizing recovery work on reopen.
-    Sync,
-}
-
 /// A contiguous journal plus an in-memory cache of the tip witness.
 pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     journal: Journal<E, F, D>,
@@ -170,67 +160,20 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         *self.tip_witness.write() = witness;
     }
 
-    /// Persist the current compact state as a new witness journal entry, committing the journal
-    /// so the entry survives a crash. Journal recovery may be required on reopen.
+    /// Persist the current compact state as a new witness journal entry, syncing the journal so
+    /// the entry survives a crash.
     ///
     /// No-op if the cached witness already matches the Merkle (the witness is already durable).
     /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to its
     /// frontier, and refreshes the cache.
-    pub(crate) async fn commit<H, S>(
-        &mut self,
-        merkle: &compact::Merkle<F, D, S>,
-        inactivity_floor_loc: Location<F>,
-        last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
-    ) -> Result<(), Error<F>>
-    where
-        H: Hasher<Digest = D>,
-        S: Strategy,
-    {
-        self.persist::<H, S>(
-            merkle,
-            inactivity_floor_loc,
-            last_commit_op_bytes,
-            Durability::Commit,
-        )
-        .await
-    }
-
-    /// Persist the current compact state as a new witness journal entry, syncing the journal and
-    /// all of its metadata to minimize recovery work on reopen.
     ///
-    /// No-op if the cached witness already matches the Merkle (the witness is already durable).
-    /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to its
-    /// frontier, and refreshes the cache.
+    /// A pending import is cleared only after the entry is durable, so an interrupted journal
+    /// replacement is retried by the next persist.
     pub(crate) async fn sync<H, S>(
         &mut self,
         merkle: &compact::Merkle<F, D, S>,
         inactivity_floor_loc: Location<F>,
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
-    ) -> Result<(), Error<F>>
-    where
-        H: Hasher<Digest = D>,
-        S: Strategy,
-    {
-        self.persist::<H, S>(
-            merkle,
-            inactivity_floor_loc,
-            last_commit_op_bytes,
-            Durability::Sync,
-        )
-        .await
-    }
-
-    /// Shared body of [`Self::commit`] and [`Self::sync`]: stage what must be persisted, append
-    /// it, make it durable per `durability`, and install it as the cached tip.
-    ///
-    /// A pending import is cleared only after the entry is durable, so an interrupted journal
-    /// replacement is retried by the next persist.
-    async fn persist<H, S>(
-        &mut self,
-        merkle: &compact::Merkle<F, D, S>,
-        inactivity_floor_loc: Location<F>,
-        last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
-        durability: Durability,
     ) -> Result<(), Error<F>>
     where
         H: Hasher<Digest = D>,
@@ -243,10 +186,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             return Ok(());
         };
         self.journal.append(&verified.witness).await?;
-        match durability {
-            Durability::Commit => self.journal.commit().await?,
-            Durability::Sync => self.journal.sync().await?,
-        }
+        self.journal.sync().await?;
         self.import_pending.store(false, Ordering::Relaxed);
         merkle.prune_to_frontier();
         self.replace(verified);

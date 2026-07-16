@@ -287,7 +287,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     ///
     /// # Warnings
     ///
-    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    /// - This operation is not guaranteed to survive restarts until `sync` is called.
     ///
     /// # Errors
     ///
@@ -298,13 +298,7 @@ pub trait Mutable: Contiguous + Send + Sync {
 
     /// Durably persist the journal, guaranteeing the current state will survive a crash.
     ///
-    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-
-    /// Durably persist the journal, guaranteeing the current state will survive a crash, and that
-    /// no recovery will be needed on startup.
-    ///
-    /// This provides a stronger guarantee than [Self::commit] but may be slower.
+    /// All pending state (item data and any boundary records) lands in one atomic commit.
     fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Destroy the journal, removing all associated storage.
@@ -326,7 +320,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     ///
     /// # Warnings
     ///
-    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    /// - This operation is not guaranteed to survive restarts until `sync` is called.
     fn rewind_to<'a, P>(
         &'a mut self,
         mut predicate: P,

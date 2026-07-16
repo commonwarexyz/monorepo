@@ -324,8 +324,8 @@ where
 
         // The floor justifying the boundary may exist only in buffered operations (it
         // advances before its batch is durable), and pruning does not guarantee buffered
-        // appends are durable. Commit so the justification survives the prune.
-        self.log.commit().await?;
+        // appends are durable. Sync so the justification survives the prune.
+        self.log.sync().await?;
 
         // Prune the log. The log will prune at section boundaries, so the actual oldest retained
         // location may be less than requested.
@@ -503,7 +503,7 @@ where
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`] calls.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        self.log.commit().await.map_err(Into::into)
+        self.log.sync().await.map_err(Into::into)
     }
 }
 

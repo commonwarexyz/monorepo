@@ -49,10 +49,6 @@ pub(super) struct Metrics<E: Clock> {
     pub cache_misses: Counter,
     /// Items returned by read, read_many, try_read_sync, and try_read_many_sync.
     pub items_read: Counter,
-    /// Durable commit calls that do not fully sync all indexes.
-    pub commit_calls: Counter,
-    /// Duration of commit calls that do not fully sync all indexes.
-    commit_duration: Timed,
     /// Full sync calls.
     pub sync_calls: Counter,
     /// Duration of full sync calls.
@@ -112,12 +108,6 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
                 "items_read",
                 "Number of items returned by point reads, batch reads, and sync probes",
             ),
-            commit_calls: context.counter("commit_calls", "Number of commit calls"),
-            commit_duration: Timed::register(
-                &context,
-                "commit_duration",
-                "Duration of commit calls",
-            ),
             sync_calls: context.counter("sync_calls", "Number of sync calls"),
             sync_duration: Timed::register(
                 &context,
@@ -148,10 +138,6 @@ impl<E: Clock> Metrics<E> {
 
     pub(super) fn read_many_timer(&self) -> ScopedTimer<E> {
         self.read_many_duration.scoped(&self.clock)
-    }
-
-    pub(super) fn commit_timer(&self) -> ScopedTimer<E> {
-        self.commit_duration.scoped(&self.clock)
     }
 
     pub(super) fn sync_timer(&self) -> ScopedTimer<E> {

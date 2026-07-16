@@ -334,17 +334,14 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
 
     /// Durably persist the queue, guaranteeing the current state will survive a crash.
     ///
-    /// This does not persist acknowledgements. For a stronger guarantee that eliminates potential
-    /// recovery and prunes acknowledged items, use [Self::sync] instead.
+    /// Unlike [Self::sync], acknowledged items are not pruned.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        self.journal.commit().await?;
+        self.journal.sync().await?;
         Ok(())
     }
 
-    /// Durably persist the queue, guaranteeing the current state will survive a crash, and that
-    /// no recovery will be needed on startup.
-    ///
-    /// This also prunes acknowledged items.
+    /// Durably persist the queue, guaranteeing the current state will survive a crash, and
+    /// prune acknowledged items.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.journal.sync().await?;
         self.journal.prune(self.ack_floor).await?;

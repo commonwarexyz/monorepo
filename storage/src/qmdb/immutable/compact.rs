@@ -513,19 +513,14 @@ where
         Ok(start_loc..Location::new(batch.bounds.total_size))
     }
 
-    /// Durably persist the current db state to disk. This is faster than [`Self::sync`] but
-    /// reopen may need to replay the witness journal's tail to recover.
+    /// Durably persist the current db state to disk. Equivalent to [`Self::sync`], kept for
+    /// API parity with the non-compact variants (whose commit defers Merkle durability).
     #[tracing::instrument(name = "qmdb.immutable.compact.db.commit", level = "info", skip_all)]
     pub async fn commit(&mut self) -> Result<(), Error<F>> {
-        self.witness
-            .commit::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
-                Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
-            })
-            .await
+        self.sync().await
     }
 
-    /// Durably persist the current db state to disk, also persisting journal metadata to
-    /// minimize recovery work on reopen.
+    /// Durably persist the current db state to disk.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.sync", level = "info", skip_all)]
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
         self.witness

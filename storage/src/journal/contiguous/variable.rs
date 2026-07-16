@@ -285,7 +285,7 @@ impl<C> Config<C> {
 /// the durable offsets entries and durable data bytes always describe prefixes of one shared
 /// history:
 ///
-/// * Appends sync the data blob then the offsets blob at each rollover, and `commit`/`sync` sync
+/// * Appends sync the data blob then the offsets blob at each rollover, and `sync` stages
 ///   data before offsets, so either side may simply be ahead of the other.
 /// * `rewind` makes both truncations durable before returning, so post-rewind appends can never
 ///   pair stale entries with rewritten bytes (see [Journal::rewind]).
@@ -309,7 +309,7 @@ pub struct Journal<E: Context, V: Codec> {
     /// The readable positions; `bounds.end` is the next append position.
     bounds: Range<u64>,
 
-    /// Earliest data blob modified since the last `commit()` or `sync()`.
+    /// Earliest data blob modified since the last `sync()`.
     dirty_from_blob: Option<u64>,
 
     /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
@@ -1189,7 +1189,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// # Durability
     ///
     /// Unlike appends, a rewind is durable when this call returns. Appends sync at every blob
-    /// rollover, so if the truncations were deferred to `commit`/`sync`, a rollover after the
+    /// rollover, so if the truncations were deferred to `sync`, a rollover after the
     /// rewind could durably publish new entries over old data bytes (or vice versa) — a state
     /// init cannot tell apart from a consistent one. Making both truncations durable here keeps
     /// every crash state reconcilable from sizes alone.
@@ -1228,7 +1228,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // Durably rewind the offsets journal first: if the data truncation lands without it, the
         // surviving entries still describe the surviving data prefix, which init reconciles.
         self.offsets.rewind(size).await?;
-        self.offsets.commit().await?;
+        self.offsets.sync().await?;
 
         if discard_blob == self.blobs.tail_blob_index() {
             self.blobs.rewind_tail(discard_offset).await?;
@@ -1481,7 +1481,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // missing entries is about to be removed. One batch stages data before offsets,
         // matching the ordering every other durability path maintains on the fallback.
         let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
-        self.commit_into(&mut batch).await?;
+        self.sync_into(&mut batch).await?;
         batch.apply_sync().await.map_err(Error::Runtime)?;
 
         self.blobs.prune(min_blob).await?;
@@ -1513,41 +1513,27 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Stage the durability of dirty data blobs and the offsets journal
-    /// with `batch`: the whole batch commits atomically, so no crash can
-    /// separate data from offsets. Data is still staged before offsets so a
-    /// sequentially replayed batch (the test-only mock fallback) preserves
-    /// the data-then-offsets ordering that keeps durable offsets at or
-    /// behind durable data (which init repairs by truncating the unindexed
-    /// data suffix).
-    async fn commit_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
+    /// (including its checkpoint record) with `batch`: the whole batch
+    /// commits atomically, so no crash can separate data from offsets. Data
+    /// is still staged before offsets so a sequentially replayed batch (the
+    /// test-only mock fallback) preserves the data-then-offsets ordering
+    /// that keeps durable offsets at or behind durable data (which init
+    /// repairs by truncating the unindexed data suffix).
+    async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
         if let Some(start_blob) = self.dirty_from_blob {
             self.blobs.sync_from_into(start_blob, batch).await?;
             self.dirty_from_blob = None;
         }
-        self.offsets.commit_into(batch).await
+        self.offsets.sync_into(batch).await
     }
 
     /// Durably persist the journal: dirty data blobs and the offsets
     /// journal, one batch, one commit.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        let _timer = self.metrics.commit_timer();
-        self.metrics.commit_calls.inc();
-        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
-        self.commit_into(&mut batch).await?;
-        batch.apply_sync().await.map_err(Error::Runtime)
-    }
-
-    /// Like [Self::commit], but also persists the offsets journal's checkpoint (in the same
-    /// batch).
     pub async fn sync(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
-        if let Some(start_blob) = self.dirty_from_blob {
-            self.blobs.sync_from_into(start_blob, &mut batch).await?;
-            self.dirty_from_blob = None;
-        }
-        self.offsets.sync_into(&mut batch).await?;
+        self.sync_into(&mut batch).await?;
         batch.apply_sync().await.map_err(Error::Runtime)
     }
 
@@ -1728,7 +1714,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 "crash repair: rewinding offsets to durable data"
             );
             offsets.rewind(target).await?;
-            offsets.commit().await?;
+            offsets.sync().await?;
         }
 
         // Remove data blobs past the recovered tail, then truncate unindexed bytes: the last
@@ -1835,10 +1821,6 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::rewind(self, size).await
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
-        Self::commit(self).await
-    }
-
     async fn sync(&mut self) -> Result<(), Error> {
         Self::sync(self).await
     }
@@ -1894,7 +1876,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Test helper: Durably rewind the internal offsets journal (simulates crash scenario).
     pub(crate) async fn test_rewind_offsets(&mut self, position: u64) -> Result<(), Error> {
         self.offsets.rewind(position).await?;
-        self.offsets.commit().await
+        self.offsets.sync().await
     }
 
     /// Test helper: Get the size of the internal offsets journal.
@@ -3645,11 +3627,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_rewind_commit_reopen() {
+    fn test_variable_rewind_sync_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "rewind-commit-reopen".into(),
+                partition: "rewind-sync-reopen".into(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -3667,7 +3649,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             journal.rewind(12).await.unwrap();
-            journal.commit().await.unwrap();
+            journal.sync().await.unwrap();
             drop(journal);
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
@@ -3943,7 +3925,7 @@ mod tests {
         });
     }
 
-    /// `commit` persists data then offsets, so a crash right after it loses nothing.
+    /// `sync` persists data and offsets in one batch, so a crash right after it loses nothing.
     #[test_traced]
     fn test_variable_concurrent_sync_recovery() {
         let executor = deterministic::Runner::default();
@@ -3966,10 +3948,7 @@ mod tests {
                 journal.append(&(i * 100)).await.unwrap();
             }
 
-            // Manually sync only data to simulate crash during concurrent sync
-            journal.commit().await.unwrap();
-
-            // Simulate a crash (offsets not synced)
+            journal.sync().await.unwrap();
             drop(journal);
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
@@ -4009,7 +3988,7 @@ mod tests {
             for i in 1..6u64 {
                 assert_eq!(journal.append(&(700 + i)).await.unwrap(), 7 + i);
             }
-            journal.commit().await.unwrap();
+            journal.sync().await.unwrap();
             drop(journal);
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
@@ -5748,7 +5727,6 @@ mod tests {
             reader.read_many(&[1, 2]).await.unwrap();
             reader.try_read_sync(3).unwrap();
             drop(reader);
-            journal.commit().await.unwrap();
             journal.sync().await.unwrap();
             journal.prune(2).await.unwrap();
             journal.rewind(4).await.unwrap();
@@ -5764,13 +5742,11 @@ mod tests {
                 "variable_metrics_read_calls_total 1",
                 "variable_metrics_read_many_calls_total 1",
                 "variable_metrics_items_read_total 4",
-                "variable_metrics_commit_calls_total 1",
                 "variable_metrics_sync_calls_total 1",
                 "variable_metrics_append_duration_count 1",
                 "variable_metrics_append_many_duration_count 1",
                 "variable_metrics_read_duration_count 0",
                 "variable_metrics_read_many_duration_count 1",
-                "variable_metrics_commit_duration_count 1",
                 "variable_metrics_sync_duration_count 1",
                 "variable_metrics_cache_hits_total 4",
                 "variable_metrics_cache_misses_total 0",

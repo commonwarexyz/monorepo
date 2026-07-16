@@ -2,7 +2,7 @@
 
 //! Fuzz target contiguous journal crash recovery.
 //!
-//! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` push data
+//! A journal is an append-only log of items. Appends are buffered; `sync` pushes data
 //! to storage (and filled blobs sync opportunistically at rollover), and an unclean shutdown
 //! loses anything not yet durable. The backend restores every blob to exactly its last-synced
 //! state, so on the next `init()` the journal recovers a consistent state by verification and
@@ -130,8 +130,6 @@ enum JournalOperation {
     Read { pos: u64 },
     /// Sync the journal to storage.
     Sync,
-    /// Commit the journal.
-    Commit,
     /// Rewind the journal to a smaller size.
     Rewind { size: u64 },
     /// Prune items before a position.
@@ -233,7 +231,7 @@ struct Expected {
 }
 
 impl Expected {
-    /// Successful append: not durable until the next sync/commit, so only raise the ceiling.
+    /// Successful append: not durable until the next sync, so only raise the ceiling.
     fn appended(&mut self, item: Item) {
         self.values.push(item);
         self.max_size = self.max_size.max(self.values.len() as u64);
@@ -250,12 +248,6 @@ impl Expected {
         self.max_size = bounds.end;
         self.durable_prune = bounds.start;
         self.max_prune = bounds.start;
-    }
-
-    /// Commit pins the size but not the pruning boundary.
-    fn committed(&mut self, size: u64) {
-        self.durable_len = size;
-        self.max_size = size;
     }
 
     /// Rewind: the truncated tail may or may not persist, so recovered size is in `[target, prev]`.
@@ -294,7 +286,6 @@ trait FuzzJournal: Sized {
     fn append(&mut self, item: Item) -> impl Future<Output = Result<u64, Error>> + Send;
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send;
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
-    fn commit(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
     fn rewind(&mut self, size: u64) -> impl Future<Output = Result<(), Error>> + Send;
     fn prune(&mut self, min_pos: u64) -> impl Future<Output = Result<bool, Error>> + Send;
 
@@ -360,10 +351,6 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     async fn sync(&mut self) -> Result<(), Error> {
         FixedJournal::sync(self).await
-    }
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        FixedJournal::commit(self).await
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
@@ -443,10 +430,6 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         buffer: NonZeroUsize,
     ) -> Result<Vec<(u64, Item)>, Error> {
         collect_replay(self, start_pos, buffer).await
-    }
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        VariableJournal::commit(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -650,14 +633,6 @@ async fn run_ops<J: FuzzJournal>(
             JournalOperation::Sync => match journal.sync().await {
                 Ok(()) => {
                     expected.synced(journal.bounds());
-                    true
-                }
-                Err(_) => false,
-            },
-
-            JournalOperation::Commit => match journal.commit().await {
-                Ok(()) => {
-                    expected.committed(journal.size().await);
                     true
                 }
                 Err(_) => false,

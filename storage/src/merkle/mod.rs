@@ -12,6 +12,8 @@ pub mod hasher;
 #[cfg(feature = "std")]
 mod persisted;
 #[cfg(feature = "std")]
+pub(crate) use persisted::pins;
+#[cfg(feature = "std")]
 pub use persisted::{compact, full};
 mod location;
 pub mod mem;
@@ -391,11 +393,6 @@ pub enum Error<F: Family> {
     /// A required digest is missing.
     #[error("missing digest: {0}")]
     MissingDigest(Position<F>),
-
-    /// A metadata error occurred.
-    #[cfg(feature = "std")]
-    #[error("metadata error: {0}")]
-    Metadata(#[from] crate::metadata::Error),
 
     /// A journal error occurred.
     #[cfg(feature = "std")]

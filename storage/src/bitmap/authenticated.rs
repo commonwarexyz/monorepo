@@ -18,21 +18,18 @@ use crate::{
             mem::{Config, Mmr},
             verification, Error, Location, Position, Proof,
         },
+        pins::Pins,
         storage::Storage,
         Family as _,
     },
-    metadata::{Config as MConfig, Metadata},
     Context,
 };
 use ahash::AHashSet;
-use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    bitmap::{BitMap as UtilsBitMap, Prunable as PrunableBitMap},
-    sequence::prefixed_u64::U64,
-};
-use tracing::{debug, error, warn};
+use commonware_utils::bitmap::{BitMap as UtilsBitMap, Prunable as PrunableBitMap};
+use std::collections::BTreeMap;
+use tracing::debug;
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.
@@ -130,15 +127,9 @@ pub struct BitMap<E: Context, D: Digest, const N: usize, M: State<D>, S: Strateg
     /// Merkleization-dependent state.
     state: M,
 
-    /// Metadata for persisting pruned state.
-    metadata: Metadata<E, U64, Vec<u8>>,
+    /// Durable record persisting the pruned state (pruned chunk count plus pinned nodes).
+    pins: Pins<mmr::Family, E, D>,
 }
-
-/// Prefix used for the metadata key identifying node digests.
-const NODE_PREFIX: u8 = 0;
-
-/// Prefix used for the metadata key identifying the pruned_chunks value.
-const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, D, N, M, S> {
     /// The size of a chunk in bits.
@@ -295,9 +286,9 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
 }
 
 impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, N, S> {
-    /// Initialize a bitmap from the metadata in the given partition. If the partition is empty,
-    /// returns an empty bitmap. Otherwise restores the pruned state (the caller must replay
-    /// retained elements to restore its full state).
+    /// Initialize a bitmap from the pins record in the given partition. If the partition is
+    /// empty, returns an empty bitmap. Otherwise restores the pruned state (the caller must
+    /// replay retained elements to restore its full state).
     ///
     /// Returns an error if the bitmap could not be restored, e.g. because of data corruption or
     /// underlying storage error.
@@ -307,24 +298,10 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
         strategy: S,
         hasher: &impl Hasher<mmr::Family, Digest = D>,
     ) -> Result<Self, Error> {
-        let metadata_cfg = MConfig {
-            partition: partition.into(),
-            codec_config: ((0..).into(), ()),
-        };
-        let metadata =
-            Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg).await?;
+        let pins = Pins::open(context.child("pins"), partition.into()).await?;
 
-        let key: U64 = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        let pruned_chunks = match metadata.get(&key) {
-            Some(bytes) => u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
-                error!("pruned chunks value not a valid u64");
-                Error::DataCorrupted("pruned chunks value not a valid u64")
-            })?),
-            None => {
-                warn!("bitmap metadata does not contain pruned chunks, initializing as empty");
-                0
-            }
-        } as usize;
+        let pruned_loc = pins.pruned_to();
+        let pruned_chunks = pruned_loc.as_u64() as usize;
         if pruned_chunks == 0 {
             let mmr = Mmr::new();
             let cached_root = mmr.root(hasher, 0)?;
@@ -333,32 +310,22 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
                 authenticated_len: 0,
                 mmr,
                 strategy,
-                metadata,
+                pins,
                 state: Merkleized { root: cached_root },
             });
         }
-        let pruned_loc = Location::new(pruned_chunks as u64);
-        if !pruned_loc.is_valid() {
-            return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
-        }
 
         let mut pinned_nodes = Vec::new();
-        for (index, pos) in mmr::Family::nodes_to_pin(pruned_loc).enumerate() {
-            let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
-                error!(?pruned_loc, ?pos, "missing pinned node");
-                return Err(Error::MissingNode(pos));
-            };
-            let digest = D::decode(bytes.as_ref());
-            let Ok(digest) = digest else {
-                error!(?pruned_loc, ?pos, "could not convert node bytes to digest");
-                return Err(Error::MissingNode(pos));
-            };
-            pinned_nodes.push(digest);
+        for pos in mmr::Family::nodes_to_pin(pruned_loc) {
+            let digest = pins
+                .get(pos)
+                .expect("pins record holds every node for its boundary");
+            pinned_nodes.push(*digest);
         }
 
         let mmr = Mmr::init(Config {
             nodes: Vec::new(),
-            pruning_boundary: Location::new(pruned_chunks as u64),
+            pruning_boundary: pruned_loc,
             pinned_nodes,
         })?;
 
@@ -371,7 +338,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
             authenticated_len: pruned_chunks,
             mmr,
             strategy,
-            metadata,
+            pins,
             state: Merkleized { root: cached_root },
         })
     }
@@ -384,31 +351,21 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
     /// retained elements.
     pub async fn write_pruned(&mut self) -> Result<(), Error> {
-        self.metadata.clear();
-
-        // Write the number of pruned chunks.
-        let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        self.metadata
-            .put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
-
-        // Write the pinned nodes.
         let pruned_loc = Location::new(self.bitmap.pruned_chunks() as u64);
         assert!(
             pruned_loc.is_valid(),
             "expected valid location from pruned_chunks"
         );
-        for (i, digest) in mmr::Family::nodes_to_pin(pruned_loc).enumerate() {
-            let digest = self.mmr.get_node_unchecked(digest);
-            let key = U64::new(NODE_PREFIX, i as u64);
-            self.metadata.put(key, digest.to_vec());
+        let mut nodes = BTreeMap::new();
+        for pos in mmr::Family::nodes_to_pin(pruned_loc) {
+            nodes.insert(pos, *self.mmr.get_node_unchecked(pos));
         }
-
-        self.metadata.sync().await.map_err(Error::Metadata)
+        self.pins.write(pruned_loc, nodes).await
     }
 
-    /// Destroy the bitmap metadata from disk.
+    /// Destroy the bitmap's pins record on disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.metadata.destroy().await.map_err(Error::Metadata)
+        self.pins.destroy().await
     }
 
     /// Prune all complete chunks before the chunk containing the given bit.
@@ -513,7 +470,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
             state: Unmerkleized {
                 dirty_chunks: AHashSet::new(),
             },
-            metadata: self.metadata,
+            pins: self.pins,
         }
     }
 }
@@ -614,7 +571,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
             authenticated_len: self.authenticated_len,
             mmr: self.mmr,
             strategy: self.strategy,
-            metadata: self.metadata,
+            pins: self.pins,
             state: Merkleized { root: cached_root },
         })
     }

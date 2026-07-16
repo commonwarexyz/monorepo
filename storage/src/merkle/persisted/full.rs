@@ -1,11 +1,11 @@
 //! A Merkle structure backed by a fixed-item-length journal.
 //!
-//! A [crate::journal] is used to store all unpruned nodes, and a [crate::metadata] store is
-//! used to preserve digests required for root and proof generation that would have otherwise been
-//! pruned.
+//! A [crate::journal] is used to store all unpruned nodes, and a small [Pins] record preserves
+//! digests required for root and proof generation that would have otherwise been pruned.
 //!
 //! This module is generic over [`Family`], so it works for both MMR and MMB.
 
+use super::pins::Pins;
 use crate::{
     journal::{
         contiguous::{
@@ -20,20 +20,19 @@ use crate::{
         mem::{Config as MemConfig, Mem},
         Error, Family, Location, Position, Proof, Readable,
     },
-    metadata::{Config as MConfig, Metadata},
     Context,
 };
-use commonware_codec::{DecodeExt, Write};
+use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
-use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
+use commonware_utils::range::NonEmptyRange;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
 ///
@@ -100,9 +99,9 @@ pub struct Config<S: Strategy> {
     /// the nodes.
     pub journal_partition: String,
 
-    /// The name of the `commonware-runtime::Storage` storage partition used for the metadata
-    /// containing pruned nodes that are still required to calculate the root and generate
-    /// proofs.
+    /// The name of the `commonware-runtime::Storage` storage partition used for the [Pins]
+    /// record containing pruned nodes that are still required to calculate the root and
+    /// generate proofs.
     pub metadata_partition: String,
 
     /// The maximum number of items to store in each blob in the backing journal.
@@ -133,7 +132,7 @@ pub struct SyncConfig<F: Family, D: Digest, S: Strategy> {
 
     /// The pinned nodes the structure needs at the pruning boundary (range start), in the order
     /// specified by `Family::nodes_to_pin`. If `None`, the pinned nodes are expected to already be
-    /// in the structure's metadata/journal.
+    /// in the structure's pins record/journal.
     pub pinned_nodes: Option<Vec<D>>,
 }
 
@@ -157,9 +156,9 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     pub(crate) journal: Journal<E, D>,
 
     /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
-    /// boundary used to generate them. The metadata remains empty until pruning is invoked, and its
+    /// boundary used to generate them. The record remains empty until pruning is invoked, and its
     /// contents change only when the pruning boundary moves.
-    pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
+    pins: Pins<F, E, D>,
 
     /// True while the journal may contain flushed nodes that have not yet been made durable.
     pub(crate) journal_dirty: bool,
@@ -167,12 +166,6 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
 }
-
-/// Prefix used for nodes in the metadata prefixed U8 key.
-const NODE_PREFIX: u8 = 0;
-
-/// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
-pub(crate) const PRUNED_TO_PREFIX: u8 = 1;
 
 impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return the total number of nodes in the structure, irrespective of any pruning. The next
@@ -186,37 +179,26 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.mem.leaves()
     }
 
-    /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
+    /// Attempt to get a node from the pins record, with fallback to journal lookup if it fails.
     /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
     /// error otherwise.
-    async fn get_from_metadata_or_journal(
-        metadata: &Metadata<E, U64, Vec<u8>>,
+    async fn get_from_pins_or_journal(
+        pins: &Pins<F, E, D>,
         journal: &Journal<E, D>,
         pos: Position<F>,
     ) -> Result<D, Error<F>> {
-        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
-            debug!(?pos, "read node from metadata");
-            let digest = D::decode(bytes.as_ref());
-            let Ok(digest) = digest else {
-                error!(
-                    ?pos,
-                    err = %digest.expect_err("digest is Err in else branch"),
-                    "could not convert node from metadata bytes to digest"
-                );
-                return Err(Error::DataCorrupted(
-                    "could not read digest at requested pos",
-                ));
-            };
-            return Ok(digest);
+        if let Some(digest) = pins.get(pos) {
+            debug!(?pos, "read node from pins");
+            return Ok(*digest);
         }
 
-        // If a node isn't found in the metadata, it might still be in the journal.
+        // If a node isn't pinned, it might still be in the journal.
         debug!(?pos, "reading node from journal");
         let node = journal.read(*pos).await;
         match node {
             Ok(node) => Ok(node),
             Err(JError::ItemPruned(_)) => {
-                error!(?pos, "node is missing from metadata and journal");
+                warn!(?pos, "node is missing from pins and journal");
                 Err(Error::MissingNode(pos))
             }
             Err(e) => Err(Error::Journal(e)),
@@ -232,14 +214,14 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Adds the pinned nodes based on `prune_pos` to `mem`.
     async fn add_extra_pinned_nodes(
         mem: &mut Mem<F, D>,
-        metadata: &Metadata<E, U64, Vec<u8>>,
+        pins: &Pins<F, E, D>,
         journal: &Journal<E, D>,
         prune_pos: Position<F>,
     ) -> Result<(), Error<F>> {
         let prune_loc = Location::try_from(prune_pos).expect("valid prune_pos");
         let mut pinned_nodes = BTreeMap::new();
         for pos in F::nodes_to_pin(prune_loc) {
-            let digest = Self::get_from_metadata_or_journal(metadata, journal, pos).await?;
+            let digest = Self::get_from_pins_or_journal(pins, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
         mem.add_pinned_nodes(pinned_nodes);
@@ -263,13 +245,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             Journal::<E, D>::init(context.child("merkle_journal"), journal_cfg).await?;
         let mut journal_size = Position::<F>::new(journal.size());
 
-        let metadata_cfg = MConfig {
-            partition: cfg.metadata_partition,
-            codec_config: ((0..).into(), ()),
-        };
-        let metadata =
-            Metadata::<_, U64, Vec<u8>>::init(context.child("merkle_metadata"), metadata_cfg)
-                .await?;
+        let pins = Pins::open(context.child("merkle_pins"), cfg.metadata_partition).await?;
 
         if journal_size == 0 {
             let mem = Mem::init(MemConfig {
@@ -281,50 +257,41 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 mem: Arc::new(mem),
                 pruned_to_pos: Position::new(0),
                 journal,
-                metadata,
+                pins,
                 journal_dirty: false,
                 strategy: cfg.strategy,
             });
         }
 
         // Make sure the journal's oldest retained node is as expected based on the last pruning
-        // boundary stored in metadata. If they don't match, prune the journal to the appropriate
+        // boundary in the pins record. If they don't match, prune the journal to the appropriate
         // location.
-        let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        let metadata_pruned_to = Location::<F>::new(metadata.get(&key).map_or(0, |bytes| {
-            u64::from_be_bytes(
-                bytes
-                    .as_slice()
-                    .try_into()
-                    .expect("metadata pruned_to is not 8 bytes"),
-            )
-        }));
-        let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
+        let record_prune_pos = Position::try_from(pins.pruned_to())?;
         let journal_bounds_start = journal.bounds().start;
-        if *metadata_prune_pos > journal_bounds_start {
-            // Metadata is ahead of journal (crashed before completing journal prune).
-            // Prune the journal to match metadata.
-            journal.prune(*metadata_prune_pos).await?;
+        if *record_prune_pos > journal_bounds_start {
+            // The record is ahead of the journal, which is normal (the journal prunes at blob
+            // granularity) but can also mean a crash interrupted the last prune. Finish it.
+            journal.prune(*record_prune_pos).await?;
             if journal.bounds().start != journal_bounds_start {
                 // This should only happen in the event of some failure during the last attempt to
                 // prune the journal.
                 warn!(
                     journal_bounds_start,
-                    ?metadata_prune_pos,
-                    "journal pruned to match metadata"
+                    ?record_prune_pos,
+                    "journal pruned to match pins record"
                 );
             }
-        } else if *metadata_prune_pos < journal_bounds_start {
-            // Metadata is stale (e.g., missing/corrupted while journal has valid state).
+        } else if *record_prune_pos < journal_bounds_start {
+            // The record is stale (e.g., from before the journal was cleared for sync).
             // Use the journal's state as authoritative.
             warn!(
-                ?metadata_prune_pos,
-                journal_bounds_start, "metadata stale, using journal pruning boundary"
+                ?record_prune_pos,
+                journal_bounds_start, "pins record stale, using journal pruning boundary"
             );
         }
 
-        // Use the more restrictive (higher) pruning boundary between metadata and journal.
-        // This handles both cases: metadata ahead (crash during prune) and metadata stale.
+        // Use the more restrictive (higher) pruning boundary between the record and journal.
+        // This handles both cases: record ahead (crash during prune) and record stale.
         //
         // The journal boundary may not be leaf-aligned (it's blob-aligned), so round up to the
         // position of the first leaf after the boundary.
@@ -340,7 +307,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             Position::try_from(Location::try_from(journal_boundary_floor)? + 1)?
         };
         let effective_prune_pos =
-            std::cmp::max(metadata_prune_pos, journal_boundary_leaf_aligned_pos);
+            std::cmp::max(record_prune_pos, journal_boundary_leaf_aligned_pos);
 
         let last_valid_size = F::to_nearest_size(journal_size);
         let mut orphaned_leaf: Option<D> = None;
@@ -364,7 +331,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let journal_leaves = Location::try_from(journal_size)?;
         let mut pinned_nodes = Vec::new();
         for pos in F::nodes_to_pin(journal_leaves) {
-            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            let digest = Self::get_from_pins_or_journal(&pins, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
         let mut mem = Mem::init(MemConfig {
@@ -372,7 +339,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             pruning_boundary: journal_leaves,
             pinned_nodes,
         })?;
-        Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, effective_prune_pos).await?;
+        Self::add_extra_pinned_nodes(&mut mem, &pins, &journal, effective_prune_pos).await?;
 
         if let Some(leaf) = orphaned_leaf {
             // Recover the orphaned leaf and any missing parents.
@@ -410,7 +377,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             mem: Arc::new(mem),
             pruned_to_pos: effective_prune_pos,
             journal,
-            metadata,
+            pins,
             journal_dirty: false,
             strategy: cfg.strategy,
         })
@@ -467,43 +434,41 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             journal_size = Position::new(journal.size());
         }
 
-        // Open the metadata.
-        let metadata_cfg = MConfig {
-            partition: cfg.config.metadata_partition,
-            codec_config: ((0..).into(), ()),
-        };
-        let mut metadata = Metadata::init(context.child("merkle_metadata"), metadata_cfg).await?;
-
-        // Write the pruning boundary.
-        let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
-        metadata.put(
-            pruning_boundary_key,
-            cfg.range.start().as_u64().to_be_bytes().into(),
-        );
-
-        // Write the required pinned nodes to metadata.
-        // The set of pinned nodes depends only on the prune boundary, not on the total
-        // structure size, so we validate against `nodes_to_pin(prune_loc)` alone.
+        // Determine the pinned node set for the sync range's pruning boundary. The set of
+        // pinned nodes depends only on the prune boundary, not on the total structure size, so
+        // we validate against `nodes_to_pin(prune_loc)` alone.
         let prune_loc = Location::try_from(prune_pos)?;
         let journal_leaves = Location::try_from(journal_size)?;
+        let mut pins =
+            Pins::open(context.child("merkle_pins"), cfg.config.metadata_partition).await?;
+        let mut record_nodes = BTreeMap::new();
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             // Use caller-provided pinned nodes.
             let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
             if pinned_nodes.len() != nodes_to_pin_persisted.len() {
                 return Err(Error::<F>::InvalidPinnedNodes);
             }
-            for (pos, digest) in nodes_to_pin_persisted.into_iter().zip(pinned_nodes.iter()) {
-                metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
+            for (pos, digest) in nodes_to_pin_persisted.into_iter().zip(pinned_nodes) {
+                record_nodes.insert(pos, digest);
+            }
+        } else {
+            // The pinned nodes must already be recoverable from the previous record or the
+            // journal.
+            for pos in F::nodes_to_pin(prune_loc) {
+                let digest = Self::get_from_pins_or_journal(&pins, &journal, pos).await?;
+                record_nodes.insert(pos, digest);
             }
         }
+
+        // Persist the record before pruning the journal so the pinned nodes survive a crash.
+        pins.write(prune_loc, record_nodes).await?;
 
         // Create the in-memory structure with the pinned nodes required for its size. This must be
         // performed *before* pruning the journal to range.start to ensure all pinned nodes are
         // present.
-        let nodes_to_pin_mem = F::nodes_to_pin(journal_leaves);
         let mut mem_pinned_nodes = Vec::new();
-        for pos in nodes_to_pin_mem {
-            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+        for pos in F::nodes_to_pin(journal_leaves) {
+            let digest = Self::get_from_pins_or_journal(&pins, &journal, pos).await?;
             mem_pinned_nodes.push(digest);
         }
         let mut mem = Mem::init(MemConfig {
@@ -515,11 +480,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         // This must also be done before pruning.
         if prune_pos < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, prune_pos).await?;
+            Self::add_extra_pinned_nodes(&mut mem, &pins, &journal, prune_pos).await?;
         }
-
-        // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
-        metadata.sync().await?;
 
         // Prune the journal to range.start.
         journal.prune(*prune_pos).await?;
@@ -528,15 +490,15 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             mem: Arc::new(mem),
             pruned_to_pos: prune_pos,
             journal,
-            metadata,
+            pins,
             journal_dirty: false,
             strategy: cfg.config.strategy,
         })
     }
 
-    /// Compute and add required nodes for the given pruning point to the metadata, and write it to
-    /// disk. Return the computed set of required nodes.
-    async fn update_metadata(
+    /// Compute the required nodes for the given pruning point and durably rewrite the pins
+    /// record with them. Return the computed set of required nodes.
+    async fn update_pins(
         &mut self,
         prune_to_pos: Position<F>,
     ) -> Result<BTreeMap<Position<F>, D>, Error<F>> {
@@ -548,22 +510,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             let digest = self.get_node(pos).await?.expect(
                 "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
             );
-            self.metadata
-                .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             pinned_nodes.insert(pos, digest);
         }
-
-        let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        self.metadata
-            .put_sync(
-                key,
-                Location::try_from(prune_to_pos)?
-                    .as_u64()
-                    .to_be_bytes()
-                    .into(),
-            )
-            .await
-            .map_err(Error::Metadata)?;
+        self.pins.write(prune_loc, pinned_nodes.clone()).await?;
 
         Ok(pinned_nodes)
     }
@@ -681,9 +630,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
         self.sync().await?;
 
-        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
-        // event of a pruning failure.
-        let pinned_nodes = self.update_metadata(pos).await?;
+        // Update the pins record to reflect the desired pruning boundary, allowing for recovery
+        // in the event of a pruning failure.
+        let pinned_nodes = self.update_pins(pos).await?;
 
         self.journal.prune(*pos).await?;
         Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
@@ -714,7 +663,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Close and permanently remove any disk resources.
     pub async fn destroy(self) -> Result<(), Error<F>> {
         self.journal.destroy().await?;
-        self.metadata.destroy().await?;
+        self.pins.destroy().await?;
 
         Ok(())
     }
@@ -752,7 +701,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     #[cfg(test)]
-    /// Simulate a crash after pruning metadata is written but before the journal is pruned.
+    /// Simulate a crash after the pins record is written but before the journal is pruned.
     pub async fn simulate_pruning_failure(mut self, prune_to: Location<F>) -> Result<(), Error<F>> {
         let prune_to_pos = Position::try_from(prune_to)?;
         assert!(prune_to_pos <= self.mem.size());
@@ -760,9 +709,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
         self.sync().await?;
 
-        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
-        // event of a pruning failure.
-        self.update_metadata(prune_to_pos).await?;
+        // Update the pins record to reflect the desired pruning boundary, allowing for recovery
+        // in the event of a pruning failure.
+        self.update_pins(prune_to_pos).await?;
 
         // Don't actually prune the journal to simulate failure
         Ok(())
@@ -854,29 +803,23 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Truncate the in-memory structure to the target size.
         // If the in-memory structure has been pruned past the target (e.g. after sync),
-        // rebuild from the journal/metadata instead.
+        // rebuild from the journal/pins instead.
         if new_size >= Position::try_from(self.mem.bounds().start).expect("valid mem bounds start")
         {
             Arc::make_mut(&mut self.mem).truncate(new_size);
         } else {
             let mut pinned_nodes = Vec::new();
             for pos in F::nodes_to_pin(destination_loc) {
-                pinned_nodes.push(
-                    Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
-                );
+                pinned_nodes
+                    .push(Self::get_from_pins_or_journal(&self.pins, &self.journal, pos).await?);
             }
             let mut mem = Mem::init(MemConfig {
                 nodes: vec![],
                 pruning_boundary: destination_loc,
                 pinned_nodes,
             })?;
-            Self::add_extra_pinned_nodes(
-                &mut mem,
-                &self.metadata,
-                &self.journal,
-                self.pruned_to_pos,
-            )
-            .await?;
+            Self::add_extra_pinned_nodes(&mut mem, &self.pins, &self.journal, self.pruned_to_pos)
+                .await?;
             self.mem = Arc::new(mem);
         }
 
@@ -1044,7 +987,6 @@ mod tests {
             hasher::Standard, mmb, mmr, Bagging::ForwardFold, Location, LocationRangeExt as _,
             Position, Proof,
         },
-        metadata::{Config as MConfig, Metadata},
     };
     use commonware_cryptography::{
         sha256::{self, Digest},
@@ -1055,7 +997,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
     };
-    use commonware_utils::{non_empty_range, sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
@@ -2402,12 +2344,11 @@ mod tests {
         executor.start(full_init_sync_rejects_extra_pinned_nodes_inner::<mmb::Family>);
     }
 
-    // Regression test that init() handles stale metadata (lower pruning boundary than journal).
-    // Before the fix, this would panic with an assertion failure. After the fix, it returns a
-    // MissingNode error (which is expected when metadata is corrupted and pinned nodes are lost).
-    async fn full_init_stale_metadata_returns_error_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
+    // Regression test that init() handles a stale pins record (lower pruning boundary than
+    // journal). Before the fix, this would panic with an assertion failure. After the fix, it
+    // returns a MissingNode error (which is expected when the record is stale and pinned nodes
+    // are lost).
+    async fn full_init_stale_pins_returns_error_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create a structure with some data and prune it
@@ -2433,28 +2374,20 @@ mod tests {
         mmr.prune(prune_loc).await.unwrap();
         drop(mmr);
 
-        // Simulate a crash after journal prune but before metadata was updated:
-        // clear all metadata and write only a stale pruning boundary of 0 (no pinned nodes).
-        let meta_cfg = MConfig {
-            partition: test_config(&context).metadata_partition,
-            codec_config: ((0..).into(), ()),
-        };
-        let mut metadata =
-            Metadata::<_, U64, Vec<u8>>::init(context.child("meta_tamper"), meta_cfg)
-                .await
-                .unwrap();
-        metadata.clear();
-        let key = U64::new(PRUNED_TO_PREFIX, 0);
-        metadata
-            .put_sync(key, 0u64.to_be_bytes().to_vec())
-            .await
-            .unwrap();
-        drop(metadata);
+        // Simulate a stale record: overwrite it with a pruning boundary of 0 (no pinned nodes).
+        let mut pins = super::Pins::<F, _, Digest>::open(
+            context.child("pins_tamper"),
+            test_config(&context).metadata_partition,
+        )
+        .await
+        .unwrap();
+        pins.write(Location::new(0), BTreeMap::new()).await.unwrap();
+        drop(pins);
 
         // Reopen the structure - before the fix, this would panic with assertion failure
         // After the fix, it returns MissingNode error (pinned nodes for the lower
-        // boundary don't exist since they were pruned from journal and weren't
-        // stored in metadata at the lower position)
+        // boundary don't exist since they were pruned from journal and aren't
+        // in the stale record)
         let result = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
@@ -2470,21 +2403,21 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_full_init_stale_metadata_returns_error_mmr() {
+    fn test_full_init_stale_pins_returns_error_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(full_init_stale_metadata_returns_error_inner::<mmr::Family>);
+        executor.start(full_init_stale_pins_returns_error_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
-    fn test_full_init_stale_metadata_returns_error_mmb() {
+    fn test_full_init_stale_pins_returns_error_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(full_init_stale_metadata_returns_error_inner::<mmb::Family>);
+        executor.start(full_init_stale_pins_returns_error_inner::<mmb::Family>);
     }
 
-    // Test that init() handles the case where metadata pruning boundary is ahead
+    // Test that init() handles the case where the record's pruning boundary is ahead
     // of journal (crashed before journal prune completed). This should successfully
-    // prune the journal to match metadata.
-    async fn full_init_metadata_ahead_inner<F: Family>(context: deterministic::Context) {
+    // prune the journal to match the record.
+    async fn full_init_pins_ahead_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create a structure with some data
@@ -2505,15 +2438,15 @@ mod tests {
         mmr.apply_batch(&batch).unwrap();
         mmr.sync().await.unwrap();
 
-        // Prune to position 30 (this stores pinned nodes and updates metadata)
+        // Prune to location 16 (this stores pinned nodes and updates the record)
         let prune_loc = Location::<F>::new(16);
         mmr.prune(prune_loc).await.unwrap();
         let expected_root = mmr.root(&hasher, 0).unwrap();
         let expected_size = mmr.size();
         drop(mmr);
 
-        // Reopen the structure - should recover correctly with metadata ahead of
-        // journal boundary (metadata says 30, journal is section-aligned to 28)
+        // Reopen the structure - should recover correctly with the record ahead of
+        // the journal's blob-aligned boundary
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
@@ -2530,15 +2463,15 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_full_init_metadata_ahead_mmr() {
+    fn test_full_init_pins_ahead_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(full_init_metadata_ahead_inner::<mmr::Family>);
+        executor.start(full_init_pins_ahead_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
-    fn test_full_init_metadata_ahead_mmb() {
+    fn test_full_init_pins_ahead_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(full_init_metadata_ahead_inner::<mmb::Family>);
+        executor.start(full_init_pins_ahead_inner::<mmb::Family>);
     }
 
     // Regression test: init_sync must compute pinned nodes BEFORE pruning the journal. Previously,
