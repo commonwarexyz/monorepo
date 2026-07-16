@@ -1,6 +1,6 @@
 //! Tracker
 
-use crate::{authenticated::discovery::config::Bootstrapper, Ingress};
+use crate::{Ingress, authenticated::discovery::config::Bootstrapper};
 use commonware_cryptography::Signer;
 use std::{num::NonZeroUsize, time::Duration};
 

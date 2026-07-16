@@ -2,20 +2,20 @@
 //!
 //! For fixed-size values, use [super::fixed] instead.
 
-use super::{operation::Operation as BaseOperation, Config as BaseConfig, Immutable};
+use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::variable::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
-        any::{value::VariableEncoding, VariableValue},
-        operation::Key,
         Error, ROOT_BAGGING,
+        any::{VariableValue, value::VariableEncoding},
+        operation::Key,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
@@ -62,14 +62,14 @@ impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, 
 }
 
 impl<
-        F: Family,
-        E: Context,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        C: Clone + Send + Sync + 'static,
-        S: Strategy,
-    > CompactDb<F, E, K, V, H, C, S>
+    F: Family,
+    E: Context,
+    K: Key,
+    V: VariableValue,
+    H: Hasher,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+> CompactDb<F, E, K, V, H, C, S>
 where
     Operation<F, K, V>: Read<Cfg = C>,
 {
@@ -95,13 +95,13 @@ mod tests {
         qmdb::immutable::test,
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
     use std::num::{NonZeroU16, NonZeroUsize};
 

@@ -4,13 +4,13 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::merkle::{
-    full::Config, hasher::Standard, mem::Mem, mmb, mmr, Bagging::ForwardFold, Error,
-    Family as MerkleFamily, Location, LocationRangeExt as _, Position,
+    Bagging::ForwardFold, Error, Family as MerkleFamily, Location, LocationRangeExt as _, Position,
+    full::Config, hasher::Standard, mem::Mem, mmb, mmr,
 };
-use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -229,18 +229,16 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             if start_loc < merkle.leaves()
                                 && end_loc < merkle.leaves()
                                 && merkle.bounds().contains(&range.start)
-                            {
-                                if let Ok(proof) =
+                                && let Ok(proof) =
                                     merkle.range_proof(&hasher, range.clone(), 0).await
-                                {
-                                    let root = merkle.root(&hasher, 0).unwrap();
-                                    assert!(proof.verify_range_inclusion(
-                                        &hasher,
-                                        &leaves[range.to_usize_range()],
-                                        Location::<F>::new(start_loc),
-                                        &root
-                                    ));
-                                }
+                            {
+                                let root = merkle.root(&hasher, 0).unwrap();
+                                assert!(proof.verify_range_inclusion(
+                                    &hasher,
+                                    &leaves[range.to_usize_range()],
+                                    Location::<F>::new(start_loc),
+                                    &root
+                                ));
                             }
                         }
                     }

@@ -1,28 +1,28 @@
 use super::{
+    Config,
     ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
     state::{Effect, FetchReason},
-    Config,
 };
 use crate::{
+    Epochable, Viewable,
     simplex::{
         actors::{resolver::state::State, voter},
         scheme::Scheme,
         types::Certificate,
     },
     types::{Epoch, View},
-    Epochable, Viewable,
 };
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
+use commonware_p2p::{Blocker, Receiver, Sender, utils::StaticProvider};
 use commonware_parallel::Strategy;
-use commonware_resolver::{p2p, Fetch, Resolver as _};
+use commonware_resolver::{Fetch, Resolver as _, p2p};
 use commonware_runtime::{
-    spawn_cell, telemetry::traces::TracedExt as _, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRng;
@@ -52,12 +52,12 @@ pub struct Actor<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRng + Metrics + Spawner,
-        S: Scheme<D>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        T: Strategy,
-    > Actor<E, S, B, D, T>
+    E: BufferPooler + Clock + CryptoRng + Metrics + Spawner,
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    T: Strategy,
+> Actor<E, S, B, D, T>
 {
     pub fn new(context: E, cfg: Config<S, B, T>) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);

@@ -1,6 +1,7 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::authenticated::{
+    Mailbox,
     discovery::{
         actors::{
             spawner,
@@ -8,17 +9,15 @@ use crate::authenticated::{
         },
         metrics,
     },
-    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
-    StreamOf,
+    StreamOf, spawn_cell,
+    telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::encrypted::{dial, Config as StreamConfig};
+use commonware_stream::encrypted::{Config as StreamConfig, dial};
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
 use std::time::Duration;
@@ -194,16 +193,16 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
 mod tests {
     use super::*;
     use crate::{
+        Ingress,
         authenticated::{
             dialing::Dialable,
-            discovery::actors::tracker::{ingress::Releaser, Metadata},
+            discovery::actors::tracker::{Metadata, ingress::Releaser},
         },
-        Ingress,
     };
     use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
+    use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::NZUsize;
     use std::{

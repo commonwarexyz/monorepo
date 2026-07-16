@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_consensus::simplex::{
     scheme::{
-        bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, Scheme,
+        Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
     },
     types::{Certificate, Vote},
 };

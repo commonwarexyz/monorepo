@@ -8,16 +8,16 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
+    Context,
     index::unordered::Index,
     journal::contiguous::variable::Journal,
     merkle::{Graftable, Location},
     qmdb::{
-        any::{unordered::variable::Operation, value::VariableEncoding, VariableValue},
-        current::VariableConfig as Config,
         Error,
+        any::{VariableValue, unordered::variable::Operation, value::VariableEncoding},
+        current::VariableConfig as Config,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
@@ -37,15 +37,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 >;
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context,
+    K: Array,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, K, V, H, T, N, S>
 where
     Operation<F, K, V>: Read,
 {
@@ -85,16 +85,16 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable,
-            E: Context,
-            K: Array,
-            V: VariableValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            const N: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, N, S>
+        F: Graftable,
+        E: Context,
+        K: Array,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, N, S>
     where
         Operation<F, K, V>: Read,
     {
@@ -117,7 +117,7 @@ mod test {
         qmdb::current::{tests::variable_config, unordered::tests as shared},
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::deterministic;
 

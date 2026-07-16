@@ -74,18 +74,18 @@
 //! is bounded by the number of databases regardless of how long sync runs.
 
 use commonware_consensus::{
-    types::{Height, Round},
     CertifiableBlock, Epochable, Roundable, Viewable,
+    types::{Height, Round},
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::{reschedule, Metrics, Spawner};
+use commonware_runtime::{Metrics, Spawner, reschedule};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::TracedAsyncRwLock,
 };
 use futures::{
-    future::{pending, Either},
+    future::{Either, pending},
     join,
 };
 use std::{
@@ -1333,7 +1333,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     /// Retain only generations referenced by at least one database.
     fn prune_generations(&mut self) {
         self.generation_state
-            .retain(|gen, _| self.dbs.iter().any(|db| db.generation() == *gen));
+            .retain(|r#gen, _| self.dbs.iter().any(|db| db.generation() == *r#gen));
     }
 
     /// Whether database `idx` is a non-reached recipient for dispatch.
@@ -1494,37 +1494,37 @@ impl_attachable_resolver_set!(
 #[cfg(test)]
 mod tests {
     use super::{
-        drain_single_tip_updates, Anchor, AttachableResolver, AttachableResolverSet,
-        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, Shared, StateSyncDb,
-        StateSyncSet, SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
+        Anchor, AttachableResolver, AttachableResolverSet, CoordinatorAction, CoordinatorState,
+        DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Shared, StateSyncDb, StateSyncSet,
+        SyncEngineConfig, TipUpdate, drain_single_tip_updates,
     };
-    use crate::stateful::tests::mocks::{anchor as mock_anchor, TestMerkleized, TestUnmerkleized};
+    use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
-        deterministic, reschedule, Clock, Runner as _, Spawner as _, Supervisor as _,
+        Clock, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
     };
     use commonware_utils::{
         channel::{mpsc, oneshot, ring},
         sync::TracedAsyncRwLock,
     };
-    use futures::{pin_mut, FutureExt, SinkExt};
+    use futures::{FutureExt, SinkExt, pin_mut};
     use std::{
         convert::Infallible,
         num::{NonZeroU64, NonZeroUsize},
         sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
 
     mod initial_sync_targets {
         use super::ManagedDb;
-        use commonware_cryptography::{sha256::Digest, Sha256};
+        use commonware_cryptography::{Sha256, sha256::Digest};
         use commonware_parallel::Sequential;
         use commonware_runtime::{
-            buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _,
+            Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
         };
         use commonware_storage::{
             journal::contiguous::{
@@ -1537,7 +1537,7 @@ mod tests {
             },
             translator::TwoCap,
         };
-        use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
+        use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
         use rstest::rstest;
         use std::{fmt::Debug, marker::PhantomData};
 
@@ -2594,10 +2594,10 @@ mod tests {
             let mut tip_updates = Some(tip_updates);
 
             loop {
-                if let Some(reached_target) = reached_target.as_ref() {
-                    if reached_target.send(final_target).await.is_err() {
-                        break;
-                    }
+                if let Some(reached_target) = reached_target.as_ref()
+                    && reached_target.send(final_target).await.is_err()
+                {
+                    break;
                 }
 
                 context.sleep(Duration::from_millis(1)).await;
@@ -2778,10 +2778,10 @@ mod tests {
             let mut tip_updates = Some(tip_updates);
 
             loop {
-                if let Some(reached_target) = reached_target.as_ref() {
-                    if reached_target.send(final_target).await.is_err() {
-                        break;
-                    }
+                if let Some(reached_target) = reached_target.as_ref()
+                    && reached_target.send(final_target).await.is_err()
+                {
+                    break;
                 }
 
                 if finish.is_none() && tip_updates.is_none() {
@@ -2959,10 +2959,10 @@ mod tests {
                 }
 
                 if observed_update && reported_target != Some(final_target) {
-                    if let Some(reached_target) = reached_target.as_ref() {
-                        if reached_target.send(final_target).await.is_err() {
-                            break;
-                        }
+                    if let Some(reached_target) = reached_target.as_ref()
+                        && reached_target.send(final_target).await.is_err()
+                    {
+                        break;
                     }
                     reported_target = Some(final_target);
                 }
@@ -3024,10 +3024,10 @@ mod tests {
 
             loop {
                 if reported_target != Some(final_target) {
-                    if let Some(reached_target) = reached_target.as_ref() {
-                        if reached_target.send(final_target).await.is_err() {
-                            break;
-                        }
+                    if let Some(reached_target) = reached_target.as_ref()
+                        && reached_target.send(final_target).await.is_err()
+                    {
+                        break;
                     }
                     reported_target = Some(final_target);
                 }
@@ -3089,10 +3089,10 @@ mod tests {
 
             loop {
                 if reported_target != Some(final_target) {
-                    if let Some(reached_target) = reached_target.as_ref() {
-                        if reached_target.send(final_target).await.is_err() {
-                            break;
-                        }
+                    if let Some(reached_target) = reached_target.as_ref()
+                        && reached_target.send(final_target).await.is_err()
+                    {
+                        break;
                     }
                     reported_target = Some(final_target);
                 }

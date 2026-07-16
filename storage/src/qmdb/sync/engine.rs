@@ -1,15 +1,15 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    merkle::{hasher::Standard as StandardHasher, Family, Location},
+    merkle::{Family, Location, hasher::Standard as StandardHasher},
     qmdb::{
         self,
         sync::{
+            Database, DbResolver, Error as SyncError, Journal, Metrics, Target,
             database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
             resolver::{FetchResult, Resolver},
             target::validate_update,
-            Database, DbResolver, Error as SyncError, Journal, Metrics, Target,
         },
     },
 };
@@ -18,15 +18,15 @@ use commonware_cryptography::Digest;
 use commonware_macros::{boxed, select};
 use commonware_runtime::Supervisor as _;
 use commonware_utils::{
+    NZU64,
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
         mpsc, oneshot,
     },
-    NZU64,
 };
 use futures::{
-    future::{pending, Either},
     StreamExt,
+    future::{Either, pending},
 };
 use mpsc::error::TryRecvError;
 use std::{
@@ -478,10 +478,10 @@ where
         if self.reached_current_target_reported {
             return;
         }
-        if let Some(sender) = self.reached_target_tx.as_ref() {
-            if !sender.send_lossy(self.target.clone()).await {
-                self.reached_target_tx = None;
-            }
+        if let Some(sender) = self.reached_target_tx.as_ref()
+            && !sender.send_lossy(self.target.clone()).await
+        {
+            self.reached_target_tx = None;
         }
         self.reached_current_target_reported = true;
     }
@@ -690,10 +690,8 @@ where
         }
 
         // Cache pinned nodes only from current-root-verified proofs.
-        if need_pinned {
-            if let Some(nodes) = pinned_nodes {
-                self.pinned_nodes = Some(nodes);
-            }
+        if need_pinned && let Some(nodes) = pinned_nodes {
+            self.pinned_nodes = Some(nodes);
         }
 
         // Store operations for later application.
@@ -823,14 +821,14 @@ mod tests {
         merkle::mmr::{Family as MmrFamily, Proof},
         qmdb::sync::requests::FetchFuture,
     };
-    use commonware_cryptography::{sha256, Sha256};
-    use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::{channel::oneshot, non_empty_range, NZU64};
+    use commonware_cryptography::{Sha256, sha256};
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{NZU64, channel::oneshot, non_empty_range};
     use std::{
         convert::Infallible,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 

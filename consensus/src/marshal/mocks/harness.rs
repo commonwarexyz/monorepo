@@ -4,57 +4,56 @@
 //! and running them against both the standard and coding marshal variants.
 
 use crate::{
+    Heightable, Reporter,
     marshal::{
+        Identifier,
         ancestry::BlockProvider,
         coding::{
-            shards,
-            types::{coding_config_for_participants, hash_context, CodedBlock},
-            Coding,
+            Coding, shards,
+            types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
         core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
-        Identifier,
     },
     simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
     },
-    types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-    Heightable, Reporter,
+    types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
 use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
+    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Provider, Scoped, Verifier as _},
+    certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
-    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
+    Clock, Quota, Runner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     telemetry::metrics::{
-        histogram::{Buckets, Timed},
         MetricsExt as _,
+        histogram::{Buckets, Timed},
     },
-    Clock, Quota, Runner, Supervisor as _,
 };
 use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, test_rng, vec::NonEmptyVec};
 use futures::StreamExt;
 use rand::{
-    seq::{IteratorRandom, SliceRandom},
     RngExt as _,
+    seq::{IteratorRandom, SliceRandom},
 };
 use std::{
     collections::BTreeMap,
@@ -203,14 +202,15 @@ pub trait TestHarness: 'static + Sized {
 
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<
-        ApplicationBlock = Self::ApplicationBlock,
-        Commitment = Self::Commitment,
-    >;
+            ApplicationBlock = Self::ApplicationBlock,
+            Commitment = Self::Commitment,
+        >;
 
     /// The block type used in test operations.
     type TestBlock: Heightable
         + Clone
         + Send
+        + Sync
         + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
 
     /// Additional per-validator state (e.g., shards mailbox for coding).
@@ -269,12 +269,25 @@ pub trait TestHarness: 'static + Sized {
     /// Get the height from a test block.
     fn height(block: &Self::TestBlock) -> Height;
 
-    /// Propose a block (broadcast to network).
+    /// Drive the leader's propose durability handshake: persist the proposed
+    /// block and assert it is durable, without broadcasting it (mirroring the
+    /// certify-time flush of a staged proposal whose broadcast was never
+    /// requested). Scenarios drive dissemination explicitly, so a proposal
+    /// must not pre-seed peer buffers and mask delivery and backfill paths.
     fn propose(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
         block: &Self::TestBlock,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = ()> + Send {
+        async move {
+            let block: <Self::Variant as crate::marshal::core::Variant>::Block =
+                block.clone().into();
+            assert!(
+                handle.mailbox.verified(round, block).await,
+                "proposed block must be durable"
+            );
+        }
+    }
 
     /// Mark a block as verified.
     fn verify(
@@ -898,8 +911,9 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: `marshal.proposed(...)=true` means the block survives an
-/// immediate crash and repeated recoveries.
+/// Contract: a durable propose handshake (the proposal's sync handle
+/// resolving durable) means the block survives an immediate crash and
+/// repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -977,18 +991,9 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered =
-                            restarted
-                                .mailbox
-                                .get_verified(round)
-                                .await
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "marshal.proposed() returning true must imply \
-                                     get_verified(round) recovers the block after restart \
-                                     (seed={seed}, cycle={cycle})"
-                                    )
-                                });
+                        let recovered = restarted.mailbox.get_verified(round).await.unwrap_or_else(
+                            || panic!("durable proposal lost after restart (seed={seed}, cycle={cycle})"),
+                        );
                         assert_eq!(
                             recovered.digest(),
                             digest,
@@ -1972,10 +1977,6 @@ impl TestHarness for StandardHarness {
         block.height()
     }
 
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2222,18 +2223,6 @@ impl TestHarness for InlineHarness {
         StandardHarness::height(block)
     }
 
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        StandardHarness::propose(
-            &mut ValidatorHandle::<StandardHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2424,18 +2413,6 @@ impl TestHarness for DeferredHarness {
 
     fn height(block: &Self::TestBlock) -> Height {
         InlineHarness::height(block)
-    }
-
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        InlineHarness::propose(
-            &mut ValidatorHandle::<InlineHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
     }
 
     async fn verify(
@@ -2815,14 +2792,6 @@ impl TestHarness for CodingHarness {
 
     fn height(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Height {
         block.height()
-    }
-
-    async fn propose(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
-    ) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(
@@ -4694,11 +4663,13 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         };
 
         // Initially, no blocks
-        assert!(handle
-            .mailbox
-            .get_block(Identifier::Height(Height::new(1)))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_block(Identifier::Height(Height::new(1)))
+                .await
+                .is_none()
+        );
         assert!(handle.mailbox.get_block(Identifier::Latest).await.is_none());
 
         let mut parent = Sha256::hash(b"");
@@ -4751,11 +4722,13 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         assert_eq!(latest.height(), Height::new(3));
 
         // Missing height
-        assert!(handle
-            .mailbox
-            .get_block(Identifier::Height(Height::new(10)))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_block(Identifier::Height(Height::new(10)))
+                .await
+                .is_none()
+        );
     })
 }
 
@@ -4854,11 +4827,13 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         };
 
         // Initially, no finalization
-        assert!(handle
-            .mailbox
-            .get_finalization(Height::new(1))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .is_none()
+        );
 
         let mut parent = Sha256::hash(b"");
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
@@ -4900,11 +4875,13 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         }
 
         // Missing height
-        assert!(handle
-            .mailbox
-            .get_finalization(Height::new(10))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_finalization(Height::new(10))
+                .await
+                .is_none()
+        );
     })
 }
 
@@ -4993,11 +4970,13 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         }
 
         // Validator 1 should not have block 5 yet
-        assert!(handle1
-            .mailbox
-            .get_finalization(Height::new(5))
-            .await
-            .is_none());
+        assert!(
+            handle1
+                .mailbox
+                .get_finalization(Height::new(5))
+                .await
+                .is_none()
+        );
 
         // Validator 1: hint that block 5 is finalized, targeting validator 0
         handle1

@@ -3,13 +3,13 @@ use commonware_cryptography::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use commonware_cryptography::reed_solomon::engine::{Avx2, Ssse3};
 use commonware_cryptography::reed_solomon::{
-    engine::{DefaultEngine, Engine, Naive, NoSimd, ShardsRefMut, GF_ORDER},
+    Decoder, Encoder, SHARD_CHUNK_BYTES,
+    engine::{DefaultEngine, Engine, GF_ORDER, Naive, NoSimd, ShardsRefMut},
     rate::{
         HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder, RateDecoder, RateEncoder,
     },
-    Decoder, Encoder, SHARD_CHUNK_BYTES,
 };
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::{Rng, RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
@@ -52,13 +52,13 @@ fn encode_recovery(
     for shard in original {
         encoder.add_original_shard(shard).unwrap();
     }
-    let recovery = encoder
+
+    encoder
         .encode()
         .unwrap()
         .recovery_iter()
         .map(<[u8]>::to_vec)
-        .collect();
-    recovery
+        .collect()
 }
 
 // ======================================================================

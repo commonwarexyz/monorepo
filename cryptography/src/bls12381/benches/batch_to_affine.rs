@@ -1,7 +1,7 @@
-use commonware_cryptography::bls12381::primitives::group::{Scalar, G1, G2};
+use commonware_cryptography::bls12381::primitives::group::{G1, G2, Scalar};
 use commonware_math::algebra::{CryptoGroup, Random};
 use commonware_utils::test_rng;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_batch_to_affine(c: &mut Criterion) {

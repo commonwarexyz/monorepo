@@ -1,15 +1,15 @@
 mod banderwagon;
 
 use crate::{
-    bls12381::primitives::group::{Scalar, ScalarReadCfg, G1},
+    Secret,
+    bls12381::primitives::group::{G1, Scalar, ScalarReadCfg},
     transcript::{Summary, Transcript},
     zk::{
         bulletproofs::circuit::{self, prove, verify},
         pedersen_to_plain,
     },
-    Secret,
 };
-use banderwagon::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
+use banderwagon::{F, G, vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
@@ -19,8 +19,8 @@ use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    ordered::{Map, Set},
     Array, Span, TryCollect, TryFromIterator,
+    ordered::{Map, Set},
 };
 use core::{
     fmt::{Debug, Display},

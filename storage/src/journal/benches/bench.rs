@@ -1,10 +1,10 @@
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::journal::contiguous::{
+    Mutable,
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
-    Mutable,
 };
-use commonware_utils::{sequence::FixedBytes, test_rng, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes, test_rng};
 use criterion::criterion_main;
 use rand::Rng;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};

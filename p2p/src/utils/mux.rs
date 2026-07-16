@@ -10,9 +10,9 @@
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable};
-use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
+use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, IoBuf, IoBufs, Spawner};
+use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
 use commonware_utils::channel::{
     fallible::FallibleExt,
     mpsc::{self, error::TrySendError},
@@ -154,10 +154,10 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                 // Get the route for the subchannel.
                 let Some(sender) = self.routes.get_mut(&subchannel) else {
                     // Attempt to use the backup channel if available.
-                    if let Some(backup) = &mut self.backup {
-                        if let Err(e) = backup.try_send((subchannel, (pk, bytes))) {
-                            debug!(?subchannel, ?e, "failed to send message to backup channel");
-                        }
+                    if let Some(backup) = &mut self.backup
+                        && let Err(e) = backup.try_send((subchannel, (pk, bytes)))
+                    {
+                        debug!(?subchannel, ?e, "failed to send message to backup channel");
                     }
 
                     // Drops the message if the subchannel is not found or the backup
@@ -496,16 +496,16 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S, R
 mod tests {
     use super::*;
     use crate::{
-        simulated::{self, Link, Network, Oracle},
         Manager as _, Provider as _, Recipients,
+        simulated::{self, Link, Network, Oracle},
     };
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, IoBuf, Quota, Runner, Supervisor as _};
-    use commonware_utils::{ordered::Set, NZUsize};
+    use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
+    use commonware_utils::{NZUsize, ordered::Set};
     use std::{
         num::NonZeroU32,
         time::{Duration, SystemTime},
@@ -563,7 +563,10 @@ mod tests {
         seed: u64,
     ) -> (
         PublicKey,
-        MuxHandle<impl Sender<PublicKey = PublicKey>, impl Receiver<PublicKey = PublicKey>>,
+        MuxHandle<
+            impl Sender<PublicKey = PublicKey> + use<>,
+            impl Receiver<PublicKey = PublicKey> + use<>,
+        >,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
@@ -583,7 +586,10 @@ mod tests {
         seed: u64,
     ) -> (
         PublicKey,
-        MuxHandle<impl Sender<PublicKey = PublicKey>, impl Receiver<PublicKey = PublicKey>>,
+        MuxHandle<
+            impl Sender<PublicKey = PublicKey> + use<>,
+            impl Receiver<PublicKey = PublicKey> + use<>,
+        >,
         mpsc::Receiver<BackupResponse<PublicKey>>,
         GlobalSender<simulated::Sender<PublicKey, deterministic::Context>>,
     ) {

@@ -1,17 +1,16 @@
 use super::{Config, Error, Identifier};
 use crate::{
+    Context,
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
-    Context,
 };
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_cryptography::{crc32, Crc32, Hasher};
+use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    buffer,
+    Blob, Buf, BufMut, BufferPooler, IoBuf, buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
-    Blob, Buf, BufMut, BufferPooler, IoBuf,
 };
 use commonware_utils::{Array, Span};
 use futures::future::try_join;
@@ -544,10 +543,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             modified |= entry1_cleared || entry2_cleared;
 
             // If the latest entry has reached the resize frequency, increment the resizable entries
-            if let Some((_, _, added)) = Self::read_latest_entry(&entry1, &entry2) {
-                if added >= table_resize_frequency {
-                    resizable += 1;
-                }
+            if let Some((_, _, added)) = Self::read_latest_entry(&entry1, &entry2)
+                && added >= table_resize_frequency
+            {
+                resizable += 1;
             }
         }
 
@@ -865,30 +864,30 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         .await?;
 
         // If we're mid-resize and this entry has already been processed, update the new position too
-        if let Some(resize_progress) = self.resize_progress {
-            if table_index < resize_progress {
-                self.unnecessary_writes.inc();
+        if let Some(resize_progress) = self.resize_progress
+            && table_index < resize_progress
+        {
+            self.unnecessary_writes.inc();
 
-                // If the previous entry crossed the threshold, so did this one
-                if added == self.table_resize_frequency {
-                    self.resizable += 1;
-                }
-
-                // This entry has been processed, so we need to update the new position as well.
-                //
-                // The entries are still identical to the old ones, so we don't need to read them again.
-                let new_table_index = self.table_size + table_index;
-                let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
-                Self::update_head(
-                    &self.context,
-                    &self.table,
-                    new_table_index,
-                    &entry1,
-                    &entry2,
-                    new_entry,
-                )
-                .await?;
+            // If the previous entry crossed the threshold, so did this one
+            if added == self.table_resize_frequency {
+                self.resizable += 1;
             }
+
+            // This entry has been processed, so we need to update the new position as well.
+            //
+            // The entries are still identical to the old ones, so we don't need to read them again.
+            let new_table_index = self.table_size + table_index;
+            let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
+            Self::update_head(
+                &self.context,
+                &self.table,
+                new_table_index,
+                &entry1,
+                &entry2,
+                new_entry,
+            )
+            .await?;
         }
 
         Ok(Cursor::new(self.current_section, value_offset, value_size))
@@ -1174,12 +1173,12 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
-        Supervisor as _,
+        Runner, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        deterministic::Context,
     };
     use commonware_utils::{
+        NZU16, NZUsize,
         sequence::{FixedBytes, U64},
-        NZUsize, NZU16,
     };
 
     fn test_key(key: &str) -> FixedBytes<64> {

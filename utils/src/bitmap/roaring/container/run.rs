@@ -379,13 +379,13 @@ fn validate_runs(runs: &[(u16, u16)]) -> Result<(), CodecError> {
         if start > end {
             return Err(CodecError::Invalid("Run", "start must be <= end"));
         }
-        if let Some(p) = prev_end {
-            if start <= p.saturating_add(1) {
-                return Err(CodecError::Invalid(
-                    "Run",
-                    "runs must be sorted, non-overlapping, and non-adjacent",
-                ));
-            }
+        if let Some(p) = prev_end
+            && start <= p.saturating_add(1)
+        {
+            return Err(CodecError::Invalid(
+                "Run",
+                "runs must be sorted, non-overlapping, and non-adjacent",
+            ));
         }
         prev_end = Some(end);
     }

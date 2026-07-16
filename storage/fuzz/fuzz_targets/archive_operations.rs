@@ -1,15 +1,15 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     archive::{
-        prunable::{Archive, Config},
         Archive as _, Identifier,
+        prunable::{Archive, Config},
     },
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -83,11 +83,10 @@ fn fuzz(data: FuzzInput) {
                     value_data,
                 } => {
                     // Skip if we've pruned this index
-                    if let Some(already_pruned) = oldest_allowed {
-                        if *index < already_pruned {
+                    if let Some(already_pruned) = oldest_allowed
+                        && *index < already_pruned {
                             continue;
                         }
-                    }
                     let key = Key::new(*key_data);
                     let value = Value::new(*value_data);
 
@@ -102,11 +101,10 @@ fn fuzz(data: FuzzInput) {
 
                 ArchiveOperation::GetByIndex(index) => {
                     // Skip if we've pruned this index
-                    if let Some(already_pruned) = oldest_allowed {
-                        if *index < already_pruned {
+                    if let Some(already_pruned) = oldest_allowed
+                        && *index < already_pruned {
                             continue;
                         }
-                    }
 
                     let result = archive.get(Identifier::Index(*index)).await;
 
@@ -226,18 +224,16 @@ fn fuzz(data: FuzzInput) {
                         assert!(gap_index >= *start, "Gap {gap_index} before requested start {start}");
 
                         // If pruned, gap should be above threshold
-                        if let Some(threshold) = oldest_allowed {
-                            if gap_index < threshold {
+                        if let Some(threshold) = oldest_allowed
+                            && gap_index < threshold {
                                 panic!("Warning: next_gap returned gap {gap_index} below pruning threshold {threshold}");
                             }
-                        }
                     }
 
-                    if let Some(next_index) = next_written {
-                        if next_index < *start {
+                    if let Some(next_index) = next_written
+                        && next_index < *start {
                             panic!("Warning: next_written {next_index} is before start {start}");
                         }
-                    }
                 }
             }
         }

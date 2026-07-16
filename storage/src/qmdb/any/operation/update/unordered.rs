@@ -1,8 +1,8 @@
 use crate::qmdb::{
     any::{
-        operation::{update::sealed::Sealed, Update as UpdateTrait},
-        value::{FixedEncoding, ValueEncoding, VariableEncoding},
         FixedValue, VariableValue,
+        operation::{Update as UpdateTrait, update::sealed::Sealed},
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
     },
     operation::Key,
 };

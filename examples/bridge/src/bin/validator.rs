@@ -1,29 +1,30 @@
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX, application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
-        self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine, Floor,
+        self, Engine, Floor, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme,
     },
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
+    Sha256, Signer as _,
     bls12381::primitives::{
         group,
         sharing::{ModeVersion, Sharing},
         variant::{MinSig, Variant},
     },
-    ed25519, Sha256, Signer as _,
+    ed25519,
 };
 use commonware_formatting::from_hex;
-use commonware_p2p::{authenticated, Manager as _};
+use commonware_p2p::{Manager as _, authenticated};
 use commonware_runtime::{
-    buffer::paged::CacheRef, tokio, Network, Quota, Runner, Strategizer, Supervisor as _,
+    Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
+use commonware_stream::encrypted::{Config as StreamConfig, dial};
+use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,

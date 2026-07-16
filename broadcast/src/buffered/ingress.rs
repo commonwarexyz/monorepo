@@ -1,7 +1,7 @@
 use crate::Broadcaster;
 use commonware_actor::{
-    mailbox::{Overflow, Policy, Sender},
     Feedback,
+    mailbox::{Overflow, Policy, Sender},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};

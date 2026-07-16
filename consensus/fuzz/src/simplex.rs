@@ -2,8 +2,8 @@ use commonware_codec::Read;
 use commonware_consensus::simplex::{
     elector::{Config as ElectorConfig, RoundRobin},
     scheme::{
-        bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
-        Scheme,
+        Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+        secp256r1,
     },
 };
 use commonware_cryptography::{
@@ -120,7 +120,7 @@ impl Simplex for SimplexSecp256r1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{fuzz, strategy::StrategyChoice, utils::Partition, FuzzInput, Standard, N4F1C3};
+    use crate::{FuzzInput, N4F1C3, Standard, fuzz, strategy::StrategyChoice, utils::Partition};
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
 

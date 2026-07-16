@@ -3,8 +3,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey, Signature},
     Signer, Verifier,
+    ed25519::{PrivateKey, PublicKey, Signature},
 };
 use commonware_utils::union_unique;
 use ed25519_consensus::{
@@ -192,9 +192,11 @@ fn test_signing(seed: [u8; 32], namespace: &[u8], message: &[u8]) {
     assert_eq!(&consensus_signature.to_bytes()[..], our_signature.as_ref());
 
     // Each implementation should accept the signature it produced
-    assert!(consensus_public_key
-        .verify(&consensus_signature, &payload)
-        .is_ok());
+    assert!(
+        consensus_public_key
+            .verify(&consensus_signature, &payload)
+            .is_ok()
+    );
     assert!(our_public_key.verify(namespace, message, &our_signature));
 }
 

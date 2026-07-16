@@ -12,10 +12,9 @@ use crate::{
         any::traits::DbAny,
         operation::Operation as OperationTrait,
         sync::{
-            self,
+            self, Engine, Target,
             engine::{Config, NextStep},
             resolver::{self, FetchResult, Resolver},
-            Engine, Target,
         },
     },
 };
@@ -23,21 +22,21 @@ use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
-    deterministic, BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _,
+    BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _, deterministic,
 };
 use commonware_utils::{
+    NZU64,
     channel::{mpsc, oneshot},
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
-    NZU64,
 };
-use futures::{pin_mut, FutureExt};
+use futures::{FutureExt, pin_mut};
 use rand::Rng as _;
 use std::{
     num::NonZeroU64,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -1807,12 +1806,10 @@ where
             && !self
                 .corrupted
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
+            && let Some(ref mut nodes) = result.pinned_nodes
+            && !nodes.is_empty()
         {
-            if let Some(ref mut nodes) = result.pinned_nodes {
-                if !nodes.is_empty() {
-                    nodes[0] = Digest::from([0xFFu8; 32]);
-                }
-            }
+            nodes[0] = Digest::from([0xFFu8; 32]);
         }
         Ok(result)
     }
@@ -2098,7 +2095,7 @@ mod harnesses {
     };
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic::Context, BufferPooler};
+    use commonware_runtime::{BufferPooler, deterministic::Context};
     use commonware_utils::TestRng;
     use rand::Rng;
 
@@ -2111,7 +2108,7 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
         let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -2137,7 +2134,7 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
         let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -2158,7 +2155,7 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Vec<u8>>> {
-        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
         let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -2185,7 +2182,7 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Vec<u8>>> {
-        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
         let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();

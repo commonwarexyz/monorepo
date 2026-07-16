@@ -1,16 +1,17 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::{fixed, variable, Contiguous, Many};
-use crate::journal::{contiguous::Mutable, Error};
+use super::{Contiguous, Many, fixed, variable};
+use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
+    Blob as _, Handle, Runner as _, Spawner as _, Storage as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs},
-    reschedule, Blob as _, Handle, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+    reschedule,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use futures::{future::BoxFuture, FutureExt as _, StreamExt};
+use commonware_utils::{NZU16, NZU64, NZUsize};
+use futures::{FutureExt as _, StreamExt, future::BoxFuture};
 use std::{
     future::Future,
     sync::atomic::{AtomicUsize, Ordering},

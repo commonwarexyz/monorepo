@@ -1,7 +1,7 @@
 //! Mechanisms for coordinating actions across many tasks.
 
 use commonware_utils::channel::oneshot::{self, error::RecvError};
-use futures::{future::Shared, FutureExt};
+use futures::{FutureExt, future::Shared};
 use std::{
     future::Future,
     pin::Pin,

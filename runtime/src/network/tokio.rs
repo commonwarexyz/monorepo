@@ -3,8 +3,8 @@ use std::{convert::identity, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     time::timeout,
 };
@@ -159,17 +159,17 @@ impl crate::Listener for Listener {
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
         }
 
         // Set SO_LINGER to zero if configured
-        if self.cfg.zero_linger {
-            if let Err(err) = stream.set_zero_linger() {
-                warn!(?err, "failed to set SO_LINGER");
-            }
+        if self.cfg.zero_linger
+            && let Err(err) = stream.set_zero_linger()
+        {
+            warn!(?err, "failed to set SO_LINGER");
         }
 
         // Return the sink and stream
@@ -335,17 +335,17 @@ impl crate::Network for Network {
             .map_err(|_| Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
         }
 
         // Set SO_LINGER to zero if configured
-        if self.cfg.zero_linger {
-            if let Err(err) = stream.set_zero_linger() {
-                warn!(?err, "failed to set SO_LINGER");
-            }
+        if self.cfg.zero_linger
+            && let Err(err) = stream.set_zero_linger()
+        {
+            warn!(?err, "failed to set SO_LINGER");
         }
 
         // Return the sink and stream
@@ -369,9 +369,9 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::{
+        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
         network::{tests, tokio as TokioNetwork},
         telemetry::metrics::Registry,
-        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use std::time::{Duration, Instant};

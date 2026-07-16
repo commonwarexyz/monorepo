@@ -1,6 +1,6 @@
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},

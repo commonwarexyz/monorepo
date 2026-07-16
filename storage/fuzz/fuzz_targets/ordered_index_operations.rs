@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, deterministic};
 use commonware_storage::{
-    index::{ordered::Index, Cursor as _, Unordered as _},
+    index::{Cursor as _, Unordered as _, ordered::Index},
     translator::TwoCap,
 };
 use libfuzzer_sys::fuzz_target;
@@ -146,18 +146,18 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 IndexOperation::CursorUpdate { key, new_value } => {
-                    if let Some(mut cursor) = index.get_mut(key) {
-                        if cursor.next().is_some() {
-                            cursor.update(*new_value);
-                        }
+                    if let Some(mut cursor) = index.get_mut(key)
+                        && cursor.next().is_some()
+                    {
+                        cursor.update(*new_value);
                     }
                 }
 
                 IndexOperation::CursorDelete { key } => {
-                    if let Some(mut cursor) = index.get_mut(key) {
-                        if cursor.next().is_some() {
-                            cursor.delete();
-                        }
+                    if let Some(mut cursor) = index.get_mut(key)
+                        && cursor.next().is_some()
+                    {
+                        cursor.delete();
                     }
                 }
 

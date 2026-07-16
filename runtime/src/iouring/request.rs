@@ -528,11 +528,7 @@ pub(super) struct WriteAtRequest {
 impl WriteAtRequest {
     /// Return the flags for this write request, setting `RWF_SYNC` when `sync` is set.
     const fn rw_flags(&self) -> i32 {
-        if self.sync {
-            libc::RWF_SYNC
-        } else {
-            0
-        }
+        if self.sync { libc::RWF_SYNC } else { 0 }
     }
 
     /// Build the next positioned write SQE for the remaining bytes.
@@ -650,7 +646,7 @@ mod tests {
             fd::{FromRawFd, IntoRawFd},
             unix::net::UnixStream,
         },
-        panic::{catch_unwind, AssertUnwindSafe},
+        panic::{AssertUnwindSafe, catch_unwind},
     };
 
     fn make_socket_fd() -> Arc<OwnedFd> {

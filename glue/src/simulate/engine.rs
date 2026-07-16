@@ -3,7 +3,7 @@
 use super::tracker::FinalizationUpdate;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{self, Oracle};
-use commonware_runtime::{deterministic, Handle, Quota};
+use commonware_runtime::{Handle, Quota, deterministic};
 use commonware_utils::channel::mpsc;
 use std::future::Future;
 

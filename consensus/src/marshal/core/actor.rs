@@ -1,4 +1,5 @@
 use super::{
+    Buffer, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
@@ -8,46 +9,44 @@ use super::{
     stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
     variant::NoBuffer,
-    Buffer, Variant,
 };
 use crate::{
+    Block, Epochable, Heightable, Reporter,
     marshal::{
+        Config, Identifier as BlockID, Start, Update,
         resolver::handler::{self, Annotation, Key, Request},
         store::{Blocks, Certificates},
-        Config, Identifier as BlockID, Start, Update,
     },
     simplex::{
         scheme::Scheme,
-        types::{verify_certificates, Finalization, Notarization, Subject},
+        types::{Finalization, Notarization, Subject, verify_certificates},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{Provider, Verifier},
     Digestible,
+    certificate::{Provider, Verifier},
 };
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
-    spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
     telemetry::{
         metrics::{Gauge, GaugeExt, MetricsExt as _},
         traces::TracedExt as _,
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
+    Acknowledgement, BoxedError,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Pool},
-    Acknowledgement, BoxedError,
 };
 use futures::{
     future::{join, join_all},
@@ -55,7 +54,7 @@ use futures::{
 };
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
-use tracing::{debug, info_span, warn, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, info_span, warn};
 
 // Resolver request keys are expressed in the variant commitment type, which
 // may differ from the block digest for coded variants.
@@ -97,10 +96,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-        BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
-    >,
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -128,8 +127,6 @@ where
     strategy: T,
 
     // ---------- State ----------
-    // Last proposed block
-    last_proposed_block: Option<(Round, V::Commitment, Arc<V::Block>)>,
     // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
     // Application delivery cursor
@@ -165,10 +162,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-        BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
-    >,
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -247,7 +244,6 @@ where
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
-                last_proposed_block: None,
                 floor,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
@@ -323,10 +319,10 @@ where
     ) -> Handle<()>
     where
         R: TargetedResolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as Verifier>::PublicKey,
-        >,
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                PublicKey = <P::Scheme as Verifier>::PublicKey,
+            >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver))
@@ -340,10 +336,10 @@ where
     ) -> Handle<()>
     where
         R: TargetedResolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as Verifier>::PublicKey,
-        >,
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                PublicKey = <P::Scheme as Verifier>::PublicKey,
+            >,
     {
         self.start(
             application,
@@ -360,10 +356,10 @@ where
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
         R: TargetedResolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as Verifier>::PublicKey,
-        >,
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                PublicKey = <P::Scheme as Verifier>::PublicKey,
+            >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         // Create a local pool for waiter futures.
@@ -570,10 +566,10 @@ where
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: TargetedResolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as Verifier>::PublicKey,
-        >,
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                PublicKey = <P::Scheme as Verifier>::PublicKey,
+            >,
     {
         if message.response_closed() {
             return;
@@ -616,60 +612,37 @@ where
                 if matches!(&recipients, Recipients::Some(peers) if peers.is_empty()) {
                     return;
                 }
-                let block = match self.take_proposed(round, commitment) {
-                    Some(block) => block,
-                    None => {
-                        let Some(block) = self.find_block_by_commitment(buffer, commitment).await
-                        else {
-                            debug!(?commitment, "block not found for forwarding");
-                            return;
-                        };
-                        block
-                    }
+                let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
+                    debug!(?commitment, "block not found for forwarding");
+                    return;
                 };
                 buffer.send(round, block, recipients);
             }
             Message::Proposed {
-                round, block, ack, ..
+                round,
+                block,
+                recipients,
+                ack,
+                ..
             } => {
-                self.ingest(Arc::clone(&block), buffer, application, resolver)
+                // To lower view latency as much as possible while preserving
+                // safety, we broadcast the block before persisting it
+                // (durability is not required until certify). A leader that
+                // crashes here may broadcast a conflicting block for the same
+                // round after restart. This is tolerated: extra block bytes
+                // cannot form a conflicting certificate (unlike votes), block
+                // storage tolerates multiple candidates per round (see
+                // [Mailbox::get_verified]), and the propose paths skip or
+                // reuse a recovered block on restart.
+                buffer.send(round, Arc::clone(&block), recipients);
+                self.persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
-                let digest = block.digest();
-
-                // If the round has already been pruned by tip advancement,
-                // `put_verified` is a no-op because the round is below
-                // the retention floor (and no longer is required by consensus
-                // to make progress). A duplicate delivery is also a no-op, with
-                // the handle still covering the original write's durability.
-                let handle = self
-                    .cache
-                    .put_verified(round, digest, block.as_ref().clone().into())
-                    .await;
-
-                // Retain the block in memory so the subsequent `Forward` can
-                // broadcast it without reloading from storage. An older retained
-                // proposal (if any) is overwritten.
-                let commitment = V::commitment(&block);
-                self.last_proposed_block = Some((round, commitment, block));
-                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Verified {
                 round, block, ack, ..
             } => {
-                self.ingest(Arc::clone(&block), buffer, application, resolver)
+                self.persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
-                let digest = block.digest();
-
-                // If the round has already been pruned by tip advancement,
-                // `put_verified` is a no-op because the round is below
-                // the retention floor (and no longer is required by consensus
-                // to make progress). A duplicate delivery is also a no-op, with
-                // the handle still covering the original write's durability.
-                let handle = self
-                    .cache
-                    .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
-                    .await;
-                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Certified {
                 round, block, ack, ..
@@ -702,7 +675,7 @@ where
                     let (notarization, block) = join(notarization_sync, block_sync).await;
                     notarization.and(block)
                 });
-                ack.expect("durable ack present").send_lossy(handle);
+                ack.send_lossy(handle);
             }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
@@ -1199,6 +1172,32 @@ where
             .ignore();
     }
 
+    /// Ingests `block` and persists it as a verify-stage candidate for `round`,
+    /// delivering the write's durable-sync handle through `ack`.
+    ///
+    /// If the round has already been pruned by tip advancement, `put_verified`
+    /// is a no-op because the round is below the retention floor (and no longer
+    /// is required by consensus to make progress). A duplicate delivery is also
+    /// a no-op, with the handle still covering the original write's durability.
+    async fn persist_verified<Buf: Buffer<V>>(
+        &mut self,
+        round: Round,
+        block: Arc<V::Block>,
+        ack: oneshot::Sender<Handle<()>>,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) {
+        self.ingest(Arc::clone(&block), buffer, application, resolver)
+            .await;
+        let digest = block.digest();
+        let handle = self
+            .cache
+            .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
+            .await;
+        ack.send_lossy(handle);
+    }
+
     /// Notifies subscribers of a validated block and applies it to any
     /// pending floor transition.
     ///
@@ -1414,17 +1413,16 @@ where
                     .iter()
                     .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
                     && height > self.floor.processed_height()
+                    && let Some(bounds) = self.epocher.containing(height)
                 {
-                    if let Some(bounds) = self.epocher.containing(height) {
-                        self.cache
-                            .put_certified(
-                                bounds.epoch(),
-                                height,
-                                digest,
-                                Arc::unwrap_or_clone(block).into(),
-                            )
-                            .await;
-                    }
+                    self.cache
+                        .put_certified(
+                            bounds.epoch(),
+                            height,
+                            digest,
+                            Arc::unwrap_or_clone(block).into(),
+                        )
+                        .await;
                 }
                 debug!(?digest, %height, "received block");
                 response.send_lossy(true);
@@ -1806,16 +1804,6 @@ where
     }
 
     // -------------------- Prunable Storage --------------------
-
-    /// If a block previously accepted via [`Message::Proposed`] matches the
-    /// supplied `(round, commitment)`, remove and return it.
-    fn take_proposed(&mut self, round: Round, commitment: V::Commitment) -> Option<Arc<V::Block>> {
-        let (cached_round, cached_commitment, _) = self.last_proposed_block.as_ref()?;
-        if *cached_round != round || *cached_commitment != commitment {
-            return None;
-        }
-        self.last_proposed_block.take().map(|(_, _, block)| block)
-    }
 
     /// Sync both finalization archives to durable storage, blocking the actor
     /// until they are durable.

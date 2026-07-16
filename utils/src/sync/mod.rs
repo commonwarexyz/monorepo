@@ -219,7 +219,7 @@ impl<T> Deref for UpgradableAsyncRwLockUpgradableReadGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{AsyncRwLock, TracedAsyncMutex, TracedAsyncRwLock, UpgradableAsyncRwLock};
-    use futures::{pin_mut, FutureExt};
+    use futures::{FutureExt, pin_mut};
 
     #[test]
     fn test_traced_async_mutex() {

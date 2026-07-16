@@ -46,16 +46,16 @@ use crate::{
     merkle::{Family, Location, Proof},
     qmdb::{
         self,
-        any::{value::ValueEncoding, FixedValue, VariableValue},
+        any::{FixedValue, VariableValue, value::ValueEncoding},
         immutable::{
+            CompactDb as ImmutableCompactDb, Operation as ImmutableOp,
             fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
             variable::{Db as ImmutableVariableDb, Operation as ImmutableVariableOp},
-            CompactDb as ImmutableCompactDb, Operation as ImmutableOp,
         },
         keyless::{
+            CompactDb as KeylessCompactDb, Operation as KeylessOp,
             fixed::{Db as KeylessFixedDb, Operation as KeylessFixedOp},
             variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
-            CompactDb as KeylessCompactDb, Operation as KeylessOp,
         },
         operation::Key,
         sync::{EngineError, Error},
@@ -69,13 +69,13 @@ use commonware_codec::{
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
-use commonware_runtime::{reschedule, Buf, BufMut, Clock, Metrics, Storage, Supervisor};
+use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor, reschedule};
 use commonware_utils::{
+    Array,
     channel::{mpsc, oneshot},
     sync::{AsyncRwLock, TracedAsyncRwLock},
-    Array,
 };
-use futures::future::{pending, Either};
+use futures::future::{Either, pending};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Compact-sync target for a compact-storage database.
@@ -293,8 +293,8 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         &'a self,
         target: Target<Self::Family, Self::Digest>,
     ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
-           + Send
-           + 'a;
+    + Send
+    + 'a;
 }
 
 /// Marker trait for resolvers whose associated types match a specific compact-sync database.
@@ -426,10 +426,10 @@ where
     let mut attempt = 0u64;
     loop {
         // Prefer the newest queued target before starting an attempt.
-        if let Some(update_rx) = update_rx.as_mut() {
-            if let Some(update) = drain_latest_target(update_rx).await {
-                target = update;
-            }
+        if let Some(update_rx) = update_rx.as_mut()
+            && let Some(update) = drain_latest_target(update_rx).await
+        {
+            target = update;
         }
         target
             .validate()
@@ -455,17 +455,17 @@ where
         metrics.record_synced(*target.leaf_count);
 
         // A target queued while the attempt ran supersedes the result.
-        if let Some(update_rx) = update_rx.as_mut() {
-            if let Some(update) = drain_latest_target(update_rx).await {
-                target = update;
-                continue;
-            }
+        if let Some(update_rx) = update_rx.as_mut()
+            && let Some(update) = drain_latest_target(update_rx).await
+        {
+            target = update;
+            continue;
         }
 
-        if let Some(reached_target_tx) = reached_target_tx.as_ref() {
-            if reached_target_tx.send(target.clone()).await.is_err() {
-                return Ok(db);
-            }
+        if let Some(reached_target_tx) = reached_target_tx.as_ref()
+            && reached_target_tx.send(target.clone()).await.is_err()
+        {
+            return Ok(db);
         }
 
         let Some(finish_rx) = finish_rx.as_mut() else {
@@ -1099,20 +1099,20 @@ impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, Varia
 mod tests {
     use super::{Config, Database, FetchResult, Resolver, State, Target};
     use crate::{
-        merkle::{mmr, Location},
+        merkle::{Location, mmr},
         qmdb,
     };
     use commonware_codec::{DecodeExt as _, Encode as _, RangeCfg};
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_parallel::Rayon;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::sync::AsyncRwLock;
     use std::{
         collections::VecDeque,
         convert::Infallible,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 

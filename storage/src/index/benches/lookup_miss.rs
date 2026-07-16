@@ -1,10 +1,10 @@
 use super::{Digest, DummyMetrics};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
-    index::{unordered, Unordered},
+    index::{Unordered, unordered},
     translator::{EightCap, FourCap, Translator, TwoCap},
 };
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::{
     collections::HashSet,
     hint::black_box,

@@ -7,8 +7,7 @@
 //!
 //! Multiple values for the same translated key (collisions, or repeated inserts) form a contiguous
 //! run of equal keys. Collisions are rare for well-distributed translated keys, so most runs have
-//! length one. Within a run the newest value is first (lowest index), matching the iteration order
-//! of the non-partitioned index.
+//! length one. The index's insertion path appends new values to the end of an existing run.
 
 use std::ops::Range;
 
@@ -41,10 +40,8 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     }
 
     /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
-    /// per distinct key with its values newest-first.
+    /// per distinct key with its values in their current run order.
     pub(super) fn drain_runs(&mut self) -> Vec<(K, Vec<V>)> {
-        // Each run is already stored newest-first (lowest index), so taking its values in array
-        // order preserves that ordering.
         let keys = std::mem::take(&mut self.keys);
         let vals = std::mem::take(&mut self.vals);
         let mut vals = vals.into_iter();
@@ -104,7 +101,7 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         start..end
     }
 
-    /// The values associated with `key`, newest first (empty if absent).
+    /// The values associated with `key` in their current run order (empty if absent).
     pub(super) fn values(&self, key: &K) -> &[V] {
         &self.vals[self.run_range(key)]
     }
@@ -138,8 +135,8 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         self.vals[idx] = value;
     }
 
-    /// The values of the lexicographically smallest key, newest first (None if the partition is
-    /// empty).
+    /// The values of the lexicographically smallest key in their current run order (None if the
+    /// partition is empty).
     pub(super) fn first_values(&self) -> Option<&[V]> {
         if self.keys.is_empty() {
             return None;
@@ -147,15 +144,15 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         Some(&self.vals[self.run_starting_at(0)])
     }
 
-    /// The values of the lexicographically largest key, newest first (None if the partition is
-    /// empty).
+    /// The values of the lexicographically largest key in their current run order (None if the
+    /// partition is empty).
     pub(super) fn last_values(&self) -> Option<&[V]> {
         let last = self.keys.len().checked_sub(1)?;
         Some(&self.vals[self.run_ending_at(last)])
     }
 
-    /// The values of the smallest key strictly greater than `key`, newest first (None if no such
-    /// key exists).
+    /// The values of the smallest key strictly greater than `key` in their current run order (None
+    /// if no such key exists).
     pub(super) fn next_values_after(&self, key: &K) -> Option<&[V]> {
         let idx = self.keys.partition_point(|k| *k <= *key);
         if idx >= self.keys.len() {
@@ -164,8 +161,8 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         Some(&self.vals[self.run_starting_at(idx)])
     }
 
-    /// The values of the largest key strictly less than `key`, newest first (None if no such key
-    /// exists).
+    /// The values of the largest key strictly less than `key` in their current run order (None if
+    /// no such key exists).
     pub(super) fn prev_values_before(&self, key: &K) -> Option<&[V]> {
         let prev = self.lower_bound(key).checked_sub(1)?;
         Some(&self.vals[self.run_ending_at(prev)])
@@ -176,11 +173,12 @@ impl<K: Ord + Copy, V> Partition<K, V> {
 mod tests {
     use super::*;
 
-    /// Insert `value` as the newest value for `key`, keeping the arrays sorted. The production hot
-    /// path instead reuses the run it already computed (`insert_at(run.start, ..)`) to avoid a
-    /// second `lower_bound`; this helper keeps the tests concise.
+    /// Append `value` to `key`'s run, keeping the arrays sorted. The production hot path instead
+    /// reuses the run it already computed (`insert_at(run.end, ..)`) to avoid a second lookup; this
+    /// helper keeps the tests concise.
     fn insert<K: Ord + Copy, V>(p: &mut Partition<K, V>, key: K, value: V) {
-        p.insert_at(p.lower_bound(&key), key, value);
+        let end = p.run_range(&key).end;
+        p.insert_at(end, key, value);
     }
 
     #[test]
@@ -217,25 +215,25 @@ mod tests {
         }
         // next strictly-greater key.
         assert_eq!(p.next_values_after(&5), Some(&[100u64] as &[u64]));
-        assert_eq!(p.next_values_after(&10), Some(&[222u64, 200] as &[u64])); // run, newest first
+        assert_eq!(p.next_values_after(&10), Some(&[200u64, 222] as &[u64]));
         assert_eq!(p.next_values_after(&20), Some(&[300u64] as &[u64]));
         assert!(p.next_values_after(&30).is_none());
         // prev strictly-less key.
         assert!(p.prev_values_before(&10).is_none());
         assert_eq!(p.prev_values_before(&20), Some(&[100u64] as &[u64]));
-        assert_eq!(p.prev_values_before(&25), Some(&[222u64, 200] as &[u64]));
+        assert_eq!(p.prev_values_before(&25), Some(&[200u64, 222] as &[u64]));
         assert_eq!(p.prev_values_before(&999), Some(&[300u64] as &[u64]));
     }
 
     #[test]
-    fn test_partition_collision_run_newest_first() {
+    fn test_partition_collision_run_append_order() {
         let mut p = Partition::<u16, u64>::default();
         insert(&mut p, 10, 1);
         insert(&mut p, 20, 2);
-        // Three values collide on key 10; newest is first within the run.
+        // Three values collide on key 10 and append within the run.
         insert(&mut p, 10, 11);
         insert(&mut p, 10, 111);
-        assert_eq!(p.values(&10), &[111, 11, 1]);
+        assert_eq!(p.values(&10), &[1, 11, 111]);
         assert_eq!(p.values(&20), &[2]);
         // Keys remain sorted with the run adjacent.
         assert_eq!(p.keys, vec![10, 10, 10, 20]);
@@ -249,12 +247,12 @@ mod tests {
         for (k, v) in [(10u16, 1u64), (10, 11), (20, 2)] {
             insert(&mut p, k, v);
         }
-        // keys=[10,10,20] vals=[11,1,2]; remove the older value of key 10 (index 1).
+        // keys=[10,10,20] vals=[1,11,2]; remove the newer value of key 10 (index 1).
         let removed = p.remove(1);
-        assert_eq!(removed, 1);
+        assert_eq!(removed, 11);
         assert_eq!(p.keys, vec![10, 20]);
-        assert_eq!(p.vals, vec![11, 2]);
-        assert_eq!(p.values(&10), &[11]);
+        assert_eq!(p.vals, vec![1, 2]);
+        assert_eq!(p.values(&10), &[1]);
     }
 
     #[test]
@@ -268,14 +266,14 @@ mod tests {
     #[test]
     fn test_partition_drain_runs() {
         let mut p = Partition::<u16, u64>::default();
-        // Two runs: key 10 with three values (newest-first 111, 11, 1), key 20 with one.
+        // Two runs: key 10 with three appended values, key 20 with one.
         for (k, v) in [(10u16, 1u64), (20, 2), (10, 11), (10, 111)] {
             insert(&mut p, k, v);
         }
         assert_eq!(p.len(), 4);
         let runs = p.drain_runs();
-        // One pair per distinct key, ascending, values newest-first.
-        assert_eq!(runs, vec![(10, vec![111, 11, 1]), (20, vec![2])]);
+        // One pair per distinct key, ascending, preserving each run's order.
+        assert_eq!(runs, vec![(10, vec![1, 11, 111]), (20, vec![2])]);
         // The partition is left empty.
         assert!(p.is_empty());
         assert_eq!(p.len(), 0);

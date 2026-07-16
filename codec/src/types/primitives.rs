@@ -19,8 +19,8 @@
 //!   endian ambiguity.
 
 use crate::{
-    util::at_least, varint::UInt, BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt,
-    Write,
+    BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write, util::at_least,
+    varint::UInt,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};

@@ -4,9 +4,9 @@
 //! authenticate against a registry (no piped token, no IAM role, no credential helper).
 
 use crate::aws::{
-    s3::{cache_and_presign, object_exists, presign_url, UploadSource, PRESIGN_DURATION},
-    services::{image_s3_key, sanitize_image},
     Architecture, Error,
+    s3::{PRESIGN_DURATION, UploadSource, cache_and_presign, object_exists, presign_url},
+    services::{image_s3_key, sanitize_image},
 };
 use aws_sdk_s3::Client as S3Client;
 use std::{path::Path, process::Stdio};

@@ -5,7 +5,7 @@
 //! resolver decides how keys are fetched, retried, and delivered.
 
 use commonware_utils::vec::NonEmptyVec;
-use std::collections::{btree_map::Entry as BTreeMapEntry, BTreeMap};
+use std::collections::{BTreeMap, btree_map::Entry as BTreeMapEntry};
 
 /// Tracks retained subscribers by resolver key, each paired with the span of the
 /// fetch that introduced it.
@@ -193,9 +193,11 @@ mod tests {
         let mut tracker = Tracker::new();
         tracker.insert(1, none(non_empty_vec![10, 11]));
 
-        assert!(tracker
-            .remove_delivered(&1, non_empty_vec![10, 11])
-            .is_none());
+        assert!(
+            tracker
+                .remove_delivered(&1, non_empty_vec![10, 11])
+                .is_none()
+        );
         assert!(!tracker.contains(&1));
     }
 

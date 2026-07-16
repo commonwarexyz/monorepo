@@ -1,6 +1,6 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_utils::test_rng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::Rng;
 
 fn bench_hash_message(c: &mut Criterion) {

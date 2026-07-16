@@ -1,7 +1,7 @@
 //! Shared helpers for compact QMDB batches.
 
 use crate::{
-    merkle::{self, batch, compact, hasher::Hasher as _, Family},
+    merkle::{self, Family, batch, compact, hasher::Hasher as _},
     qmdb,
 };
 use commonware_codec::EncodeShared;

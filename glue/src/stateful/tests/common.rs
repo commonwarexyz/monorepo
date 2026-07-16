@@ -1,13 +1,13 @@
 use crate::simulate::processed::ProcessedHeight;
 use commonware_consensus::{
-    marshal::{self, core::Variant, Identifier as MarshalIdentifier},
+    marshal::{self, Identifier as MarshalIdentifier, core::Variant},
     simplex::mocks::scheme::Scheme as MockScheme,
     types::Height,
 };
-use commonware_cryptography::{ed25519, sha256, Digestible};
-use commonware_runtime::{buffer::paged::CacheRef, Quota};
+use commonware_cryptography::{Digestible, ed25519, sha256};
+use commonware_runtime::{Quota, buffer::paged::CacheRef};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use std::{
     future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},

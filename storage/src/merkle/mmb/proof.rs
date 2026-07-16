@@ -6,8 +6,8 @@
 mod tests {
     use crate::{
         merkle::{
-            hasher::Standard, mmb::mem::Mmb, proof::Blueprint, Bagging, Bagging::ForwardFold,
-            Family,
+            Bagging, Bagging::ForwardFold, Family, hasher::Standard, mmb::mem::Mmb,
+            proof::Blueprint,
         },
         mmb::Location,
     };

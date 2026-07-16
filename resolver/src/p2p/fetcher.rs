@@ -1,14 +1,14 @@
 use crate::p2p::wire;
 use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
+use commonware_p2p::{Recipients, Sender, utils::codec::WrappedSender};
 use commonware_runtime::{
+    Clock, Metrics,
     telemetry::metrics::{
+        EncodeStruct, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
         histogram::Buckets,
         status::{self, Status},
-        EncodeStruct, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
     },
-    Clock, Metrics,
 };
 use commonware_utils::{PrioritySet, Span, SystemTimeExt};
 use rand::seq::SliceRandom;
@@ -539,15 +539,15 @@ mod tests {
     use crate::p2p::mocks::Key as MockKey;
     use commonware_actor::Unreliable;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
-        deterministic::{self, Context, Runner},
         BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _, Supervisor as _,
+        deterministic::{self, Context, Runner},
     };
-    use commonware_utils::{sync::RwLock, NZU32};
+    use commonware_utils::{NZU32, sync::RwLock};
     use std::{sync::Arc, time::Duration};
 
     #[derive(Debug)]

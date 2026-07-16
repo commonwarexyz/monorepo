@@ -35,8 +35,8 @@
 //! - Messages with timestamps too old are rejected to prevent replay attacks
 //! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
 use crate::{
-    transcript::{Summary, Transcript},
     PublicKey, Signature, Signer, Verifier,
+    transcript::{Summary, Transcript},
 };
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
 use core::ops::Range;
@@ -392,7 +392,7 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ed25519::PrivateKey, transcript::Transcript, Signer};
+    use crate::{Signer, ed25519::PrivateKey, transcript::Transcript};
     use commonware_codec::{Codec, DecodeExt};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;

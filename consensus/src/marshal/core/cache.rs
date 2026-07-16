@@ -4,13 +4,13 @@ use crate::{
     types::{Epoch, Height, Round, View},
 };
 use commonware_codec::{CodecShared, Read};
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    buffer::paged::CacheRef, BufferPooler, Clock, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
 };
 use commonware_storage::{
-    archive::{self, prunable, Archive as _, Identifier, MultiArchive as _},
+    archive::{self, Archive as _, Identifier, MultiArchive as _, prunable},
     metadata::{self, Metadata},
     translator::TwoCap,
 };
@@ -564,10 +564,9 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get verified block")
+                && predicate(&block)
             {
-                if predicate(&block) {
-                    return Some(block);
-                }
+                return Some(block);
             }
 
             // Check notarized blocks
@@ -576,10 +575,9 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get notarized block")
+                && predicate(&block)
             {
-                if predicate(&block) {
-                    return Some(block);
-                }
+                return Some(block);
             }
 
             // Check certified blocks
@@ -588,10 +586,9 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get certified block")
+                && predicate(&block)
             {
-                if predicate(&block) {
-                    return Some(block);
-                }
+                return Some(block);
             }
         }
         None

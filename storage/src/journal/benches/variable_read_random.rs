@@ -1,12 +1,12 @@
 use crate::{append_fixed_random_data, get_variable_journal};
 use commonware_runtime::{
+    Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
-    Runner as _, Supervisor as _,
 };
-use commonware_storage::journal::contiguous::{variable::Journal, Contiguous as _};
-use commonware_utils::{sequence::FixedBytes, test_rng, NZU64};
-use criterion::{criterion_group, Criterion};
+use commonware_storage::journal::contiguous::{Contiguous as _, variable::Journal};
+use commonware_utils::{NZU64, sequence::FixedBytes, test_rng};
+use criterion::{Criterion, criterion_group};
 use futures::future::try_join_all;
 use rand::RngExt as _;
 use std::{

@@ -133,7 +133,7 @@ impl Random for PrivateKey {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for PrivateKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         Ok(Self::random(&mut rand))
@@ -248,7 +248,7 @@ impl Display for PublicKey {
 impl arbitrary::Arbitrary<'_> for PublicKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKey::random(&mut rand);
@@ -350,7 +350,7 @@ impl Display for Signature {
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKey::random(&mut rand);
@@ -404,7 +404,7 @@ impl BatchVerifier for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bls12381, Verifier as _};
+    use crate::{Verifier as _, bls12381};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;

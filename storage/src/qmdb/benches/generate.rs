@@ -4,21 +4,21 @@
 //! variants (fixed-value, variable-value) and the keyless variant.
 
 use crate::common::{
-    define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value, make_var_value,
-    open_keyless_db, Digest,
+    Digest, define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value,
+    make_var_value, open_keyless_db,
 };
 use commonware_macros::boxed;
 use commonware_runtime::{
+    Supervisor as _,
     benchmarks::{context, tokio},
     tokio::{Config, Context},
-    Supervisor as _,
 };
 use commonware_storage::{
-    merkle::{mmb, mmr, Family},
+    merkle::{Family, mmb, mmr},
     qmdb::any::traits::DbAny,
 };
 use commonware_utils::TestRng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::Rng;
 use std::time::{Duration, Instant};
 

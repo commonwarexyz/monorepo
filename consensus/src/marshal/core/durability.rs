@@ -111,7 +111,7 @@ impl DispatchGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
 
     #[test]
     fn test_durable_resolves_true_on_success() {

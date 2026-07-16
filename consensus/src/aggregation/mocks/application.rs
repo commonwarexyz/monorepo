@@ -1,4 +1,4 @@
-use crate::{types::Height, Automaton as A};
+use crate::{Automaton as A, types::Height};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_utils::channel::oneshot;
 use tracing::trace;

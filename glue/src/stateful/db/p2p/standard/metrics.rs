@@ -1,8 +1,8 @@
 //! Metrics for the P2P resolver [`Actor`](super::Actor).
 
 use commonware_runtime::{
-    telemetry::metrics::{status, MetricsExt, Registered},
     Metrics as MetricsTrait,
+    telemetry::metrics::{MetricsExt, Registered, status},
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 

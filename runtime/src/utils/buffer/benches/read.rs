@@ -1,8 +1,8 @@
 //! Benchmark read performance at random offsets.
 
-use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE, PAGE_SIZE_USIZE};
+use super::{CACHE_SIZE, PAGE_SIZE, PAGE_SIZE_USIZE, create_append, destroy_append};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Runner, Storage,
+    BufferPooler, Runner, Storage, buffer::paged::CacheRef, deterministic, tokio,
 };
 use commonware_utils::{NZUsize, TestRng};
 use criterion::Criterion;

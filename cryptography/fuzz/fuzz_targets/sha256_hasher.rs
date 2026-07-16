@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256 as OurSha256};
+use commonware_cryptography::{Hasher, Sha256 as OurSha256, sha256::Digest};
 use libfuzzer_sys::fuzz_target;
 use sha2::{Digest as RefSha2Digest, Sha256 as RefSha256};
 use zeroize::Zeroize;

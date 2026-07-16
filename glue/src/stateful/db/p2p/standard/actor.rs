@@ -1,16 +1,15 @@
 //! Resolver service actor for QMDB sync over P2P.
 
-use super::{handler, mailbox, metrics::Metrics as ResolverMetrics, Mailbox};
+use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
-use commonware_resolver::{p2p, Resolver as _};
+use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{GaugeExt, status},
 };
 use commonware_storage::{
     merkle::Family,
@@ -390,19 +389,19 @@ where
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519, sha256, Sha256};
+    use commonware_cryptography::{Sha256, ed25519, sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, full::Config as MmrJournalConfig, Location, Proof},
-        qmdb::any::{unordered::fixed, FixedConfig},
+        mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
+        qmdb::any::{FixedConfig, unordered::fixed},
         translator::TwoCap,
     };
-    use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, channel::oneshot, sync::TracedAsyncRwLock};
     use std::{num::NonZeroU64, sync::Arc, time::Duration};
 
     #[derive(Clone, Debug)]

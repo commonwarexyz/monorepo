@@ -14,7 +14,7 @@
 //! signature). Note, the weights must be unpredictable to the attacker for this to work (i.e. they
 //! must be generated securely).
 use super::{
-    super::{group::SmallScalar, variant::Variant, Error},
+    super::{Error, group::SmallScalar, variant::Variant},
     hash_with_namespace,
 };
 #[cfg(not(feature = "std"))]
@@ -302,7 +302,7 @@ mod tests {
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, NZUsize};
+    use commonware_utils::{NZUsize, test_rng};
 
     fn verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();

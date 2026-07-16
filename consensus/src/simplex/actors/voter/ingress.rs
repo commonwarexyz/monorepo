@@ -1,16 +1,16 @@
 use crate::{
+    Epochable, Viewable,
     simplex::{
         metrics::TimeoutReason,
         types::{Certificate, Proposal},
     },
     types::{Round as Rnd, View},
-    Epochable, Viewable,
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use std::collections::VecDeque;
-use tracing::{info_span, Span};
+use tracing::{Span, info_span};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
@@ -95,11 +95,11 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
     where
         F: FnMut(Message<S, D>) -> Option<Message<S, D>>,
     {
-        if let Some(finalization) = self.finalization.take() {
-            if let Some(finalization) = push(finalization) {
-                self.finalization = Some(finalization);
-                return;
-            }
+        if let Some(finalization) = self.finalization.take()
+            && let Some(finalization) = push(finalization)
+        {
+            self.finalization = Some(finalization);
+            return;
         }
 
         while let Some(message) = self.messages.pop_front() {

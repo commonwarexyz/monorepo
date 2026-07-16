@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_utils::test_rng;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 
 fn bench_aggregate_verify_same_message(c: &mut Criterion) {

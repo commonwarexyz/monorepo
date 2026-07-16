@@ -10,8 +10,8 @@ use crate::Channel;
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota,
-    Resolver, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
+    Spawner, spawn_cell,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;

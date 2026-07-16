@@ -322,7 +322,6 @@ cfg_if::cfg_if! {
                     Self::X86_64 => "amd64",
                 }
             }
-
         }
 
         impl std::fmt::Display for Architecture {
@@ -510,18 +509,24 @@ cfg_if::cfg_if! {
                 target: String,
                 storage_class: String,
             },
-            #[error("storage_iops for {target} is invalid for storage_class {storage_class}: {storage_iops}")]
+            #[error(
+                "storage_iops for {target} is invalid for storage_class {storage_class}: {storage_iops}"
+            )]
             InvalidStorageIops {
                 target: String,
                 storage_class: String,
                 storage_iops: i32,
             },
-            #[error("storage_throughput is only supported for {target} when storage_class is gp3: {storage_class}")]
+            #[error(
+                "storage_throughput is only supported for {target} when storage_class is gp3: {storage_class}"
+            )]
             UnsupportedStorageThroughput {
                 target: String,
                 storage_class: String,
             },
-            #[error("storage_throughput for {target} must be between 125 and 2000 MiB/s: {storage_throughput}")]
+            #[error(
+                "storage_throughput for {target} must be between 125 and 2000 MiB/s: {storage_throughput}"
+            )]
             InvalidStorageThroughput {
                 target: String,
                 storage_throughput: i32,
@@ -568,7 +573,9 @@ cfg_if::cfg_if! {
             UnsupportedInstanceType(String),
             #[error("no subnets available")]
             NoSubnetsAvailable,
-            #[error("availability zone group '{group}' in region '{region}' has no mutually-supported AZ for instance types {instance_types:?}")]
+            #[error(
+                "availability zone group '{group}' in region '{region}' has no mutually-supported AZ for instance types {instance_types:?}"
+            )]
             AvailabilityZoneGroupUnsupported {
                 region: String,
                 group: String,
