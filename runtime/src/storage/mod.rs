@@ -733,22 +733,21 @@ pub(crate) mod tests {
         blob.write_at(0, b"concurrent write").await.unwrap();
 
         // Read and write concurrently
-        let write_task = tokio::spawn({
+        let write_task = {
             let blob = blob.clone();
             async move {
                 blob.write_at(0, IoBuf::from(b"concurrent write"))
                     .await
                     .unwrap();
             }
-        });
+        };
 
-        let read_task = tokio::spawn({
+        let read_task = {
             let blob = blob.clone();
             async move { blob.read_at(0, 16).await.unwrap() }
-        });
+        };
 
-        write_task.await.unwrap();
-        let buffer = read_task.await.unwrap();
+        let ((), buffer) = futures::join!(write_task, read_task);
 
         assert_eq!(
             buffer.coalesce(),

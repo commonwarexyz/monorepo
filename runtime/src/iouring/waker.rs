@@ -58,6 +58,11 @@ const STATE_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT | WAKE_SIG
 /// Mask covering just the current wait target bits.
 const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 /// Packed-state increment for one submitted operation (low bits are reserved).
+///
+/// The runtime stages submissions on the loop thread itself, so the publish
+/// protocol is currently exercised only by tests and loom models. It is
+/// retained for a future cross-thread submission path.
+#[cfg_attr(not(any(test, feature = "loom")), allow(dead_code))]
 const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
 /// Full sequence domain used by the packed submission counter (state >> 3).
 pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
@@ -263,6 +268,10 @@ impl Waker {
     /// armed and no wake has yet been claimed for that epoch, this caller
     /// claims `WAKE_SIGNALLED_BIT` with a follow-up atomic update and then
     /// signals the armed wait target.
+    /// The runtime stages submissions on the loop thread itself, so this is
+    /// currently exercised only by tests and loom models. It is retained for
+    /// a future cross-thread submission path.
+    #[cfg_attr(not(any(test, feature = "loom")), allow(dead_code))]
     #[inline]
     pub fn publish(&self) {
         // Use `Release` so that when `pending()` later observes a published-ahead
@@ -666,12 +675,16 @@ pub mod tests {
         os::fd::{AsRawFd, FromRawFd},
     };
 
+    // Retained alongside the currently unexercised publish protocol so a
+    // future cross-thread submission path keeps its test toolkit.
+    #[allow(dead_code)]
     pub fn wait_until_futex_armed(waker: &Waker) {
         while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_FUTEX_BIT == 0 {
             std::hint::spin_loop();
         }
     }
 
+    #[allow(dead_code)]
     pub fn wait_until_eventfd_armed(waker: &Waker) {
         while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_EVENTFD_BIT == 0 {
             std::hint::spin_loop();

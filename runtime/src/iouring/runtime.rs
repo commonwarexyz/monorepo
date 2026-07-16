@@ -552,13 +552,16 @@ impl crate::Runner for Runner {
         // Drop the root task to release any Context references it may still hold.
         drop(root);
 
-        // Drop the runtime's own submission handle, cancel operations whose
-        // callers were just dropped (so e.g. an idle recv does not hold its
-        // waiter slot until its deadline), and drain in-flight ring work so
-        // kernel-owned buffers and descriptors are released before the ring
-        // is destroyed.
+        // Close the driver so late admissions fail with their kind-specific
+        // error, then drain in-flight ring work so kernel-owned buffers and
+        // descriptors are released before the ring is destroyed. Dropping the
+        // tasks above already orphaned abandoned operations (eagerly
+        // requesting their cancellation), so e.g. an idle recv does not hold
+        // its waiter slot until its deadline.
+        for waker in io.close() {
+            waker.wake();
+        }
         drop(io);
-        ioloop.cancel_orphans();
         ioloop.drain(&mut ring);
 
         // Assert the context doesn't escape the start() function (behavior

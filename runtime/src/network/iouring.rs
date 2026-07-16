@@ -25,7 +25,6 @@ use crate::{
     Buf, BufferPool, Error, IoBufMut, IoBufs,
     iouring::{self, RawSocketAddr},
 };
-use commonware_utils::channel::oneshot;
 use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -206,7 +205,7 @@ pub struct Network {
     /// Whether to set `SO_LINGER` to zero on the socket.
     zero_linger: bool,
     /// Used to submit operations to the io_uring event loop.
-    handle: iouring::Handle,
+    handle: Arc<iouring::Driver>,
     /// Timeout for establishing an outbound TCP connection.
     connect_timeout: Duration,
     /// Timeout budget applied to each send/recv call and each in-flight
@@ -225,7 +224,7 @@ impl Network {
     /// large enough, given the number of connections that will be maintained.
     /// Each in-flight send/recv to/from each connection consumes a ring slot, as
     /// does each in-flight accept and connect.
-    pub(crate) const fn new(cfg: Config, handle: iouring::Handle, pool: BufferPool) -> Self {
+    pub(crate) const fn new(cfg: Config, handle: Arc<iouring::Driver>, pool: BufferPool) -> Self {
         Self {
             tcp_nodelay: cfg.tcp_nodelay,
             zero_linger: cfg.zero_linger,
@@ -312,7 +311,7 @@ pub struct Listener {
     /// Address the listener is bound to.
     local_addr: SocketAddr,
     /// Used to submit operations to the io_uring event loop.
-    handle: iouring::Handle,
+    handle: Arc<iouring::Driver>,
     /// Timeout budget applied to each in-flight accept and inherited by
     /// accepted connections.
     read_write_timeout: Duration,
@@ -323,7 +322,7 @@ pub struct Listener {
     /// In-flight accept, retained so a cancelled accept future resumes the
     /// same request instead of losing an accepted connection.
     #[allow(clippy::type_complexity)]
-    pending: Option<oneshot::Receiver<Result<(OwnedFd, SocketAddr), Error>>>,
+    pending: Option<iouring::AcceptTicket>,
 }
 
 impl Drop for Listener {
@@ -354,11 +353,11 @@ impl crate::Listener for Listener {
             }
 
             // Wait on the in-flight accept. If this future is dropped, the
-            // receiver stays in `self.pending` and the next call resumes it.
-            let receiver = self.pending.as_mut().expect("pending accept was just set");
-            let result = receiver.await;
+            // ticket stays in `self.pending` and the next call resumes it.
+            let ticket = self.pending.as_mut().expect("pending accept was just set");
+            let result = ticket.await;
             self.pending = None;
-            match result.map_err(|_| Error::ConnectionFailed)? {
+            match result {
                 Ok((fd, remote_addr)) => {
                     let fd = Arc::new(fd);
                     configure_socket(&fd, self.tcp_nodelay, self.zero_linger);
@@ -392,7 +391,7 @@ pub struct Sink {
     /// Shared socket descriptor backing this sink half.
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
-    handle: iouring::Handle,
+    handle: Arc<iouring::Driver>,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
     /// Tracks this sink's lifecycle.
@@ -411,7 +410,7 @@ enum SinkState {
 
 impl Sink {
     /// Construct a sink that submits logical send requests through one io_uring loop.
-    const fn new(fd: Arc<OwnedFd>, handle: iouring::Handle, timeout: Duration) -> Self {
+    const fn new(fd: Arc<OwnedFd>, handle: Arc<iouring::Driver>, timeout: Duration) -> Self {
         Self {
             fd,
             handle,
@@ -488,7 +487,7 @@ pub struct Stream {
     /// Shared socket descriptor backing this stream half.
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
-    handle: iouring::Handle,
+    handle: Arc<iouring::Driver>,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
     /// Tracks whether a previous recv failure has made this stream unusable.
@@ -507,7 +506,7 @@ impl Stream {
     /// Construct a stream with an optional internal read buffer.
     fn new(
         fd: Arc<OwnedFd>,
-        handle: iouring::Handle,
+        handle: Arc<iouring::Driver>,
         timeout: Duration,
         buffer_capacity: usize,
         pool: BufferPool,
@@ -655,14 +654,14 @@ mod tests {
     use crate::{
         BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
         Sink as _, Stream as _, iouring,
+        iouring::testing::{TestLoop, poll_once},
         network::{
             iouring::{Config, Network},
             tests,
         },
         telemetry::metrics::{Register, Registry},
-        thread,
     };
-    use commonware_macros::{select, test_group};
+    use commonware_macros::test_group;
     use std::{
         io::{Read, Write},
         net::SocketAddr,
@@ -675,10 +674,9 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_network(), scope)
     }
 
-    /// Start a test network backed by a standalone io_uring event loop on its
-    /// own thread, mirroring how the runtime hands the network a handle to the
-    /// runtime-driven loop.
-    fn test_network_with_ring(cfg: Config, mut ring: iouring::RingConfig) -> Network {
+    /// Start a test network backed by a loop harness on this thread, mirroring
+    /// how the runtime hands the network a driver for the runtime-driven loop.
+    fn test_network_with_ring(cfg: Config, mut ring: iouring::RingConfig) -> (TestLoop, Network) {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         // Match the runtime's startup behavior so network deadlines are never
@@ -687,27 +685,24 @@ mod tests {
             .max_request_timeout
             .max(cfg.read_write_timeout)
             .max(cfg.connect_timeout);
-        let (handle, io_loop) =
-            iouring::IoUringLoop::new(ring, &mut registry.sub_registry("network"));
-        thread::spawn(thread::system_thread_stack_size(), move || io_loop.run());
-        Network::new(cfg, handle, pool)
+        let harness = TestLoop::new(ring);
+        let network = Network::new(cfg, Arc::clone(&harness.driver), pool);
+        (harness, network)
     }
 
     /// [test_network_with_ring] with the default ring configuration.
-    fn test_network(cfg: Config) -> Network {
+    fn test_network(cfg: Config) -> (TestLoop, Network) {
         test_network_with_ring(cfg, iouring::RingConfig::default())
     }
 
-    #[tokio::test]
-    async fn test_trait() {
+    #[test]
+    fn test_trait() {
         // Verify the io_uring backend satisfies the shared network trait suite.
-        tests::test_network_trait(|| {
-            test_network(Config {
-                read_write_timeout: Duration::from_secs(15),
-                ..Default::default()
-            })
-        })
-        .await;
+        let (mut harness, network) = test_network(Config {
+            read_write_timeout: Duration::from_secs(15),
+            ..Default::default()
+        });
+        harness.block_on(tests::test_network_trait(move || network.clone()));
     }
 
     #[test]
@@ -747,239 +742,251 @@ mod tests {
     }
 
     #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
+    #[test]
+    fn test_stress_trait() {
         // Exercise the io_uring backend under the shared stress suite.
-        tests::stress_test_network_trait(|| {
-            test_network_with_ring(
-                Config::default(),
-                iouring::RingConfig {
-                    size: 256,
-                    ..Default::default()
-                },
-            )
-        })
-        .await;
+        let (mut harness, network) = test_network_with_ring(
+            Config::default(),
+            iouring::RingConfig {
+                size: 256,
+                ..Default::default()
+            },
+        );
+        harness.block_on(tests::stress_test_network_trait(move || network.clone()));
     }
 
-    #[tokio::test]
-    async fn test_small_send_read_quickly() {
+    #[test]
+    fn test_small_send_read_quickly() {
         // Verify a small message is delivered promptly through the buffered recv path.
-        let network = test_network(Config::default());
+        let (mut harness, network) = test_network(Config::default());
+        harness.block_on(async move {
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+            let reader = async move {
+                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
-        // Spawn a task to accept and read
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+                // Read a small message (much smaller than the 64KB buffer)
+                stream.recv(10).await.unwrap()
+            };
 
-            // Read a small message (much smaller than the 64KB buffer)
-            stream.recv(10).await.unwrap()
+            let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+            let sender = async {
+                let (mut sink, _stream) = network.dial(addr).await.unwrap();
+                sink.send(msg.clone()).await.unwrap();
+            };
+
+            let (received, ()) = futures::join!(reader, sender);
+            assert_eq!(received.coalesce(), msg.as_slice());
         });
-
-        // Connect and send a small message
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        sink.send(msg.clone()).await.unwrap();
-
-        // Wait for the reader to complete
-        let received = reader.await.unwrap();
-
-        // Verify we got the right data
-        assert_eq!(received.coalesce(), msg.as_slice());
     }
 
-    #[tokio::test]
-    async fn test_read_timeout_with_partial_data() {
+    #[test]
+    fn test_read_timeout_with_partial_data() {
         // Verify a top-level recv returns timeout after partial progress stalls.
-        // Use a short timeout to make the test fast
         let op_timeout = Duration::from_millis(100);
-        let network = test_network(Config {
+        let (mut harness, network) = test_network(Config {
             read_write_timeout: op_timeout,
             ..Default::default()
         });
+        harness.block_on(async move {
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+            let reader = async move {
+                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+                // Try to read 100 bytes, but only 5 will be sent
+                let start = Instant::now();
+                let result = stream.recv(100).await;
+                let elapsed = start.elapsed();
 
-            // Try to read 100 bytes, but only 5 will be sent
-            let start = Instant::now();
-            let result = stream.recv(100).await;
-            let elapsed = start.elapsed();
+                (result, elapsed)
+            };
 
-            (result, elapsed)
+            // Connect and send only partial data. Keep the connection open so
+            // the reader observes a stall rather than EOF.
+            let sender = async {
+                let (mut sink, stream) = network.dial(addr).await.unwrap();
+                sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+                (sink, stream)
+            };
+
+            let ((result, elapsed), (_sink, _stream)) = futures::join!(reader, sender);
+            assert!(matches!(result, Err(Error::Timeout)));
+
+            // Verify the timeout occurred around the expected time, with some
+            // margin for timing variance.
+            assert!(elapsed >= op_timeout);
+            assert!(elapsed < op_timeout * 3);
         });
-
-        // Connect and send only partial data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
-
-        // Wait for the reader to complete
-        let (result, elapsed) = reader.await.unwrap();
-        assert!(matches!(result, Err(Error::Timeout)));
-
-        // Verify the timeout occurred around the expected time
-        assert!(elapsed >= op_timeout);
-        // Allow some margin for timing variance
-        assert!(elapsed < op_timeout * 3);
     }
 
-    #[tokio::test]
-    async fn test_unbuffered_mode() {
+    #[test]
+    fn test_unbuffered_mode() {
         // Verify disabling the internal read buffer preserves direct recv behavior.
-        // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
-        let network = test_network(Config {
+        let (mut harness, network) = test_network(Config {
             read_buffer_size: 0,
             ..Default::default()
         });
+        harness.block_on(async move {
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+            // Accept one connection and verify that peeking never observes
+            // buffered bytes because the wrapper retains no internal read state.
+            let reader = async move {
+                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
-        // Accept one connection and verify that peeking never observes buffered
-        // bytes because the wrapper should not retain any internal read state.
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+                // In unbuffered mode, peek should always return empty
+                assert!(stream.peek(100).is_empty());
 
-            // In unbuffered mode, peek should always return empty
-            assert!(stream.peek(100).is_empty());
+                // Read messages without buffering
+                let buf1 = stream.recv(5).await.unwrap();
 
-            // Read messages without buffering
-            let buf1 = stream.recv(5).await.unwrap();
+                // Even after recv, peek should be empty in unbuffered mode
+                assert!(stream.peek(100).is_empty());
 
-            // Even after recv, peek should be empty in unbuffered mode
-            assert!(stream.peek(100).is_empty());
+                let buf2 = stream.recv(5).await.unwrap();
+                assert!(stream.peek(100).is_empty());
 
-            let buf2 = stream.recv(5).await.unwrap();
-            assert!(stream.peek(100).is_empty());
+                (buf1, buf2)
+            };
 
-            (buf1, buf2)
+            // Send two independent messages so the reader exercises repeated
+            // direct recvs.
+            let sender = async {
+                let (mut sink, _stream) = network.dial(addr).await.unwrap();
+                sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+                sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
+                (sink, _stream)
+            };
+
+            let ((buf1, buf2), (_sink, _stream)) = futures::join!(reader, sender);
+            assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
+            assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
         });
-
-        // Send two independent messages so the reader exercises repeated direct recvs.
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
-        sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
-
-        // Both messages should arrive exactly as sent, with no extra bytes hidden in `peek`.
-        let (buf1, buf2) = reader.await.unwrap();
-
-        assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
-        assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
     }
 
-    #[tokio::test]
-    async fn test_op_fd_keeps_descriptor_alive() {
-        // Verify queued recv requests keep their socket fd alive after caller cancellation.
-        // When a recv future is cancelled (e.g. via select!) after the Request has
-        // been sent to the io_uring channel, the Stream can be dropped while
-        // the request is still queued. The request's fd field keeps the socket alive
-        // so the OS cannot reuse the FD number.
+    #[test]
+    fn test_op_fd_keeps_descriptor_alive() {
+        // Verify admitted recv requests keep their socket fd alive after
+        // caller cancellation: the slot's fd clone prevents the OS from
+        // reusing the FD number while the kernel may still reference it.
         let op_timeout = Duration::from_millis(200);
-        let network = test_network(Config {
+        let (mut harness, network) = test_network(Config {
             read_write_timeout: op_timeout,
             ..Default::default()
         });
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let (client_sink, mut client_stream) = network.dial(addr).await.unwrap();
-        let (_addr, _server_sink, _server_stream) = listener.accept().await.unwrap();
+        // Keep the server halves alive so the connection stays open while the
+        // client recv is in flight.
+        let (_server_halves, client_sink, mut client_stream) = harness.block_on(async {
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let accept = async { listener.accept().await.unwrap() };
+            let dial = async { network.dial(addr).await.unwrap() };
+            let (server_halves, (client_sink, client_stream)) = futures::join!(accept, dial);
+            (server_halves, client_sink, client_stream)
+        });
 
         // Sink + stream + our clone.
         let fd = client_stream.fd.clone();
         assert_eq!(Arc::strong_count(&fd), 3);
 
-        // Cancel a recv mid-flight (blocks because no data arrives).
-        select! {
-            _ = client_stream.recv(1) => unreachable!("no data was sent"),
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+        // Cancel a recv mid-flight (no data arrives): admit and submit the
+        // recv, then drop the future.
+        {
+            let mut recv = Box::pin(client_stream.recv(1));
+            assert!(poll_once(&harness, &mut recv).is_pending());
+            harness.ioloop.turn(&mut harness.ring);
+
+            // The admitted request holds an additional clone.
+            assert_eq!(Arc::strong_count(&fd), 4);
         }
 
-        // The queued request holds an additional clone.
-        assert_eq!(Arc::strong_count(&fd), 4);
-
-        // Drop all handles. The queued request still retains the fd.
+        // Drop all handles. The in-flight request still retains the fd until
+        // the eager cancellation retires it.
         drop(client_sink);
         drop(client_stream);
         assert_eq!(Arc::strong_count(&fd), 2); // our clone + request
 
-        // After op_timeout, the request completes and releases its fd clone.
-        tokio::time::sleep(op_timeout).await;
-        assert_eq!(Arc::strong_count(&fd), 1);
+        // The dropped future requested cancellation, so the fd releases
+        // promptly rather than at the deadline.
+        let start = Instant::now();
+        while Arc::strong_count(&fd) != 1 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "cancelled recv still holds fd after {:?}",
+                start.elapsed()
+            );
+            harness.ioloop.turn(&mut harness.ring);
+            harness
+                .ioloop
+                .park(&mut harness.ring, Some(Duration::from_millis(10)));
+        }
     }
 
-    #[tokio::test]
-    async fn test_peek_with_buffered_data() {
+    #[test]
+    fn test_peek_with_buffered_data() {
         // Verify buffered recv calls leave unread bytes visible via peek().
-        // Use default buffer size to enable buffering
-        let network = test_network(Config::default());
+        let (mut harness, network) = test_network(Config::default());
+        harness.block_on(async move {
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+            let reader = async move {
+                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+                assert!(stream.peek(100).is_empty());
 
-            // Initially peek should be empty (no data received yet)
-            assert!(stream.peek(100).is_empty());
+                // Receive partial data - this should buffer more than requested
+                let first = stream.recv(5).await.unwrap();
+                assert_eq!(first.coalesce(), b"hello");
 
-            // Receive partial data - this should buffer more than requested
-            let first = stream.recv(5).await.unwrap();
-            assert_eq!(first.coalesce(), b"hello");
+                // Peek should show remaining buffered data
+                let peeked = stream.peek(100);
+                assert!(!peeked.is_empty());
+                assert_eq!(peeked, b" world");
 
-            // Peek should show remaining buffered data
-            let peeked = stream.peek(100);
-            assert!(!peeked.is_empty());
-            assert_eq!(peeked, b" world");
+                // Peek again should return the same (non-consuming)
+                assert_eq!(stream.peek(100), b" world");
 
-            // Peek again should return the same (non-consuming)
-            assert_eq!(stream.peek(100), b" world");
+                // Peek with max_len should truncate
+                assert_eq!(stream.peek(3), b" wo");
 
-            // Peek with max_len should truncate
-            assert_eq!(stream.peek(3), b" wo");
+                // Receive the rest
+                let rest = stream.recv(6).await.unwrap();
+                assert_eq!(rest.coalesce(), b" world");
 
-            // Receive the rest
-            let rest = stream.recv(6).await.unwrap();
-            assert_eq!(rest.coalesce(), b" world");
+                // Peek should be empty after consuming all buffered data
+                assert!(stream.peek(100).is_empty());
+            };
 
-            // Peek should be empty after consuming all buffered data
-            assert!(stream.peek(100).is_empty());
+            let sender = async {
+                let (mut sink, _stream) = network.dial(addr).await.unwrap();
+                sink.send(b"hello world").await.unwrap();
+                (sink, _stream)
+            };
+
+            let ((), (_sink, _stream)) = futures::join!(reader, sender);
         });
-
-        // Connect and send data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send(b"hello world").await.unwrap();
-
-        reader.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn test_submit_recv_returns_bytes_for_this_call() {
+    #[test]
+    fn test_submit_recv_returns_bytes_for_this_call() {
         // Verify `submit_recv` translates the request state's cumulative total
         // back into the per-call byte count expected by the higher-level recv loop.
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
-        let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::RingConfig::default(),
-            &mut registry.sub_registry("iouring"),
-        );
-        let handle = std::thread::spawn(move || io_loop.run());
+        let mut harness = TestLoop::new(iouring::RingConfig::default());
 
         // Build the wrapper directly so the test exercises `submit_recv`
         // without involving the higher-level buffered recv machinery.
         let (left, mut right) = UnixStream::pair().unwrap();
         let stream = Stream::new(
             Arc::new(left.into()),
-            submitter,
+            Arc::clone(&harness.driver),
             Duration::from_secs(1),
             0,
             pool,
@@ -987,172 +994,174 @@ mod tests {
 
         // Pretend the caller already filled two bytes, then complete exactly
         // three more bytes from the socket.
-        let writer = tokio::task::spawn_blocking(move || right.write_all(b"abc"));
+        right.write_all(b"abc").unwrap();
         let buffer = IoBufMut::with_capacity(5);
-        let result = stream
-            .submit_recv(buffer, 2, 3, true, Instant::now() + Duration::from_secs(1))
-            .await;
+        let result = harness.block_on(stream.submit_recv(
+            buffer,
+            2,
+            3,
+            true,
+            Instant::now() + Duration::from_secs(1),
+        ));
 
         // The wrapper should report only the bytes read by this invocation,
         // not the cumulative total tracked inside the request state.
-        writer.await.unwrap().unwrap();
         let (_buffer, read) = result.expect("submit_recv should succeed");
         assert_eq!(read, 3);
-
-        drop(stream);
-        handle.join().unwrap();
     }
 
-    #[tokio::test]
-    async fn test_vectored_send_path() {
+    #[test]
+    fn test_vectored_send_path() {
         // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
-        let mut registry = Registry::default();
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::RingConfig::default(), &mut registry);
-        let handle = std::thread::spawn(move || io_loop.run());
+        let mut harness = TestLoop::new(iouring::RingConfig::default());
 
         let (left, mut right) = UnixStream::pair().unwrap();
-        let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
+        let mut sink = Sink::new(
+            Arc::new(left.into()),
+            Arc::clone(&harness.driver),
+            Duration::from_secs(1),
+        );
 
         // Queue two buffers so the wrapper must preserve vectored ordering.
         let mut bufs = IoBufs::default();
         bufs.append(IoBuf::from(b"ab"));
         bufs.append(IoBuf::from(b"cd"));
 
-        // Read from the peer in one shot so the final payload ordering is unambiguous.
-        let reader = tokio::task::spawn_blocking(move || {
-            let mut buf = [0u8; 4];
-            right.read_exact(&mut buf).unwrap();
-            buf
-        });
-
         // The peer should observe the concatenated payload in-order.
-        sink.send(bufs).await.unwrap();
-        assert_eq!(&reader.await.unwrap(), b"abcd");
-
-        drop(sink);
-        handle.join().unwrap();
+        harness.block_on(sink.send(bufs)).unwrap();
+        let mut buf = [0u8; 4];
+        right.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"abcd");
     }
 
-    #[tokio::test]
-    async fn test_zero_length_send_short_circuits_before_submit() {
-        // Verify empty sends return locally without depending on a live io_uring loop.
-        let mut registry = Registry::default();
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::RingConfig::default(), &mut registry);
-        drop(io_loop);
+    #[test]
+    fn test_zero_length_send_short_circuits_before_submit() {
+        // Verify empty sends return locally without staging any request.
+        let mut harness = TestLoop::new(iouring::RingConfig::default());
+        for waker in harness.driver.close() {
+            waker.wake();
+        }
 
-        // Construct a sink whose handle would fail immediately if the wrapper
+        // Construct a sink whose driver would fail immediately if the wrapper
         // tried to hand work to the loop.
         let (left, _right) = UnixStream::pair().unwrap();
-        let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
+        let mut sink = Sink::new(
+            Arc::new(left.into()),
+            Arc::clone(&harness.driver),
+            Duration::from_secs(1),
+        );
 
-        sink.send(IoBufs::default()).await.unwrap();
-        sink.send(IoBuf::default()).await.unwrap();
-        sink.send(Vec::<u8>::new()).await.unwrap();
+        harness.block_on(sink.send(IoBufs::default())).unwrap();
+        harness.block_on(sink.send(IoBuf::default())).unwrap();
+        harness.block_on(sink.send(Vec::<u8>::new())).unwrap();
     }
 
-    #[tokio::test]
-    async fn test_large_recv_skips_internal_buffer() {
+    #[test]
+    fn test_large_recv_skips_internal_buffer() {
         // Verify reads that are at least as large as the internal buffer go
         // straight into the caller-owned output buffer.
-        let network = test_network(Config {
+        let (mut harness, network) = test_network(Config {
             read_buffer_size: 8,
             ..Default::default()
         });
+        harness.block_on(async move {
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let expected = *b"abcdefgh";
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let expected = *b"abcdefgh";
+            // Accept one connection and issue a recv that exactly matches the
+            // internal buffer size, forcing the direct-recv branch.
+            let reader = async move {
+                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+                let received = stream.recv(expected.len()).await.unwrap();
+                assert!(stream.peek(1).is_empty());
+                received
+            };
 
-        // Accept one connection and issue a recv that exactly matches the
-        // internal buffer size, forcing the direct-recv branch.
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
-            let received = stream.recv(expected.len()).await.unwrap();
-            assert!(stream.peek(1).is_empty());
-            received
+            let sender = async {
+                let (mut sink, _stream) = network.dial(addr).await.unwrap();
+                sink.send(expected.to_vec()).await.unwrap();
+                (sink, _stream)
+            };
+
+            let (received, (_sink, _stream)) = futures::join!(reader, sender);
+            assert_eq!(received.coalesce(), expected);
         });
-
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send(expected.to_vec()).await.unwrap();
-
-        assert_eq!(reader.await.unwrap().coalesce(), expected);
     }
 
-    #[tokio::test]
-    async fn test_configured_socket_options_cover_accept_and_dial_paths() {
+    #[test]
+    fn test_configured_socket_options_cover_accept_and_dial_paths() {
         // Verify both dial and accept exercise the configured socket-option branches.
-        let network = test_network(Config {
+        let (mut harness, network) = test_network(Config {
             tcp_nodelay: Some(true),
             zero_linger: true,
             ..Default::default()
         });
+        harness.block_on(async move {
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        // Accepting the connection covers the listener-side option setters.
-        let accepter = tokio::spawn(async move {
-            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
+            // Accepting covers the listener-side option setters, dialing the
+            // client-side ones.
+            let accept = async { listener.accept().await.unwrap() };
+            let dial = async { network.dial(addr).await.unwrap() };
+            let (_accepted, (_sink, _stream)) = futures::join!(accept, dial);
         });
-
-        // Dialing the listener covers the client-side option setters.
-        let (_sink, _stream) = network.dial(addr).await.unwrap();
-        accepter.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn test_disabled_socket_options_cover_accept_and_dial_paths() {
+    #[test]
+    fn test_disabled_socket_options_cover_accept_and_dial_paths() {
         // Verify both dial and accept also cover the "do not touch socket options" branches.
-        let network = test_network(Config {
+        let (mut harness, network) = test_network(Config {
             tcp_nodelay: None,
             zero_linger: false,
             ..Default::default()
         });
+        harness.block_on(async move {
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let accepter = tokio::spawn(async move {
-            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
+            let accept = async { listener.accept().await.unwrap() };
+            let dial = async { network.dial(addr).await.unwrap() };
+            let (_accepted, (_sink, _stream)) = futures::join!(accept, dial);
         });
-
-        let (_sink, _stream) = network.dial(addr).await.unwrap();
-        accepter.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn test_channel_close_fallbacks() {
-        // Verify send/recv callers get wrapper-level failures if the io_uring loop disappears.
+    #[test]
+    fn test_closed_driver_fallbacks() {
+        // Verify send/recv callers get wrapper-level failures once the driver
+        // has closed.
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
-        let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::RingConfig::default(),
-            &mut registry.sub_registry("iouring"),
-        );
-        let recv_handle = submitter.clone();
-        drop(io_loop);
+        let mut harness = TestLoop::new(iouring::RingConfig::default());
+        for waker in harness.driver.close() {
+            waker.wake();
+        }
 
-        // Send should fail locally once the submission channel has been
-        // disconnected and no loop remains to accept work.
+        // Send should fail locally once the driver no longer admits work.
         let (send_left, _send_right) = UnixStream::pair().unwrap();
         let mut sink = Sink::new(
             Arc::new(send_left.into()),
-            submitter,
+            Arc::clone(&harness.driver),
             Duration::from_secs(1),
         );
-        assert!(matches!(sink.send(b"hello").await, Err(Error::SendFailed)));
+        assert!(matches!(
+            harness.block_on(sink.send(b"hello")),
+            Err(Error::SendFailed)
+        ));
 
         // Recv should surface the symmetric wrapper-specific failure.
         let (recv_left, _recv_right) = UnixStream::pair().unwrap();
         let mut stream = Stream::new(
             Arc::new(recv_left.into()),
-            recv_handle,
+            Arc::clone(&harness.driver),
             Duration::from_secs(1),
             0,
             pool,
         );
-        assert!(matches!(stream.recv(1).await, Err(Error::RecvFailed)));
+        assert!(matches!(
+            harness.block_on(stream.recv(1)),
+            Err(Error::RecvFailed)
+        ));
     }
 }
