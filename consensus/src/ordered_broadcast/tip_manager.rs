@@ -1,6 +1,6 @@
 use super::types::Node;
-use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
-use std::collections::{hash_map::Entry, HashMap};
+use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
+use std::collections::{HashMap, hash_map::Entry};
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default, Debug)]
@@ -58,20 +58,20 @@ mod tests {
     use super::*;
     use crate::{
         ordered_broadcast::{
-            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+            scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
             types::{Chunk, ChunkSigner},
         },
         types::Height,
     };
     use commonware_cryptography::{
+        Hasher as _, Signer as _,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
-        Hasher as _, Signer as _,
     };
     use commonware_math::algebra::Random;
-    use commonware_utils::{test_rng, TestRng};
+    use commonware_utils::{TestRng, test_rng};
     use std::panic::catch_unwind;
 
     const NAMESPACE: &[u8] = b"tip_manager_test";
@@ -237,22 +237,30 @@ mod tests {
         assert!(
             catch_unwind(|| put_same_height_different_payload_panics(secp256r1::fixture)).is_err()
         );
-        assert!(catch_unwind(|| put_same_height_different_payload_panics(
-            bls12381_multisig::fixture::<MinPk, _>
-        ))
-        .is_err());
-        assert!(catch_unwind(|| put_same_height_different_payload_panics(
-            bls12381_multisig::fixture::<MinSig, _>
-        ))
-        .is_err());
-        assert!(catch_unwind(|| put_same_height_different_payload_panics(
-            bls12381_threshold::fixture::<MinPk, _>
-        ))
-        .is_err());
-        assert!(catch_unwind(|| put_same_height_different_payload_panics(
-            bls12381_threshold::fixture::<MinSig, _>
-        ))
-        .is_err());
+        assert!(
+            catch_unwind(|| put_same_height_different_payload_panics(
+                bls12381_multisig::fixture::<MinPk, _>
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(|| put_same_height_different_payload_panics(
+                bls12381_multisig::fixture::<MinSig, _>
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(|| put_same_height_different_payload_panics(
+                bls12381_threshold::fixture::<MinPk, _>
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(|| put_same_height_different_payload_panics(
+                bls12381_threshold::fixture::<MinSig, _>
+            ))
+            .is_err()
+        );
     }
 
     fn get_nonexistent<S>()

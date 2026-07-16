@@ -3,8 +3,8 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinSig, Variant},
 };
 use commonware_parallel::{Rayon, Sequential, Strategy};
-use commonware_utils::{test_rng, NZUsize};
-use criterion::{criterion_group, BatchSize, Criterion};
+use commonware_utils::{NZUsize, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
 

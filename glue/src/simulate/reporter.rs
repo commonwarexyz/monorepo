@@ -7,7 +7,7 @@
 
 use super::tracker::FinalizationUpdate;
 use commonware_actor::Feedback;
-use commonware_consensus::{marshal::Update, Block, Reporter};
+use commonware_consensus::{Block, Reporter, marshal::Update};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_utils::channel::mpsc;
 

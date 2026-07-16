@@ -1,12 +1,12 @@
 use commonware_actor::{
-    mailbox::{Policy, Sender},
     Feedback,
+    mailbox::{Policy, Sender},
 };
 use commonware_consensus::{
-    simplex::{types::Context, Plan},
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
+    simplex::{Plan, types::Context},
 };
-use commonware_cryptography::{ed25519::PublicKey, Digest};
+use commonware_cryptography::{Digest, ed25519::PublicKey};
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 

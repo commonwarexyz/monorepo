@@ -4,57 +4,56 @@
 //! and running them against both the standard and coding marshal variants.
 
 use crate::{
+    Heightable, Reporter,
     marshal::{
+        Identifier,
         ancestry::BlockProvider,
         coding::{
-            shards,
-            types::{coding_config_for_participants, hash_context, CodedBlock},
-            Coding,
+            Coding, shards,
+            types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
         core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
-        Identifier,
     },
     simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
     },
-    types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-    Heightable, Reporter,
+    types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
 use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
+    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Provider, Scoped, Verifier as _},
+    certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
-    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
+    Clock, Quota, Runner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     telemetry::metrics::{
-        histogram::{Buckets, Timed},
         MetricsExt as _,
+        histogram::{Buckets, Timed},
     },
-    Clock, Quota, Runner, Supervisor as _,
 };
 use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, test_rng, vec::NonEmptyVec};
 use futures::StreamExt;
 use rand::{
-    seq::{IteratorRandom, SliceRandom},
     RngExt as _,
+    seq::{IteratorRandom, SliceRandom},
 };
 use std::{
     collections::BTreeMap,
@@ -203,9 +202,9 @@ pub trait TestHarness: 'static + Sized {
 
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<
-        ApplicationBlock = Self::ApplicationBlock,
-        Commitment = Self::Commitment,
-    >;
+            ApplicationBlock = Self::ApplicationBlock,
+            Commitment = Self::Commitment,
+        >;
 
     /// The block type used in test operations.
     type TestBlock: Heightable
@@ -4664,11 +4663,13 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         };
 
         // Initially, no blocks
-        assert!(handle
-            .mailbox
-            .get_block(Identifier::Height(Height::new(1)))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_block(Identifier::Height(Height::new(1)))
+                .await
+                .is_none()
+        );
         assert!(handle.mailbox.get_block(Identifier::Latest).await.is_none());
 
         let mut parent = Sha256::hash(b"");
@@ -4721,11 +4722,13 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         assert_eq!(latest.height(), Height::new(3));
 
         // Missing height
-        assert!(handle
-            .mailbox
-            .get_block(Identifier::Height(Height::new(10)))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_block(Identifier::Height(Height::new(10)))
+                .await
+                .is_none()
+        );
     })
 }
 
@@ -4824,11 +4827,13 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         };
 
         // Initially, no finalization
-        assert!(handle
-            .mailbox
-            .get_finalization(Height::new(1))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .is_none()
+        );
 
         let mut parent = Sha256::hash(b"");
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
@@ -4870,11 +4875,13 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         }
 
         // Missing height
-        assert!(handle
-            .mailbox
-            .get_finalization(Height::new(10))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_finalization(Height::new(10))
+                .await
+                .is_none()
+        );
     })
 }
 
@@ -4963,11 +4970,13 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         }
 
         // Validator 1 should not have block 5 yet
-        assert!(handle1
-            .mailbox
-            .get_finalization(Height::new(5))
-            .await
-            .is_none());
+        assert!(
+            handle1
+                .mailbox
+                .get_finalization(Height::new(5))
+                .await
+                .is_none()
+        );
 
         // Validator 1: hint that block 5 is finalized, targeting validator 0
         handle1

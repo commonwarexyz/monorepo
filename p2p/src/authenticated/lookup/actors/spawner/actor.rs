@@ -1,18 +1,17 @@
-use super::{ingress::Message, Config};
+use super::{Config, ingress::Message};
 use crate::authenticated::{
+    Mailbox,
     lookup::{
         actors::{peer, router, tracker},
         metrics,
     },
-    Mailbox,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
 use rand_core::CryptoRng;
 use std::num::NonZeroUsize;
@@ -37,12 +36,8 @@ pub struct Actor<
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<
-        E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-        Si: Sink,
-        St: Stream,
-        C: PublicKey,
-    > Actor<E, Si, St, C>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, Si: Sink, St: Stream, C: PublicKey>
+    Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let sent_messages = context.family("messages_sent", "messages sent");

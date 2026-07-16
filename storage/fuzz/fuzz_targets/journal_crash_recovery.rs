@@ -42,16 +42,16 @@
 //! guarantees the success path is covered on every input; the raw value still tests rejection.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
+use commonware_runtime::{BufferPooler, Runner, Supervisor as _, deterministic};
 use commonware_storage::journal::{
+    Error,
     contiguous::{
+        Contiguous,
         fixed::{Config as FixedConfig, Journal as FixedJournal},
         variable::{Config as VariableConfig, Journal as VariableJournal},
-        Contiguous,
     },
-    Error,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{

@@ -9,7 +9,7 @@
 //! - Queue state is consistent after recovery
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -260,10 +260,10 @@ async fn run_operations(
             },
 
             QueueOperation::DequeueAndAck => {
-                if let Ok(Some((pos, _item))) = queue.dequeue().await {
-                    if queue.ack(pos).is_ok() {
-                        state.update_ack_floor(queue.ack_floor());
-                    }
+                if let Ok(Some((pos, _item))) = queue.dequeue().await
+                    && queue.ack(pos).is_ok()
+                {
+                    state.update_ack_floor(queue.ack_floor());
                 }
             }
 

@@ -1,7 +1,7 @@
-use crate::{ordered_broadcast::types::Context, types::Height, Automaton as A, Relay as R};
+use crate::{Automaton as A, Relay as R, ordered_broadcast::types::Context, types::Height};
 use bytes::Bytes;
 use commonware_actor::Feedback;
-use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
+use commonware_cryptography::{Hasher, PublicKey, Sha256, sha256};
 use commonware_utils::channel::oneshot;
 use tracing::trace;
 

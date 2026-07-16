@@ -1,6 +1,7 @@
 //! Mock `Reporter` for tests: tracks participants/leaders, verifies activities,
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
+    Monitor, Viewable,
     simplex::{
         elector::{Config as ElectorConfig, Elector},
         scheme,
@@ -10,23 +11,22 @@ use crate::{
         },
     },
     types::{Round, View},
-    Monitor, Viewable,
 };
 use commonware_actor::Feedback;
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{
-    certificate::{Scheme, Verifier},
     Digest,
+    certificate::{Scheme, Verifier},
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{
+    N3f1,
     channel::{
         fallible::AsyncFallibleExt,
         mpsc::{Receiver, Sender},
     },
     ordered::{Quorum, Set},
     sync::Mutex,
-    N3f1,
 };
 use rand_core::CryptoRng;
 use std::{

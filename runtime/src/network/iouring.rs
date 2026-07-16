@@ -22,9 +22,10 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use crate::{
+    Buf, BufferPool, Error, IoBufMut, IoBufs,
     iouring::{self},
     telemetry::metrics::Register,
-    utils, Buf, BufferPool, Error, IoBufMut, IoBufs,
+    utils,
 };
 use std::{
     net::SocketAddr,
@@ -560,14 +561,14 @@ impl crate::Stream for Stream {
 mod tests {
     use super::{Sink, Stream};
     use crate::{
-        iouring,
+        BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
+        Sink as _, Stream as _, iouring,
         network::{
             iouring::{Config, Network},
             tests,
         },
         telemetry::metrics::{Register, Registry},
-        thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
-        Network as _, Sink as _, Stream as _,
+        thread,
     };
     use commonware_macros::{select, test_group};
     use std::{

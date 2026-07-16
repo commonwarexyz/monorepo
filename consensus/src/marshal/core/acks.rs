@@ -1,6 +1,6 @@
 use super::Variant;
 use crate::types::Height;
-use commonware_utils::{futures::OptionFuture, Acknowledgement};
+use commonware_utils::{Acknowledgement, futures::OptionFuture};
 use futures::FutureExt;
 use pin_project::pin_project;
 use std::{

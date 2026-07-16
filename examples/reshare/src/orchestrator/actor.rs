@@ -1,33 +1,33 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{genesis, Block, EpochProvider, Provider},
-    orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
+    application::{Block, EpochProvider, Provider, genesis},
+    orchestrator::{Mailbox, ingress::Message},
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, elector::Config as Elector, scheme, types::Context, Floor, Plan},
-    types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
     CertifiableAutomaton, Relay,
+    marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
+    simplex::{self, Floor, Plan, elector::Config as Elector, scheme, types::Context},
+    types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Digestible, Hasher, Signer,
+    Digestible, Hasher, Signer, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::mux::{Builder, MuxHandle, Muxer},
     Blocker, Sender,
+    utils::mux::{Builder, MuxHandle, Muxer},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
+use commonware_utils::{NZU16, NZUsize, vec::NonEmptyVec};
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info, warn};

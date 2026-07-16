@@ -1,6 +1,6 @@
 use crate::{
-    net::{request_id::RequestId, Message, MAX_MESSAGE_SIZE},
     Error,
+    net::{MAX_MESSAGE_SIZE, Message, request_id::RequestId},
 };
 use commonware_macros::select_loop;
 use commonware_runtime::{Handle, IoBufs, Sink, Spawner, Stream};

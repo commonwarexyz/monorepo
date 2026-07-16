@@ -1,8 +1,8 @@
-use commonware_cryptography::{sha256, Sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family};
-use commonware_utils::{test_rng, TestRng};
-use criterion::{criterion_group, BatchSize, Criterion};
+use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, mem::Mem};
+use commonware_utils::{TestRng, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
 use futures::executor::block_on;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;

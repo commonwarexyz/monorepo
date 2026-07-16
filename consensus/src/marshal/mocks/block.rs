@@ -1,6 +1,6 @@
 use crate::types::Height;
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Codec, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 use commonware_cryptography::{Digest, Digestible, Hasher};
 use std::fmt::Debug;
 

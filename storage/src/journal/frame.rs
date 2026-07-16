@@ -5,11 +5,11 @@
 
 use super::Error;
 use commonware_codec::{
-    util::at_least,
-    varint::{UInt, MAX_U32_VARINT_SIZE},
     Codec, Decode as _, EncodeSize, Read, ReadExt as _, Write as _,
+    util::at_least,
+    varint::{MAX_U32_VARINT_SIZE, UInt},
 };
-use commonware_runtime::{buffer::paged::Writer, Blob, Buf, IoBufMut, IoBufs};
+use commonware_runtime::{Blob, Buf, IoBufMut, IoBufs, buffer::paged::Writer};
 use std::{future::Future, io::Cursor};
 use zstd::{bulk::compress, decode_all};
 
@@ -373,7 +373,7 @@ mod tests {
         let buf = [0x05u8, 1, 2, 3, 4, 5, 99];
         let mut cursor = &buf[..];
         let item = PrefixedItem::<Greedy>::read_cfg(&mut cursor, &()).unwrap();
-        assert_eq!(item.0 .0, vec![1, 2, 3, 4, 5]);
+        assert_eq!(item.0.0, vec![1, 2, 3, 4, 5]);
         assert_eq!(cursor, &[99u8][..]);
     }
 

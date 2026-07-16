@@ -4,32 +4,32 @@
 //! the preferred recovery point for replaying data to rebuild offset entries.
 
 use super::{
-    blob_first_position,
+    Contiguous, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     fixed,
     metrics::Metrics,
-    position_to_blob, Contiguous, Many, Mutable,
+    position_to_blob,
+};
+use crate::{
+    Context,
+    journal::{
+        Error,
+        frame::{
+            FrameInfo, PrefixedItem, decode_item, decode_length_prefix, encode_frame_into,
+            find_frame, read_frame_at,
+        },
+    },
 };
 #[commonware_macros::stability(ALPHA)]
 use crate::{journal::authenticated, merkle};
-use crate::{
-    journal::{
-        frame::{
-            decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
-            FrameInfo, PrefixedItem,
-        },
-        Error,
-    },
-    Context,
-};
-use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
+use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Replay, Writer},
     Blob as RBlob, Buf, IoBuf,
+    buffer::paged::{CacheRef, Replay, Writer},
 };
 use commonware_utils::NZUsize;
-use futures::{future::try_join_all, Stream};
+use futures::{Stream, future::try_join_all};
 use std::{
     collections::BTreeMap,
     io::Cursor,
@@ -1035,12 +1035,12 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         // possible. On a data-frame miss the resolved offset is reused by the async path so the
         // offsets journal is not consulted twice.
         let cached_offset = self.offsets.try_read_sync(position);
-        if let Some(offset) = cached_offset {
-            if let Some(item) = self.try_read_frame_sync(position, offset) {
-                self.metrics.cache_hits.inc();
-                self.metrics.items_read.inc();
-                return Ok(item);
-            }
+        if let Some(offset) = cached_offset
+            && let Some(item) = self.try_read_frame_sync(position, offset)
+        {
+            self.metrics.cache_hits.inc();
+            self.metrics.items_read.inc();
+            return Ok(item);
         }
 
         let _timer = self.metrics.read_timer();
@@ -1738,7 +1738,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                         items,
                         valid_size,
                         torn,
-                    })
+                    });
                 }
             }
         }
@@ -2347,10 +2347,11 @@ mod tests {
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
+        Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
         buffer::paged::{CacheRef, Writer},
-        deterministic, Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
+        deterministic,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
     use futures::{FutureExt as _, StreamExt as _};
     use std::num::NonZeroU16;
 

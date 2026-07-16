@@ -1,8 +1,8 @@
-use commonware_cryptography::{sha256, Hasher, Sha256};
+use commonware_cryptography::{Hasher, Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use commonware_utils::test_rng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::seq::IndexedRandom;
 
 const SAMPLE_SIZE: usize = 100;
@@ -27,19 +27,20 @@ fn bench_prove_single(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let samples = queries
+                        queries
                             .sample(&mut sampler, SAMPLE_SIZE)
                             .cloned()
-                            .collect::<Vec<_>>();
-                        samples
+                            .collect::<Vec<_>>()
                     },
                     |samples| {
                         let mut hasher = Sha256::new();
                         for (pos, element) in samples {
                             let proof = tree.proof(pos).unwrap();
-                            assert!(proof
-                                .verify_element_inclusion(&mut hasher, &element, pos, &root)
-                                .is_ok());
+                            assert!(
+                                proof
+                                    .verify_element_inclusion(&mut hasher, &element, pos, &root)
+                                    .is_ok()
+                            );
                         }
                     },
                     criterion::BatchSize::SmallInput,

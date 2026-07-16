@@ -5,15 +5,15 @@
 //! next-key value for `foo` is `bar`.
 
 use crate::{
+    Context,
     index::ordered::Index,
     journal::contiguous::fixed::Journal,
     merkle::{Family, Location},
     qmdb::{
-        any::{ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
         Error,
+        any::{FixedConfig as Config, FixedValue, ordered, value::FixedEncoding},
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -57,15 +57,15 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
+        Context,
         index::partitioned::ordered::Index,
         journal::contiguous::fixed::Journal,
         merkle::{Family, Location},
         qmdb::{
-            any::{FixedConfig as Config, FixedValue},
             Error,
+            any::{FixedConfig as Config, FixedValue},
         },
         translator::Translator,
-        Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
@@ -92,15 +92,15 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family,
-            E: Context,
-            K: Array,
-            V: FixedValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, S>
+        F: Family,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, S>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -128,17 +128,17 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         merkle::{
-            mmr::{self, Location},
             Location as GenericLocation,
+            mmr::{self, Location},
         },
         qmdb::{
             any::{
                 ordered::{
+                    Update,
                     test::{
                         test_ordered_any_db_basic, test_ordered_any_db_empty,
                         test_ordered_any_update_collision_edge_case,
                     },
-                    Update,
                 },
                 test::fixed_db_config,
             },
@@ -146,17 +146,17 @@ pub(crate) mod test {
         },
         translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic::{self, Context},
         Runner as _, Supervisor as _,
+        deterministic::{self, Context},
     };
-    use commonware_utils::{sequence::FixedBytes, TestRng, NZU64};
+    use commonware_utils::{NZU64, TestRng, sequence::FixedBytes};
     use futures::StreamExt as _;
-    use rand::{seq::IteratorRandom, Rng};
+    use rand::{Rng, seq::IteratorRandom};
     use std::collections::{BTreeMap, HashMap};
 
     /// A generic type alias for an Any database parameterized by merkle family.

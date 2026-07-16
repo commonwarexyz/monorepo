@@ -109,7 +109,7 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::{BufsMut, Error, Read, Write};
-    use bytes::{buf::UninitSlice, Buf, BufMut, Bytes, BytesMut};
+    use bytes::{Buf, BufMut, Bytes, BytesMut, buf::UninitSlice};
 
     /// One-byte test type that uses the default aggregate hooks.
     ///

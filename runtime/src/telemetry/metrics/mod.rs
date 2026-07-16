@@ -36,8 +36,8 @@ pub mod raw {
 
 use commonware_utils::sync::Mutex;
 use prometheus_client::encoding::{
-    text::{encode, encode_eof},
     MetricEncoder as PromMetricEncoder,
+    text::{encode, encode_eof},
 };
 pub use registration::Registration;
 use std::{
@@ -45,7 +45,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
     ops::Deref,
-    sync::{atomic::Ordering, Arc, Weak},
+    sync::{Arc, Weak, atomic::Ordering},
 };
 
 /// Native integer width used by [`raw::Gauge`] on this target.
@@ -857,7 +857,7 @@ impl Register for Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Metrics as _, Runner, Spawner, Supervisor as _};
+    use crate::{Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_macros::test_traced;
     use futures::future;
     use std::sync::mpsc::{self, TryRecvError};

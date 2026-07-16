@@ -27,9 +27,9 @@
 //! more durable data than the checkpoint claims, never less.
 
 use crate::{
+    Context,
     journal::Error,
     metadata::{Config as MetadataConfig, Metadata},
-    Context,
 };
 use commonware_utils::sequence::VecU64;
 
@@ -154,7 +154,7 @@ impl<E: Context> Checkpoint<E> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
     /// Direct-injection helpers used by tests (here and in the fixed journal) to plant states
     /// the production API never produces: invalid or absent watermarks, a corrupt clear intent,

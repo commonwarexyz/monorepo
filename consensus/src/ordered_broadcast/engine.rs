@@ -8,39 +8,39 @@
 //! - Notifying other actors of new chunks and certificates
 
 use super::{
-    metrics, scheme,
+    AckManager, Config, TipManager, metrics, scheme,
     types::{
         Ack, Activity, Chunk, ChunkSigner, ChunkVerifier, Context, Error, Lock, Node, Parent,
         Proposal, SequencersProvider,
     },
-    AckManager, Config, TipManager,
 };
 use crate::{
-    types::{Epoch, EpochDelta, Height, HeightDelta},
     Automaton, Monitor, Relay, Reporter,
+    types::{Epoch, EpochDelta, Height, HeightDelta},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as _, Verifier},
     Digest, PublicKey, Signer,
+    certificate::{Provider, Scheme as _, Verifier},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
-    telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
 use futures::{
+    StreamExt,
     future::{self, Either},
-    pin_mut, StreamExt,
+    pin_mut,
 };
 use rand_core::CryptoRng;
 use std::{
@@ -198,17 +198,17 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + CryptoRng + Storage + Metrics,
-        C: Signer,
-        S: SequencersProvider<PublicKey = C::PublicKey>,
-        P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
-        D: Digest,
-        A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
-        R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
-        Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
-        M: Monitor<Index = Epoch>,
-        T: Strategy,
-    > Engine<E, C, S, P, D, A, R, Z, M, T>
+    E: BufferPooler + Clock + Spawner + CryptoRng + Storage + Metrics,
+    C: Signer,
+    S: SequencersProvider<PublicKey = C::PublicKey>,
+    P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
+    D: Digest,
+    A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
+    R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
+    Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
+    M: Monitor<Index = Epoch>,
+    T: Strategy,
+> Engine<E, C, S, P, D, A, R, Z, M, T>
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M, T>) -> Self {
@@ -313,11 +313,11 @@ impl<
             self.context,
             on_start => {
                 // Request a new proposal if necessary
-                if pending.is_none() {
-                    if let Some(context) = self.should_propose() {
-                        let receiver = self.automaton.propose(context.clone()).await;
-                        pending = Some((context, receiver));
-                    }
+                if pending.is_none()
+                    && let Some(context) = self.should_propose()
+                {
+                    let receiver = self.automaton.propose(context.clone()).await;
+                    pending = Some((context, receiver));
                 }
 
                 // Create deadline futures.
@@ -595,12 +595,11 @@ impl<
         }
 
         // If the certificate is for my sequencer, record metric
-        if let Some(ref signer) = self.sequencer_signer {
-            if chunk.sequencer == signer.public_key() {
-                if let Some(timer) = self.propose_timer.take() {
-                    timer.observe(self.context.as_ref());
-                }
-            }
+        if let Some(ref signer) = self.sequencer_signer
+            && chunk.sequencer == signer.public_key()
+            && let Some(timer) = self.propose_timer.take()
+        {
+            timer.observe(self.context.as_ref());
         }
 
         // Emit the activity
@@ -879,10 +878,10 @@ impl<
 
         // Optimization: If the node is exactly equal to the tip,
         // don't perform further validation.
-        if let Some(tip) = self.tip_manager.get(sender) {
-            if tip == *node {
-                return Ok(None);
-            }
+        if let Some(tip) = self.tip_manager.get(sender)
+            && tip == *node
+        {
+            return Ok(None);
         }
 
         // Validate chunk

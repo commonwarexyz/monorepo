@@ -39,22 +39,22 @@ mod tests {
     use super::{mocks::TestMessage, *};
     use crate::Broadcaster;
     use commonware_actor::{
-        mailbox::{Overflow, Policy},
         Feedback,
+        mailbox::{Overflow, Policy},
     };
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Digestible, Hasher, Sha256, Signer as _,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
         Manager as _, Recipients, Sender as _, TrackedPeers,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, Clock, Error, IoBuf, Metrics as _,
-        Quota, Runner, Supervisor as _,
+        Clock, Error, IoBuf, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
+        telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::NZUsize;
     use std::{
@@ -385,9 +385,11 @@ mod tests {
             // Send a single broadcast message from the first peer
             let message = TestMessage::shared(b"hello world test message");
             let first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
-            assert!(first_mailbox
-                .broadcast(Recipients::All, message.clone())
-                .accepted());
+            assert!(
+                first_mailbox
+                    .broadcast(Recipients::All, message.clone())
+                    .accepted()
+            );
 
             // Allow time for propagation
             context.sleep(Duration::from_secs(1)).await;
@@ -403,9 +405,11 @@ mod tests {
 
             // Send another message
             let message = TestMessage::shared(b"hello world again");
-            assert!(first_mailbox
-                .broadcast(Recipients::All, message.clone())
-                .accepted());
+            assert!(
+                first_mailbox
+                    .broadcast(Recipients::All, message.clone())
+                    .accepted()
+            );
 
             // Allow time for propagation
             context.sleep(Duration::from_secs(1)).await;
@@ -492,9 +496,11 @@ mod tests {
 
             let message = Arc::new(TestMessage::shared(b"shared broadcast"));
             let digest = message.digest();
-            assert!(mailbox
-                .broadcast_shared(Recipients::All, Arc::clone(&message))
-                .accepted());
+            assert!(
+                mailbox
+                    .broadcast_shared(Recipients::All, Arc::clone(&message))
+                    .accepted()
+            );
 
             let cached = mailbox.get(digest).await.expect("message should be cached");
             assert!(Arc::ptr_eq(&message, &cached));
@@ -518,9 +524,11 @@ mod tests {
             let digest = message.digest();
             for i in 0..100 {
                 // Broadcast the message
-                assert!(first_mailbox
-                    .broadcast(Recipients::All, message.clone())
-                    .accepted());
+                assert!(
+                    first_mailbox
+                        .broadcast(Recipients::All, message.clone())
+                        .accepted()
+                );
                 context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
                 // Check if all peers received the message
@@ -557,9 +565,11 @@ mod tests {
             // Broadcast a message
             let message = TestMessage::shared(b"cached message");
             let first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
-            assert!(first_mailbox
-                .broadcast(Recipients::All, message.clone())
-                .accepted());
+            assert!(
+                first_mailbox
+                    .broadcast(Recipients::All, message.clone())
+                    .accepted()
+            );
 
             // Wait for propagation
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -599,9 +609,11 @@ mod tests {
             drop(dummy2);
 
             // Broadcast the message
-            assert!(mailbox1
-                .broadcast(Recipients::All, message.clone())
-                .accepted());
+            assert!(
+                mailbox1
+                    .broadcast(Recipients::All, message.clone())
+                    .accepted()
+            );
 
             // Wait for propagation
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -628,9 +640,11 @@ mod tests {
                 messages.push(TestMessage::shared(format!("message {i}").as_bytes()));
             }
             for message in messages.iter() {
-                assert!(mailbox
-                    .broadcast(Recipients::All, message.clone())
-                    .accepted());
+                assert!(
+                    mailbox
+                        .broadcast(Recipients::All, message.clone())
+                        .accepted()
+                );
             }
 
             // Wait for propagation
@@ -731,9 +745,11 @@ mod tests {
             let sender_mb = mailboxes.get(&sender_pk).unwrap().clone();
 
             let msg = TestMessage::shared(b"selective-broadcast");
-            assert!(sender_mb
-                .broadcast(Recipients::One(target_peer.clone()), msg.clone())
-                .accepted());
+            assert!(
+                sender_mb
+                    .broadcast(Recipients::One(target_peer.clone()), msg.clone())
+                    .accepted()
+            );
 
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
@@ -875,9 +891,11 @@ mod tests {
 
             // The victim should still process later valid traffic.
             let message = TestMessage::shared(b"valid-after-malformed");
-            assert!(honest_mailbox
-                .broadcast(Recipients::One(victim.clone()), message.clone())
-                .accepted());
+            assert!(
+                honest_mailbox
+                    .broadcast(Recipients::One(victim.clone()), message.clone())
+                    .accepted()
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             let received = victim_mailbox
@@ -1308,9 +1326,11 @@ mod tests {
 
             // Peer A is no longer in `latest.primary`, so A does not buffer; send still runs.
             let fresh = TestMessage::shared(b"post-eviction-latest-test");
-            assert!(mailbox_a
-                .broadcast(Recipients::All, fresh.clone())
-                .accepted());
+            assert!(
+                mailbox_a
+                    .broadcast(Recipients::All, fresh.clone())
+                    .accepted()
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             assert!(
@@ -1551,9 +1571,11 @@ mod tests {
             context.sleep(A_JIFFY).await;
 
             let after = TestMessage::shared(b"after-tracking");
-            assert!(mailbox_a
-                .broadcast(Recipients::All, after.clone())
-                .accepted());
+            assert!(
+                mailbox_a
+                    .broadcast(Recipients::All, after.clone())
+                    .accepted()
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             assert_eq!(mailbox_b.get(after.digest()).await.as_deref(), Some(&after));

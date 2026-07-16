@@ -1,5 +1,5 @@
 use crate::{
-    merkle::{verification::ProofStore, Error, Family, Location, Position, Proof},
+    merkle::{Error, Family, Location, Position, Proof, verification::ProofStore},
     qmdb,
 };
 use commonware_codec::Encode;
@@ -122,12 +122,12 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::{build_range_proof, hasher::Standard, mem::Mem, LocationRangeExt as _},
+        merkle::{LocationRangeExt as _, build_range_proof, hasher::Standard, mem::Mem},
         mmb, mmr,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
     use core::ops::Range;
 
     fn test_digest(v: u8) -> Digest {
@@ -311,13 +311,15 @@ mod tests {
 
         // Should fail with wrong root
         let wrong_root = test_digest(99);
-        assert!(verify_proof_and_extract_digests::<Sha256, _, _>(
-            &proof,
-            Location::<F>::new(1),
-            &operations[range.to_usize_range()],
-            &wrong_root
-        )
-        .is_err());
+        assert!(
+            verify_proof_and_extract_digests::<Sha256, _, _>(
+                &proof,
+                Location::<F>::new(1),
+                &operations[range.to_usize_range()],
+                &wrong_root
+            )
+            .is_err()
+        );
     }
 
     #[test_traced]
@@ -407,13 +409,15 @@ mod tests {
 
         // Should fail with invalid root
         let wrong_root = test_digest(99);
-        assert!(create_proof_store::<Sha256, _, _>(
-            &proof,
-            Location::<F>::new(0),
-            &operations,
-            &wrong_root
-        )
-        .is_err());
+        assert!(
+            create_proof_store::<Sha256, _, _>(
+                &proof,
+                Location::<F>::new(0),
+                &operations,
+                &wrong_root
+            )
+            .is_err()
+        );
     }
 
     #[test_traced]
@@ -531,13 +535,15 @@ mod tests {
             &operations[range.to_usize_range()],
             &root
         ));
-        assert!(create_proof_store::<Sha256, _, _>(
-            &tampered,
-            range.start,
-            &operations[range.to_usize_range()],
-            &root
-        )
-        .is_err());
+        assert!(
+            create_proof_store::<Sha256, _, _>(
+                &tampered,
+                range.start,
+                &operations[range.to_usize_range()],
+                &root
+            )
+            .is_err()
+        );
 
         let mut tampered = proof;
         tampered.inactive_peaks = inactive_peaks + 1;
@@ -547,13 +553,15 @@ mod tests {
             &operations[range.to_usize_range()],
             &root
         ));
-        assert!(create_proof_store::<Sha256, _, _>(
-            &tampered,
-            range.start,
-            &operations[range.to_usize_range()],
-            &root
-        )
-        .is_err());
+        assert!(
+            create_proof_store::<Sha256, _, _>(
+                &tampered,
+                range.start,
+                &operations[range.to_usize_range()],
+                &root
+            )
+            .is_err()
+        );
 
         let target_locations = vec![Location::<F>::new(33), Location::<F>::new(48)];
 

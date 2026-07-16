@@ -64,52 +64,51 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Relay,
         marshal::{
             ancestry::BlockProvider,
             coding::{
-                shards,
-                types::{coding_config_for_participants, hash_context, CodedBlock},
-                Coding, Marshaled, MarshaledConfig,
+                Coding, Marshaled, MarshaledConfig, shards,
+                types::{CodedBlock, coding_config_for_participants, hash_context},
             },
             config::{Config, Start},
             core,
             mocks::{
                 application::Application,
                 harness::{
-                    self, default_leader, genesis_commitment, make_coding_block,
-                    setup_network_links, setup_network_with_participants, CodingB, CodingCtx,
-                    CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, D, K, LINK,
-                    NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, UNRELIABLE_LINK, V,
+                    self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
+                    LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
+                    UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
+                    setup_network_links, setup_network_with_participants,
                 },
                 verifying::{GatedVerifyingApp, MockVerifyingApp},
             },
             resolver::handler,
         },
         simplex::{
-            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal, Plan,
+            Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal,
         },
-        types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Relay,
+        types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
     };
     use bytes::Bytes;
-    use commonware_actor::{mailbox, Feedback};
+    use commonware_actor::{Feedback, mailbox};
     use commonware_codec::{Encode, FixedSize};
     use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Verifier as _},
-        sha256::Sha256,
         Committable, Digestible, Hasher,
+        certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
+        sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::Recipients;
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Supervisor as _,
+        Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        channel::oneshot, sync::Mutex, vec::NonEmptyVec, NZUsize, NZU16, NZU64,
+        NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
     use std::{sync::Arc, time::Duration};
 
@@ -536,19 +535,21 @@ mod tests {
             let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
 
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver_tx
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Notarized { round },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Notarization { round },
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: (notarization, dishonest_block).encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver_tx
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Notarized { round },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Notarization { round },
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (notarization, dishonest_block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 !response_rx.await.unwrap(),
                 "notarized delivery should reject a dishonest coding config"

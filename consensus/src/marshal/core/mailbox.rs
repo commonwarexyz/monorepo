@@ -1,29 +1,29 @@
-use super::{durability::Durable as _, Variant};
+use super::{Variant, durability::Durable as _};
 use crate::{
+    Reporter,
     marshal::{
-        ancestry::{AncestorStream, Ancestry, BlockProvider},
         Identifier,
+        ancestry::{AncestorStream, Ancestry, BlockProvider},
     },
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
-    Reporter,
 };
 use commonware_actor::{
-    mailbox::{Overflow, Policy, Sender},
     Feedback,
+    mailbox::{Overflow, Policy, Sender},
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_runtime::{
-    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
     Clock, Handle,
+    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
 };
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
-    collections::{btree_map::Entry, BTreeMap, VecDeque},
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     sync::Arc,
 };
-use tracing::{info_span, Span};
+use tracing::{Span, info_span};
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -532,15 +532,15 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     {
         // Drain floor and prune first so the actor advances its floor before
         // it sees the height-bounded reads that follow
-        if let Some((span, finalization)) = self.floor.take() {
-            if !self.drain_one(Message::SetFloor { span, finalization }, &mut push) {
-                return;
-            }
+        if let Some((span, finalization)) = self.floor.take()
+            && !self.drain_one(Message::SetFloor { span, finalization }, &mut push)
+        {
+            return;
         }
-        if let Some((span, height)) = self.prune.take() {
-            if !self.drain_one(Message::Prune { span, height }, &mut push) {
-                return;
-            }
+        if let Some((span, height)) = self.prune.take()
+            && !self.drain_one(Message::Prune { span, height }, &mut push)
+        {
+            return;
         }
 
         // Drain the remaining queued messages in FIFO order
@@ -992,16 +992,16 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
 mod tests {
     use super::*;
     use crate::{
+        Heightable,
         marshal::{mocks::harness, standard::Standard},
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{Epoch, View},
-        Heightable,
     };
     use commonware_cryptography::{
-        certificate::mocks::Fixture, ed25519::PrivateKey, Digest as _, Signer as _,
+        Digest as _, Signer as _, certificate::mocks::Fixture, ed25519::PrivateKey,
     };
-    use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::{channel::oneshot::error::TryRecvError, NZUsize, TestRng};
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{NZUsize, TestRng, channel::oneshot::error::TryRecvError};
 
     type TestMessage = Message<harness::S, Standard<harness::B>>;
     type TestPending = Pending<harness::S, Standard<harness::B>>;

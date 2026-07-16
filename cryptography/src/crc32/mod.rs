@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use crate::Hasher;
     use commonware_codec::{DecodeExt, Encode};
-    use crc::{Crc, CRC_32_ISCSI};
+    use crc::{CRC_32_ISCSI, Crc};
 
     /// Reference CRC32C implementation from the [`crc`](https://crates.io/crates/crc) crate.
     const CRC32C_REF: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);

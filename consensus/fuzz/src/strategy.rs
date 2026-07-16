@@ -1,8 +1,8 @@
 use crate::EPOCH;
 use commonware_consensus::{
+    Viewable,
     simplex::types::Proposal,
     types::{Epoch, Round, View},
-    Viewable,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use rand::{Rng, RngExt as _};

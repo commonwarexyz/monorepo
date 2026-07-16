@@ -2,17 +2,17 @@
 
 use super::Immutable;
 use crate::{
+    Context,
     journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location},
     qmdb::{
-        any::{batch::lookup_sorted, ValueEncoding},
+        Error,
+        any::{ValueEncoding, batch::lookup_sorted},
         batch_chain::{self, Bounds},
         immutable::operation::Operation,
         operation::Key,
-        Error,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
@@ -318,7 +318,7 @@ where
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, K, V, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 

@@ -1,10 +1,10 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
 use super::{Contiguous, Many};
-use crate::journal::{contiguous::Mutable, Error};
+use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_utils::NZUsize;
-use futures::{future::BoxFuture, StreamExt};
+use futures::{StreamExt, future::BoxFuture};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Run the full suite of generic tests on a [Contiguous] implementation.

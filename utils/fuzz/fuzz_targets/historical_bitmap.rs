@@ -21,7 +21,7 @@
 //! - Operations that would violate invariants are skipped (not an error)
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_utils::bitmap::{historical::BitMap, Prunable};
+use commonware_utils::bitmap::{Prunable, historical::BitMap};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum number of commits in a single fuzz input
@@ -206,8 +206,7 @@ fn fuzz(input: FuzzInput) {
             let expected_val = expected.get_bit(bit);
             let actual_val = reconstructed.get_bit(bit);
             assert_eq!(
-                actual_val,
-                expected_val,
+                actual_val, expected_val,
                 "Bit {bit} mismatch at commit {commit_num} (expected {expected_val}, got {actual_val})"
             );
         }

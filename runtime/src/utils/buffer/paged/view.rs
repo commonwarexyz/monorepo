@@ -6,7 +6,7 @@
 //! to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
 //! exactly one place.
 
-use super::{cache::CachedDecode, CacheRef};
+use super::{CacheRef, cache::CachedDecode};
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use commonware_codec::Read as CodecRead;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -408,8 +408,8 @@ fn map_misses(
 
 #[cfg(test)]
 mod tests {
-    use crate::{buffer::paged::Writer, deterministic, Runner as _, Storage as _};
-    use commonware_utils::{NZUsize, NZU16};
+    use crate::{Runner as _, Storage as _, buffer::paged::Writer, deterministic};
+    use commonware_utils::{NZU16, NZUsize};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);

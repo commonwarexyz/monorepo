@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_storage::{
-    merkle::{mmb, mmr, Family as MerkleFamily, Location, Proof},
+    merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
     qmdb::verify::verify_multi_proof,
 };
 use libfuzzer_sys::fuzz_target;

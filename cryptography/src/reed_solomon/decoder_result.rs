@@ -214,7 +214,7 @@ impl<'a> Recoveries<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{test_util, Decoder, Encoder, SHARD_CHUNK_BYTES};
+    use crate::reed_solomon::{Decoder, Encoder, SHARD_CHUNK_BYTES, test_util};
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
 

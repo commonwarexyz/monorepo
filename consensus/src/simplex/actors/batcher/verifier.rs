@@ -5,7 +5,7 @@ use crate::{
     },
     types::Participant,
 };
-use commonware_cryptography::{certificate::Verification, Digest};
+use commonware_cryptography::{Digest, certificate::Verification};
 use commonware_parallel::Strategy;
 use commonware_utils::ordered::Set;
 use rand::rngs::StdRng;
@@ -197,10 +197,10 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             }
             Vote::Finalize(finalize) => {
                 // If leader proposal is set and the message is not for it, drop it
-                if let Some(ref leader_proposal) = self.leader_proposal {
-                    if leader_proposal != &finalize.proposal {
-                        return;
-                    }
+                if let Some(ref leader_proposal) = self.leader_proposal
+                    && leader_proposal != &finalize.proposal
+                {
+                    return;
                 }
 
                 // If we've made it this far, add the finalize
@@ -535,7 +535,7 @@ mod tests {
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, TestRng};
+    use commonware_utils::{Faults, N3f1, TestRng, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -748,10 +748,12 @@ mod tests {
 
         let (batch, failed_second) = verifier2.verify_notarizes(&mut rng, &Sequential).await;
         assert_eq!(batch, quorum as usize);
-        assert!(verifier2
-            .verified_notarizes
-            .iter()
-            .any(|notarize| notarize == &leader_vote));
+        assert!(
+            verifier2
+                .verified_notarizes
+                .iter()
+                .any(|notarize| notarize == &leader_vote)
+        );
         assert_eq!(failed_second, vec![faulty_vote.signer()]);
     }
 

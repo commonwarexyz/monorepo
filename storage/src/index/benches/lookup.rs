@@ -1,11 +1,11 @@
 use super::{Digest, DummyMetrics};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
-    index::{partitioned, unordered, Unordered},
+    index::{Unordered, partitioned, unordered},
     translator::{Cap, EightCap, FourCap, OneCap, Translator, TwoCap},
 };
 use commonware_utils::TestRng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::seq::SliceRandom;
 use std::{
     hint::black_box,

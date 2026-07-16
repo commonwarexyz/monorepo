@@ -1,6 +1,6 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::ordinal;
-use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, test_rng, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes, test_rng};
 use rand::Rng;
 use std::collections::BTreeMap;
 

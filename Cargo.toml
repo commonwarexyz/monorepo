@@ -61,10 +61,10 @@ libraries = [{ path = ".github/dylints/*" }]
 
 [workspace.package]
 version = "2026.7.0"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
-rust-version = "1.91.1"
+rust-version = "1.95.0"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(benchmark_tracking)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }

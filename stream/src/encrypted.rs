@@ -58,12 +58,12 @@
 use crate::utils::codec::{append_frame, framed_len, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError, FixedSize};
 use commonware_cryptography::{
+    Signer,
     handshake::{
-        self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
-        Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck,
+        self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
+        dial_start, listen_end, listen_start,
     },
     transcript::Transcript,
-    Signer,
 };
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -529,16 +529,16 @@ impl<I: Stream> Receiver<I> {
 mod test {
     use super::*;
     use commonware_codec::varint::UInt;
-    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+    use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{
-        deterministic, mocks, BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _,
-        Spawner as _, Supervisor as _,
+        BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
+        Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{sync::Mutex, NZUsize};
+    use commonware_utils::{NZUsize, sync::Mutex};
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };

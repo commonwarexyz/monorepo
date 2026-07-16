@@ -1,25 +1,25 @@
 use super::{
+    Producer,
     config::Config,
     fetcher::{Config as FetcherConfig, Fetcher},
     inflight::Inflight,
     ingress::{FetchKey, Mailbox, Message},
-    metrics, wire, Producer,
+    metrics, wire,
 };
-use crate::{subscribers, Consumer, Delivery};
+use crate::{Consumer, Delivery, subscribers};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Blocker, Provider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
-use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
+use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
 use futures::future::{self, Either};
 use rand_core::Rng;
 use std::marker::PhantomData;

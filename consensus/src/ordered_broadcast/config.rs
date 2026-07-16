@@ -1,9 +1,9 @@
 use super::types::{Activity, ChunkSigner, ChunkVerifier, Context, SequencersProvider};
 use crate::{
-    types::{Epoch, EpochDelta, HeightDelta},
     Automaton, Monitor, Relay, Reporter,
+    types::{Epoch, EpochDelta, HeightDelta},
 };
-use commonware_cryptography::{certificate::Provider, Digest, Signer};
+use commonware_cryptography::{Digest, Signer, certificate::Provider};
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::{

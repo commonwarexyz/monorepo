@@ -6,15 +6,15 @@ use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
 use ahash::AHashMap;
 use commonware_codec::Read as CodecRead;
 use commonware_utils::{cache::Clock, sync::RwLock};
-use futures::{future::Shared, FutureExt};
+use futures::{FutureExt, future::Shared};
 use std::{
     collections::hash_map::Entry,
     future::Future,
     num::{NonZeroU16, NonZeroUsize},
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 use tracing::{error, trace};
@@ -890,25 +890,25 @@ async fn fetch_cacheable_page(
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{buf::MAX_GATHER_PAGES, Checksum},
+        super::{Checksum, buf::MAX_GATHER_PAGES},
         *,
     };
     use crate::{
-        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
-        BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _, Spawner as _,
-        Storage as _, Supervisor as _,
+        Buf, BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _,
+        Spawner as _, Storage as _, Supervisor as _, buffer::paged::CHECKSUM_SIZE, deterministic,
+        telemetry::metrics::Registry,
     };
     use commonware_codec::ReadExt as _;
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
-    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16};
+    use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
     use futures::future::pending;
     use rstest::rstest;
     use std::{
         num::NonZeroU16,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };

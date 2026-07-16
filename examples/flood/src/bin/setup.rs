@@ -1,6 +1,6 @@
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_codec::Encode;
-use commonware_cryptography::{ed25519, Signer as _};
+use commonware_cryptography::{Signer as _, ed25519};
 use commonware_deployer::aws;
 use commonware_flood::Config;
 use commonware_formatting::hex;

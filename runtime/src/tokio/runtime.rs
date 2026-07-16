@@ -1,25 +1,24 @@
+#[cfg(feature = "external")]
+use crate::Pacer;
 #[cfg(not(feature = "iouring-network"))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
-#[cfg(feature = "external")]
-use crate::Pacer;
 use crate::{
-    child_label,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
+    Spawner as _, StreamOf, Supervisor as _, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::{
-        add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
-        Register, Registered, Registry,
+        CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
+        task::Label, validate_label,
     },
-    utils::{self, signal::Stopper, supervision::Tree, Panicker},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Name, SinkOf, Spawner as _,
-    StreamOf, Supervisor as _, METRICS_PREFIX,
+    utils::{self, Panicker, signal::Stopper, supervision::Tree},
 };
 #[cfg(feature = "iouring-network")]
 use crate::{
@@ -29,7 +28,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
-use commonware_utils::{sync::Mutex, sys_rng, NZUsize};
+use commonware_utils::{NZUsize, sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]

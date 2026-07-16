@@ -1,11 +1,11 @@
 //! A stream that yields the ancestors of a block while prefetching parents.
 
-use crate::{types::Height, Block, Heightable};
+use crate::{Block, Heightable, types::Height};
 use commonware_cryptography::{Digest, Digestible};
-use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock};
+use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use futures::{
-    future::{BoxFuture, OptionFuture},
     FutureExt, Stream,
+    future::{BoxFuture, OptionFuture},
 };
 use pin_project::pin_project;
 use std::{
@@ -286,14 +286,13 @@ where
 mod test {
     use super::*;
     use crate::marshal::mocks::block::Block;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
+    use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
     use commonware_runtime::{
-        deterministic,
+        Runner as _, Supervisor as _, deterministic,
         telemetry::metrics::{
-            histogram::{Buckets, Timed},
             MetricsExt as _,
+            histogram::{Buckets, Timed},
         },
-        Runner as _, Supervisor as _,
     };
     use futures::StreamExt;
 
