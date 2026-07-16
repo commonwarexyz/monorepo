@@ -547,7 +547,7 @@ fn unlink(state: &mut core::State, id: u64) {
 
 impl<S: crate::Storage> crate::Blob for Blob<S> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        core::read_verified(&self.ready, &self.core, offset, len).await
+        core::read_verified(&self.ready, &self.core, offset, len, None).await
     }
 
     async fn read_at_buf(
@@ -556,14 +556,7 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let mut bufs = bufs.into();
-        let data = core::read_verified(&self.ready, &self.core, offset, len)
-            .await?
-            .coalesce();
-        // SAFETY: `len` bytes are filled via copy_from_slice below.
-        unsafe { bufs.set_len(len) };
-        bufs.copy_from_slice(data.as_ref());
-        Ok(bufs)
+        core::read_verified(&self.ready, &self.core, offset, len, Some(bufs.into())).await
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {

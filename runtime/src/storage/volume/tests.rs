@@ -6,8 +6,10 @@ use super::{Config, Storage as Volume, BLOCK};
 use crate::{
     storage::{memory, tests::run_storage_tests},
     telemetry::metrics::Registry,
-    Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, IoBufsMut, Storage as _,
+    Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+    Storage as _,
 };
+use bytes::Buf as _;
 use commonware_utils::{sync::Mutex, TestRng};
 use rand::{Rng as _, RngExt as _};
 use std::{collections::BTreeMap, sync::Arc};
@@ -31,11 +33,14 @@ async fn test_volume_storage_contract() {
 type IoLog = Arc<Mutex<Vec<(bool, u64, usize)>>>;
 
 /// An inner storage wrapper recording every read and write the volume issues
-/// to the volume file.
+/// to the volume file, plus the buffer address of every `read_at_buf` (to
+/// pin that caller buffers reach the inner blob directly, without a pool
+/// scratch buffer in between).
 #[derive(Clone)]
 struct Recording {
     inner: memory::Storage,
     log: IoLog,
+    buf_ptrs: Arc<Mutex<Vec<usize>>>,
 }
 
 impl Recording {
@@ -43,6 +48,7 @@ impl Recording {
         Self {
             inner: memory::Storage::new(pool),
             log: Arc::new(Mutex::new(Vec::new())),
+            buf_ptrs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -61,6 +67,7 @@ impl crate::Storage for Recording {
             RecordingBlob {
                 inner: blob,
                 log: self.log.clone(),
+                buf_ptrs: self.buf_ptrs.clone(),
             },
             len,
             version,
@@ -80,6 +87,7 @@ impl crate::Storage for Recording {
 struct RecordingBlob {
     inner: memory::Blob,
     log: IoLog,
+    buf_ptrs: Arc<Mutex<Vec<usize>>>,
 }
 
 impl crate::Blob for RecordingBlob {
@@ -95,6 +103,8 @@ impl crate::Blob for RecordingBlob {
         bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         self.log.lock().push((false, offset, len));
+        let bufs = bufs.into();
+        self.buf_ptrs.lock().push(bufs.chunk().as_ptr() as usize);
         self.inner.read_at_buf(offset, len, bufs).await
     }
 
@@ -1037,6 +1047,32 @@ async fn test_volume_written_chunks_read_exact_range() {
             "read must not be widened: {new:?}"
         );
     }
+
+    // read_at_buf takes the same fast path: exactly one exact-range inner
+    // read, issued WITH the caller's buffer (the inner blob fills it
+    // directly — no pool scratch, no copy), and the caller's buffer is
+    // returned.
+    let before = recording.log.lock().iter().filter(|(w, _, _)| !*w).count();
+    let buf = IoBufMut::zeroed(100);
+    let caller_ptr = buf.as_ref().as_ptr() as usize;
+    let got = blob.read_at_buf(50, 100, buf).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[7u8; 100][..]);
+    assert_eq!(
+        got.as_ref().as_ptr() as usize,
+        caller_ptr,
+        "the caller's buffer must be returned"
+    );
+    {
+        let log = recording.log.lock();
+        let new: Vec<_> = log.iter().filter(|(w, _, _)| !*w).skip(before).collect();
+        assert_eq!(new.len(), 1, "one exact inner read: {new:?}");
+        assert_eq!(new[0].2, 100, "read must not be widened: {new:?}");
+    }
+    assert_eq!(
+        recording.buf_ptrs.lock().last().copied(),
+        Some(caller_ptr),
+        "the inner read must fill the caller's buffer directly"
+    );
 }
 
 /// A one-shot pause point for inner I/O: while armed, the next matching
@@ -1357,6 +1393,98 @@ async fn test_volume_unverified_read_races_in_place_overwrite() {
         .expect("in-place overwrite must never surface as corruption")
         .coalesce();
     assert_eq!(got.as_ref(), &[0x11u8; 100]);
+}
+
+/// A relocation generation bump landing between a fast-path `read_at_buf`'s
+/// snapshot and its post-read verification forces a retry that re-derives
+/// the read plan. Both retry outcomes must fill the caller's buffers with
+/// the correct (post-relocation) bytes: a COW keeps the chunk verified (the
+/// retry stays on the direct-fill path), while a resize-down leaves the
+/// boundary chunk unverified (the retry falls back to the scratch-and-copy
+/// path).
+#[tokio::test]
+async fn test_volume_read_at_buf_retries_on_relocation() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    // COW bump: a committed chunk (verified by construction, frozen by the
+    // commit) relocates on overwrite.
+    let (blob, _) = volume.open("p", b"cow").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+
+    // The reader derives the fast-path plan, then parks on the inner read
+    // (already carrying the caller's buffer).
+    gated.read_gate.arm();
+    let reader = {
+        let blob = blob.clone();
+        tokio::spawn(async move {
+            let buf = IoBufMut::zeroed(100);
+            let ptr = buf.as_ref().as_ptr() as usize;
+            let got = blob.read_at_buf(0, 100, buf).await.unwrap().coalesce();
+            (ptr, got)
+        })
+    };
+    gated.read_gate.wait_reached().await;
+
+    // Overwriting frozen bytes relocates the chunk (COW): the generation
+    // moves while the read is in flight, so the parked read returns the OLD
+    // extent's bytes and must retry against the relocated (still verified)
+    // chunk.
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x22u8; 100]))
+        .await
+        .unwrap();
+
+    gated.read_gate.release();
+    let (ptr, got) = reader.await.unwrap();
+    assert_eq!(
+        got.as_ref(),
+        &[0x22u8; 100][..],
+        "retry must serve the relocated bytes"
+    );
+    assert_eq!(
+        got.as_ref().as_ptr() as usize,
+        ptr,
+        "the caller's buffer must be returned"
+    );
+
+    // Resize-down bump: the boundary chunk's CRC is recomputed from an
+    // unchecked read-back, leaving it UNVERIFIED — the retry no longer
+    // qualifies for the direct-fill path and must fall back to scratch.
+    let (blob, _) = volume.open("p", b"shrink").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x33u8; 300]))
+        .await
+        .unwrap();
+
+    gated.read_gate.arm();
+    let reader = {
+        let blob = blob.clone();
+        tokio::spawn(async move {
+            let buf = IoBufMut::zeroed(100);
+            let ptr = buf.as_ref().as_ptr() as usize;
+            let got = blob.read_at_buf(0, 100, buf).await.unwrap().coalesce();
+            (ptr, got)
+        })
+    };
+    gated.read_gate.wait_reached().await;
+
+    blob.resize(150).await.unwrap();
+
+    gated.read_gate.release();
+    let (ptr, got) = reader.await.unwrap();
+    assert_eq!(
+        got.as_ref(),
+        &[0x33u8; 100][..],
+        "scratch fallback must serve the surviving bytes"
+    );
+    assert_eq!(
+        got.as_ref().as_ptr() as usize,
+        ptr,
+        "the caller's buffer must be returned"
+    );
 }
 
 /// A removal racing an in-flight commit on an unrelated blob must not let

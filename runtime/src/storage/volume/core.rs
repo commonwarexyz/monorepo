@@ -1070,11 +1070,19 @@ const MAX_READ_SPAN: u64 = 1 << 20;
 /// CRC, quiesce and generation retries) and are marked verified on success.
 /// When the whole request is one contiguous verified stretch, the inner
 /// read buffer is returned directly (zero copy).
+///
+/// With caller-provided buffers (`caller`, the [`crate::Blob::read_at_buf`]
+/// path), that same stretch is passed straight to the inner blob's
+/// `read_at_buf`, which fills the buffers directly — no pool scratch, no
+/// copy. Every other shape reads into pool scratch and copies into the
+/// caller's buffers once at the end. The returned buffers are always the
+/// caller's, with exactly `len` bytes filled and the chunk layout preserved.
 pub(super) async fn read_verified<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
     offset: u64,
     len: usize,
+    mut caller: Option<IoBufsMut>,
 ) -> Result<IoBufsMut, Error> {
     ready.check_poisoned()?;
     let end = offset
@@ -1107,7 +1115,11 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 return Err(Error::BlobInsufficientLength);
             }
             if len == 0 {
-                return Ok(IoBufsMut::default());
+                return Ok(caller.take().map_or_else(IoBufsMut::default, |mut bufs| {
+                    // SAFETY: zero bytes need no initialization.
+                    unsafe { bufs.set_len(0) };
+                    bufs
+                }));
             }
             let mut groups: Vec<Group> = Vec::new();
             for chunk in chunk_of(offset)..=chunk_of(end - 1) {
@@ -1170,7 +1182,8 @@ pub(super) async fn read_verified<S: crate::Storage>(
         };
 
         // Zero-copy fast path: the whole request is one verified stretch —
-        // return the inner read buffer directly.
+        // return the inner read buffer directly, or fill the caller's
+        // buffers directly through the inner blob's `read_at_buf`.
         if let [Group::Verified {
             physical,
             logical,
@@ -1178,12 +1191,26 @@ pub(super) async fn read_verified<S: crate::Storage>(
         }] = groups.as_slice()
         {
             if *logical == offset && *read_len == len as u64 {
-                let bufs = ready.file.read_at(*physical, len).await?;
-                if blob.inner.lock().generation == generation {
-                    return Ok(bufs);
+                match caller.take() {
+                    Some(bufs) => {
+                        let bufs = ready.file.read_at_buf(*physical, len, bufs).await?;
+                        if blob.inner.lock().generation == generation {
+                            return Ok(bufs);
+                        }
+                        // Re-issuing into the same caller buffers mid-call
+                        // is fine: only the returned state matters.
+                        caller = Some(bufs);
+                    }
+                    None => {
+                        let bufs = ready.file.read_at(*physical, len).await?;
+                        if blob.inner.lock().generation == generation {
+                            return Ok(bufs);
+                        }
+                    }
                 }
                 // The backing relocated (and may have been recycled) while
-                // the read was in flight.
+                // the read was in flight: re-derive the read plan (the new
+                // backing may no longer qualify for this path).
                 continue 'retry;
             }
         }
@@ -1307,7 +1334,15 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 continue 'retry;
             }
         }
-        return Ok(out.into());
+        return Ok(match caller.take() {
+            Some(mut bufs) => {
+                // SAFETY: `len` bytes are filled via copy_from_slice below.
+                unsafe { bufs.set_len(len) };
+                bufs.copy_from_slice(out.as_ref());
+                bufs
+            }
+            None => out.into(),
+        });
     }
 }
 
