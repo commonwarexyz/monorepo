@@ -23,14 +23,59 @@ use std::{
 };
 use tracing::error;
 
-/// Handle to a spawned task.
+/// Handle to an asynchronous result.
+///
+/// Handles returned by [`crate::Spawner::spawn`] abort the spawned task. Completion handles only
+/// stop waiting when aborted, resolving to [`Error::Aborted`]; they do not cancel the underlying
+/// work.
 pub struct Handle<T>
 where
     T: Send + 'static,
 {
-    abort_handle: Option<AbortHandle>,
-    receiver: oneshot::Receiver<Result<T, Error>>,
-    metric: MetricHandle,
+    state: HandleState<T>,
+}
+
+/// Distinguishes handles that own spawned work from handles that only wait on completion.
+enum HandleState<T>
+where
+    T: Send + 'static,
+{
+    Task {
+        receiver: oneshot::Receiver<Result<T, Error>>,
+        abort_handle: AbortHandle,
+        metric: MetricHandle,
+    },
+    Completion {
+        future: Abortable<Completion<T>>,
+        abort_handle: AbortHandle,
+    },
+}
+
+/// Normalizes receiver-backed and future-backed completions behind one abortable future.
+enum Completion<T>
+where
+    T: Send + 'static,
+{
+    Receiver(oneshot::Receiver<Result<T, Error>>),
+    Future(Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'static>>),
+}
+
+impl<T> Unpin for Completion<T> where T: Send + 'static {}
+
+impl<T> Future for Completion<T>
+where
+    T: Send + 'static,
+{
+    type Output = Result<T, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut *self {
+            Self::Receiver(receiver) => Pin::new(receiver)
+                .poll(cx)
+                .map(|result| result.unwrap_or(Err(Error::Closed))),
+            Self::Future(future) => future.as_mut().poll(cx),
+        }
+    }
 }
 
 impl<T> Handle<T>
@@ -84,11 +129,45 @@ where
         (
             task,
             Self {
-                abort_handle: Some(abort_handle),
-                receiver,
-                metric,
+                state: HandleState::Task {
+                    receiver,
+                    abort_handle,
+                    metric,
+                },
             },
         )
+    }
+
+    /// Returns a handle backed by a completion receiver.
+    pub fn from_receiver(receiver: oneshot::Receiver<Result<T, Error>>) -> Self {
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        Self {
+            state: HandleState::Completion {
+                future: Abortable::new(Completion::Receiver(receiver), abort_registration),
+                abort_handle,
+            },
+        }
+    }
+
+    /// Returns a handle backed by a completion future.
+    pub fn from_future<F>(future: F) -> Self
+    where
+        F: Future<Output = Result<T, Error>> + Send + 'static,
+    {
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        Self {
+            state: HandleState::Completion {
+                future: Abortable::new(Completion::Future(Box::pin(future)), abort_registration),
+                abort_handle,
+            },
+        }
+    }
+
+    /// Returns a handle that is already complete.
+    pub fn ready(result: Result<T, Error>) -> Self {
+        let (sender, receiver) = oneshot::channel();
+        let _ = sender.send(result);
+        Self::from_receiver(receiver)
     }
 
     /// Returns a handle that resolves to [`Error::Closed`] without spawning work.
@@ -100,31 +179,39 @@ where
         let (sender, receiver) = oneshot::channel();
         drop(sender);
 
-        Self {
-            abort_handle: None,
-            receiver,
-            metric,
-        }
+        Self::from_receiver(receiver)
     }
 
-    /// Abort the task (if not blocking).
+    /// Abort the spawned task or stop waiting for a completion.
     pub fn abort(&self) {
-        // Get abort handle and abort the task
-        let Some(abort_handle) = &self.abort_handle else {
-            return;
-        };
-        abort_handle.abort();
+        match &self.state {
+            HandleState::Task {
+                abort_handle,
+                metric,
+                ..
+            } => {
+                abort_handle.abort();
 
-        // We might never poll the future again after aborting it, so run the
-        // metric cleanup right away
-        self.metric.finish();
+                // We might never poll the future again after aborting it, so run the
+                // metric cleanup right away.
+                metric.finish();
+            }
+            HandleState::Completion { abort_handle, .. } => {
+                abort_handle.abort();
+            }
+        }
     }
 
     /// Returns a helper that aborts the task and updates metrics consistently.
     pub(crate) fn aborter(&self) -> Option<Aborter> {
-        self.abort_handle
-            .clone()
-            .map(|inner| Aborter::new(inner, self.metric.clone()))
+        match &self.state {
+            HandleState::Task {
+                abort_handle,
+                metric,
+                ..
+            } => Some(Aborter::new(abort_handle.clone(), metric.clone())),
+            HandleState::Completion { .. } => None,
+        }
     }
 }
 
@@ -135,9 +222,14 @@ where
     type Output = Result<T, Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.receiver)
-            .poll(cx)
-            .map(|result| result.unwrap_or_else(|_| Err(Error::Closed)))
+        match &mut self.state {
+            HandleState::Task { receiver, .. } => Pin::new(receiver)
+                .poll(cx)
+                .map(|result| result.unwrap_or_else(|_| Err(Error::Closed))),
+            HandleState::Completion { future, .. } => Pin::new(future)
+                .poll(cx)
+                .map(|result| result.unwrap_or(Err(Error::Aborted))),
+        }
     }
 }
 
@@ -279,7 +371,9 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use crate::{deterministic, Metrics as _, Runner, Spawner, Supervisor as _};
+    use super::Handle;
+    use crate::{deterministic, Error, Metrics as _, Runner, Spawner, Supervisor as _};
+    use commonware_utils::channel::oneshot;
     use futures::future;
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
@@ -376,6 +470,19 @@ mod tests {
                 Some(0),
                 "expected tasks_running gauge to return to 0 after abort: {metrics}",
             );
+        });
+    }
+
+    #[test]
+    fn completion_handle_abort_stops_waiting() {
+        deterministic::Runner::default().start(|_| async move {
+            let (sender, receiver) = oneshot::channel();
+            let handle = Handle::from_receiver(receiver);
+
+            handle.abort();
+
+            assert!(sender.send(Ok(())).is_ok());
+            assert!(matches!(handle.await, Err(Error::Aborted)));
         });
     }
 

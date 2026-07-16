@@ -1,5 +1,7 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
+use futures::future::{BoxFuture, FutureExt as _, Shared};
+
 pub mod paged;
 mod read;
 mod tip;
@@ -8,125 +10,166 @@ mod write;
 pub use read::Read;
 pub use write::Write;
 
+/// A shared sync result.
+///
+/// Handles returned by [Completion::handle] are detached observers of the same shared result:
+/// dropping one neither cancels the underlying sync nor consumes its result, and every
+/// observer sees the same outcome.
+#[derive(Clone)]
+struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
+
+impl Completion {
+    /// Return a handle for the sync result.
+    fn handle(&self) -> crate::Handle<()> {
+        crate::Handle::from_future(self.0.clone())
+    }
+
+    /// Wait for the sync result.
+    async fn wait(&self) -> Result<(), crate::Error> {
+        self.0.clone().await
+    }
+}
+
+impl From<crate::Handle<()>> for Completion {
+    fn from(handle: crate::Handle<()>) -> Self {
+        Self(handle.boxed().shared())
+    }
+}
+
+/// Tracks whether blob mutations still need a sync.
+///
+/// Callers rely on three properties:
+/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
+///   sync's coverage is never disturbed by later writes.
+/// - [SyncState::start_sync] on a [SyncState::Pending] state returns the in-flight sync's
+///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
+///   observe outstanding work.
+/// - A failure is never lost: every handle cloned from the shared completion reports it, and
+///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
+///   which also marks the state [SyncState::Dirty] since the mutations still need durability.
+enum SyncState {
+    // No unsynced mutations.
+    Clean,
+    // Unsynced mutations need a sync.
+    Dirty,
+    // A started sync is in flight.
+    Pending(Completion),
+}
+
+impl SyncState {
+    /// Mark a new unsynced mutation.
+    fn mark_dirty(&mut self) {
+        assert!(
+            !matches!(self, Self::Pending(_)),
+            "pending sync must be joined before marking dirty"
+        );
+        *self = Self::Dirty;
+    }
+
+    /// Wait for an in-flight sync before reusing or mutating the blob.
+    async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
+        let Self::Pending(pending) = self else {
+            return Ok(());
+        };
+        match pending.wait().await {
+            Ok(()) => {
+                *self = Self::Clean;
+                Ok(())
+            }
+            Err(err) => {
+                // The sync failed, so the pending mutations still need durability.
+                *self = Self::Dirty;
+                Err(err)
+            }
+        }
+    }
+
+    /// Write data that will require a later sync.
+    async fn write_at(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+    ) -> Result<(), crate::Error> {
+        self.wait_for_pending().await?;
+        blob.write_at(offset, bufs).await?;
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Write data and make it durable before returning.
+    async fn write_at_sync(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+    ) -> Result<(), crate::Error> {
+        self.wait_for_pending().await?;
+        match self {
+            Self::Dirty => {
+                // Earlier mutations need a full durability barrier too.
+                blob.write_at(offset, bufs).await?;
+                blob.sync().await?;
+                *self = Self::Clean;
+                Ok(())
+            }
+            Self::Clean => {
+                // If this fails, a later sync must still cover the attempted write.
+                self.mark_dirty();
+                blob.write_at_sync(offset, bufs).await?;
+                *self = Self::Clean;
+                Ok(())
+            }
+            Self::Pending(_) => unreachable!("pending sync waited above"),
+        }
+    }
+
+    /// Resize the blob and require a later sync.
+    async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
+        self.wait_for_pending().await?;
+        blob.resize(len).await?;
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Make all pending mutations durable before returning.
+    async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
+        self.wait_for_pending().await?;
+        if matches!(self, Self::Clean) {
+            return Ok(());
+        }
+        blob.sync().await?;
+        *self = Self::Clean;
+        Ok(())
+    }
+
+    /// Start making pending mutations durable and return a handle for completion.
+    async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
+        match self {
+            Self::Clean => crate::Handle::ready(Ok(())),
+            Self::Dirty => {
+                // Store a shared completion so repeated calls observe the same sync.
+                let pending = Completion::from(blob.start_sync().await);
+                let handle = pending.handle();
+                *self = Self::Pending(pending);
+                handle
+            }
+            Self::Pending(pending) => pending.handle(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        deterministic, Blob as _, Buf, BufMut, Clock, Error, IoBufMut, IoBufs, IoBufsMut, Runner,
-        Spawner, Storage, Supervisor as _,
+        deterministic,
+        mocks::{next_pending_sync, DelayedSyncBlob},
+        Blob as _, BufMut, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner, Storage,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
-    use futures::{pin_mut, FutureExt};
-    use std::{sync::Arc, time::Duration};
-
-    struct BlockingReadGate {
-        read_started: Option<oneshot::Sender<()>>,
-        release_read: Option<oneshot::Receiver<()>>,
-    }
-
-    /// Test-only blob wrapper that blocks exactly one read call until explicitly released.
-    ///
-    /// Used to assert lock ordering / contention behavior in writer read-path tests.
-    #[derive(Clone)]
-    struct BlockingReadBlob {
-        data: Arc<Mutex<Vec<u8>>>,
-        gate: Arc<Mutex<BlockingReadGate>>,
-    }
-
-    impl BlockingReadBlob {
-        fn new(data: Vec<u8>) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
-            let (read_started_tx, read_started_rx) = oneshot::channel();
-            let (release_read_tx, release_read_rx) = oneshot::channel();
-            (
-                Self {
-                    data: Arc::new(Mutex::new(data)),
-                    gate: Arc::new(Mutex::new(BlockingReadGate {
-                        read_started: Some(read_started_tx),
-                        release_read: Some(release_read_rx),
-                    })),
-                },
-                read_started_rx,
-                release_read_tx,
-            )
-        }
-
-        async fn block_once_on_read(&self) {
-            let rx = {
-                let mut gate = self.gate.lock();
-                gate.read_started.take().map(|read_started| {
-                    let _ = read_started.send(());
-                    gate.release_read.take().expect("release signal missing")
-                })
-            };
-            if let Some(rx) = rx {
-                let _ = rx.await;
-            }
-        }
-    }
-
-    impl crate::Blob for BlockingReadBlob {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::default()).await
-        }
-
-        async fn read_at_buf(
-            &self,
-            offset: u64,
-            len: usize,
-            buf: impl Into<IoBufsMut> + Send,
-        ) -> Result<IoBufsMut, Error> {
-            self.block_once_on_read().await;
-
-            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
-            let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
-            let data = self.data.lock();
-            if end > data.len() {
-                return Err(Error::BlobInsufficientLength);
-            }
-
-            let mut out = buf.into();
-            out.put_slice(&data[start..end]);
-            Ok(out)
-        }
-
-        async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            let buf = buf.into().coalesce();
-            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
-            let end = start.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
-
-            let mut data = self.data.lock();
-            if end > data.len() {
-                data.resize(end, 0);
-            }
-            data[start..end].copy_from_slice(buf.as_ref());
-            Ok(())
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            let bufs = bufs.into();
-            if !bufs.has_remaining() {
-                return Ok(());
-            }
-
-            self.write_at(offset, bufs).await?;
-            self.sync().await
-        }
-
-        async fn resize(&self, len: u64) -> Result<(), Error> {
-            let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
-            self.data.lock().resize(len, 0);
-            Ok(())
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            Ok(())
-        }
-    }
+    use commonware_utils::{sync::Mutex, NZUsize};
+    use std::sync::Arc;
 
     #[derive(Default)]
     struct RangeSyncState {
@@ -151,7 +194,7 @@ mod tests {
 
     /// Test blob with separate visible and durable state.
     ///
-    /// Plain writes and resizes only update `data`. `write_at_sync` updates `data`
+    /// Writes and resizes only update `data`. `write_at_sync` updates `data`
     /// and then copies only that submitted range into `durable`. `sync` copies all
     /// of `data` to `durable`. This lets tests assert that `Write::sync` uses range
     /// sync only when no earlier unsynced mutation needs a full durability barrier.
@@ -248,6 +291,10 @@ mod tests {
             state.durable = state.data.clone();
             state.full_syncs += 1;
             Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 
@@ -758,11 +805,11 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 0);
 
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(8));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(8));
             writer.write_at(0, b"hello").await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
 
             // Verify data was written correctly
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
@@ -781,11 +828,11 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 0);
 
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(4));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(4));
             writer.write_at(0, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 3);
+            assert_eq!(writer.size(), 3);
             writer.write_at(3, b"defg").await.unwrap();
-            assert_eq!(writer.size().await, 7);
+            assert_eq!(writer.size(), 7);
             writer.sync().await.unwrap();
 
             // Verify the final result
@@ -805,16 +852,16 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_large").await.unwrap();
             assert_eq!(size, 0);
 
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(4));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(4));
             writer.write_at(0, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 3);
+            assert_eq!(writer.size(), 3);
             writer
                 .write_at(3, b"defghijklmnopqrstuvwxyz")
                 .await
                 .unwrap();
-            assert_eq!(writer.size().await, 26);
+            assert_eq!(writer.size(), 26);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 26);
+            assert_eq!(writer.size(), 26);
 
             // Verify the complete data
             let (blob, size) = context.open("partition", b"write_large").await.unwrap();
@@ -831,16 +878,16 @@ mod tests {
         executor.start(|context| async move {
             // Test sequential appends that exceed buffer capacity
             let (blob, size) = context.open("partition", b"append_buf").await.unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Write data that fits in buffer
             writer.write_at(0, b"hello").await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
 
             // Append data that causes buffer flush
             writer.write_at(5, b" world").await.unwrap();
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 11);
+            assert_eq!(writer.size(), 11);
 
             // Verify the complete result
             let (blob, size) = context.open("partition", b"append_buf").await.unwrap();
@@ -857,15 +904,15 @@ mod tests {
         executor.start(|context| async move {
             // Test overwriting data within the buffer and extending it
             let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(20));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(20));
 
             // Initial write
             writer.write_at(0, b"abcdefghij").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Overwrite middle section
             writer.write_at(2, b"01234").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
             writer.sync().await.unwrap();
 
             // Verify overwrite result
@@ -877,9 +924,9 @@ mod tests {
 
             // Extend buffer and do partial overwrite
             writer.write_at(10, b"klmnopqrst").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.write_at(9, b"wxyz").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
 
             // Verify final result
@@ -897,15 +944,15 @@ mod tests {
         executor.start(|context| async move {
             // Test writing at offsets before the current buffer position
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Write data at a later offset first
             writer.write_at(10, b"0123456789").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
 
             // Write at an earlier offset (should flush buffer first)
             writer.write_at(0, b"abcde").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
 
             // Verify data placement with gap
@@ -920,9 +967,9 @@ mod tests {
 
             // Fill the gap between existing data
             writer.write_at(5, b"fghij").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
 
             // Verify gap is filled
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
@@ -940,13 +987,13 @@ mod tests {
         executor.start(|context| async move {
             // Test blob resize functionality and subsequent writes
             let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
-            let writer = Write::from_pooler(&context, blob, size, NZUsize!(10));
+            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Write initial data
             writer.write_at(0, b"hello world").await.unwrap();
-            assert_eq!(writer.size().await, 11);
+            assert_eq!(writer.size(), 11);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 11);
+            assert_eq!(writer.size(), 11);
 
             let (blob_check, size_check) =
                 context.open("partition", b"resize_write").await.unwrap();
@@ -955,7 +1002,7 @@ mod tests {
 
             // Resize to smaller size
             writer.resize(5).await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
             writer.sync().await.unwrap();
 
             // Verify resize
@@ -967,7 +1014,7 @@ mod tests {
 
             // Write to resized blob
             writer.write_at(0, b"X").await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
             writer.sync().await.unwrap();
 
             // Verify overwrite
@@ -979,7 +1026,7 @@ mod tests {
 
             // Test resize to larger size
             writer.resize(10).await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
             writer.sync().await.unwrap();
 
             // Verify resize
@@ -992,15 +1039,16 @@ mod tests {
 
             // Test resize to zero
             let (blob_zero, size) = context.open("partition", b"resize_zero").await.unwrap();
-            let writer_zero = Write::from_pooler(&context, blob_zero.clone(), size, NZUsize!(10));
+            let mut writer_zero =
+                Write::from_pooler(&context, blob_zero.clone(), size, NZUsize!(10));
             writer_zero.write_at(0, b"some data").await.unwrap();
-            assert_eq!(writer_zero.size().await, 9);
+            assert_eq!(writer_zero.size(), 9);
             writer_zero.sync().await.unwrap();
-            assert_eq!(writer_zero.size().await, 9);
+            assert_eq!(writer_zero.size(), 9);
             writer_zero.resize(0).await.unwrap();
-            assert_eq!(writer_zero.size().await, 0);
+            assert_eq!(writer_zero.size(), 0);
             writer_zero.sync().await.unwrap();
-            assert_eq!(writer_zero.size().await, 0);
+            assert_eq!(writer_zero.size(), 0);
 
             // Ensure the blob is empty
             let (_, size_z) = context.open("partition", b"resize_zero").await.unwrap();
@@ -1014,11 +1062,11 @@ mod tests {
         executor.start(|context| async move {
             // Test reading through writer's read_at method (buffer + blob reads)
             let (blob, size) = context.open("partition", b"read_at_writer").await.unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Write data that stays in buffer
             writer.write_at(0, b"buffered").await.unwrap();
-            assert_eq!(writer.size().await, 8);
+            assert_eq!(writer.size(), 8);
 
             // Read from buffer via writer
             let read_buf_vec = writer.read_at(0, 4).await.unwrap().coalesce();
@@ -1032,9 +1080,9 @@ mod tests {
 
             // Write large data that flushes buffer
             writer.write_at(8, b" and flushed").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
 
             // Read from underlying blob through writer
             let read_buf_vec_2 = writer.read_at(0, 4).await.unwrap().coalesce();
@@ -1045,7 +1093,7 @@ mod tests {
 
             // Buffer new data at the end
             writer.write_at(20, b" more data").await.unwrap();
-            assert_eq!(writer.size().await, 30);
+            assert_eq!(writer.size(), 30);
 
             // Read newly buffered data
             let read_buf_vec_3 = writer.read_at(20, 5).await.unwrap().coalesce();
@@ -1057,7 +1105,7 @@ mod tests {
 
             // Verify complete content by reopening
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 30);
+            assert_eq!(writer.size(), 30);
             let (final_blob, final_size) =
                 context.open("partition", b"read_at_writer").await.unwrap();
             assert_eq!(final_size, 30);
@@ -1073,7 +1121,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (blob, size) = context.open("partition", b"zero_len_probe").await.unwrap();
-            let writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
             writer.write_at(0, b"abc").await.unwrap();
 
             let empty = writer.read_at(3, 0).await.unwrap();
@@ -1085,111 +1133,22 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_write_read_at_blocks_concurrent_write_until_persisted_read_completes() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (blob, read_started_rx, release_read_tx) =
-                BlockingReadBlob::new(b"abcdefghij".to_vec());
-            let writer = Write::from_pooler(&context, blob, 10, NZUsize!(8));
-            let reader = writer.clone();
-            let verifier = writer.clone();
-
-            // This read is entirely in persisted blob bytes (no buffered tip overlap).
-            let read_task = context
-                .child("read")
-                .spawn(move |_| async move { reader.read_at(0, 4).await.expect("read failed") });
-
-            // Wait until read_at reached underlying blob I/O while holding the tip lock.
-            read_started_rx.await.expect("read start signal missing");
-
-            let write_task = context.child("write").spawn(move |_| async move {
-                writer.write_at(0, b"WXYZ").await.expect("write failed");
-            });
-            pin_mut!(write_task);
-
-            // Let scheduler poll the write task, it should be blocked on the tip write lock.
-            context.sleep(Duration::from_secs(1)).await;
-            assert!(
-                write_task.as_mut().now_or_never().is_none(),
-                "write_at completed while read_at still held lock over blob I/O"
-            );
-
-            // Unblock persisted read and ensure both operations complete.
-            release_read_tx
-                .send(())
-                .expect("failed to release blocked read");
-            let read_result = read_task.await.expect("read task failed").coalesce();
-            assert_eq!(read_result.as_ref(), b"abcd");
-            write_task.await.expect("write task failed");
-
-            let updated = verifier.read_at(0, 4).await.unwrap().coalesce();
-            assert_eq!(updated.as_ref(), b"WXYZ");
-        });
-    }
-
-    #[test_traced]
-    fn test_write_read_at_overlap_blocks_concurrent_write_until_persisted_read_completes() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (blob, read_started_rx, release_read_tx) =
-                BlockingReadBlob::new(b"abcdefghij".to_vec());
-            let writer = Write::from_pooler(&context, blob, 10, NZUsize!(8));
-            let verifier = writer.clone();
-
-            // This creates a tip buffer with "XYZ" at offset 10.
-            writer.write_at(10, b"XYZ").await.unwrap();
-
-            // This reads overlaps blob and tip buffer.
-            let reader = writer.clone();
-            let read_task = context
-                .child("read")
-                .spawn(move |_| async move { reader.read_at(8, 5).await.expect("read failed") });
-
-            // Wait until overlap read reaches persisted blob I/O while holding the tip lock.
-            read_started_rx.await.expect("read start signal missing");
-
-            let write_task = context.child("write").spawn(move |_| async move {
-                writer.write_at(10, b"UVW").await.expect("write failed");
-            });
-            pin_mut!(write_task);
-
-            // Write should remain blocked on the tip write lock until read releases it.
-            context.sleep(Duration::from_secs(1)).await;
-            assert!(
-                write_task.as_mut().now_or_never().is_none(),
-                "write_at completed while overlap read_at still held lock over blob I/O"
-            );
-
-            // Unblock persisted read and ensure both operations complete.
-            release_read_tx
-                .send(())
-                .expect("failed to release blocked read");
-            let read_result = read_task.await.expect("read task failed").coalesce();
-            assert_eq!(read_result.as_ref(), b"ijXYZ");
-            write_task.await.expect("write task failed");
-
-            let updated = verifier.read_at(8, 5).await.unwrap().coalesce();
-            assert_eq!(updated.as_ref(), b"ijUVW");
-        });
-    }
-
-    #[test_traced]
     fn test_write_straddling_non_mergeable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test writes that cannot be merged into buffer (non-contiguous/too large)
             let (blob, size) = context.open("partition", b"write_straddle").await.unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Fill buffer completely
             writer.write_at(0, b"0123456789").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Write at non-contiguous offset (should flush then write directly)
             writer.write_at(15, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 18);
+            assert_eq!(writer.size(), 18);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 18);
+            assert_eq!(writer.size(), 18);
 
             // Verify data with gap
             let (blob_check, size_check) =
@@ -1205,15 +1164,15 @@ mod tests {
 
             // Test write that exceeds buffer capacity
             let (blob2, size) = context.open("partition", b"write_straddle2").await.unwrap();
-            let writer2 = Write::from_pooler(&context, blob2.clone(), size, NZUsize!(10));
+            let mut writer2 = Write::from_pooler(&context, blob2.clone(), size, NZUsize!(10));
             writer2.write_at(0, b"0123456789").await.unwrap();
-            assert_eq!(writer2.size().await, 10);
+            assert_eq!(writer2.size(), 10);
 
             // Write large data that exceeds capacity
             writer2.write_at(5, b"ABCDEFGHIJKL").await.unwrap();
-            assert_eq!(writer2.size().await, 17);
+            assert_eq!(writer2.size(), 17);
             writer2.sync().await.unwrap();
-            assert_eq!(writer2.size().await, 17);
+            assert_eq!(writer2.size(), 17);
 
             // Verify overwrite result
             let (blob_check2, size_check2) =
@@ -1231,9 +1190,9 @@ mod tests {
         executor.start(|context| async move {
             // Test that closing writer flushes and persists buffered data
             let (blob_orig, size) = context.open("partition", b"write_close").await.unwrap();
-            let writer = Write::from_pooler(&context, blob_orig.clone(), size, NZUsize!(8));
+            let mut writer = Write::from_pooler(&context, blob_orig.clone(), size, NZUsize!(8));
             writer.write_at(0, b"pending").await.unwrap();
-            assert_eq!(writer.size().await, 7);
+            assert_eq!(writer.size(), 7);
 
             // Sync writer to persist data
             writer.sync().await.unwrap();
@@ -1256,12 +1215,12 @@ mod tests {
                 .open("partition", b"write_direct_size")
                 .await
                 .unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(5));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(5));
 
             // Write data larger than buffer capacity (should write directly)
             let data_large = b"0123456789";
             writer.write_at(0, data_large).await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Sync to ensure data is persisted
             writer.sync().await.unwrap();
@@ -1278,7 +1237,7 @@ mod tests {
 
             // Now write small data that should be buffered
             writer.write_at(10, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 13);
+            assert_eq!(writer.size(), 13);
 
             // Verify it's in buffer by reading through writer
             let read_small_buf_vec = writer.read_at(10, 3).await.unwrap().coalesce();
@@ -1307,15 +1266,15 @@ mod tests {
                 .open("partition", b"overwrite_extend_buf")
                 .await
                 .unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(15));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(15));
 
             // Write initial data
             writer.write_at(0, b"0123456789").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Overwrite and extend within buffer capacity
             writer.write_at(5, b"ABCDEFGHIJ").await.unwrap();
-            assert_eq!(writer.size().await, 15);
+            assert_eq!(writer.size(), 15);
 
             // Verify buffer content through writer
             let read_buf_vec = writer.read_at(0, 15).await.unwrap().coalesce();
@@ -1341,16 +1300,16 @@ mod tests {
         executor.start(|context| async move {
             // Test writing at the current logical end of the blob
             let (blob, size) = context.open("partition", b"write_end").await.unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(20));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(20));
 
             // Write initial data
             writer.write_at(0, b"0123456789").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
             writer.sync().await.unwrap();
 
             // Append at the current size (logical end)
-            writer.write_at(writer.size().await, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 13);
+            writer.write_at(writer.size(), b"abc").await.unwrap();
+            assert_eq!(writer.size(), 13);
             writer.sync().await.unwrap();
 
             // Verify complete result
@@ -1371,25 +1330,25 @@ mod tests {
                 .open("partition", b"write_multiple_appends_at_size")
                 .await
                 .unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(5));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(5));
 
             // First write
             writer.write_at(0, b"AAA").await.unwrap();
-            assert_eq!(writer.size().await, 3);
+            assert_eq!(writer.size(), 3);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 3);
+            assert_eq!(writer.size(), 3);
 
             // Append using size()
-            writer.write_at(writer.size().await, b"BBB").await.unwrap();
-            assert_eq!(writer.size().await, 6); // 3 (AAA) + 3 (BBB)
+            writer.write_at(writer.size(), b"BBB").await.unwrap();
+            assert_eq!(writer.size(), 6); // 3 (AAA) + 3 (BBB)
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 6);
+            assert_eq!(writer.size(), 6);
 
             // Append again using size()
-            writer.write_at(writer.size().await, b"CCC").await.unwrap();
-            assert_eq!(writer.size().await, 9); // 6 + 3 (CCC)
+            writer.write_at(writer.size(), b"CCC").await.unwrap();
+            assert_eq!(writer.size(), 9); // 6 + 3 (CCC)
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 9);
+            assert_eq!(writer.size(), 9);
 
             // Verify final content
             let (blob_check, size_check) = context
@@ -1412,27 +1371,24 @@ mod tests {
                 .open("partition", b"write_non_contiguous_then_append")
                 .await
                 .unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Initial buffered write
             writer.write_at(0, b"INITIAL").await.unwrap(); // 7 bytes
-            assert_eq!(writer.size().await, 7);
+            assert_eq!(writer.size(), 7);
             // Buffer contains "INITIAL", inner.position = 0
 
             // Non-contiguous write, forces flush of "INITIAL" and direct write of "NONCONTIG"
             writer.write_at(20, b"NONCONTIG").await.unwrap();
-            assert_eq!(writer.size().await, 29);
+            assert_eq!(writer.size(), 29);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 29);
+            assert_eq!(writer.size(), 29);
 
             // Append at the new size
-            writer
-                .write_at(writer.size().await, b"APPEND")
-                .await
-                .unwrap();
-            assert_eq!(writer.size().await, 35); // 29 + 6
+            writer.write_at(writer.size(), b"APPEND").await.unwrap();
+            assert_eq!(writer.size(), 35); // 29 + 6
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 35);
+            assert_eq!(writer.size(), 35);
 
             // Verify final content
             let (blob_check, size_check) = context
@@ -1460,32 +1416,29 @@ mod tests {
                 .open("partition", b"resize_then_append_at_size")
                 .await
                 .unwrap();
-            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Write initial data and sync
             writer.write_at(0, b"0123456789ABCDEF").await.unwrap(); // 16 bytes
-            assert_eq!(writer.size().await, 16);
+            assert_eq!(writer.size(), 16);
             writer.sync().await.unwrap(); // inner.position = 16, buffer empty
-            assert_eq!(writer.size().await, 16);
+            assert_eq!(writer.size(), 16);
 
             // Resize
             let resize_to = 5;
             writer.resize(resize_to).await.unwrap();
             // after resize, inner.position should be `resize_to` (5)
             // buffer should be empty
-            assert_eq!(writer.size().await, resize_to);
+            assert_eq!(writer.size(), resize_to);
             writer.sync().await.unwrap(); // Ensure truncation is persisted for verify step
-            assert_eq!(writer.size().await, resize_to);
+            assert_eq!(writer.size(), resize_to);
 
             // Append at the new (resized) size
-            writer
-                .write_at(writer.size().await, b"XXXXX")
-                .await
-                .unwrap(); // 5 bytes
-                           // inner.buffer = "XXXXX", inner.position = 5
-            assert_eq!(writer.size().await, 10); // 5 (resized) + 5 (XXXXX)
+            writer.write_at(writer.size(), b"XXXXX").await.unwrap(); // 5 bytes
+                                                                     // inner.buffer = "XXXXX", inner.position = 5
+            assert_eq!(writer.size(), 10); // 5 (resized) + 5 (XXXXX)
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Verify final content
             let (blob_check, size_check) = context
@@ -1499,12 +1452,217 @@ mod tests {
         });
     }
 
+    // Verifies start_sync flushes current bytes, completes durability, and marks the writer clean.
+    #[test_traced]
+    fn test_write_start_sync_persists_and_marks_clean() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+
+            // Start a sync for buffered bytes and wait for the returned handle.
+            writer.write_at(0, b"abc").await.unwrap();
+            let handle = writer.start_sync().await;
+            handle.await.unwrap();
+
+            // The buffered write required a full sync because the fresh writer starts dirty.
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // The started sync marked the writer clean, so the next buffered write can use a
+            // range-scoped sync.
+            writer.write_at(3, b"d").await.unwrap();
+            writer.sync().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcd");
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+
+            // Nothing left to sync.
+            let handle = writer.start_sync().await;
+            handle.await.unwrap();
+            let (_, _, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    // Verifies sync waits for an outstanding start_sync instead of starting new disk work.
+    #[test_traced]
+    fn test_write_sync_waits_for_outstanding_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            // Hold the started sync open so a later sync cannot finish right away.
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            // The attempted sync reaches the pending handle and cannot complete yet.
+            let mut sync = Box::pin(writer.sync());
+            assert!(
+                sync.as_mut().now_or_never().is_none(),
+                "sync must wait for the outstanding start_sync handle"
+            );
+            deferred
+                .blocked
+                .await
+                .expect("sync never waited on start_sync");
+
+            let (_, _, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the original handle lets sync observe the completed disk sync.
+            deferred.release.send(Ok(())).unwrap();
+            sync.await.unwrap();
+            handle.await.unwrap();
+            let (_, _, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    // Verifies writes made after start_sync wait before they are flushed.
+    #[test_traced]
+    fn test_write_sync_after_start_sync_and_small_write_waits_before_range_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            // Begin syncing the initial dirty state and keep that sync blocked.
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            // The tip must not reach the blob while the earlier sync is pending.
+            writer.write_at(0, b"abc").await.unwrap();
+            let mut sync = Box::pin(writer.sync());
+            assert!(
+                sync.as_mut().now_or_never().is_none(),
+                "sync must wait for the outstanding start_sync before flushing the small write"
+            );
+            deferred
+                .blocked
+                .await
+                .expect("sync never waited on start_sync");
+
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // After the earlier sync completes, the buffered write can be persisted.
+            deferred.release.send(Ok(())).unwrap();
+            sync.await.unwrap();
+            handle.await.unwrap();
+
+            let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    // Verifies overlapping writes wait before flushing buffered bytes while start_sync is pending.
+    #[test_traced]
+    fn test_write_at_overlap_flush_waits_for_outstanding_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            inner.write_at(0, b"xxx").await.unwrap();
+
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(8));
+
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            // This append is local while the earlier sync is pending.
+            writer.write_at(3, b"abc").await.unwrap();
+
+            // The drained tip must not reach the blob while the earlier sync is pending.
+            let mut write = Box::pin(writer.write_at(2, b"ZZ"));
+            assert!(
+                write.as_mut().now_or_never().is_none(),
+                "overlapping write must wait for the outstanding start_sync before flushing"
+            );
+            deferred
+                .blocked
+                .await
+                .expect("write never waited on start_sync");
+
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the sync lets the parked write reach the blob.
+            deferred.release.send(Ok(())).unwrap();
+            write.await.unwrap();
+            handle.await.unwrap();
+
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 3);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    // Verifies resize does not mutate the blob before an outstanding start_sync completes.
+    #[test_traced]
+    fn test_write_resize_waits_for_outstanding_start_sync_before_resizing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            inner.write_at(0, b"abcdef").await.unwrap();
+
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(8));
+
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+            let original_size = inner.size();
+
+            // Resize must not reach the blob while the earlier sync is pending.
+            let mut resize = Box::pin(writer.resize(3));
+            assert!(
+                resize.as_mut().now_or_never().is_none(),
+                "resize must wait for the outstanding start_sync handle"
+            );
+            deferred
+                .blocked
+                .await
+                .expect("resize never waited on start_sync");
+            assert_eq!(
+                inner.size(),
+                original_size,
+                "resize must not mutate the blob before the pending sync finishes"
+            );
+
+            // Releasing the sync lets the resize apply.
+            deferred.release.send(Ok(())).unwrap();
+            resize.await.unwrap();
+            handle.await.unwrap();
+            assert_eq!(writer.size(), 3);
+            assert_eq!(inner.size(), 3);
+        });
+    }
+
     #[test_traced]
     fn test_write_sync_uses_range_sync_for_buffer_only_write() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let blob = SyncTrackingBlob::new();
-            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
 
             // A fresh writer preserves one sync barrier for mutations that predate wrapping.
             writer.sync().await.unwrap();
@@ -1544,7 +1702,7 @@ mod tests {
             // Simulate a plain blob mutation before the writer wraps it.
             blob.write_at(0, b"abc").await.unwrap();
 
-            let writer = Write::from_pooler(&context, blob.clone(), 3, NZUsize!(8));
+            let mut writer = Write::from_pooler(&context, blob.clone(), 3, NZUsize!(8));
             writer.sync().await.unwrap();
 
             // The first sync must use a full barrier to make the pre-wrapped write durable.
@@ -1572,7 +1730,7 @@ mod tests {
         executor.start(|context| async move {
             let name = b"failed_range_sync";
             let (blob, size) = context.open("partition", name).await.unwrap();
-            let writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
             writer.sync().await.unwrap();
 
             // Keep the write buffered so sync attempts the clean `write_at_sync` path.
@@ -1593,7 +1751,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let blob = SyncTrackingBlob::new();
-            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(4));
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(4));
 
             // This exceeds the buffer and forces a plain write before the final buffered tip.
             writer.write_at(0, b"abcdef").await.unwrap();
@@ -1632,7 +1790,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let blob = SyncTrackingBlob::new();
-            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
             writer.sync().await.unwrap();
 
             // Establish already-durable data with a range sync.

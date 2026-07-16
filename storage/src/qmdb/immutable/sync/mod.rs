@@ -1,10 +1,6 @@
 use crate::{
     index::unordered::Index,
-    journal::{
-        authenticated,
-        contiguous::{Mutable, Reader as _},
-        Error as JournalError,
-    },
+    journal::{authenticated, contiguous::Mutable},
     merkle::{
         full::{self, Merkle},
         Family, Location,
@@ -19,9 +15,9 @@ use crate::{
         Error,
     },
     translator::Translator,
-    Context, Persistable,
+    Context,
 };
-use commonware_codec::{Encode, EncodeShared, Read};
+use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -32,9 +28,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>
-        + Persistable<Error = JournalError>
-        + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
+    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
     C::Config: Clone + Send,
     H: Hasher,
@@ -98,8 +92,7 @@ where
             Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let reader = journal.journal.reader().await;
-            let bounds = reader.bounds();
+            let bounds = journal.journal.bounds();
             let last_commit_loc = Location::<F>::new(
                 bounds
                     .end
@@ -107,7 +100,7 @@ where
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &reader,
+                &journal.journal,
                 Location::new(bounds.end),
                 |op| op.has_floor(),
             )
@@ -116,8 +109,9 @@ where
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
                 inactivity_floor_loc,
-                &reader,
+                &journal.journal,
                 &mut snapshot,
+                db_config.init_cache_size,
                 |_, _| {},
             )
             .await?;
@@ -131,7 +125,7 @@ where
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
-        let db = Self {
+        let mut db = Self {
             journal,
             root,
             snapshot,
@@ -139,10 +133,39 @@ where
             inactivity_floor_loc,
             metrics,
         };
-        db.update_metrics().await;
+        db.update_metrics();
 
         db.sync().await?;
         Ok(db)
+    }
+
+    async fn local_boundary_nodes(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &sync::Target<F, Self::Digest>,
+        journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
+        if target.range.start() == Location::new(0)
+            || !sync::journal_covers_range(journal.bounds(), &target.range)
+        {
+            return Ok(None);
+        }
+
+        // The inactivity floor is carried by the last commit operation rather than being
+        // the target range's start.
+        let inactivity_floor =
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end(), |op| {
+                op.has_floor()
+            })
+            .await?;
+
+        sync::local_boundary_nodes::<F, _, H, S>(
+            context,
+            config.merkle_config.clone(),
+            target,
+            inactivity_floor,
+        )
+        .await
     }
 
     fn root(&self) -> Self::Digest {
@@ -174,44 +197,13 @@ where
         config: Self::Config,
         state: sync::compact::ValidatedState<Self::Family, Self::Op, Self::Digest>,
     ) -> Result<Self, Error<F>> {
-        let sync::compact::ValidatedState {
-            state,
-            root,
-            inactivity_floor: inactivity_floor_loc,
-        } = state;
-        let sync::compact::State {
-            leaf_count,
-            pinned_nodes,
-            last_commit_op,
-            last_commit_proof,
-        } = state;
-        let last_commit_loc = Location::new(*leaf_count - 1);
-        let Operation::Commit(last_commit_metadata, op_floor) = last_commit_op else {
-            return Err(Error::UnexpectedData(last_commit_loc));
-        };
-        assert_eq!(op_floor, inactivity_floor_loc, "inactivity floor mismatch");
-        let commit_codec_config = config.commit_codec_config.clone();
-        let last_commit_op_bytes =
-            Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
-                .encode()
-                .to_vec();
-        let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
-            context.child("merkle"),
-            config.merkle,
-            leaf_count,
-            pinned_nodes.clone(),
-        )
-        .await?;
-        Self::init_from_verified_state(
-            merkle,
-            commit_codec_config,
-            last_commit_metadata,
-            inactivity_floor_loc,
-            root,
-            last_commit_op_bytes,
-            last_commit_proof,
-            pinned_nodes,
-        )
+        let journal: crate::qmdb::compact::witness::Journal<E, F, H::Digest> =
+            crate::journal::contiguous::variable::Journal::init(
+                context.child("witness"),
+                config.witness,
+            )
+            .await?;
+        Self::init_from_validated_state(config.strategy, journal, config.commit_codec_config, state)
     }
 
     fn inactivity_floor(op: &Self::Op) -> Option<Location<Self::Family>> {
@@ -222,8 +214,8 @@ where
         self.root()
     }
 
-    async fn persist_compact_state(&self) -> Result<(), Error<F>> {
-        self.persist_cached_witness().await
+    async fn persist_compact_state(&mut self) -> Result<(), Error<F>> {
+        self.sync().await
     }
 }
 

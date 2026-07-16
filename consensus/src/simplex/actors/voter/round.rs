@@ -1,18 +1,20 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
+        actors::span::ViewSpan,
         metrics::TimeoutReason,
         types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
     types::{Participant, Round as Rnd},
 };
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{futures::Aborter, ordered::Quorum};
 use std::{
     mem::replace,
     time::{Duration, SystemTime},
 };
-use tracing::debug;
+use tracing::{debug, info_span, Span};
 
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
@@ -39,6 +41,9 @@ pub struct Round<S: Scheme, D: Digest> {
     scheme: S,
 
     round: Rnd,
+
+    // Root span for all work attributed to this view.
+    span: ViewSpan,
 
     // Leader is set as soon as we know the seed for the view (if any).
     leader: Option<Leader<S::PublicKey>>,
@@ -68,6 +73,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             start,
             scheme,
             round,
+            span: ViewSpan::new(),
             leader: None,
             proposal: ProposalSlot::new(),
             leader_deadline: None,
@@ -135,10 +141,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Attempt to certify this round's proposal.
     ///
-    /// Returns the proposal along with whether the local participant previously
-    /// proposed it, in which case certification can be inferred once a
-    /// notarization exists.
-    pub fn try_certify(&mut self) -> Option<(Proposal<D>, bool)> {
+    /// Returns the proposal once a notarization exists for it.
+    pub fn try_certify(&mut self) -> Option<Proposal<D>> {
         let notarization = self.notarization.as_ref()?;
         match self.certify {
             CertifyState::Ready => {}
@@ -159,7 +163,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             &proposal, &notarization.proposal,
             "slot proposal must match notarization proposal"
         );
-        Some((proposal, self.proposal.is_local()))
+        Some(proposal)
     }
 
     /// Sets the handle for the certification request.
@@ -173,6 +177,34 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return;
         }
         self.certify = CertifyState::Aborted;
+    }
+
+    /// Returns the root span for all work attributed to this view.
+    ///
+    /// Disabled once the view is decided (see [Self::close_span]).
+    pub fn span(&self) -> Span {
+        self.span.get()
+    }
+
+    /// Opens the view's root span when the round becomes the active view.
+    pub fn open_span(&mut self) {
+        let round = self.round;
+        self.span.open(|| {
+            info_span!(
+                parent: None,
+                "simplex.voter.view",
+                epoch = round.epoch().traced(),
+                view = round.view().traced()
+            )
+        });
+    }
+
+    /// Closes the view's root span once the view is decided.
+    ///
+    /// The round is retained for backfill and deduplication, but its work no
+    /// longer anchors a trace.
+    pub fn close_span(&mut self) {
+        self.span.close();
     }
 
     /// Returns the elected leader (if any) for this round.
@@ -490,7 +522,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // This check prevents us from voting for a proposal if we have observed equivocation (where
         // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
         // completed yet.
-        if !matches!(self.proposal.status(), ProposalStatus::Verified(_)) {
+        if !matches!(self.proposal.status(), ProposalStatus::Verified) {
             return None;
         }
 
@@ -538,10 +570,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 );
 
                 // Replaying our local notarize restores a verified proposal and
-                // the fact that we already voted. Only leader-owned rounds gain
-                // the local certification shortcut from this replay; follower
-                // rounds also journal local notarize votes over other leaders'
-                // proposals.
+                // the fact that we already voted. For leader-owned rounds, the
+                // proposal was built locally; follower rounds also journal local
+                // notarize votes over other leaders' proposals.
                 //
                 // This relies on journal replay remaining append-ordered. By the
                 // time we replay a local vote for round `v`, the earlier
@@ -923,7 +954,7 @@ mod tests {
 
         // Proposal should be restored as verified (we are the leader).
         assert_eq!(round.proposal.proposal(), Some(&proposal));
-        assert_eq!(round.proposal.status(), ProposalStatus::Verified(true));
+        assert_eq!(round.proposal.status(), ProposalStatus::Verified);
         assert!(round.broadcast_notarize);
 
         // No verification request should be emitted.
@@ -943,12 +974,8 @@ mod tests {
         assert!(added);
         assert!(equivocator.is_none());
 
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(
-            is_local,
-            "local notarize replay should restore local certification"
-        );
     }
 
     #[test]
@@ -1025,10 +1052,9 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // First try_certify should succeed, but not via the local shortcut.
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        // First try_certify should succeed.
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(!is_local);
 
         // Set a certify handle then mark as certified
         let mut pool = AbortablePool::<()>::default();
@@ -1068,12 +1094,8 @@ mod tests {
         assert!(added);
         assert!(equivocator.is_none());
 
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(
-            is_local,
-            "locally proposed payload should carry local certify permission"
-        );
     }
 
     #[test]
@@ -1105,10 +1127,9 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // First try_certify should succeed, but not via the local shortcut.
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        // First try_certify should succeed.
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(!is_local);
 
         // Set a certify handle (simulating in-flight certification)
         let mut pool = AbortablePool::<()>::default();
@@ -1192,11 +1213,8 @@ mod tests {
         assert!(added);
 
         // Has notarization and proposal came from certificate.
-        // Certification should go through the automaton because the proposal was
-        // not built locally.
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(!is_local);
     }
 
     #[test]

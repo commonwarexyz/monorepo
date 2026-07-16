@@ -5,8 +5,12 @@
 //! and workloads with overlapping indices should use [MultiArchive] (allows all items with the same index
 //! to be retrieved). The same key may be stored at multiple indices in either case, and a key lookup may
 //! return any of the associated values.
+//!
+//! Storage errors from mutable operations are considered fatal for the current handle and may
+//! leave its in-memory state inconsistent with the underlying storage.
 
 use commonware_codec::Codec;
+use commonware_runtime::Handle;
 use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
@@ -76,6 +80,23 @@ pub trait Archive: Send {
         }
     }
 
+    /// Perform a [Archive::put] and [Archive::start_sync] in a single operation.
+    ///
+    /// If the index already exists (making the put a no-op), the returned handle still reports
+    /// the durability of all previously accepted writes, including the original write for this
+    /// index if its sync is still in flight.
+    fn put_start_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
+        async move {
+            self.put(index, key, value).await?;
+            self.start_sync().await
+        }
+    }
+
     /// Retrieve an item from [Archive].
     ///
     /// Note that if the [Archive] is a [MultiArchive], there may be multiple values associated with the
@@ -119,6 +140,18 @@ pub trait Archive: Send {
     /// Sync all pending writes.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
+    /// Request that all pending writes are synced.
+    ///
+    /// The returned handle completes once every write accepted before this call is durable,
+    /// including writes covered by a sync that is still in flight. Implementations without a
+    /// non-blocking sync path may complete the sync before returning an already-finished handle.
+    fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
+        async move {
+            self.sync().await?;
+            Ok(Handle::ready(Ok(())))
+        }
+    }
+
     /// Remove all persistent data created by this [Archive].
     fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
@@ -136,6 +169,16 @@ pub trait MultiArchive: Archive {
         &self,
         index: u64,
     ) -> impl Future<Output = Result<Option<Vec<Self::Value>>, Error>> + Send + use<'_, Self>;
+
+    /// Check whether `key` is stored at `index`.
+    ///
+    /// Unlike [Archive::has] with [Identifier::Key], the check is scoped to a
+    /// single index. Unlike [MultiArchive::get_all], no values are fetched.
+    fn has_at<'a>(
+        &'a self,
+        index: u64,
+        key: &'a Self::Key,
+    ) -> impl Future<Output = Result<bool, Error>> + Send + use<'a, Self>;
 
     /// Store an item, allowing multiple items at the same index.
     ///
@@ -161,6 +204,19 @@ pub trait MultiArchive: Archive {
             self.sync().await
         }
     }
+
+    /// Perform a [MultiArchive::put_multi] and [Archive::start_sync] in a single operation.
+    fn put_multi_start_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
+        async move {
+            self.put_multi(index, key, value).await?;
+            self.start_sync().await
+        }
+    }
 }
 
 #[cfg(test)]
@@ -176,7 +232,7 @@ mod tests {
         Metrics as _, Runner, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-    use rand::Rng;
+    use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
@@ -218,13 +274,13 @@ mod tests {
     ) -> impl Archive<Key = FixedBytes<64>, Value = i32> {
         let cfg = immutable::Config {
             metadata_partition: "test-metadata".into(),
-            freezer_table_partition: "test-table".into(),
+            freezer_table_partition: "test-freezer-table".into(),
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
-            freezer_key_partition: "test-key".into(),
+            freezer_key_partition: "test-freezer-key".into(),
             freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            freezer_value_partition: "test-value".into(),
+            freezer_value_partition: "test-freezer-value".into(),
             freezer_value_target_size: 1024 * 1024,
             freezer_value_compression: compression,
             ordinal_partition: "test-ordinal".into(),
@@ -621,14 +677,14 @@ mod tests {
             // Insert 100 keys with gaps
             let mut last_index = 0u64;
             while keys.len() < 100 {
-                let gap: u64 = context.gen_range(1..=10);
+                let gap: u64 = context.random_range(1..=10);
                 let index = last_index + gap;
                 last_index = index;
 
                 let mut key_bytes = [0u8; 64];
                 context.fill(&mut key_bytes);
                 let key = FixedBytes::<64>::decode(key_bytes.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.random();
 
                 if keys.contains_key(&index) {
                     continue;
@@ -746,7 +802,7 @@ mod tests {
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
                 let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.random();
 
                 archive
                     .put(index, key.clone(), data)
@@ -755,7 +811,7 @@ mod tests {
                 keys.insert(key, (index, data));
 
                 // Randomly sync the archive
-                if context.gen_bool(0.1) {
+                if context.random_bool(0.1) {
                     archive.sync().await.expect("Failed to sync archive");
                 }
             }
@@ -1179,12 +1235,14 @@ mod tests {
         T::Value: Clone,
     {
         assert_send(archive.put(1, key.clone(), value.clone()));
-        assert_send(archive.put_sync(2, key.clone(), value));
+        assert_send(archive.put_sync(2, key.clone(), value.clone()));
+        assert_send(archive.put_start_sync(3, key.clone(), value));
         assert_send(archive.get(Identifier::Index(1)));
         assert_send(archive.get(Identifier::Key(&key)));
         assert_send(archive.has(Identifier::Index(1)));
         assert_send(archive.has(Identifier::Key(&key)));
         assert_send(archive.sync());
+        assert_send(archive.start_sync());
     }
 
     #[allow(dead_code)]
@@ -1204,7 +1262,8 @@ mod tests {
         assert_archive_futures_are_send(archive, key.clone(), value.clone());
         assert_send(archive.get_all(1));
         assert_send(archive.put_multi(1, key.clone(), value.clone()));
-        assert_send(archive.put_multi_sync(2, key, value));
+        assert_send(archive.put_multi_sync(2, key.clone(), value.clone()));
+        assert_send(archive.put_multi_start_sync(3, key, value));
     }
 
     #[allow(dead_code)]

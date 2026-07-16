@@ -14,10 +14,10 @@ use crate::{
         Error, ROOT_BAGGING,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
 /// Type alias for a fixed-size operation.
@@ -39,15 +39,8 @@ pub type Config<T, S> = BaseConfig<T, JournalConfig, S>;
 /// Configuration for a fixed-size compact immutable db.
 pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
-impl<
-        F: Family,
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -60,17 +53,17 @@ impl<
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(journal, context, cfg.translator).await
+        Self::init_from_journal(journal, context, cfg.translator, cfg.init_cache_size).await
     }
 }
 
-impl<F: Family, E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, S: Strategy>
+impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, S: Strategy>
     CompactDb<F, E, K, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
-        Self::init_from_merkle(merkle, ()).await
+        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
+        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
     }
 }
 
@@ -83,7 +76,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
@@ -113,6 +106,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -127,9 +121,14 @@ mod tests {
         context: deterministic::Context,
     ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {
         let cfg = CompactConfig {
-            merkle: crate::merkle::compact::Config {
-                partition: "compact-immutable-fixed".into(),
-                strategy: Sequential,
+            strategy: Sequential,
+            witness: crate::journal::contiguous::variable::Config {
+                partition: "compact-immutable-fixed-witness".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
         };
@@ -143,7 +142,11 @@ mod tests {
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
             let floor = db.inactivity_floor_loc();
-            let batch = db.new_batch().set(key, value).merkleize(&db, None, floor);
+            let batch = db
+                .new_batch()
+                .set(key, value)
+                .merkleize(&db, None, floor)
+                .await;
             db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
@@ -160,7 +163,7 @@ mod tests {
                 "db_last_commit 2",
                 "db_get_calls_total 1",
                 "db_get_many_calls_total 1",
-                "db_keys_requested_total 2",
+                "db_lookups_requested_total 2",
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 2",
                 "db_commit_calls_total 1",
@@ -299,6 +302,18 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_fixed_prune_after_uncommitted_apply_batch_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_prune_after_uncommitted_apply_batch_recovery(
+                ctx,
+                open::<mmr::Family>,
+            )
+            .await;
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_fixed_batch_chain() {
         let executor = deterministic::Runner::default();
@@ -379,6 +394,7 @@ mod tests {
         });
     }
 
+    #[boxed]
     async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
         let mut db = open_db::<F>(ctx.child("db")).await;
         let mut compact = open_compact::<F>(ctx.child("compact")).await;
@@ -395,20 +411,21 @@ mod tests {
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&db, Some(metadata), floor);
-        let compact_batch =
-            compact
-                .new_batch()
-                .set(k1, v1)
-                .set(k2, v2)
-                .merkleize(&compact, Some(metadata), floor);
+            .merkleize(&db, Some(metadata), floor)
+            .await;
+        let compact_batch = compact
+            .new_batch()
+            .set(k1, v1)
+            .set(k2, v2)
+            .merkleize(&compact, Some(metadata), floor)
+            .await;
 
         assert_eq!(retained.root(), compact_batch.root());
 
         db.apply_batch(retained).await.unwrap();
         compact.apply_batch(compact_batch).unwrap();
         db.commit().await.unwrap();
-        compact.commit().await.unwrap();
+        compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata));

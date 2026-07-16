@@ -25,7 +25,7 @@ use commonware_runtime::{
     deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
 };
 use commonware_utils::non_empty_range;
-use rand::RngCore as _;
+use rand::Rng as _;
 
 // ===== Harness Implementations =====
 
@@ -33,7 +33,7 @@ mod harnesses {
     use super::*;
     use crate::merkle::{self, mmb, mmr};
     use commonware_math::algebra::Random;
-    use commonware_utils::test_rng_seeded;
+    use commonware_utils::TestRng;
 
     type OrderedFixedDb<F> = crate::qmdb::current::ordered::fixed::Db<
         F,
@@ -82,7 +82,7 @@ mod harnesses {
     ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -104,7 +104,7 @@ mod harnesses {
     ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -126,7 +126,7 @@ mod harnesses {
     ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut ops = Vec::new();
         for i in 0..n {
             if i % 10 == 0 && i > 0 {
@@ -152,7 +152,7 @@ mod harnesses {
     ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut ops = Vec::new();
         for i in 0..n {
             let key = Digest::random(&mut rng);
@@ -521,7 +521,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let sync_root = SyncDatabase::root(&target_db);
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary();
-        let upper_bound = target_db.bounds().await.end;
+        let upper_bound = target_db.bounds().end;
 
         let client_suffix = context.next_u64().to_string();
         let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
@@ -606,7 +606,7 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
         assert!(db.sync_boundary() >= prune_loc);
         db.prune(prune_loc).await.unwrap();
 
-        let bounds = db.bounds().await;
+        let bounds = db.bounds();
         let local_start = bounds.start;
         let local_end = bounds.end;
         let sync_root = SyncDatabase::root(&db);

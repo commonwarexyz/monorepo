@@ -1,5 +1,4 @@
-use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut};
-use sha2::digest::Update;
+use crate::{deterministic::Auditor, Error, Handle, IoBufs, IoBufsMut};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -31,8 +30,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
-            hasher.update(&versions.start().to_be_bytes());
-            hasher.update(&versions.end().to_be_bytes());
+            hasher.update(versions.start().to_be_bytes());
+            hasher.update(versions.end().to_be_bytes());
         });
         self.inner
             .open_versioned(partition, name, versions)
@@ -54,8 +53,12 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.auditor.event(b"remove", |hasher| {
             hasher.update(partition.as_bytes());
-            if let Some(name) = name {
-                hasher.update(name);
+            match name {
+                Some(name) => {
+                    hasher.update([1]);
+                    hasher.update(name);
+                }
+                None => hasher.update([0]),
             }
         });
         self.inner.remove(partition, name).await
@@ -82,8 +85,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            hasher.update(&len.to_be_bytes());
+            hasher.update(offset.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
         self.inner.read_at(offset, len).await
     }
@@ -98,8 +101,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"read_at_buf", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            hasher.update(&len.to_be_bytes());
+            hasher.update(offset.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
         self.inner.read_at_buf(offset, len, bufs).await
     }
@@ -109,8 +112,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            bufs.for_each_chunk(|chunk| hasher.update(chunk));
+            hasher.update(offset.to_be_bytes());
+            hasher.update_bufs(&bufs);
         });
         self.inner.write_at(offset, bufs).await
     }
@@ -124,8 +127,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"write_at_sync", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            bufs.for_each_chunk(|chunk| hasher.update(chunk));
+            hasher.update(offset.to_be_bytes());
+            hasher.update_bufs(&bufs);
         });
         self.inner.write_at_sync(offset, bufs).await
     }
@@ -134,7 +137,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"resize", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&len.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
         self.inner.resize(len).await
     }
@@ -146,17 +149,27 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         });
         self.inner.sync().await
     }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.auditor.event(b"start_sync", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+        });
+        self.inner.start_sync().await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
+        deterministic::Auditor,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
         telemetry::metrics::Registry,
-        Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, IoBufsMut, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut,
+        Storage as _,
     };
     use commonware_utils::sync::Mutex;
     use std::sync::Arc;
@@ -176,9 +189,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_audited_storage_combined() {
-        use crate::deterministic::Auditor;
+    async fn test_audited_storage_separates_partition_and_blob_names() {
+        let auditor1 = Arc::new(Auditor::default());
+        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let auditor2 = Arc::new(Auditor::default());
+        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
 
+        storage1.open("a", b"bc").await.unwrap();
+        storage2.open("ab", b"c").await.unwrap();
+
+        assert_ne!(auditor1.state(), auditor2.state());
+    }
+
+    #[tokio::test]
+    async fn test_audited_start_sync() {
+        // Two independent storages run the same sequence of operations.
+        let auditor1 = Arc::new(Auditor::default());
+        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let auditor2 = Arc::new(Auditor::default());
+        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+
+        let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
+        let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
+        blob1.write_at(0, b"hello world").await.unwrap();
+        blob2.write_at(0, b"hello world").await.unwrap();
+
+        // `start_sync` must record an auditor event, so the state advances.
+        let before = auditor1.state();
+        blob1.start_sync().await.await.unwrap();
+        assert_ne!(
+            auditor1.state(),
+            before,
+            "start_sync must record an auditor event"
+        );
+
+        // The recorded event must be deterministic across independent runs.
+        blob2.start_sync().await.await.unwrap();
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after start_sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audited_storage_combined() {
         // Initialize the first storage and auditor
         let inner1 = MemStorage::new(test_pool());
         let auditor1 = Arc::new(Auditor::default());
@@ -330,6 +385,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 

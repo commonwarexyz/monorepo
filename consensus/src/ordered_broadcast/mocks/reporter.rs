@@ -14,7 +14,7 @@ use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_parallel::Sequential;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, NZUsize};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet, VecDeque};
 
 #[allow(clippy::large_enum_variant)]
@@ -34,7 +34,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Policy for Message<C, S, D> {
     }
 }
 
-pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
+pub struct Reporter<R: CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
     context: ContextCell<R>,
     mailbox: Receiver<Message<C, S, D>>,
 
@@ -60,7 +60,7 @@ pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
 
 impl<R, C, S, D> Reporter<R, C, S, D>
 where
-    R: CryptoRngCore + Metrics,
+    R: CryptoRng + Metrics,
     C: PublicKey,
     S: Scheme,
     D: Digest,

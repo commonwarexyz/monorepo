@@ -20,6 +20,25 @@ pub enum TimeoutReason {
     FailedCertification,
 }
 
+impl TimeoutReason {
+    /// Returns the stable trace field value for this reason.
+    ///
+    /// Matches the `EncodeLabelValue` rendering so a timeout trace span and its
+    /// metric series share the same string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactivity => "Inactivity",
+            Self::LeaderNullify => "LeaderNullify",
+            Self::LeaderTimeout => "LeaderTimeout",
+            Self::CertificationTimeout => "CertificationTimeout",
+            Self::MissingProposal => "MissingProposal",
+            Self::IgnoredProposal => "IgnoredProposal",
+            Self::InvalidProposal => "InvalidProposal",
+            Self::FailedCertification => "FailedCertification",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Timeout {
     pub leader: String,

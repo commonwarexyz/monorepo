@@ -15,12 +15,12 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -43,7 +43,7 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,

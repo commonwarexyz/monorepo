@@ -14,7 +14,7 @@ mod tests {
         mmr::{Error, Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
-    use commonware_runtime::{deterministic, tokio, Runner, ThreadPooler};
+    use commonware_runtime::{deterministic, tokio, Runner, Strategizer};
     use commonware_utils::NZUsize;
 
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
@@ -157,7 +157,7 @@ mod tests {
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root(&hasher, 0).unwrap();
 
-            let strategy = context.create_strategy(NZUsize!(4)).unwrap();
+            let strategy = context.strategy(NZUsize!(4));
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
             let mut mmr = Mmr::init(Config {

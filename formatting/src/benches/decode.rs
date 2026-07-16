@@ -6,7 +6,7 @@
 //! 50/50).
 
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::hint::black_box;
 
 /// Inject whitespace at every 8th character, plus a `prefix` at the start.

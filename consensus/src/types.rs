@@ -37,6 +37,8 @@
 use crate::{Epochable, Viewable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+#[cfg(not(target_arch = "wasm32"))]
+use commonware_runtime::telemetry::traces::TracedExt;
 use commonware_utils::sequence::U64;
 use core::{
     fmt::{self, Display, Formatter},
@@ -317,6 +319,27 @@ impl View {
 impl Display for View {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TracedExt for Epoch {
+    fn traced(self) -> i64 {
+        self.0.traced()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TracedExt for Height {
+    fn traced(self) -> i64 {
+        self.0.traced()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TracedExt for View {
+    fn traced(self) -> i64 {
+        self.0.traced()
     }
 }
 
@@ -706,7 +729,7 @@ commonware_macros::stability_scope!(ALPHA {
             num::NonZeroU16,
             ops::{Deref, Range},
         };
-        use rand_core::CryptoRngCore;
+        use rand_core::CryptoRng;
 
         /// A [`Digest`] containing a coding commitment, encoded [`CodingConfig`], and context hash.
         ///
@@ -777,7 +800,7 @@ commonware_macros::stability_scope!(ALPHA {
         }
 
         impl Random for Commitment {
-            fn random(mut rng: impl CryptoRngCore) -> Self {
+            fn random(mut rng: impl CryptoRng) -> Self {
                 let mut buf = [0u8; Self::SIZE];
                 rng.fill_bytes(&mut buf[..Self::CONFIG_OFFSET]);
 
@@ -1687,7 +1710,7 @@ mod tests {
         struct Digest([u8; Self::SIZE]);
 
         impl Random for Digest {
-            fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
+            fn random(mut rng: impl rand_core::CryptoRng) -> Self {
                 let mut buf = [0u8; Self::SIZE];
                 rng.fill_bytes(&mut buf);
                 Self(buf)

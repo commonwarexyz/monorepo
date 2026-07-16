@@ -2,7 +2,7 @@
 
 use super::Immutable;
 use crate::{
-    journal::{authenticated, contiguous::Mutable, Error as JournalError},
+    journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location},
     qmdb::{
         any::{batch::lookup_sorted, ValueEncoding},
@@ -12,10 +12,10 @@ use crate::{
         Error,
     },
     translator::Translator,
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use std::{
     collections::BTreeMap,
@@ -42,7 +42,7 @@ where
     F: Family,
     K: Key,
     V: ValueEncoding,
-    H: CHasher,
+    H: Hasher,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>,
@@ -95,7 +95,7 @@ where
     F: Family,
     K: Key,
     V: ValueEncoding,
-    H: CHasher,
+    H: Hasher,
     Operation<F, K, V>: EncodeShared,
 {
     /// Create a batch from a committed DB (no parent chain).
@@ -105,7 +105,7 @@ where
     ) -> Self
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -120,8 +120,8 @@ where
 
     /// Set a key to a value.
     ///
-    /// The key must not already exist in the database or in any ancestor batch
-    /// in the chain. Setting a key that already exists causes undefined behavior.
+    /// If the key already exists in the database or an ancestor batch, reads
+    /// of it may return any of its written values.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.mutations.insert(key, value);
         self
@@ -135,7 +135,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -169,7 +169,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -230,7 +230,8 @@ where
     ///
     /// `inactivity_floor` declares that all operations before this location are inactive.
     /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
-    pub fn merkleize<E, C, T>(
+    #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
+    pub async fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
         metadata: Option<V::Value>,
@@ -238,7 +239,7 @@ where
     ) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -259,22 +260,20 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
-
-        // Add operations to the journal batch and merkleize.
-        let mut journal_batch = self.journal_batch;
-        for op in &ops {
-            journal_batch = journal_batch.add(op.clone());
-        }
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
-        let root = db
+
+        // Leaf and node hashing dominate merkleization, so run them as one job on the
+        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        let (journal, root) = db
             .journal
-            .with_mem(|mem| journal_merkleized.root(mem, &db.journal.hasher, inactive_peaks))
+            .merkleize(self.journal_batch, ops, inactive_peaks)
+            .await
             .expect("inactive_peaks computed from batch size");
 
+        // Compute the batch chain bounds.
         let mut ancestor_diffs = Vec::new();
         let mut ancestors = Vec::new();
         for batch in
@@ -288,7 +287,7 @@ where
         }
 
         Arc::new(MerkleizedBatch {
-            journal_batch: journal_merkleized,
+            journal_batch: journal,
             root,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
@@ -331,9 +330,9 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
-        H: CHasher<Digest = D>,
+        H: Hasher<Digest = D>,
         T: Translator,
     {
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
@@ -357,9 +356,9 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
-        H: CHasher<Digest = D>,
+        H: Hasher<Digest = D>,
         T: Translator,
     {
         if keys.is_empty() {
@@ -414,7 +413,7 @@ where
     /// loss detected at `apply_batch` time.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S>
     where
-        H: CHasher<Digest = D>,
+        H: Hasher<Digest = D>,
     {
         UnmerkleizedBatch {
             journal_batch: self.journal_batch.new_batch::<H>(),
@@ -432,9 +431,9 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    H: CHasher,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 {

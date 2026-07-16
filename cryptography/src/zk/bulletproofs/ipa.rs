@@ -590,7 +590,7 @@ where
     // At this point, we've committed to the claim we're trying to prove, so
     // we can't pull any shenanigans by modifying the claim based on the challenges.
     transcript.commit(claim.encode());
-    let w = F::random(&mut transcript.noise(b"w challenge"));
+    let w = F::random(transcript.noise(b"w challenge"));
     let w_q = setup.product_generator.clone() * &w;
 
     let mut l_r_coms = Vec::<(G, G)>::new();
@@ -605,8 +605,8 @@ where
         let mid = a.len() / 2;
         let (a_lo, a_hi) = a.split_at_mut(mid);
         let (b_lo, b_hi) = b.split_at_mut(mid);
-        let (g_lo, g_hi) = g.split_at_mut(mid);
-        let (h_lo, h_hi) = h.split_at_mut(mid);
+        let (g_lo, g_hi) = g.split_at(mid);
+        let (h_lo, h_hi) = h.split_at(mid);
         let l = G::msm(g_hi, a_lo, strategy)
             + &G::msm(h_lo, b_hi, strategy)
             + &(w_q.clone() * &F::msm(a_lo, b_hi, strategy));
@@ -616,7 +616,7 @@ where
         l_r_coms.push((l.clone(), r.clone()));
         transcript.commit(l.encode());
         transcript.commit(r.encode());
-        let u = F::random(&mut transcript.noise(b"u challenge"));
+        let u = F::random(transcript.noise(b"u challenge"));
         let u_inv = u.inv();
 
         for (a_lo_i, a_hi_i) in a_lo.iter_mut().zip(a_hi.iter_mut()) {
@@ -631,17 +631,21 @@ where
         }
         b.truncate(mid);
 
-        for (g_lo_i, g_hi_i) in g_lo.iter_mut().zip(g_hi.iter_mut()) {
-            *g_lo_i *= &u_inv;
-            *g_lo_i += &(g_hi_i.clone() * &u);
-        }
-        g.truncate(mid);
-
-        for (h_lo_i, h_hi_i) in h_lo.iter_mut().zip(h_hi.iter_mut()) {
-            *h_lo_i *= &u;
-            *h_lo_i += &(h_hi_i.clone() * &u_inv);
-        }
-        h.truncate(mid);
+        let u_u_inv = [u.clone(), u_inv.clone()];
+        let (new_g, new_h) = strategy.join(
+            || {
+                strategy.map_collect_vec(g_lo.iter().zip(g_hi), |(g_lo_i, g_hi_i)| {
+                    G::msm(&[g_hi_i.clone(), g_lo_i.clone()], &u_u_inv, strategy)
+                })
+            },
+            || {
+                strategy.map_collect_vec(h_lo.iter().zip(h_hi), |(h_lo_i, h_hi_i)| {
+                    G::msm(&[h_lo_i.clone(), h_hi_i.clone()], &u_u_inv, strategy)
+                })
+            },
+        );
+        g = new_g;
+        h = new_h;
     }
     let a_final = a.pop().expect("a should not be empty");
     let b_final = b.pop().expect("b should not be empty");
@@ -759,7 +763,7 @@ where
     }
     transcript.commit(claim.encode());
 
-    let w = F::random(&mut transcript.noise(b"w challenge"));
+    let w = F::random(transcript.noise(b"w challenge"));
 
     // We reduce verification down to one MSM which needs to equal 0:
     // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)

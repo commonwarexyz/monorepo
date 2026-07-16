@@ -1,11 +1,12 @@
 use super::{Digest, DummyMetrics};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
-    index::{unordered, Unordered},
-    translator::{EightCap, FourCap, OneCap, Translator, TwoCap},
+    index::{partitioned, unordered, Unordered},
+    translator::{Cap, EightCap, FourCap, OneCap, Translator, TwoCap},
 };
+use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::seq::SliceRandom;
 use std::{
     hint::black_box,
     time::{Duration, Instant},
@@ -30,11 +31,43 @@ fn run_lookup<T: Translator>(
     }
 
     // Shuffle lookup order
-    let mut rng = StdRng::seed_from_u64(1);
+    let mut rng = TestRng::new(1);
     let mut lookup_keys: Vec<_> = keys.iter().take(items).cloned().collect();
     lookup_keys.shuffle(&mut rng);
 
     let label = format!("{}/translator={name} items={items}", module_path!());
+    c.bench_function(&label, |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                for key in &lookup_keys {
+                    black_box(index.get(key).next().is_some());
+                }
+                total += start.elapsed();
+            }
+            total
+        });
+    });
+}
+
+/// Benchmark `get` on an index the caller constructs, after populating it with `items` keys.
+fn run_lookup_prebuilt<I: Unordered<Value = u64>>(
+    c: &mut Criterion,
+    mut index: I,
+    name: &str,
+    items: usize,
+    keys: &[Digest],
+) {
+    for (i, key) in keys.iter().enumerate().take(items) {
+        index.insert(key, i as u64);
+    }
+
+    let mut rng = TestRng::new(1);
+    let mut lookup_keys: Vec<_> = keys.iter().take(items).cloned().collect();
+    lookup_keys.shuffle(&mut rng);
+
+    let label = format!("{}/variant={name} items={items}", module_path!());
     c.bench_function(&label, |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
@@ -57,10 +90,26 @@ fn bench_lookup(c: &mut Criterion) {
         .collect();
 
     for items in N_ITEMS {
+        // Sweep translators and benchmark both partitioned variants at P=2. The P=3 / huge-scale
+        // lookup characterization lives in the standalone `index_scale` bench.
         run_lookup(c, OneCap, "one_cap", items, &keys);
         run_lookup(c, TwoCap, "two_cap", items, &keys);
         run_lookup(c, FourCap, "four_cap", items, &keys);
         run_lookup(c, EightCap, "eight_cap", items, &keys);
+        run_lookup_prebuilt(
+            c,
+            partitioned::ordered::Index::<_, _, 2>::new(DummyMetrics, Cap::<6>::new()),
+            "partitioned_ordered_2",
+            items,
+            &keys,
+        );
+        run_lookup_prebuilt(
+            c,
+            partitioned::unordered::Index::<_, _, 2>::new(DummyMetrics, Cap::<6>::new()),
+            "partitioned_unordered_2",
+            items,
+            &keys,
+        );
     }
 }
 

@@ -3,7 +3,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
 };
-use commonware_storage::journal::contiguous::{fixed::Journal, Reader as _};
+use commonware_storage::journal::contiguous::{fixed::Journal, Contiguous as _};
 use commonware_utils::{sequence::FixedBytes, NZU64};
 use criterion::{criterion_group, Criterion};
 use std::{
@@ -22,8 +22,8 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
 const ITEM_SIZE: usize = 32;
 
 /// Sequentially read `items_to_read` items in the given `journal` starting from item 0.
-async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
-    let reader = journal.reader().await;
+async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
+    let reader = journal.snapshot().await.unwrap();
     for pos in 0..items_to_read {
         black_box(reader.read(pos).await.expect("failed to read data"));
     }
@@ -43,14 +43,14 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
                     let mut j =
                         get_fixed_journal::<ITEM_SIZE>(ctx, PARTITION, ITEMS_PER_BLOB).await;
                     append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
-                    let sz = j.size().await;
+                    let sz = j.size();
                     assert_eq!(sz, items);
 
                     // Run the benchmark
                     let mut duration = Duration::ZERO;
                     for _ in 0..iters {
                         let start = Instant::now();
-                        bench_run(&j, items).await;
+                        bench_run(&mut j, items).await;
                         duration += start.elapsed();
                     }
 

@@ -197,6 +197,24 @@ impl<F: Family, D: Digest> Mem<F, D> {
         &self.nodes[self.pos_to_index(pos)]
     }
 
+    /// Return the retained nodes at positions `[from_pos, size())`, in order, as up to two
+    /// contiguous slices (the second is non-empty only when the range wraps the underlying ring
+    /// buffer). Lets callers copy or encode a run of nodes without a per-position lookup.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `from_pos` precedes the oldest retained position.
+    #[cfg(feature = "std")]
+    pub(crate) fn nodes_from(&self, from_pos: Position<F>) -> (&[D], &[D]) {
+        let start = self.pos_to_index(from_pos);
+        let (head, tail) = self.nodes.as_slices();
+        if start >= head.len() {
+            (&tail[start - head.len()..], &[])
+        } else {
+            (&head[start..], tail)
+        }
+    }
+
     /// Return the index of the element in the current nodes vector given its position.
     ///
     /// # Panics
@@ -468,7 +486,7 @@ mod tests {
     };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, ThreadPooler};
+    use commonware_runtime::{deterministic, Runner as _, Strategizer};
     use commonware_utils::NZUsize;
 
     type D = sha256::Digest;
@@ -706,7 +724,7 @@ mod tests {
         executor.start(|ctx| async move {
             let hasher: H = Standard::new(ForwardFold);
             let mem = build::<F>(&hasher, 200);
-            let strategy = ctx.create_strategy(NZUsize!(4)).unwrap();
+            let strategy = ctx.strategy(NZUsize!(4));
             do_batch_update(&hasher, mem, strategy);
         });
     }

@@ -348,7 +348,7 @@ where
         &mut self,
         key: F::Key,
         value: F::Value,
-        delivered: NonEmptyVec<Con::Subscriber>,
+        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
     ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -364,7 +364,7 @@ where
     }
 
     /// Deliver an already accepted response to subscribers that arrived later.
-    fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<Con::Subscriber>) {
+    fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>) {
         self.deliveries.redeliver(Delivery {
             key,
             subscribers: delivered,
@@ -393,6 +393,7 @@ where
         let Delivery {
             key,
             subscribers: delivered,
+            ..
         } = delivery;
         if !self.current_delivery(&key, id) {
             return;
@@ -491,13 +492,15 @@ where
     fn handle_delivered(
         &mut self,
         key: F::Key,
-        delivered: NonEmptyVec<Con::Subscriber>,
+        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
         valid: bool,
     ) {
         let accepted = self.deliveries.response_accepted(&key);
 
         if valid {
-            let remaining = self.subscribers.remove_delivered(&key, delivered);
+            let remaining = self
+                .subscribers
+                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
 
             // The first accepted response is reused for subscribers that joined
             // while validation was pending, avoiding a duplicate source fetch
@@ -754,7 +757,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             let first = wait_for_delivery(&context, &consumer).await;
@@ -763,7 +767,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 11
+                    subscriber: 11,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             context.sleep(Duration::from_millis(10)).await;
@@ -771,7 +776,15 @@ mod tests {
 
             let second = wait_for_delivery(&context, &consumer).await;
             assert_eq!(second.value, Bytes::from_static(b"value"));
-            assert_eq!(second.delivery.subscribers, non_empty_vec![11]);
+            assert_eq!(
+                second
+                    .delivery
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| *subscriber)
+                    .collect::<Vec<_>>(),
+                vec![11]
+            );
             second.response.send(true).expect("response dropped");
 
             context.sleep(Duration::from_millis(10)).await;
@@ -792,7 +805,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             context
@@ -818,7 +832,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             let first = wait_for_delivery(&context, &consumer).await;
@@ -826,7 +841,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 11
+                    subscriber: 11,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             context.sleep(Duration::from_millis(10)).await;
@@ -853,13 +869,15 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 11
+                    subscriber: 11,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             started.await.expect("fetch did not start");
@@ -872,7 +890,15 @@ mod tests {
                 .expect("fetcher dropped");
 
             let delivery = wait_for_delivery(&context, &consumer).await;
-            assert_eq!(delivery.delivery.subscribers, non_empty_vec![11]);
+            assert_eq!(
+                delivery
+                    .delivery
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| *subscriber)
+                    .collect::<Vec<_>>(),
+                vec![11]
+            );
             delivery.response.send(true).expect("response dropped");
         });
     }
@@ -887,7 +913,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             started.await.expect("fetch did not start");
@@ -917,7 +944,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             let delivery = wait_for_delivery(&context, &consumer).await;
@@ -950,7 +978,8 @@ mod tests {
                 .fetch_targeted(
                     Fetch {
                         key: 1,
-                        subscriber: 10
+                        subscriber: 10,
+                        span: tracing::Span::none(),
                     },
                     non_empty_vec![target]
                 )

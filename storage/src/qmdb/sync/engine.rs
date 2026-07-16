@@ -9,17 +9,14 @@ use crate::{
             requests::{Id as RequestId, Requests},
             resolver::{FetchResult, Resolver},
             target::validate_update,
-            Database, DbResolver, Error as SyncError, Journal, Target,
+            Database, DbResolver, Error as SyncError, Journal, Metrics, Target,
         },
     },
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
-use commonware_macros::select;
-use commonware_runtime::{
-    telemetry::metrics::{Gauge, GaugeExt, MetricsExt},
-    Supervisor as _,
-};
+use commonware_macros::{boxed, select};
+use commonware_runtime::Supervisor as _;
 use commonware_utils::{
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
@@ -64,34 +61,6 @@ enum Event<F: Family, Op, D: Digest, E> {
     FinishRequested,
     /// The finish signal channel was closed
     FinishChannelClosed,
-}
-
-/// Progress gauges updated by the sync engine.
-struct ProgressMetrics {
-    journal_size: Gauge,
-    target_end: Gauge,
-}
-
-impl ProgressMetrics {
-    /// Register sync progress metrics on the provided context.
-    fn new(context: &impl commonware_runtime::Metrics) -> Self {
-        let journal_size = context.gauge("journal_size", "Current sync journal size");
-        let target_end = context.gauge(
-            "target_end",
-            "Exclusive target range end, equal to journal size when sync completes",
-        );
-
-        Self {
-            journal_size,
-            target_end,
-        }
-    }
-
-    /// Update progress gauges from the current engine snapshot.
-    fn record(&self, journal_size: u64, target_end: u64) {
-        let _ = self.journal_size.try_set(journal_size);
-        let _ = self.target_end.try_set(target_end);
-    }
 }
 
 /// Result from a fetch operation with its request ID and starting location.
@@ -258,7 +227,7 @@ where
     reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
 
     /// Progress gauges updated after target updates and batch application.
-    progress_metrics: ProgressMetrics,
+    metrics: Metrics,
 
     /// Whether explicit finish has been requested.
     finish_requested: bool,
@@ -300,7 +269,7 @@ where
             config.target.range.clone(),
         )
         .await?;
-        let journal_size = journal.size().await;
+        let journal_size = journal.size();
 
         // The sync journal is the source of truth for resume. If it already
         // reaches the target, try to recover boundary pins from local Merkle
@@ -318,8 +287,7 @@ where
             None
         };
 
-        let sync_context = config.context.child("sync");
-        let progress_metrics = ProgressMetrics::new(&sync_context);
+        let metrics = Metrics::new(&config.context);
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
@@ -341,15 +309,15 @@ where
             reached_target_tx: config.reached_target_tx,
             finish_requested: false,
             reached_current_target_reported: false,
-            progress_metrics,
+            metrics,
         };
-        engine.schedule_requests().await?;
-        engine.record_progress().await;
+        engine.schedule_requests()?;
+        engine.record_progress();
         Ok(engine)
     }
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
-    async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
+    fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
         let target_size = self.target.range.end();
 
         // Schedule a pinned-nodes request at the lower sync bound if we don't
@@ -382,7 +350,7 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_requests.len());
 
-        let log_size = self.journal.size().await;
+        let log_size = self.journal.size();
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
@@ -519,9 +487,9 @@ where
     }
 
     /// Record a progress snapshot in metrics.
-    async fn record_progress(&mut self) {
-        self.progress_metrics
-            .record(self.journal.size().await, *self.target.range.end());
+    fn record_progress(&mut self) {
+        self.metrics.record_target(*self.target.range.end());
+        self.metrics.record_synced(self.journal.size());
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
@@ -542,7 +510,7 @@ where
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
     pub(crate) async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
-        let mut next_loc = self.journal.size().await;
+        let mut next_loc = self.journal.size();
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
@@ -600,8 +568,8 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub async fn is_at_target(&mut self) -> Result<bool, Error<DB, R>> {
-        let journal_size = self.journal.size().await;
+    pub fn is_at_target(&mut self) -> Result<bool, Error<DB, R>> {
+        let journal_size = self.journal.size();
         let target_journal_size = self.target.range.end();
 
         // Check if we've completed sync
@@ -627,8 +595,8 @@ where
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
-    async fn is_ready_to_complete(&mut self) -> Result<bool, Error<DB, R>> {
-        Ok(self.is_at_target().await? && self.has_boundary_state())
+    fn is_ready_to_complete(&mut self) -> Result<bool, Error<DB, R>> {
+        Ok(self.is_at_target()? && self.has_boundary_state())
     }
 
     /// Handle the result of a fetch operation.
@@ -744,8 +712,8 @@ where
                 validate_update(&self.target, &new_target)?;
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
-                updated_self.record_progress().await;
-                updated_self.schedule_requests().await?;
+                updated_self.record_progress();
+                updated_self.schedule_requests()?;
                 Ok(NextStep::Continue(updated_self))
             }
             Event::UpdateChannelClosed => {
@@ -759,9 +727,9 @@ where
             Event::FinishChannelClosed => Err(SyncError::Engine(EngineError::FinishChannelClosed)),
             Event::BatchReceived(fetch_result) => {
                 self.handle_fetch_result(fetch_result)?;
-                self.schedule_requests().await?;
+                self.schedule_requests()?;
                 self.apply_operations().await?;
-                self.record_progress().await;
+                self.record_progress();
                 Ok(NextStep::Continue(self))
             }
         }
@@ -777,16 +745,12 @@ where
     ///
     /// Returns `NextStep::Complete(database)` when sync is finished, or
     /// `NextStep::Continue(self)` when more work remains.
-    pub(crate) async fn step(self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
-        Box::pin(Self::step_inner(self)).await
-    }
-
-    /// Implements one sync step behind a boxed future boundary.
-    async fn step_inner(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+    #[boxed]
+    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         self.drain_finish_requests()?;
 
         // Check if sync is complete
-        if self.is_ready_to_complete().await? {
+        if self.is_ready_to_complete()? {
             self.report_reached_target().await;
 
             if self.finish_rx.is_some() && !self.finish_requested {
@@ -911,7 +875,7 @@ mod tests {
             Ok(())
         }
 
-        async fn size(&self) -> u64 {
+        fn size(&self) -> u64 {
             self.size
         }
 

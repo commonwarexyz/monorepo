@@ -16,7 +16,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
-    buffer::paged::{Append, CacheRef},
+    buffer::paged::{CacheRef, Writer},
     deterministic, Blob, Buf, Error, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
@@ -114,7 +114,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("cannot open blob");
 
-        let append = Append::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
+        let mut append = Writer::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
             .await
             .expect("cannot create append wrapper");
 
@@ -160,7 +160,7 @@ fn fuzz(input: FuzzInput) {
 
         // The append wrapper may truncate if the corruption affected the last page's CRC
         // during initialization, so we handle both cases.
-        let append = match Append::new(blob, size, BUFFER_CAPACITY, cache_ref.clone()).await
+        let mut append = match Writer::new(blob, size, BUFFER_CAPACITY, cache_ref.clone()).await
         {
             Ok(a) => a,
             Err(_) => {
@@ -169,7 +169,7 @@ fn fuzz(input: FuzzInput) {
             }
         };
 
-        let reported_size = append.size().await;
+        let reported_size = append.size();
 
         // Step 4: Perform read operations and verify results.
         for read_op in &input.reads {

@@ -73,7 +73,7 @@ use commonware_codec::{
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
 use core::{fmt::Debug, hash::Hash};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
@@ -204,7 +204,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         M: Faults;
 
@@ -216,7 +216,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
         M: Faults,
@@ -242,7 +242,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         strategy: &impl Strategy,
     ) -> Vec<bool>
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         Self::Subject<'a, D>: Copy,
         Self::Certificate: 'a,
@@ -342,7 +342,7 @@ pub trait Scheme: Verifier {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest;
 
     /// Batch-verifies attestations and separates valid attestations from signer indices that failed
@@ -358,7 +358,7 @@ pub trait Scheme: Verifier {
         strategy: &impl Strategy,
     ) -> Verification<Self>
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
@@ -445,7 +445,7 @@ impl<S: Scheme> Verifier for Scoped<S> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         M: Faults,
     {
@@ -460,7 +460,7 @@ impl<S: Scheme> Verifier for Scoped<S> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
         M: Faults,

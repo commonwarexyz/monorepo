@@ -18,7 +18,6 @@ futures.workspace = true
 libfuzzer-sys.workspace = true
 num-bigint.workspace = true
 num-rational.workspace = true
-rand = { workspace = true, features = ["std_rng"] }
 
 [[bin]]
 name = "lib_functions"
@@ -37,6 +36,13 @@ bench = false
 [[bin]]
 name = "bitmap"
 path = "fuzz_targets/bitmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache"
+path = "fuzz_targets/cache.rs"
 test = false
 doc = false
 bench = false

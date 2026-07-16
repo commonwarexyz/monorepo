@@ -13,8 +13,8 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
-use rand_core::CryptoRngCore;
-use std::{collections::HashSet, fmt::Debug, hash::Hash};
+use rand_core::CryptoRng;
+use std::{collections::HashSet, fmt::Debug, hash::Hash, iter::once};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -417,6 +417,18 @@ pub enum Certificate<S: Scheme, D: Digest> {
     Nullification(Nullification<S>),
     /// A recovered certificate for a finalization.
     Finalization(Finalization<S, D>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<S: Scheme, D: Digest> Certificate<S, D> {
+    /// Returns the stable trace field value for this certificate's type.
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Notarization(_) => "notarization",
+            Self::Nullification(_) => "nullification",
+            Self::Finalization(_) => "finalization",
+        }
+    }
 }
 
 impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
@@ -835,7 +847,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// This ensures that the notarize signature is valid for the claimed proposal.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(
@@ -941,7 +953,7 @@ pub fn verify_certificates<'a, R, S, D>(
     strategy: &impl Strategy,
 ) -> Vec<bool>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     S: CertificateVerifier<D>,
     D: Digest,
 {
@@ -963,16 +975,24 @@ pub struct Notarization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
-    /// Builds a notarization certificate from notarize votes for the same proposal.
-    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+    /// Builds a notarization certificate from owned notarize votes for the same proposal,
+    /// consuming the votes to avoid cloning each attestation.
+    pub fn from_owned_notarizes<I>(
+        scheme: &S,
+        notarizes: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self>
     where
-        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I: IntoIterator<Item = Notarize<S, D>>,
         I::IntoIter: Send,
     {
-        let mut iter = notarizes.into_iter().peekable();
-        let proposal = iter.peek()?.proposal.clone();
-        let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
+        let mut notarizes = notarizes.into_iter();
+        let Notarize {
+            proposal,
+            attestation,
+        } = notarizes.next()?;
+        let attestations = once(attestation).chain(notarizes.map(|n| n.attestation));
+        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
 
         Some(Self {
             proposal,
@@ -980,10 +1000,19 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         })
     }
 
+    /// Builds a notarization certificate from notarize votes for the same proposal.
+    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I::IntoIter: Send,
+    {
+        Self::from_owned_notarizes(scheme, notarizes.into_iter().cloned(), strategy)
+    }
+
     /// Verifies the notarization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(
+    pub fn verify<R: CryptoRng>(
         &self,
         rng: &mut R,
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
@@ -1116,7 +1145,7 @@ impl<S: Scheme> Nullify<S> {
     /// This ensures that the nullify signature is valid for the given round.
     pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(
@@ -1198,24 +1227,38 @@ pub struct Nullification<S: Scheme> {
 }
 
 impl<S: Scheme> Nullification<S> {
+    /// Builds a nullification certificate from owned nullify votes from the same round,
+    /// consuming the votes to avoid cloning each attestation.
+    pub fn from_owned_nullifies<I>(
+        scheme: &S,
+        nullifies: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = Nullify<S>>,
+        I::IntoIter: Send,
+    {
+        let mut nullifies = nullifies.into_iter();
+        let Nullify { round, attestation } = nullifies.next()?;
+        let attestations = once(attestation).chain(nullifies.map(|n| n.attestation));
+        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+
+        Some(Self { round, certificate })
+    }
+
     /// Builds a nullification certificate from nullify votes from the same round.
     pub fn from_nullifies<'a, I>(scheme: &S, nullifies: I, strategy: &impl Strategy) -> Option<Self>
     where
         I: IntoIterator<Item = &'a Nullify<S>>,
         I::IntoIter: Send,
     {
-        let mut iter = nullifies.into_iter().peekable();
-        let round = iter.peek()?.round;
-        let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
-
-        Some(Self { round, certificate })
+        Self::from_owned_nullifies(scheme, nullifies.into_iter().cloned(), strategy)
     }
 
     /// Verifies the nullification certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed round.
-    pub fn verify<R: CryptoRngCore, D: Digest>(
+    pub fn verify<R: CryptoRng, D: Digest>(
         &self,
         rng: &mut R,
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
@@ -1330,7 +1373,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// This ensures that the finalize signature is valid for the claimed proposal.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(
@@ -1440,16 +1483,24 @@ pub struct Finalization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
-    /// Builds a finalization certificate from finalize votes for the same proposal.
-    pub fn from_finalizes<'a, I>(scheme: &S, finalizes: I, strategy: &impl Strategy) -> Option<Self>
+    /// Builds a finalization certificate from owned finalize votes for the same proposal,
+    /// consuming the votes to avoid cloning each attestation.
+    pub fn from_owned_finalizes<I>(
+        scheme: &S,
+        finalizes: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self>
     where
-        I: IntoIterator<Item = &'a Finalize<S, D>>,
+        I: IntoIterator<Item = Finalize<S, D>>,
         I::IntoIter: Send,
     {
-        let mut iter = finalizes.into_iter().peekable();
-        let proposal = iter.peek()?.proposal.clone();
-        let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|f| f.attestation.clone()), strategy)?;
+        let mut finalizes = finalizes.into_iter();
+        let Finalize {
+            proposal,
+            attestation,
+        } = finalizes.next()?;
+        let attestations = once(attestation).chain(finalizes.map(|f| f.attestation));
+        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
 
         Some(Self {
             proposal,
@@ -1457,10 +1508,19 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         })
     }
 
+    /// Builds a finalization certificate from finalize votes for the same proposal.
+    pub fn from_finalizes<'a, I>(scheme: &S, finalizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Finalize<S, D>>,
+        I::IntoIter: Send,
+    {
+        Self::from_owned_finalizes(scheme, finalizes.into_iter().cloned(), strategy)
+    }
+
     /// Verifies the finalization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(
+    pub fn verify<R: CryptoRng>(
         &self,
         rng: &mut R,
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
@@ -1732,12 +1792,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the certificates contained in this response against the signing scheme.
-    pub fn verify<R: CryptoRngCore>(
-        &self,
-        rng: &mut R,
-        scheme: &S,
-        strategy: &impl Strategy,
-    ) -> bool
+    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -1975,12 +2030,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: CryptoRngCore>(
-        &self,
-        rng: &mut R,
-        scheme: &S,
-        strategy: &impl Strategy,
-    ) -> bool
+    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -2255,7 +2305,7 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         self.notarize_1.verify(rng, scheme, strategy)
@@ -2383,7 +2433,7 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         self.finalize_1.verify(rng, scheme, strategy)
@@ -2500,7 +2550,7 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         self.nullify.verify(rng, scheme, strategy) && self.finalize.verify(rng, scheme, strategy)
@@ -2590,8 +2640,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1};
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{test_rng, Faults, N3f1, TestRng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -2603,7 +2652,7 @@ mod tests {
     /// Generate a fixture using the provided generator function with a specific seed.
     fn setup_seeded<S, F>(n: u32, seed: u64, fixture: F) -> Fixture<S>
     where
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         setup_seeded_ns(n, seed, NAMESPACE, fixture)
     }
@@ -2611,9 +2660,9 @@ mod tests {
     /// Generate a fixture using the provided generator function with a specific seed and namespace.
     fn setup_seeded_ns<S, F>(n: u32, seed: u64, namespace: &[u8], fixture: F) -> Fixture<S>
     where
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = TestRng::new(seed);
         fixture(&mut rng, namespace, n)
     }
 
@@ -2632,7 +2681,7 @@ mod tests {
     fn notarize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -2662,7 +2711,7 @@ mod tests {
     fn notarization_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -2700,7 +2749,7 @@ mod tests {
     fn nullify_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -2727,7 +2776,7 @@ mod tests {
     fn nullification_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -2761,7 +2810,7 @@ mod tests {
     fn finalize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -2789,7 +2838,7 @@ mod tests {
     fn finalization_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -2824,7 +2873,7 @@ mod tests {
     fn backfiller_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -2892,7 +2941,7 @@ mod tests {
     fn response_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -2947,7 +2996,7 @@ mod tests {
     fn conflicting_notarize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -2987,7 +3036,7 @@ mod tests {
     fn conflicting_finalize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -3027,7 +3076,7 @@ mod tests {
     fn nullify_finalize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -3059,7 +3108,7 @@ mod tests {
     fn notarize_verify_wrong_namespace<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         // Create two fixtures with different namespaces
         let mut rng = test_rng();
@@ -3088,7 +3137,7 @@ mod tests {
     fn notarize_verify_wrong_scheme<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
@@ -3116,7 +3165,7 @@ mod tests {
     fn notarization_verify_wrong_scheme<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
@@ -3153,7 +3202,7 @@ mod tests {
     fn notarization_verify_wrong_namespace<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         // Create two fixtures with different namespaces
         let fixture = setup_seeded_ns(5, 0, NAMESPACE, &f);
@@ -3192,7 +3241,7 @@ mod tests {
     fn notarization_recover_insufficient_signatures<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
@@ -3228,7 +3277,7 @@ mod tests {
     fn conflicting_notarize_detection<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
@@ -3263,7 +3312,7 @@ mod tests {
     fn nullify_finalize_detection<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
@@ -3297,7 +3346,7 @@ mod tests {
     fn finalization_verify_wrong_scheme<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);

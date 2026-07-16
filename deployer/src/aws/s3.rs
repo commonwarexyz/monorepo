@@ -27,18 +27,30 @@ use tracing::{debug, info};
 /// File name for the bucket config (stores the S3 bucket name).
 const BUCKET_CONFIG_FILE: &str = "bucket";
 
+/// Returns the persisted bucket name without generating one.
+///
+/// Reads ~/.commonware_deployer/bucket and returns its contents if present and non-empty.
+/// Cleanup paths (`clean`, `destroy`) must use this rather than [`get_bucket_name`] so a missing
+/// config never silently mints a new name that points at no real bucket or cached data.
+pub fn get_bucket_name_if_exists() -> Option<String> {
+    let path = deployer_directory(None).join(BUCKET_CONFIG_FILE);
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let name = contents.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 /// Gets the bucket name, generating one if it doesn't exist.
 /// The bucket name is stored in ~/.commonware_deployer/bucket.
 pub fn get_bucket_name() -> String {
-    let path = deployer_directory(None).join(BUCKET_CONFIG_FILE);
-
-    if let Ok(contents) = std::fs::read_to_string(&path) {
-        let name = contents.trim();
-        if !name.is_empty() {
-            return name.to_string();
-        }
+    if let Some(name) = get_bucket_name_if_exists() {
+        return name;
     }
 
+    let path = deployer_directory(None).join(BUCKET_CONFIG_FILE);
     let suffix = &uuid::Uuid::new_v4().simple().to_string()[..16];
     let bucket_name = format!("commonware-deployer-{suffix}");
 
@@ -59,7 +71,7 @@ pub fn delete_bucket_config() {
     let _ = std::fs::remove_file(path);
 }
 
-/// Prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
+/// Prefix for tool binaries and packages: tools/binaries/{tool}/{version}/{platform}/{filename}
 pub const TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
 
 /// Prefix for tool configs: tools/configs/{deployer_version}/{component}/{file}

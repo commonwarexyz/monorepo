@@ -7,7 +7,7 @@
 //! documentation for more details.
 //!
 //! For sync, the engine targets the **ops root** (not the canonical root). The operations and proof
-//! format are identical to `any`; direct proof verifiers should use `qmdb::hasher`. The bitmap is
+//! format are identical to `any`; verify proofs directly with `qmdb::verify_proof`. The bitmap is
 //! reconstructed deterministically from the operations after sync completes. See the
 //! [Root structure](commonware_storage::qmdb::current) module documentation for details.
 //!
@@ -18,7 +18,7 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_codec::FixedSize;
 use commonware_cryptography::{sha256, Hasher as CryptoHasher};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, BufferPooler};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     mmr::{self, full::Config as MmrConfig, Location, Proof},
@@ -28,6 +28,7 @@ use commonware_storage::{
         current::{self, FixedConfig as Config},
         operation::Committable,
     },
+    Context,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -71,12 +72,13 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
         },
         grafted_metadata_partition: "grafted-mmr-metadata".into(),
         translator: Translator::default(),
+        init_cache_size: Some(NZUsize!(1 << 16)),
     }
 }
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -157,13 +159,13 @@ where
 
 impl<E> super::Syncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
-    async fn size(&self) -> Location {
-        self.bounds().await.end
+    fn size(&self) -> Location {
+        self.bounds().end
     }
 
-    async fn sync_boundary(&self) -> Location {
+    fn sync_boundary(&self) -> Location {
         self.sync_boundary()
     }
 

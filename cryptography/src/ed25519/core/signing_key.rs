@@ -2,7 +2,7 @@ use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
 use commonware_formatting::Hex;
 use core::convert::TryFrom;
 use curve25519_dalek::{constants, scalar::Scalar};
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, Rng};
 use sha2::{digest::Update, Digest, Sha512};
 
 /// An Ed25519 signing key.
@@ -131,7 +131,7 @@ impl zeroize::Zeroize for SigningKey {
 
 impl SigningKey {
     /// Generate a new signing key.
-    pub fn new<R: RngCore + CryptoRng>(mut rng: R) -> Self {
+    pub fn new<R: Rng + CryptoRng>(mut rng: R) -> Self {
         let mut bytes = [0u8; 32];
         rng.fill_bytes(&mut bytes[..]);
         bytes.into()

@@ -14,11 +14,11 @@ use crate::{
         operation::Committable,
         Error, ROOT_BAGGING,
     },
+    Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for variable-length values.
 pub type Operation<F, V> = BaseOperation<F, VariableEncoding<V>>;
@@ -39,9 +39,7 @@ pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
 /// Configuration for a variable-size [keyless](super) compact db.
 pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 
-impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
-    Db<F, E, V, H, S>
-{
+impl<F: Family, E: Context, V: VariableValue, H: Hasher, S: Strategy> Db<F, E, V, H, S> {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
@@ -62,7 +60,7 @@ impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: St
 
 impl<
         F: Family,
-        E: Storage + Clock + Metrics,
+        E: Context,
         V: VariableValue,
         H: Hasher,
         C: Clone + Send + Sync + 'static,
@@ -73,8 +71,14 @@ where
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
-        Self::init_from_merkle(merkle, cfg.commit_codec_config).await
+        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
+        Self::init_from_merkle(
+            merkle,
+            context.child("witness"),
+            cfg.witness,
+            cfg.commit_codec_config,
+        )
+        .await
     }
 }
 
@@ -86,7 +90,7 @@ mod test {
         qmdb::keyless::tests,
     };
     use commonware_cryptography::Sha256;
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
@@ -150,9 +154,14 @@ mod test {
         context: deterministic::Context,
     ) -> TestCompactDb<F> {
         let cfg = CompactConfig {
-            merkle: crate::merkle::compact::Config {
-                partition: "compact-keyless-variable".into(),
-                strategy: Sequential,
+            strategy: Sequential,
+            witness: crate::journal::contiguous::variable::Config {
+                partition: "compact-keyless-variable-witness".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((0..=10000usize).into(), ()),
         };
@@ -254,7 +263,7 @@ mod test {
                         ));
                 }
                 let new_commit_loc = Location::new(*db.last_commit_loc() + 1 + 3);
-                db.apply_batch(batch.merkleize(&db, None, new_commit_loc))
+                db.apply_batch(batch.merkleize(&db, None, new_commit_loc).await)
                     .await
                     .unwrap();
             }
@@ -262,7 +271,7 @@ mod test {
             // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
             // commit is at 8.
             db.prune(Location::new(8)).await.unwrap();
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert_eq!(*bounds.start, 7);
 
             // op_count = first retained commit (= state just before that commit). Expected:
@@ -323,6 +332,7 @@ mod test {
         });
     }
 
+    #[boxed]
     async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
         ctx: deterministic::Context,
     ) {
@@ -339,19 +349,21 @@ mod test {
             .new_batch()
             .append(v1.clone())
             .append(v2.clone())
-            .merkleize(&db, Some(metadata.clone()), floor);
-        let compact_batch = compact.new_batch().append(v1).append(v2).merkleize(
-            &compact,
-            Some(metadata.clone()),
-            floor,
-        );
+            .merkleize(&db, Some(metadata.clone()), floor)
+            .await;
+        let compact_batch = compact
+            .new_batch()
+            .append(v1)
+            .append(v2)
+            .merkleize(&compact, Some(metadata.clone()), floor)
+            .await;
 
         assert_eq!(retained.root(), compact_batch.root());
 
         db.apply_batch(retained).await.unwrap();
         compact.apply_batch(compact_batch).unwrap();
         db.commit().await.unwrap();
-        compact.commit().await.unwrap();
+        compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata.clone()));

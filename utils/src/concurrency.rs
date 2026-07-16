@@ -25,6 +25,8 @@ impl Limiter {
 
     /// Attempt to reserve a slot. Returns `None` when the limiter is saturated.
     pub fn try_acquire(&self) -> Option<Reservation> {
+        // TODO: migrate to `try_update` once MSRV is >= 1.95
+        #[allow(deprecated)]
         self.current
             .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
                 (current < self.max).then_some(current + 1)

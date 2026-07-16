@@ -35,7 +35,7 @@ use commonware_runtime::{
 use commonware_storage::archive::immutable;
 use commonware_utils::{union, NZUsize, NZU16, NZU32, NZU64};
 use futures::future::try_join_all;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZero, NonZeroU16, NonZeroUsize},
@@ -82,7 +82,7 @@ where
 
 pub struct Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -95,7 +95,7 @@ where
 {
     context: ContextCell<E>,
     config: Config<C, P, B, V, T>,
-    dkg: dkg::Actor<E, P, H, C, V>,
+    dkg: dkg::Actor<E, P, B, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>, P>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
@@ -126,7 +126,7 @@ where
 
 impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -147,6 +147,7 @@ where
             context.child("dkg"),
             dkg::Config {
                 manager: config.manager.clone(),
+                blocker: config.blocker.clone(),
                 signer: config.signer.clone(),
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: config.partition_prefix.clone(),

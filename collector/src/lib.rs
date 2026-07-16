@@ -75,11 +75,6 @@ commonware_macros::stability_scope!(ALPHA {
         /// the same commitment.
         ///
         /// [Monitor::collected] is only called once per `handler`.
-        fn collected(
-            &mut self,
-            handler: Self::PublicKey,
-            response: Self::Response,
-            count: usize,
-        );
+        fn collected(&mut self, handler: Self::PublicKey, response: Self::Response, count: usize);
     }
 });

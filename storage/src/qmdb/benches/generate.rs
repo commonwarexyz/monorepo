@@ -7,6 +7,7 @@ use crate::common::{
     define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value, make_var_value,
     open_keyless_db, Digest,
 };
+use commonware_macros::boxed;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
@@ -16,8 +17,9 @@ use commonware_storage::{
     merkle::{mmb, mmr, Family},
     qmdb::any::traits::DbAny,
 };
+use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::Rng;
 use std::time::{Duration, Instant};
 
 const NUM_ELEMENTS: u64 = 1_000;
@@ -27,12 +29,13 @@ const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
 
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
+#[boxed]
 async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     mut db: C,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-    make_value: impl Fn(&mut StdRng) -> C::Value,
+    make_value: impl Fn(&mut TestRng) -> C::Value,
 ) -> Duration {
     let start = Instant::now();
     gen_random_kv::<F, _>(
@@ -40,10 +43,14 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
         elements,
         operations,
         Some(commit_frequency),
+        None, // seed_batch
+        None, // prune_frequency
+        None, // key_zipf_exponent (uniform churn)
+        None, // keyspace (all keys seeded)
         make_value,
     )
     .await;
-    db.prune(db.sync_boundary().await).await.unwrap();
+    db.prune(db.sync_boundary()).await.unwrap();
     db.sync().await.unwrap();
     let elapsed = start.elapsed();
     db.destroy().await.unwrap();
@@ -199,20 +206,21 @@ fn bench_keyless_generate(c: &mut Criterion) {
                         for _ in 0..iters {
                             let start = Instant::now();
                             dispatch_keyless!(ctx.child("storage"), variant, |db| {
-                                let mut rng = StdRng::seed_from_u64(42);
+                                let mut rng = TestRng::new(42);
                                 let mut batch = db.new_batch();
                                 for _ in 0u64..operations {
                                     let v = make_var_value(&mut rng);
                                     batch = batch.append(v);
-                                    if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
-                                        let merkleized =
-                                            batch.merkleize(&db, None, db.inactivity_floor_loc());
+                                    if rng.next_u32().is_multiple_of(KEYLESS_COMMIT_FREQ) {
+                                        let merkleized = batch
+                                            .merkleize(&db, None, db.inactivity_floor_loc())
+                                            .await;
                                         db.apply_batch(merkleized).await.unwrap();
                                         batch = db.new_batch();
                                     }
                                 }
                                 let merkleized =
-                                    batch.merkleize(&db, None, db.inactivity_floor_loc());
+                                    batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
                                 db.apply_batch(merkleized).await.unwrap();
                                 db.sync().await.unwrap();
 

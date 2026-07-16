@@ -42,10 +42,15 @@
 //! assert!(proof.verify_element_inclusion(&mut hasher, &digests[1], 1, &root).is_ok());
 //! ```
 
-use alloc::collections::btree_set::BTreeSet;
+use alloc::{
+    collections::btree_set::BTreeSet,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Buf, BufMut};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 

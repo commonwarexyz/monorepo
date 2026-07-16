@@ -5,9 +5,10 @@ use commonware_runtime::{
     Runner,
 };
 use commonware_storage::freezer::Identifier;
+use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
@@ -23,10 +24,10 @@ const READS: [usize; 3] = [1_000, 10_000, 50_000];
 
 /// Select random keys for benchmarking.
 pub fn select_keys(count: usize, keys: &[Key]) -> Vec<Key> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut selected_keys = Vec::with_capacity(count);
     for _ in 0..count {
-        let idx = rng.gen_range(0..keys.len());
+        let idx = rng.random_range(0..keys.len());
         selected_keys.push(keys[idx].clone());
     }
     selected_keys
@@ -62,11 +63,11 @@ fn bench_get(c: &mut Criterion) {
     // Populate the freezer with random keys
     let cfg = Config::default();
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
-    let keys = builder.start(|ctx| async move {
-        let mut store = init(ctx).await;
+    let (keys, checkpoint) = builder.start(|ctx| async move {
+        let mut store = init(ctx, None).await;
         let keys = append_random(&mut store, ITEMS).await;
-        store.close().await.unwrap();
-        keys
+        let checkpoint = store.close().await.unwrap();
+        (keys, checkpoint)
     });
 
     // Run the benchmarks
@@ -86,7 +87,7 @@ fn bench_get(c: &mut Criterion) {
                         let keys = keys.clone();
                         async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let store = init(ctx).await;
+                            let store = init(ctx, Some(checkpoint)).await;
                             let selected_keys = match pattern {
                                 "random" => select_keys(reads, &keys),
                                 "recent" => select_recent_keys(reads, &keys),
@@ -113,7 +114,7 @@ fn bench_get(c: &mut Criterion) {
     // Clean up shared artifacts
     let cleaner = commonware_runtime::tokio::Runner::new(cfg);
     cleaner.start(|ctx| async move {
-        let store = init(ctx).await;
+        let store = init(ctx, None).await;
         store.destroy().await.unwrap();
     });
 }

@@ -5,6 +5,7 @@ use commonware_runtime::{
 };
 use criterion::criterion_main;
 
+mod grinding;
 mod hashmap_insert;
 mod hashmap_insert_fixed;
 mod hashmap_iteration;
@@ -48,6 +49,7 @@ impl Metrics for DummyMetrics {
 }
 
 criterion_main!(
+    grinding::benches,
     hashmap_iteration::benches,
     hashmap_insert_fixed::benches,
     hashmap_insert::benches,

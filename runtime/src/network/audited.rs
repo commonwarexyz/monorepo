@@ -1,5 +1,4 @@
 use crate::{deterministic::Auditor, Error, IoBufs, SinkOf, StreamOf};
-use sha2::digest::Update;
 use std::{net::SocketAddr, sync::Arc};
 
 /// A sink that audits network operations.
@@ -14,7 +13,7 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
         let bufs = bufs.into();
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            bufs.for_each_chunk(|chunk| hasher.update(chunk));
+            hasher.update_bufs(&bufs);
         });
 
         self.inner.send(bufs).await.inspect_err(|e| {
@@ -42,7 +41,7 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(&len.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
 
         let bufs = self.inner.recv(len).await.inspect_err(|e| {
@@ -54,7 +53,7 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
 
         self.auditor.event(b"recv_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            bufs.for_each_chunk(|chunk| hasher.update(chunk));
+            hasher.update_bufs(&bufs);
         });
 
         Ok(bufs)

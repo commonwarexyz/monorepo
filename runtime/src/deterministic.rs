@@ -63,36 +63,35 @@ use crate::{
         supervision::Tree,
         thread, Panicker,
     },
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Name, Panicked,
-    Spawner as _, Supervisor as _, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf, Name,
+    Panicked, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::{
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
-    SystemTimeExt,
+    Cached, SystemTimeExt,
 };
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    future::Either,
     task::{waker, ArcWake},
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
-use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
-use rand_core::CryptoRngCore;
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
+    convert::Infallible,
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -102,8 +101,7 @@ use std::{
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{info_span, trace, Instrument};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing::trace;
 
 #[derive(Debug)]
 struct Metrics {
@@ -143,6 +141,37 @@ impl Metrics {
 /// A SHA-256 digest.
 type Digest = [u8; 32];
 
+/// Hashes an unambiguous sequence of fields for deterministic runtime auditing.
+pub(crate) struct AuditHasher(Sha256);
+
+impl AuditHasher {
+    /// Creates an empty audit hasher.
+    pub(crate) fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    /// Adds a length-prefixed field to the audit.
+    pub(crate) fn update(&mut self, value: impl AsRef<[u8]>) {
+        let value = value.as_ref();
+        self.0.update((value.len() as u64).to_be_bytes());
+        self.0.update(value);
+    }
+
+    /// Adds the logical contents of `bufs` as one length-prefixed field.
+    ///
+    /// Physical chunk boundaries are excluded because they are not part of the storage or network
+    /// operation being audited.
+    pub(crate) fn update_bufs(&mut self, bufs: &IoBufs) {
+        self.0.update((bufs.len() as u64).to_be_bytes());
+        bufs.for_each_chunk(|chunk| self.0.update(chunk));
+    }
+
+    /// Returns the digest of all fields added to the audit.
+    pub(crate) fn finalize(self) -> Digest {
+        self.0.finalize().into()
+    }
+}
+
 /// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
     digest: Mutex<Digest>,
@@ -162,16 +191,16 @@ impl Auditor {
     /// whatever other data is passed in the `payload` closure.
     pub(crate) fn event<F>(&self, label: &'static [u8], payload: F)
     where
-        F: FnOnce(&mut Sha256),
+        F: FnOnce(&mut AuditHasher),
     {
         let mut digest = self.digest.lock();
 
-        let mut hasher = Sha256::new();
+        let mut hasher = AuditHasher::new();
         hasher.update(digest.as_ref());
         hasher.update(label);
         payload(&mut hasher);
 
-        *digest = hasher.finalize().into();
+        *digest = hasher.finalize();
     }
 
     /// Generate a representation of the current state of the runtime.
@@ -185,7 +214,7 @@ impl Auditor {
 }
 
 /// A dynamic RNG that can safely be sent between threads.
-pub type BoxDynRng = Box<dyn CryptoRngCore + Send + 'static>;
+pub type BoxDynRng = Box<dyn CryptoRng + Send + 'static>;
 
 /// Configuration for the `deterministic` runtime.
 pub struct Config {
@@ -932,7 +961,6 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    traced: bool,
 }
 
 impl Context {
@@ -1010,7 +1038,6 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                traced: false,
             },
             executor,
             panicked,
@@ -1081,7 +1108,6 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                traced: false,
             },
             executor,
             panicked,
@@ -1165,9 +1191,7 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let traced = self.traced;
         self.execution = Execution::default();
-        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -1176,15 +1200,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future = if traced {
-            let span = info_span!(parent: None, "task", name = %label.name());
-            for (key, value) in &self.attributes {
-                span.set_attribute(key.clone(), value.clone());
-            }
-            Either::Left(f(self).instrument(span))
-        } else {
-            Either::Right(f(self))
-        };
+        let future = f(self);
         let (f, handle) = Handle::init(
             future,
             metric,
@@ -1233,26 +1249,44 @@ impl crate::Spawner for Context {
     }
 }
 
-impl crate::ThreadPooler for Context {
-    fn create_thread_pool(
-        &self,
-        concurrency: NonZeroUsize,
-    ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
+// Rayon permits one permanent registry registration per OS thread. Cache the pool that
+// registered the executor thread so later requests and runners reuse it.
+commonware_utils::thread_local_cache!(static THREAD_POOL: ThreadPool);
 
-        if rayon::current_thread_index().is_none() {
-            builder = builder.use_current_thread()
-        }
+/// Returns the single-threaded pool the executor thread registered with, created on first use.
+///
+/// All pool work executes inline on the executor thread, so a larger pool would only
+/// add permanently unstarted workers.
+fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
+    let pool = Cached::take(
+        &THREAD_POOL,
+        || {
+            ThreadPoolBuilder::new()
+                .num_threads(1)
+                .use_current_thread()
+                .build()
+                .map(Arc::new)
+        },
+        |_| Ok(()),
+    )?;
+    Ok(Arc::clone(&pool))
+}
 
-        builder
-            .spawn_handler(move |thread| {
-                self.child("rayon_thread")
-                    .dedicated()
-                    .spawn(move |_| async move { thread.run() });
-                Ok(())
-            })
-            .build()
-            .map(Arc::new)
+/// Spawning threads would be nondeterministic, so the pool has no background workers. The
+/// executor thread registers itself as its sole member and all work executes inline.
+///
+/// Rayon's current-thread registration is permanent and per-OS-thread, so only one pool
+/// can ever execute work on the executor thread. Every request (including from a later
+/// runner on the same thread) returns a strategy on that single-threaded pool with its
+/// planning parallelism set independently. This controls adaptive decisions and manual
+/// partitioning hints while Rayon executes on the sole registered thread. The returned
+/// strategy is therefore tied to the executor thread.
+impl crate::Strategizer for Context {
+    fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
+        Rayon::with_pool(
+            shared_thread_pool().expect("failed to create deterministic Rayon thread pool"),
+        )
+        .with_parallelism(parallelism)
     }
 }
 
@@ -1269,7 +1303,6 @@ impl crate::Supervisor for Context {
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
             execution: Execution::default(),
-            traced: false,
         }
     }
 
@@ -1287,13 +1320,6 @@ impl crate::Supervisor for Context {
             label: self.name.clone(),
             attributes: self.attributes.clone(),
         }
-    }
-}
-
-impl crate::Tracing for Context {
-    fn with_span(mut self) -> Self {
-        self.traced = true;
-        self
     }
 }
 
@@ -1557,44 +1583,38 @@ impl crate::Resolver for Context {
     }
 }
 
-impl RngCore for Context {
-    fn next_u32(&mut self) -> u32 {
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
         let result = executor.rng.lock().next_u32();
-        result
+        Ok(result)
     }
 
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
         let result = executor.rng.lock().next_u64();
-        result
+        Ok(result)
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
         executor.rng.lock().fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        let executor = self.executor();
-        executor.auditor.event(b"rand", |hasher| {
-            hasher.update(b"try_fill_bytes");
-        });
-        let result = executor.rng.lock().try_fill_bytes(dest);
-        result
+        Ok(())
     }
 }
 
-impl CryptoRng for Context {}
+impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
@@ -1632,7 +1652,10 @@ mod tests {
     use super::*;
     #[cfg(feature = "external")]
     use crate::FutureExt;
-    use crate::{deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Storage};
+    use crate::{
+        deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Spawner as _,
+        Storage, Supervisor as _,
+    };
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
@@ -1671,6 +1694,21 @@ mod tests {
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
         run_tasks(5, executor)
+    }
+
+    fn run_with_metric(name: &'static str, help: &'static str) -> String {
+        deterministic::Runner::default().start(|context| async move {
+            let _: Registered<raw::Counter> = context.register(name, help, raw::Counter::default());
+            context.auditor().state()
+        })
+    }
+
+    #[test]
+    fn test_auditor_separates_metric_fields() {
+        let state_a = run_with_metric("a", "bc");
+        let state_b = run_with_metric("ab", "c");
+
+        assert_ne!(state_a, state_b);
     }
 
     #[test]

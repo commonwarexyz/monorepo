@@ -155,7 +155,7 @@ mod tests {
     fn delivery(key: MockKey) -> Delivery<MockKey, ()> {
         Delivery {
             key,
-            subscribers: non_empty_vec![()],
+            subscribers: non_empty_vec![((), tracing::Span::none())],
         }
     }
 

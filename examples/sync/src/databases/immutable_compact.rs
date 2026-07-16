@@ -2,18 +2,18 @@
 
 use crate::{Hasher, Key, Value};
 use commonware_parallel::Sequential;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, BufferPooler};
 use commonware_storage::{
-    merkle::{
-        compact::Config as MerkleConfig,
-        mmr::{self},
-    },
+    journal::contiguous::variable,
+    merkle::mmr,
     qmdb::{
         self,
         immutable::fixed::{self, CompactConfig},
         sync::compact,
     },
+    Context,
 };
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use tracing::error;
 
 /// Database type alias.
@@ -23,11 +23,16 @@ pub type Database<E> = fixed::CompactDb<mmr::Family, E, Key, Value, Hasher, Sequ
 pub type Operation = fixed::Operation<mmr::Family, Key, Value>;
 
 /// Create a database configuration for the compact immutable variant.
-pub fn create_config(_context: &impl BufferPooler) -> CompactConfig<Sequential> {
+pub fn create_config(context: &impl BufferPooler) -> CompactConfig<Sequential> {
     CompactConfig {
-        merkle: MerkleConfig {
-            partition: "compact-immutable".into(),
-            strategy: Sequential,
+        strategy: Sequential,
+        witness: variable::Config {
+            partition: "compact-immutable-witness".into(),
+            items_per_section: NZU64!(4096),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(64)),
+            write_buffer: NZUsize!(1024),
         },
         commit_codec_config: (),
     }
@@ -35,7 +40,7 @@ pub fn create_config(_context: &impl BufferPooler) -> CompactConfig<Sequential> 
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -64,9 +69,9 @@ where
                     batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata, floor) => {
-                    let merkleized = batch.merkleize(self, metadata, floor);
+                    let merkleized = batch.merkleize(self, metadata, floor).await;
                     self.apply_batch(merkleized)?;
-                    self.commit().await?;
+                    self.sync().await?;
                     batch = self.new_batch();
                 }
             }
@@ -89,9 +94,9 @@ where
 
 impl<E> super::CompactSyncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
-    async fn current_target(&self) -> compact::Target<Self::Family, Key> {
-        Self::current_target(self)
+    fn target(&self) -> compact::Target<Self::Family, Key> {
+        Self::target(self)
     }
 }

@@ -7,7 +7,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::NonZeroDuration;
 use discovery::Discovery;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::num::NonZeroUsize;
 
 mod discovery;
@@ -16,7 +16,7 @@ mod service;
 /// Configuration for the [`Probe`] actor.
 pub struct Config<E, D, T, P, B>
 where
-    E: Spawner + CryptoRngCore + Clock + Metrics,
+    E: Spawner + CryptoRng + Clock + Metrics,
     D: Provider<Scope = Epoch>,
     T: Strategy,
     P: PublicKey,
@@ -48,7 +48,7 @@ where
 /// without consuming one and enters service without soliciting peers.
 pub struct Probe<E, S, D, V, T, P, B>
 where
-    E: Spawner + CryptoRngCore + Clock + Metrics,
+    E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
@@ -67,7 +67,7 @@ where
 
 impl<E, S, D, V, T, P, B> Probe<E, S, D, V, T, P, B>
 where
-    E: Spawner + CryptoRngCore + Clock + Metrics,
+    E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,

@@ -5,15 +5,20 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
     Feedback,
 };
-use commonware_consensus::{marshal::Update, Application as ConsensusApplication, Reporter};
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_consensus::{
+    marshal::Update, Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter,
+    Viewable,
+};
+use commonware_cryptography::Digestible;
+use commonware_runtime::{telemetry::traces::TracedExt as _, Clock, Metrics, Spawner};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use futures::Stream;
-use rand::Rng;
-use std::{collections::VecDeque, pin::Pin};
+use rand_core::Rng;
+use std::{collections::VecDeque, pin::Pin, sync::Arc};
+use tracing::{info_span, Span};
 
 /// Type alias for an ancestor stream sent through the actor mailbox.
-pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = B> + Send>>;
+pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = Arc<B>> + Send>>;
 
 /// Messages processed by the actor loop.
 pub(crate) enum Message<E, A>
@@ -23,6 +28,7 @@ where
 {
     /// A request to propose a block.
     Propose {
+        span: Span,
         context: (E, A::Context),
         ancestry: ErasedAncestorStream<A::Block>,
         response: oneshot::Sender<Option<A::Block>>,
@@ -30,6 +36,7 @@ where
 
     /// A request to verify a block.
     Verify {
+        span: Span,
         context: (E, A::Context),
         ancestry: ErasedAncestorStream<A::Block>,
         response: oneshot::Sender<bool>,
@@ -37,7 +44,8 @@ where
 
     /// A reporting of a new finalized block.
     Finalized {
-        block: A::Block,
+        span: Span,
+        block: Arc<A::Block>,
         acknowledgement: Exact,
     },
 
@@ -166,6 +174,15 @@ where
     /// This resolves once startup handoff has attached the database set to the
     /// serving actor. Late callers receive the current database set
     /// immediately.
+    ///
+    /// ## Safety
+    ///
+    /// Holders must never manually prune these databases. Stateful uses
+    /// [`Config::prune_config`](crate::stateful::Config::prune_config) to
+    /// schedule safe pruning without pruning past the rewind window needed for
+    /// crash reconciliation. With pruning enabled, glue keeps a
+    /// `max_pending_acks + 1` finalized-target window plus the configured
+    /// extra block windows before pruning.
     pub async fn subscribe_databases(&self) -> A::Databases {
         let (response, receiver) = oneshot::channel();
         let _ = self
@@ -189,10 +206,16 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send + 'static,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
+        let span = info_span!(
+            "stateful.mailbox.propose",
+            epoch = context.1.epoch().traced(),
+            view = context.1.view().traced()
+        );
         let _ = self.sender.enqueue(Message::Propose {
+            span,
             context,
             ancestry: Box::pin(ancestry),
             response,
@@ -203,12 +226,18 @@ where
     async fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send + 'static,
     ) -> bool {
         // We must panic if we don't get a response; We cannot override the decision
         // of the application based on the availabilitiy of the actor.
         let (response, receiver) = oneshot::channel();
+        let span = info_span!(
+            "stateful.mailbox.verify",
+            epoch = context.1.epoch().traced(),
+            view = context.1.view().traced()
+        );
         let _ = self.sender.enqueue(Message::Verify {
+            span,
             context,
             ancestry: Box::pin(ancestry),
             response,
@@ -229,10 +258,20 @@ where
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
             Update::Tip(_, _, _) => return Feedback::Ok,
-            Update::Block(block, acknowledgement) => Message::Finalized {
-                block,
-                acknowledgement,
-            },
+            Update::Block(block, acknowledgement) => {
+                let context = block.context();
+                let span = info_span!(
+                    "stateful.mailbox.finalized",
+                    epoch = context.epoch().traced(),
+                    view = context.view().traced(),
+                    digest = %block.digest()
+                );
+                Message::Finalized {
+                    span,
+                    block,
+                    acknowledgement,
+                }
+            }
         };
 
         self.sender.enqueue(message)

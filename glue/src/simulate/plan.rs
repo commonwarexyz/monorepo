@@ -16,7 +16,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{deterministic, Clock, Runner as _, Spawner, Supervisor as _};
 use commonware_utils::{channel::mpsc, ordered::Set, NZUsize, TryCollect};
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use std::{
     collections::HashSet,
     sync::{
@@ -600,7 +600,8 @@ impl<D: EngineDefinition> Plan<D> {
             },
             Some(pk) = restart_rx.recv() else break => {
                 let was_delayed = delayed.contains(&pk);
-                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed).await;
+                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                    .await;
             },
             Some(cmd) = schedule_rx.recv() else break => match cmd {
                 ScheduleCmd::Crash(pk) => {
@@ -610,7 +611,8 @@ impl<D: EngineDefinition> Plan<D> {
                 }
                 ScheduleCmd::Restart(pk) => {
                     let was_delayed = delayed.contains(&pk);
-                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed).await;
+                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                        .await;
                 }
             },
             _ = crash_rx.recv() => {
@@ -620,7 +622,7 @@ impl<D: EngineDefinition> Plan<D> {
                 let active = team.active_keys();
                 let crash_count = count.min(active.len());
                 let to_crash: Vec<D::PublicKey> = active
-                    .choose_multiple(&mut ctx, crash_count)
+                    .sample(&mut ctx, crash_count)
                     .cloned()
                     .collect();
                 for pk in to_crash {

@@ -2,7 +2,7 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture `Arc<AsyncRwLock<Immutable>>`
+//! deletions. The wrapper types here capture `Arc<TracedAsyncRwLock<Immutable>>`
 //! so the batch API can read through to committed state.
 
 use crate::stateful::db::{
@@ -12,43 +12,39 @@ use crate::stateful::db::{
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    journal::{
-        contiguous::{
-            fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
-        },
-        Error as JournalError,
+    journal::contiguous::{
+        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
     },
     merkle::{Family, Location},
     qmdb::{
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            fixed, variable, Immutable, Operation,
+            fixed, initial_root, variable, Immutable, Operation,
         },
         operation::Key,
         sync::{self, resolver::Resolver, Target as AnySyncTarget},
         Error,
     },
     translator::Translator,
-    Persistable,
+    Context,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> =
-    Arc<AsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
+    Arc<TracedAsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -63,10 +59,10 @@ where
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -82,10 +78,10 @@ where
 impl<F, E, K, V, C, H, T, S> ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -132,10 +128,10 @@ where
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -148,10 +144,10 @@ where
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -167,10 +163,10 @@ where
 impl<F, E, K, V, C, H, T, S> ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -194,10 +190,10 @@ where
 impl<F, E, K, V, C, H, T, S> UnmerkleizedTrait for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -208,11 +204,14 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(
-            &*db,
-            self.metadata,
-            self.inactivity_floor.unwrap_or_default(),
-        );
+        let merkleized = self
+            .batch
+            .merkleize(
+                &*db,
+                self.metadata,
+                self.inactivity_floor.unwrap_or_default(),
+            )
+            .await;
         Ok(ImmutableMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -223,10 +222,10 @@ where
 impl<F, E, K, V, C, H, T, S> MerkleizedTrait for ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -252,7 +251,7 @@ where
 impl<F, E, K, V, H, T, S> ManagedDb<E> for fixed::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
@@ -287,7 +286,14 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, K, FixedEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),
@@ -305,12 +311,15 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
-        Ok(())
+        self.sync().await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
+    }
+
+    fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
@@ -321,7 +330,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -333,7 +342,7 @@ where
 impl<F, E, K, V, H, T, S> ManagedDb<E> for variable::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
@@ -369,7 +378,14 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, K, VariableEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),
@@ -387,12 +403,15 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
-        Ok(())
+        self.sync().await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
+    }
+
+    fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
@@ -403,7 +422,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -415,7 +434,7 @@ where
 impl<F, E, K, V, H, T, R, S> StateSyncDb<E, R> for fixed::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
@@ -455,7 +474,7 @@ where
 impl<F, E, K, V, H, T, R, S> StateSyncDb<E, R> for variable::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,

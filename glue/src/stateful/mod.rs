@@ -63,9 +63,10 @@
 //!   above `database_anchor` arrives first, the actor processes it during handoff.
 //!   Durable metadata is marked in-progress before any database mutation and is
 //!   marked complete at the converged anchor before handoff acknowledgement. A
-//!   crash before completion restarts through the state-sync path, reopening
-//!   the existing sync journals. Subsequent restarts after completion take the
-//!   marshal sync path to ensure a contiguous stream.
+//!   crash before completion restarts through the state-sync path from the
+//!   persisted floor, reopening the existing sync journals. A lagging floor
+//!   sampled during restart cannot move that floor backward. Subsequent restarts
+//!   after completion take the marshal sync path to ensure a contiguous stream.
 //!
 //! # Lazy Recovery
 //!
@@ -94,11 +95,11 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
 use futures::Stream;
-use rand::Rng;
-use std::future::Future;
+use rand_core::Rng;
+use std::{future::Future, sync::Arc};
 
 mod actor;
-pub use actor::{Config, Mailbox, Stateful, SyncPlan};
+pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
 
 pub mod db;
 pub mod probe;
@@ -185,7 +186,7 @@ where
     fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: &mut Self::InputProvider,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
@@ -224,7 +225,7 @@ where
     fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
@@ -255,10 +256,21 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
 
-    /// Observe a block after its database batches have been durably finalized.
+    /// Observe a finalized block after it is reflected in durable state.
     ///
-    /// Called only after [`DatabaseSet::finalize`] succeeds. Implementations
-    /// may use this to run post-finalization maintenance such as pruning.
+    /// Once the database set is ready, the wrapper calls this for every
+    /// finalized block it receives from marshal before releasing that block's
+    /// marshal acknowledgement. Blocks applied through normal processing are
+    /// reported after [`DatabaseSet::finalize`] succeeds. Blocks already
+    /// reflected by startup reconciliation or completed state sync are reported
+    /// without reapplying them.
+    ///
+    /// During peer state sync, finalized blocks observed before sync completes
+    /// are used to update the sync target and are not reported here.
+    ///
+    /// Inherited from marshal's reporter stream, this is an at-least-once notification:
+    /// a crash after this hook runs but before the marshal acknowledgement is
+    /// durable may cause the same block to be reported again after restart.
     ///
     /// # Panics
     ///

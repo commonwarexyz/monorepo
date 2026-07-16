@@ -28,7 +28,11 @@ use crate::{
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{channel::oneshot, sync::AsyncRwLock, Array};
+use commonware_utils::{
+    channel::oneshot,
+    sync::{AsyncRwLock, TracedAsyncRwLock},
+    Array,
+};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Result from a fetch operation.
@@ -258,8 +262,12 @@ macro_rules! impl_resolver {
                 .await
             }
         }
+        impl_resolver!(@locked $db, $op, $val_bound, AsyncRwLock);
+        impl_resolver!(@locked $db, $op, $val_bound, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $val_bound:ident, $lock:ident) => {
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T, S>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<$db<F, E, K, V, H, T, S>>>
         where
             F: Family,
             E: Context,
@@ -298,7 +306,7 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T, S>>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, T, S>>>>
         where
             F: Family,
             E: Context,
@@ -394,8 +402,12 @@ macro_rules! impl_resolver_immutable {
                 .await
             }
         }
+        impl_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, AsyncRwLock);
+        impl_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $val_bound:ident, $key_bound:path, $lock:ident) => {
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T, S>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<$db<F, E, K, V, H, T, S>>>
         where
             F: Family,
             E: Context,
@@ -434,7 +446,7 @@ macro_rules! impl_resolver_immutable {
             }
         }
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T, S>>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, T, S>>>>
         where
             F: Family,
             E: Context,
@@ -519,8 +531,12 @@ macro_rules! impl_resolver_keyless {
                 .await
             }
         }
+        impl_resolver_keyless!(@locked $db, $op, $val_bound, AsyncRwLock);
+        impl_resolver_keyless!(@locked $db, $op, $val_bound, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $val_bound:ident, $lock:ident) => {
 
-        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<$db<F, E, V, H, S>>>
+        impl<F, E, V, H, S> Resolver for Arc<$lock<$db<F, E, V, H, S>>>
         where
             F: Family,
             E: Context,
@@ -556,7 +572,7 @@ macro_rules! impl_resolver_keyless {
             }
         }
 
-        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H, S>>>>
+        impl<F, E, V, H, S> Resolver for Arc<$lock<Option<$db<F, E, V, H, S>>>>
         where
             F: Family,
             E: Context,

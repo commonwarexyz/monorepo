@@ -11,35 +11,32 @@
 //!
 //! # What compact dbs store
 //!
-//! A compact db persists two pieces of state that must always describe the same committed tip:
-//!
-//! 1. the compact Merkle frontier (persisted by [`crate::merkle::compact`]), and
-//! 2. a db-level witness for the last commit (persisted by `qmdb::compact::witness`).
-//!
-//! The witness exists because only the db layer knows how to encode and decode the typed commit
-//! operation. Without it, a compact db could recover its root and continue appending, but it could
-//! not serve compact sync to another node.
+//! A compact db's only persistent state is its witness journal (`qmdb::compact::witness`), whose
+//! entries each snapshot one committed state (commit operation, proof, and frontier pins).
+//! The in-memory compact Merkle ([`crate::merkle::compact`]) is rebuilt from the journal tip on
+//! reopen. Without the witness, a compact db could recover its root and continue appending, but
+//! it could not serve compact sync to another node.
 //!
 //! # When compact state changes
 //!
 //! The servable compact state advances only on durable persistence:
 //!
 //! - [`sync`] verifies the final commit proof and compact frontier before database construction.
-//! - [`Database::from_validated_state`] reconstructs the already-validated state in memory only.
-//! - Compact db-local commits persist the frontier and witness together during `sync`/`commit`.
-//! - `rewind` restores both the frontier and the witness from the previous slot together.
+//! - [`Database::from_validated_state`] reconstructs the already-validated state without
+//!   persisting it.
+//! - Compact db-local commits append one witness entry during `sync`.
+//! - `rewind` restores the frontier and the witness from the target journal entry.
 //!
-//! Unsynced in-memory mutations are therefore intentionally not servable: `current_target()` and
-//! compact-state responses lag behind `apply_batch()` until the next durable sync.
+//! Unsynced in-memory mutations are therefore intentionally not servable: `target()` and
+//! compact-state responses lag behind `apply_batch()` until the db's next sync.
 //!
 //! # Safety and invariants
 //!
 //! The compact path relies on these invariants:
 //!
 //! - the served commit proof must authenticate the final commit at `leaf_count - 1`,
-//! - the frontier pins and witness must move together in the same ping-pong slot,
-//! - reopen and rewind must re-verify the persisted witness against the root restored from that
-//!   slot, and
+//! - reopen and rewind must re-verify the persisted witness against the root recomputed from the
+//!   frontier rebuilt from the same journal entry, and
 //! - reconstructed state must not be persisted until the db recomputes the requested root locally.
 //!
 //! If those invariants are violated by missing or corrupted persisted data, compact db reopen fails
@@ -70,9 +67,15 @@ use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor};
-use commonware_utils::{channel::oneshot, sync::AsyncRwLock, Array};
+use commonware_runtime::{reschedule, Buf, BufMut, Clock, Metrics, Storage, Supervisor};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    sync::{AsyncRwLock, TracedAsyncRwLock},
+    Array,
+};
+use futures::future::{pending, Either};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Compact-sync target for a compact-storage database.
@@ -175,28 +178,12 @@ pub struct State<F: Family, Op, D: Digest> {
 }
 
 /// Compact state that has been validated against a target root.
-///
-/// This carries the original compact state plus the values derived while validating it. Compact
-/// database constructors still build their storage-backed Merkle state and witness cache, but they
-/// should use these values instead of re-deriving them from peer-provided state.
 #[derive(Clone, Debug)]
 pub struct ValidatedState<F: Family, Op, D: Digest> {
     /// The compact state fetched from a peer after validation.
     pub state: State<F, Op, D>,
     /// The target root that `state` was validated against.
     pub root: D,
-    /// The inactivity floor derived from the final commit operation.
-    pub inactivity_floor: Location<F>,
-}
-
-impl<F: Family, Op, D: Digest> ValidatedState<F, Op, D> {
-    const fn new(state: State<F, Op, D>, root: D, inactivity_floor: Location<F>) -> Self {
-        Self {
-            state,
-            root,
-            inactivity_floor,
-        }
-    }
 }
 
 impl<F: Family, Op, D: Digest> Write for State<F, Op, D>
@@ -215,7 +202,7 @@ where
 pub struct FetchResult<F: Family, Op, D: Digest> {
     /// The fetched compact state.
     pub state: State<F, Op, D>,
-    /// Callback used to report whether downstream accepted the state.
+    /// Callback used to report whether downstream validated the state.
     pub callback: Option<oneshot::Sender<bool>>,
 }
 
@@ -356,7 +343,7 @@ pub trait Database: Sized + Send {
 
     /// Persist the compact-initialized state once the caller has verified its root.
     fn persist_compact_state(
-        &self,
+        &mut self,
     ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
@@ -374,6 +361,39 @@ where
     pub target: Target<DB::Family, DB::Digest>,
     /// Database-specific configuration.
     pub db_config: DB::Config,
+    /// Channel for receiving sync target updates. Each update supersedes the
+    /// current target, cancelling any in-flight attempt against it.
+    pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
+    /// Channel that requests sync completion once the current target is reached.
+    ///
+    /// When `None`, sync completes as soon as the target is reached.
+    pub finish_rx: Option<mpsc::Receiver<()>>,
+    /// Channel used to notify an observer once the current target is reached.
+    /// If the receiver is dropped, sync completes with the current database.
+    pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
+}
+
+/// Maximum queued target updates drained per scheduling tick.
+const MAX_UPDATE_DRAIN_PER_TICK: usize = 32;
+
+/// Drain all queued target updates without blocking, returning the newest.
+async fn drain_latest_target<T>(update_rx: &mut mpsc::Receiver<T>) -> Option<T> {
+    let mut latest = None;
+    let mut drained = 0usize;
+    loop {
+        match update_rx.try_recv() {
+            Ok(update) => {
+                latest = Some(update);
+                drained += 1;
+                if drained.is_multiple_of(MAX_UPDATE_DRAIN_PER_TICK) {
+                    reschedule().await;
+                }
+            }
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                return latest;
+            }
+        }
+    }
 }
 
 /// Create/open a compact-storage database and initialize it from compact authenticated state.
@@ -382,14 +402,10 @@ where
 /// authenticates the final commit and frontier state for the target root rather than replaying a
 /// retained operation range.
 ///
-/// Verification order:
-/// 1. Fetch the proposed compact state for `target`.
-/// 2. Verify the final commit proof against `target.root`.
-/// 3. Rebuild the compact frontier in memory and compare its root against `target.root`.
-/// 4. Build the compact db from that already-validated state.
-/// 5. Assert the db root still matches and persist the state.
-///
-/// Any failure leaves the local compact db unopened or unchanged on disk.
+/// Targets received on `update_rx` supersede the current target. When `finish_rx` is `Some(...)`,
+/// reaching a target parks sync until a finish signal or another target update arrives. Each
+/// reached target is reported on `reached_target_tx`.
+#[boxed]
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
@@ -397,23 +413,111 @@ where
     DB: Database,
     R: CompactDbResolver<DB>,
 {
-    let target = config.target;
-    target
-        .validate()
-        .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
+    let Config {
+        context,
+        resolver,
+        mut target,
+        db_config,
+        mut update_rx,
+        mut finish_rx,
+        reached_target_tx,
+    } = config;
+    let metrics = super::Metrics::new(&context);
+    let mut attempt = 0u64;
+    loop {
+        // Prefer the newest queued target before starting an attempt.
+        if let Some(update_rx) = update_rx.as_mut() {
+            if let Some(update) = drain_latest_target(update_rx).await {
+                target = update;
+            }
+        }
+        target
+            .validate()
+            .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
+        metrics.record_target(*target.leaf_count);
 
+        attempt += 1;
+        let update_future = update_rx.as_mut().map_or_else(
+            || Either::Right(pending()),
+            |update_rx| Either::Left(update_rx.recv()),
+        );
+        let db = select! {
+            update = update_future => {
+                let Some(update) = update else {
+                    update_rx = None;
+                    continue;
+                };
+                target = update;
+                continue;
+            },
+            db = attempt_sync(&context, attempt, &resolver, &db_config, &target) => db?,
+        };
+        metrics.record_synced(*target.leaf_count);
+
+        // A target queued while the attempt ran supersedes the result.
+        if let Some(update_rx) = update_rx.as_mut() {
+            if let Some(update) = drain_latest_target(update_rx).await {
+                target = update;
+                continue;
+            }
+        }
+
+        if let Some(reached_target_tx) = reached_target_tx.as_ref() {
+            if reached_target_tx.send(target.clone()).await.is_err() {
+                return Ok(db);
+            }
+        }
+
+        let Some(finish_rx) = finish_rx.as_mut() else {
+            return Ok(db);
+        };
+        let Some(update_rx) = update_rx.as_mut() else {
+            return Ok(db);
+        };
+        select! {
+            _ = finish_rx.recv() => return Ok(db),
+            update = update_rx.recv() => {
+                let Some(update) = update else {
+                    return Ok(db);
+                };
+                target = update;
+            },
+        }
+    }
+}
+
+/// Run one compact sync attempt against `target`.
+///
+/// Verification order:
+/// 1. Fetch the proposed compact state for `target`.
+/// 2. Verify the final commit proof against `target.root`.
+/// 3. Rebuild the compact frontier in memory and compare its root against `target.root`.
+/// 4. Build the compact db from that already-validated state.
+/// 5. Assert the db root still matches and persist the state.
+///
+/// A failure before the final persist leaves on-disk state untouched.
+async fn attempt_sync<DB, R>(
+    context: &DB::Context,
+    attempt: u64,
+    resolver: &R,
+    db_config: &DB::Config,
+    target: &Target<DB::Family, DB::Digest>,
+) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
+where
+    DB: Database,
+    R: CompactDbResolver<DB>,
+{
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
     // responses. Resolver errors and local construction failures remain terminal.
     loop {
-        let FetchResult { state, callback } = config
-            .resolver
+        let FetchResult { state, callback } = resolver
             .get_compact_state(target.clone())
             .await
             .map_err(Error::Resolver)?;
 
         // Validation failures describe a bad compact response. Reject it if the resolver supplied
         // feedback, then fetch another candidate.
-        let validated_state = match validate_compact_state::<DB>(&target, state) {
+        let validated_state = match validate_compact_state::<DB>(target, state) {
             Ok(state) => state,
             Err(err) => {
                 if let Some(callback) = callback {
@@ -427,9 +531,9 @@ where
         // The peer response has already authenticated the final commit and frontier. From here,
         // construction should only fail for local database/storage reasons; a root mismatch is a
         // bug in this path.
-        let db = DB::from_validated_state(
-            config.context.child("compact"),
-            config.db_config.clone(),
+        let mut db = DB::from_validated_state(
+            context.child("compact").with_attribute("attempt", attempt),
+            db_config.clone(),
             validated_state,
         )
         .await
@@ -463,10 +567,8 @@ where
         });
     }
 
-    let hasher = qmdb::hasher::<DB::Hasher>();
     let last_commit_loc = Location::new(*state.leaf_count - 1);
-    if !verify_proof(
-        &hasher,
+    if !verify_proof::<DB::Hasher, _, _>(
         &state.last_commit_proof,
         last_commit_loc,
         std::slice::from_ref(&state.last_commit_op),
@@ -525,14 +627,13 @@ where
         });
     }
 
-    Ok(ValidatedState::new(
+    Ok(ValidatedState {
         state,
-        target.root,
-        inactivity_floor_loc,
-    ))
+        root: target.root,
+    })
 }
 
-async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistFut, Pins, PinsFut>(
+async fn fetch_state_from_full_source<F, Op, D, Current, Hist, HistFut, Pins, PinsFut>(
     target: Target<F, D>,
     current_target: Current,
     historical_proof: Hist,
@@ -541,8 +642,7 @@ async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistF
 where
     F: Family,
     D: Digest,
-    Current: FnOnce() -> CurrentFut,
-    CurrentFut: Future<Output = Target<F, D>>,
+    Current: FnOnce() -> Target<F, D>,
     Hist: FnOnce(Location<F>, Location<F>) -> HistFut,
     HistFut: Future<Output = Result<(Proof<F, D>, Vec<Op>), qmdb::Error<F>>>,
     Pins: FnOnce(Location<F>) -> PinsFut,
@@ -551,7 +651,7 @@ where
     // Full sources do not cache a compact witness. Instead, derive the compact payload on demand
     // from the current tip commit plus the frontier pins at the requested tree size.
     target.validate().map_err(ServeError::InvalidTarget)?;
-    let current = current_target().await;
+    let current = current_target();
     if target.root != current.root || target.leaf_count != current.leaf_count {
         return Err(ServeError::StaleTarget {
             requested: target,
@@ -604,7 +704,7 @@ macro_rules! impl_compact_resolver_keyless {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(self.root(), self.bounds().await.end) },
+                    || Target::new(self.root(), self.bounds().end),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -618,8 +718,12 @@ macro_rules! impl_compact_resolver_keyless {
                 .map(Into::into)
             }
         }
+        impl_compact_resolver_keyless!(@locked $db, $op, $val_bound, AsyncRwLock);
+        impl_compact_resolver_keyless!(@locked $db, $op, $val_bound, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $val_bound:ident, $lock:ident) => {
 
-        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<$db<F, E, V, H, S>>>
+        impl<F, E, V, H, S> Resolver for Arc<$lock<$db<F, E, V, H, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -639,7 +743,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || Target::new(db.root(), db.bounds().end),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -654,7 +758,7 @@ macro_rules! impl_compact_resolver_keyless {
             }
         }
 
-        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H, S>>>>
+        impl<F, E, V, H, S> Resolver for Arc<$lock<Option<$db<F, E, V, H, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -675,7 +779,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || Target::new(db.root(), db.bounds().end),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -718,7 +822,7 @@ macro_rules! impl_compact_resolver_immutable {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(self.root(), self.bounds().await.end) },
+                    || Target::new(self.root(), self.bounds().end),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -732,8 +836,12 @@ macro_rules! impl_compact_resolver_immutable {
                 .map(Into::into)
             }
         }
+        impl_compact_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, AsyncRwLock);
+        impl_compact_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $val_bound:ident, $key_bound:path, $lock:ident) => {
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T, S>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<$db<F, E, K, V, H, T, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -756,7 +864,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || Target::new(db.root(), db.bounds().end),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -771,7 +879,7 @@ macro_rules! impl_compact_resolver_immutable {
             }
         }
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T, S>>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, T, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -795,7 +903,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || Target::new(db.root(), db.bounds().end),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -838,8 +946,12 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 self.compact_state(target).map(Into::into)
             }
         }
+        impl_compact_resolver_compact_keyless!(@locked $db, $op, AsyncRwLock);
+        impl_compact_resolver_compact_keyless!(@locked $db, $op, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $lock:ident) => {
 
-        impl<F, E, V, H, C, S> Resolver for Arc<AsyncRwLock<$db<F, E, V, H, C, S>>>
+        impl<F, E, V, H, C, S> Resolver for Arc<$lock<$db<F, E, V, H, C, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -863,7 +975,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             }
         }
 
-        impl<F, E, V, H, C, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H, C, S>>>>
+        impl<F, E, V, H, C, S> Resolver for Arc<$lock<Option<$db<F, E, V, H, C, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -917,8 +1029,12 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 self.compact_state(target).map(Into::into)
             }
         }
+        impl_compact_resolver_compact_immutable!(@locked $db, $op, AsyncRwLock);
+        impl_compact_resolver_compact_immutable!(@locked $db, $op, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $lock:ident) => {
 
-        impl<F, E, K, V, H, C, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, C, S>>>
+        impl<F, E, K, V, H, C, S> Resolver for Arc<$lock<$db<F, E, K, V, H, C, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -943,7 +1059,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             }
         }
 
-        impl<F, E, K, V, H, C, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, C, S>>>>
+        impl<F, E, K, V, H, C, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, C, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -1039,7 +1155,7 @@ mod tests {
             self.root
         }
 
-        async fn persist_compact_state(&self) -> Result<(), qmdb::Error<Self::Family>> {
+        async fn persist_compact_state(&mut self) -> Result<(), qmdb::Error<Self::Family>> {
             Ok(())
         }
     }
@@ -1174,6 +1290,9 @@ mod tests {
                 },
                 target: target.clone(),
                 db_config: (target.root, constructions.clone()),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();

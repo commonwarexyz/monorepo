@@ -5,6 +5,7 @@
 
 use clap::{Arg, Command};
 use commonware_codec::{EncodeShared, Read};
+use commonware_macros::boxed;
 use commonware_runtime::{
     tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage,
     Supervisor as _,
@@ -22,9 +23,9 @@ use commonware_sync::{
 };
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
-    DurationExt,
+    sys_rng, DurationExt,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr},
@@ -178,6 +179,7 @@ where
 }
 
 /// Repeatedly sync an Any database to the server's state.
+#[boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
@@ -219,6 +221,7 @@ where
 ///
 /// The sync engine targets the ops root (not the canonical root). After sync completes,
 /// the bitmap and grafted MMR are reconstructed from the synced operations.
+#[boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
@@ -360,6 +363,9 @@ where
             resolver,
             target,
             db_config: make_db_config(&context),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
         };
         let database: DB = match compact::sync(sync_config).await {
             Ok(database) => database,
@@ -533,7 +539,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .to_string();
         // Only add suffix if using the default value
         if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
-            let suffix: u64 = rand::thread_rng().gen();
+            let suffix: u64 = sys_rng().next_u64();
             format!("{storage_dir}-{suffix}")
         } else {
             storage_dir
@@ -588,7 +594,7 @@ fn main() {
     executor.start(|context| async move {
         tokio_runtime::telemetry::init(
             context.child("telemetry"),
-            tokio_runtime::telemetry::Logging {
+            tokio_runtime::telemetry::Logs {
                 level: tracing::Level::INFO,
                 json: false,
             },

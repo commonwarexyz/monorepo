@@ -18,12 +18,12 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
 pub struct Actor<
-    E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
+    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
     O: Sink,
     I: Stream,
     C: PublicKey,
@@ -44,12 +44,8 @@ pub struct Actor<
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<
-        E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
-        O: Sink,
-        I: Stream,
-        C: PublicKey,
-    > Actor<E, O, I, C>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sink, I: Stream, C: PublicKey>
+    Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
@@ -124,9 +120,8 @@ impl<
                                 );
 
                                 // Get greeting from tracker (returns None if not eligible)
-                                let Some(greeting) = tracker
-                                    .connect(peer.clone(), peer_mailbox, is_dialer)
-                                    .await
+                                let Some(greeting) =
+                                    tracker.connect(peer.clone(), peer_mailbox, is_dialer).await
                                 else {
                                     debug!(?peer, "peer not eligible");
                                     drop(reservation);

@@ -10,7 +10,8 @@ use crate::{
             Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, Proposed, Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
+        SyncPlan,
     },
 };
 use commonware_broadcast::buffered;
@@ -34,18 +35,14 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     certificate::{mocks::Fixture, ConstantProvider},
-    ed25519,
-    sha256::{self, Digest as Sha256Digest},
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    ed25519, sha256, Digest as _, Digestible, Hasher, Sha256, Signer as _,
 };
-use commonware_formatting::hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, Clock, Handle, Metrics, Quota, Spawner, Storage,
-    Supervisor as _,
+    buffer::paged::CacheRef, deterministic, Buf, BufMut, Handle, Quota, Spawner, Supervisor as _,
 };
 use commonware_storage::{
-    archive::immutable,
+    archive::prunable,
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, full::Config as MmrJournalConfig, Location},
     qmdb::{
@@ -53,22 +50,23 @@ use commonware_storage::{
         sync::Target,
     },
     translator::TwoCap,
+    Context as StorageContext,
 };
 use commonware_utils::{
     non_empty_range,
     range::NonEmptyRange,
-    sync::{AsyncRwLock, Mutex},
+    sync::{Mutex, TracedAsyncRwLock},
     test_rng, NZDuration, NZUsize, NZU64,
 };
 use futures::{Stream, StreamExt};
-use rand::Rng;
+use rand_core::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// The QMDB database type used by the single-db e2e tests.
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-pub(crate) type SingleDatabaseSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
+pub(crate) type SingleDatabaseSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
 
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,7 +168,7 @@ impl App {
     }
 
     /// Execute a block: increment "counter" and write `height -> height_val`.
-    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage>(
+    async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
@@ -189,7 +187,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
+impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -203,7 +201,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, E>> {
@@ -225,7 +223,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
@@ -364,6 +362,7 @@ impl EngineDefinition for SingleDbEngine {
                 write_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         };
 
         // Destructure the 7 channels.
@@ -407,30 +406,24 @@ impl EngineDefinition for SingleDbEngine {
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
         broadcast_engine.start(broadcast_network);
 
-        // Immutable archives
-        let finalizations_by_height = immutable::Archive::init(
+        // Prunable archives so marshal pruning takes effect.
+        let finalizations_by_height = prunable::Archive::init(
             context.child("finalizations_by_height"),
             archive_config(&partition_prefix, "finalizations", page_cache.clone(), ()),
         )
         .await
         .expect("failed to initialize finalizations archive");
 
-        let finalized_blocks = immutable::Archive::init(
+        let finalized_blocks = prunable::Archive::init(
             context.child("finalized_blocks"),
             archive_config(&partition_prefix, "blocks", page_cache.clone(), ()),
         )
         .await
         .expect("failed to initialize blocks archive");
 
-        let genesis_block = {
-            let empty_db_root = Sha256Digest::from(hex!(
-                "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
-            ));
-            Block::genesis(
-                empty_db_root,
-                non_empty_range!(Location::new(0), Location::new(1)),
-            )
-        };
+        let initial_target =
+            <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+        let genesis_block = Block::genesis(initial_target.root, initial_target.range);
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
@@ -513,13 +506,30 @@ impl EngineDefinition for SingleDbEngine {
                 db_config,
                 input_provider: (),
                 marshal: marshal_mailbox.clone(),
-                max_pending_acks,
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
+                prune_config: Some(PruneConfig {
+                    max_pending_acks,
+                    maintenance_interval: NZUsize!(5),
+                    retained_marshal_blocks: 10,
+                    retained_qmdb_blocks: 0,
+                }),
             },
         );
+
+        // Observe the oldest operation QMDB still retains, to assert pruning ran.
+        let prune_observer = stateful_mailbox.clone();
+        let oldest_retained: OldestRetained = Arc::new(move || {
+            let mailbox = prune_observer.clone();
+            Box::pin(async move {
+                let databases = mailbox.subscribe_databases().await;
+                let guard = databases.read().await;
+                let bounds = guard.bounds();
+                *bounds.start
+            })
+        });
 
         // Deferred wrapper
         let deferred = Deferred::new(
@@ -600,6 +610,7 @@ impl EngineDefinition for SingleDbEngine {
                     .copied()
                     .unwrap_or(0),
                 state_sync_height,
+                oldest_retained,
             },
         )
     }

@@ -13,7 +13,7 @@ use commonware_cryptography::{
     Hasher, Signer,
 };
 use commonware_utils::{acknowledgement::Exact, channel::oneshot, Acknowledgement};
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 use tracing::error;
 
 /// A message that can be sent to the [Actor].
@@ -35,7 +35,10 @@ where
     },
 
     /// A new block has been finalized.
-    Finalized { block: Block<H, C, V>, response: A },
+    Finalized {
+        block: Arc<Block<H, C, V>>,
+        response: A,
+    },
 }
 
 impl<H, C, V, A> Policy for Message<H, C, V, A>

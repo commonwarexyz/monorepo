@@ -13,11 +13,11 @@ use commonware_cryptography::{
     ed25519, sha256::Digest as Sha256Digest, Digest as _, Digestible, Signer as _,
 };
 use commonware_runtime::{deterministic, Buf, BufMut};
-use commonware_utils::sync::AsyncRwLock;
+use commonware_utils::sync::TracedAsyncRwLock;
 use futures::Stream;
 use std::{convert::Infallible, sync::Arc};
 
-pub(crate) type TestDatabases = Arc<AsyncRwLock<TestDb>>;
+pub(crate) type TestDatabases = Arc<TracedAsyncRwLock<TestDb>>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -59,11 +59,15 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Config = ();
     type SyncTarget = u64;
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        unreachable!("TestDb is constructed directly in tests")
+    }
+
     async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
         Ok(Self)
     }
 
-    async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(_db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -75,7 +79,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(())
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         0
     }
 
@@ -186,7 +190,7 @@ impl Application<deterministic::Context> for TestApp {
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         _input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -196,7 +200,7 @@ impl Application<deterministic::Context> for TestApp {
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         None
@@ -213,7 +217,7 @@ impl Application<deterministic::Context> for TestApp {
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Arc::new(AsyncRwLock::new(TestDb))
+    Arc::new(TracedAsyncRwLock::new("test", TestDb))
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "actor",
+    "bench",
     "broadcast",
     "codec",
     "codec/macros",
@@ -50,6 +51,8 @@ members = [
 exclude = [
     ".github/dylints/borrowed_child_context",
     ".github/dylints/child_attribute_name_conflict",
+    ".github/dylints/span_name_style",
+    ".github/dylints/tracing_int_fields",
 ]
 resolver = "2"
 
@@ -57,14 +60,14 @@ resolver = "2"
 libraries = [{ path = ".github/dylints/*" }]
 
 [workspace.package]
-version = "2026.5.0"
+version = "2026.7.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(benchmark_tracking)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
 warnings = "deny"
@@ -79,23 +82,27 @@ disallowed_macros = "deny"
 disallowed_methods = "deny"
 undocumented_unsafe_blocks = "deny"
 unused-async = "warn"
+large_futures = "warn"
 # This generates false positives for methods that are correct, and the contortions
 # to avoid triggering this method make the code worse.
 suspicious_op_assign_impl = "allow"
 
 [workspace.dependencies]
+ahash = { version = "0.8.12", default-features = false }
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
-ark-ec = { version = "0.5.0", default-features = false }
-ark-ed-on-bls12-381-bandersnatch = { version = "0.5.0", default-features = false }
-ark-ff = { version = "0.5.0", default-features = false }
-ark-r1cs-std = { version = "0.5.0", default-features = false }
-ark-relations = { version = "0.5.1", default-features = false }
-ark-serialize = { version = "0.5.0", default-features = false }
 aws-config = "1.8.17"
 aws-lc-rs = "1.16.3"
-aws-sdk-ec2 = "1.228.0"
-aws-sdk-s3 = "1.134.0"
+aws-sdk-ec2 = { version = "1.228.0", default-features = false, features = [
+	"default-https-client",
+	"rt-tokio",
+] }
+aws-sdk-s3 = { version = "1.134.0", default-features = false, features = [
+	"default-https-client",
+	"http-1x",
+	"rt-tokio",
+	"sigv4a",
+] }
 axum = "0.8.1"
 blake3 = { version = "1.8.2", default-features = false }
 blst = { version = "0.3.13", default-features = false }
@@ -105,33 +112,35 @@ chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = "0.4.39"
 clap = "4.5.18"
 colored = "3.0.0"
-commonware-actor = { version = "2026.5.0", path = "actor" }
-commonware-broadcast = { version = "2026.5.0", path = "broadcast" }
-commonware-codec = { version = "2026.5.0", path = "codec", default-features = false }
-commonware-codec-macros = { version = "2026.5.0", path = "codec/macros" }
-commonware-coding = { version = "2026.5.0", path = "coding" }
-commonware-collector = { version = "2026.5.0", path = "collector" }
-commonware-conformance = { version = "2026.5.0", path = "conformance" }
-commonware-conformance-macros = { version = "2026.5.0", path = "conformance/macros" }
-commonware-consensus = { version = "2026.5.0", path = "consensus" }
-commonware-cryptography = { version = "2026.5.0", path = "cryptography", default-features = false }
-commonware-deployer = { version = "2026.5.0", path = "deployer", default-features = false }
-commonware-formatting = { version = "2026.5.0", path = "formatting", default-features = false }
-commonware-glue = { version = "2026.5.0", path = "glue" }
-commonware-invariants = { version = "2026.5.0", path = "invariants" }
-commonware-macros = { version = "2026.5.0", path = "macros", default-features = false }
-commonware-macros-impl = { version = "2026.5.0", path = "macros/impl" }
-commonware-math = { version = "2026.5.0", path = "math", default-features = false }
-commonware-p2p = { version = "2026.5.0", path = "p2p" }
-commonware-parallel = { version = "2026.5.0", path = "parallel", default-features = false }
-commonware-resolver = { version = "2026.5.0", path = "resolver" }
-commonware-runtime = { version = "2026.5.0", path = "runtime" }
-commonware-runtime-macros = { version = "2026.5.0", path = "runtime/macros" }
-commonware-storage = { version = "2026.5.0", path = "storage", default-features = false }
-commonware-stream = { version = "2026.5.0", path = "stream" }
-commonware-utils = { version = "2026.5.0", path = "utils", default-features = false }
+commonware-actor = { version = "2026.7.0", path = "actor" }
+commonware-bench = { version = "2026.7.0", path = "bench" }
+commonware-broadcast = { version = "2026.7.0", path = "broadcast" }
+commonware-codec = { version = "2026.7.0", path = "codec", default-features = false }
+commonware-codec-macros = { version = "2026.7.0", path = "codec/macros" }
+commonware-coding = { version = "2026.7.0", path = "coding" }
+commonware-collector = { version = "2026.7.0", path = "collector" }
+commonware-conformance = { version = "2026.7.0", path = "conformance" }
+commonware-conformance-macros = { version = "2026.7.0", path = "conformance/macros" }
+commonware-consensus = { version = "2026.7.0", path = "consensus" }
+commonware-cryptography = { version = "2026.7.0", path = "cryptography", default-features = false }
+commonware-deployer = { version = "2026.7.0", path = "deployer", default-features = false }
+commonware-formatting = { version = "2026.7.0", path = "formatting", default-features = false }
+commonware-glue = { version = "2026.7.0", path = "glue" }
+commonware-invariants = { version = "2026.7.0", path = "invariants" }
+commonware-macros = { version = "2026.7.0", path = "macros", default-features = false }
+commonware-macros-impl = { version = "2026.7.0", path = "macros/impl" }
+commonware-math = { version = "2026.7.0", path = "math", default-features = false }
+commonware-p2p = { version = "2026.7.0", path = "p2p" }
+commonware-parallel = { version = "2026.7.0", path = "parallel", default-features = false }
+commonware-resolver = { version = "2026.7.0", path = "resolver" }
+commonware-runtime = { version = "2026.7.0", path = "runtime" }
+commonware-runtime-macros = { version = "2026.7.0", path = "runtime/macros" }
+commonware-storage = { version = "2026.7.0", path = "storage", default-features = false }
+commonware-stream = { version = "2026.7.0", path = "stream" }
+commonware-utils = { version = "2026.7.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
 const-hex = { version = "1.18.1", default-features = false }
+cpufeatures = "0.2.17"
 crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
@@ -139,15 +148,18 @@ crossbeam-queue = "0.3.12"
 crossbeam-utils = "0.8.21"
 crossterm = "0.29.0"
 ctutils = "0.3.1"
-curve25519-dalek = "4.1.3"
-ecdsa = { version = "0.16.9", default-features = false }
+curve25519-dalek = { version = "5.0.0", features = ["digest"] }
+dashmap = "6.1.0"
+ecdsa = { version = "0.17.0", default-features = false }
 ed25519-consensus = "2.1.0"
-ed25519-zebra = "4.1.0"
 either = "1.13.0"
+fixedbitset = { version = "0.5.7", default-features = false }
 futures = "0.3.31"
 futures-timer = "3.0.3"
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
-governor = "0.10.2"
+glob = "0.3.3"
+governor = "0.10.4"
+gungraun = "0.19.1"
 hashbrown = { version = "0.16.1", default-features = false, features = ["default-hasher"] }
 io-uring = "0.7.4"
 libc = "0.2.172"
@@ -157,49 +169,52 @@ num-bigint = { version = "0.4.6", default-features = false }
 num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
 num-traits = { version = "0.2.19", default-features = false }
-opentelemetry = "0.31.0"
-opentelemetry-otlp = "0.31.0"
-opentelemetry_sdk = "0.31.0"
-p256 = { version = "0.13.2", default-features = false }
+once_cell = { version = "1.21.3", default-features = false }
+opentelemetry = "0.32.0"
+opentelemetry-otlp = "0.32.0"
+opentelemetry_sdk = "0.32.0"
+p256 = { version = "0.14.0", default-features = false }
 parking_lot = "0.12.5"
 paste = "1.0.15"
 pin-project = "1.1.10"
 proc-macro-crate = "3.4.0"
 proc-macro2 = "1.0"
 prometheus-client = "0.24.0"
-proptest = "1.8.0"
+proptest = "1.11.0"
 prost = "0.14.1"
 prost-build = "0.14.1"
 quote = "1.0"
-rand = { version = "0.8.5", default-features = false }
-rand_chacha = { version = "0.3", default-features = false }
-rand_core = "0.6.4"
-rand_distr = "0.4.3"
+rand = { version = "0.10.2", default-features = false }
+rand_chacha = { version = "0.10.0", default-features = false }
+rand_core = { version = "0.10.1", default-features = false }
+rand_distr = "0.6.0"
 ratatui = "0.29.0"
 rayon = { version = "1.10.0", default-features = false }
-reed-solomon-simd = "3.1.0"
-reqwest = "0.12.12"
+reqwest = "0.13.4"
 rstest = "0.26.1"
 serde = "1.0.218"
 serde_json = "1.0.122"
 serde_yaml = "0.9.34"
-sha2 = { version = "0.10.8", default-features = false }
+sha2 = { version = "0.11.0", default-features = false }
+shlex = "1.3.0"
 syn = "2.0.0"
 sysinfo = "0.37.2"
 thiserror = { version = "2.0.12", default-features = false }
 tokio = "1.50.0"
 toml = "0.9.8"
 tracing = "0.1.41"
-tracing-opentelemetry = "0.32.0"
+tracing-opentelemetry = "0.33.0"
 tracing-subscriber = "0.3.19"
 uuid = "1.15.1"
-x25519-dalek = "2.0.1"
+x25519-dalek = "3.0.0"
 zeroize = "1.5.7"
 zstd = "0.13.2"
 
 [profile.bench]
 # Because we enable overflow checks in "release", we should benchmark with them.
 overflow-checks = true
+# Gungraun requires debug symbols for bench targets.
+debug = true
 
 [profile.dev]
 # Although overflow checks are enabled by default in "dev", we explicitly
@@ -283,9 +298,6 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.rand_chacha]
-opt-level = 3
-
-[profile.test.package.reed-solomon-simd]
 opt-level = 3
 
 [profile.test.package.sha2]

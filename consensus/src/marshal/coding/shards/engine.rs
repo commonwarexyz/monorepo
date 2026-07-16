@@ -173,10 +173,11 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     ordered::{Quorum, Set},
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::{
     collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
+    sync::Arc,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -276,7 +277,7 @@ where
     H: Hasher,
 {
     round: Round,
-    block: CodedBlock<B, C, H>,
+    block: Arc<CodedBlock<B, C, H>>,
 }
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
@@ -363,7 +364,7 @@ where
     /// the keyed [`Commitment`].
     #[allow(clippy::type_complexity)]
     block_subscriptions:
-        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<CodedBlock<B, C, H>>>>,
+        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>>,
 
     /// Metrics for the shard engine.
     metrics: ShardMetrics<P>,
@@ -429,13 +430,13 @@ where
             sender,
         );
         let (receiver_service, mut receiver) =
-            WrappedBackgroundReceiver::<_, P, X, _, Shard<C, H>>::new(
+            WrappedBackgroundReceiver::<_, P, X, _, Shard<C, H>, T>::new(
                 self.context.child("shard_ingress"),
                 receiver,
                 self.shard_codec_cfg.clone(),
                 self.blocker.clone(),
                 self.background_channel_capacity,
-                &self.strategy,
+                self.strategy.clone(),
             );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
@@ -508,12 +509,9 @@ where
                         response.send_lossy(block);
                     }
                     Message::GetByDigest { digest, response } => {
-                        let block = self
-                            .reconstructed_blocks
-                            .values()
-                            .find_map(|entry| {
-                                (entry.block.digest() == digest).then_some(entry.block.clone())
-                            });
+                        let block = self.reconstructed_blocks.values().find_map(|entry| {
+                            (entry.block.digest() == digest).then_some(entry.block.clone())
+                        });
                         response.send_lossy(block);
                     }
                     Message::SubscribeAssignedShardVerified {
@@ -640,7 +638,7 @@ where
     fn try_reconstruct(
         &mut self,
         commitment: Commitment,
-    ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
+    ) -> Result<Option<Arc<CodedBlock<B, C, H>>>, Error<C>> {
         if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(entry.block.clone()));
         }
@@ -696,8 +694,7 @@ where
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
-        let block = CodedBlock::new_trusted(inner, commitment);
-        self.cache_block(round, block.clone());
+        let block = self.cache_block(round, Arc::new(CodedBlock::new_trusted(inner, commitment)));
         self.metrics.blocks_reconstructed_total.inc();
         Ok(Some(block))
     }
@@ -883,16 +880,21 @@ where
     }
 
     /// Cache a block and notify all subscribers waiting on it.
-    fn cache_block(&mut self, round: Round, block: CodedBlock<B, C, H>) {
+    fn cache_block(
+        &mut self,
+        round: Round,
+        block: Arc<CodedBlock<B, C, H>>,
+    ) -> Arc<CodedBlock<B, C, H>> {
         let commitment = block.commitment();
         self.reconstructed_blocks.insert(
             commitment,
             ReconstructedBlock {
                 round,
-                block: block.clone(),
+                block: Arc::clone(&block),
             },
         );
-        self.notify_block_subscribers(block);
+        self.notify_block_subscribers(Arc::clone(&block));
+        block
     }
 
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
@@ -903,7 +905,7 @@ where
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         round: Round,
-        mut block: CodedBlock<B, C, H>,
+        block: Arc<CodedBlock<B, C, H>>,
     ) {
         let commitment = block.commitment();
 
@@ -1075,7 +1077,7 @@ where
     fn handle_block_subscription(
         &mut self,
         key: BlockSubscriptionKey<B::Digest>,
-        response: oneshot::Sender<CodedBlock<B, C, H>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     ) {
         let block = match key {
             BlockSubscriptionKey::Commitment(commitment) => self
@@ -1090,7 +1092,7 @@ where
 
         // Answer immediately if we have the block cached.
         if let Some(block) = block {
-            response.send_lossy(block.clone());
+            response.send_lossy(Arc::clone(block));
             return;
         }
 
@@ -1114,7 +1116,7 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
-    fn notify_block_subscribers(&mut self, block: CodedBlock<B, C, H>) {
+    fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         let digest = block.digest();
 
@@ -1124,7 +1126,7 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(block.clone());
+                subscriber.send_lossy(Arc::clone(&block));
             }
         }
 
@@ -1134,7 +1136,7 @@ where
             .remove(&BlockSubscriptionKey::Digest(digest))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(block.clone());
+                subscriber.send_lossy(Arc::clone(&block));
             }
         }
     }
@@ -4477,13 +4479,16 @@ mod tests {
         // - we receive a shard for commitment B (the certifiable one)
         // - commitment A reconstructs first
         // - commitment B must still remain recoverable
+        // - the leader must not be blocked (a leader that crashes after its
+        //   broadcast but before its local persist legitimately re-proposes
+        //   a different block for the same round after restart)
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
 
         fixture.start(
-            |config, context, _oracle, mut peers, _, coding_config| async move {
+            |config, context, oracle, mut peers, _, coding_config| async move {
                 let receiver_idx = 3usize;
                 let receiver_pk = peers[receiver_idx].public_key.clone();
                 let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
@@ -4571,6 +4576,17 @@ mod tests {
                         panic!("certifiable commitment was not recoverable after same-round equivocation");
                     },
                 }
+
+                // Cross-commitment equivocation within a round is tolerated,
+                // so the leader must not be blocked.
+                let blocked_peers = oracle.blocked().await.unwrap();
+                let is_blocked = blocked_peers
+                    .iter()
+                    .any(|(a, b)| a == &receiver_pk && b == &leader);
+                assert!(
+                    !is_blocked,
+                    "leader must not be blocked for same-round cross-commitment shards"
+                );
             },
         );
     }

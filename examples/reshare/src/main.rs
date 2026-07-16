@@ -11,7 +11,7 @@ use commonware_consensus::simplex::elector::{Random, RoundRobin};
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    tokio::{self, telemetry::Logging},
+    tokio::{self, telemetry::Logs},
     Runner, Supervisor as _,
 };
 use commonware_utils::NZU64;
@@ -160,7 +160,7 @@ fn main() {
         // Initialize telemetry.
         tokio::telemetry::init(
             context.child("telemetry"),
-            Logging {
+            Logs {
                 level: app.log_level,
                 json: false,
             },
