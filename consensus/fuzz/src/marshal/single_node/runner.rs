@@ -501,11 +501,13 @@ where
         // repair.
         let mut processed_height: u64 = setup.height.map_or(0, |h| h.get());
         let mut delivery_log: Vec<Height> = Vec::new();
-        // segment_bounds[i]..segment_bounds[i+1] is the i-th segment of
-        // delivery_log. segment_starts[i] is the height the i-th actor
-        // instance is expected to begin delivery at (its restored
-        // processed height + 1).
+        // segment_bounds split the ack-observation log for runner-local
+        // bookkeeping. application_segment_bounds split the append-only
+        // application delivery log for end-of-run delivery invariants.
+        // segment_starts[i] is the height the i-th actor instance is expected
+        // to begin delivery at (its restored processed height + 1).
         let mut segment_bounds: Vec<usize> = vec![0];
+        let mut application_segment_bounds: Vec<usize> = vec![0];
         let mut segment_starts: Vec<u64> = vec![setup.height.map_or(0, |h| h.get()) + 1];
         // For each restart, the heights pending ack at the moment of
         // restart. A later actor instance must redeliver each one.
@@ -1250,6 +1252,7 @@ where
                     }
                     expected_redeliveries.push(pending_real);
                     segment_bounds.push(delivery_log.len());
+                    application_segment_bounds.push(application.delivered().len());
 
                     actor_handle.abort();
                     let _ = actor_handle.await;
@@ -1355,11 +1358,11 @@ where
             "stale ack bookkeeping retained unmatched entries: {stale_to_skip:?}",
         );
         segment_bounds.push(delivery_log.len());
+        application_segment_bounds.push(application.delivered().len());
 
         invariant::check_all::<H>(
             ready_prefix,
-            &delivery_log,
-            &segment_bounds,
+            &application_segment_bounds,
             &segment_starts,
             &expected_redeliveries,
             &application.delivered(),
