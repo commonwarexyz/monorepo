@@ -97,11 +97,18 @@ pub struct NetworkConfig {
     /// Defaults to `true`.
     zero_linger: bool,
 
+    /// Timeout for establishing an outbound TCP connection.
+    ///
+    /// Defaults to 10 seconds.
+    connect_timeout: Duration,
+
     /// Read/write timeout for network operations.
     ///
     /// Bounds the full `Sink::send` and `Stream::recv` calls rather than each
-    /// individual socket syscall. Larger
-    /// batched writes may therefore require a larger timeout.
+    /// individual socket syscall. Larger batched writes may therefore require a
+    /// larger timeout.
+    ///
+    /// Defaults to 60 seconds.
     read_write_timeout: Duration,
 }
 
@@ -110,6 +117,7 @@ impl Default for NetworkConfig {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
+            connect_timeout: Duration::from_secs(10),
             read_write_timeout: Duration::from_secs(60),
         }
     }
@@ -217,6 +225,11 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.network_cfg.connect_timeout = timeout;
+        self
+    }
+    /// See [Config]
     pub const fn with_read_write_timeout(mut self, d: Duration) -> Self {
         self.network_cfg.read_write_timeout = d;
         self
@@ -272,6 +285,10 @@ impl Config {
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
+    }
+    /// See [Config]
+    pub const fn connect_timeout(&self) -> Duration {
+        self.network_cfg.connect_timeout
     }
     /// See [Config]
     pub const fn read_write_timeout(&self) -> Duration {
@@ -436,6 +453,7 @@ impl crate::Runner for Runner {
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     zero_linger: self.cfg.network_cfg.zero_linger,
+                    connect_timeout: self.cfg.network_cfg.connect_timeout,
                     read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
@@ -458,6 +476,7 @@ impl crate::Runner for Runner {
                 );
             } else {
                 let config = TokioNetworkConfig::default()
+                    .with_connect_timeout(self.cfg.network_cfg.connect_timeout)
                     .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
