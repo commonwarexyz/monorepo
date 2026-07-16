@@ -83,6 +83,15 @@
 //! recorded (found by this model; it is the Blob contract's writer
 //! exclusivity applied to the batch as a deferred writer).
 //!
+//! A batch can also stage a blob CREATION ([`Action::BatchCreate`]): the
+//! blob does not exist until apply publishes it, and a creation-bearing
+//! batch publishes and begins its commit in ONE step (the implementation's
+//! `apply_sync` holds the commit lock across both, and plain apply rejects
+//! staged creations). This is load-bearing: table assembly emits an entry
+//! for EVERY live blob, so a published-but-uncommitted creation would be
+//! made durable by any unrelated commit without the batch's other members
+//! (see `mutation_create_commit_detected`).
+//!
 //! # Invariants
 //!
 //! - I1/I2 (durability + snapshot consistency): every recovery adopts a state
@@ -121,7 +130,7 @@ const RESERVED: usize = 2;
 /// Logical cells per block.
 const CELLS_PER_BLOCK: u8 = 2;
 /// Blobs in the workload.
-const BLOBS: u8 = 2;
+const BLOBS: u8 = 3;
 /// Maximum committed cells per blob (bounds the space).
 const MAX_CELLS: u8 = 4;
 
@@ -320,6 +329,9 @@ struct StagedSlot {
     fresh: Vec<usize>,
     /// Published blocks replaced by staged COW (pending-freed at apply).
     replaced: Vec<usize>,
+    /// The slot is a staged CREATION: the blob does not exist until apply
+    /// publishes it (and, per the spec, immediately begins its commit).
+    created: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -367,10 +379,10 @@ struct Volume {
     /// Applied-but-uncommitted atomic groups: disjoint slot sets, merged
     /// when batches share slots, cleared when a commit resolves them.
     groups: Vec<Vec<u8>>,
-    /// Applied-but-uncommitted batches: slot -> Some(pubseq at apply), or
-    /// None once the slot was resolved by removal. Checked at every
-    /// snapshot for the never-split invariant (I6).
-    pending_batches: Vec<BTreeMap<u8, Option<u64>>>,
+    /// Applied-but-uncommitted batches: slot -> Some((pubseq at apply,
+    /// created-by-batch)), or None once the slot was resolved by removal.
+    /// Checked at every snapshot for the never-split invariant (I6).
+    pending_batches: Vec<BTreeMap<u8, Option<(u64, bool)>>>,
 }
 
 /// A pure logical view: per slot, (generation, committed cells). Holes and
@@ -415,6 +427,13 @@ struct Rules {
     /// write the blob's new entry, recycling extents the confirmed table
     /// still references.
     capture_gated_frees: bool,
+    /// Publish a creation-bearing batch and begin its commit atomically
+    /// (the implementation's apply_sync holds the commit lock across both,
+    /// and plain apply rejects staged creations). Disabling lets an unrelated
+    /// commit run between publish and the batch's commit: table assembly
+    /// emits an entry for EVERY live blob, so that commit persists the
+    /// creation while the batch's other members stay uncommitted (I6).
+    atomic_create_commit: bool,
 }
 
 const SPEC: Rules = Rules {
@@ -427,6 +446,7 @@ const SPEC: Rules = Rules {
     respect_groups: true,
     stage_invisible: true,
     capture_gated_frees: true,
+    atomic_create_commit: true,
 };
 
 /// Capture mask covering every blob (group-commit behavior).
@@ -454,7 +474,10 @@ enum Action {
     BatchAppend(u8),
     /// Stage an overwrite of cell 0 into the current batch.
     BatchOverwrite(u8),
-    /// Atomically publish the staged batch.
+    /// Stage the creation of a (removed) blob into the current batch.
+    BatchCreate(u8),
+    /// Atomically publish the staged batch. A creation-bearing batch also
+    /// begins its commit in the same step (the apply_sync requirement).
     BatchApply,
     /// Drop the staged batch without applying it.
     BatchDrop,
@@ -1167,6 +1190,200 @@ fn recovery_states(
     Ok(out)
 }
 
+/// Begin a commit capturing the dirty live blobs in `mask` (the RAM snapshot
+/// phase). Returns `Ok(false)` when the commit would not change the table
+/// (the action is disabled). Callers check `syncs_blocked` and
+/// `in_flight.is_none()` first.
+fn begin_snapshot(
+    s: &mut State,
+    mask: u8,
+    rules: &Rules,
+    trace: &[Action],
+) -> Result<bool, Violation> {
+    // The capture set: requested dirty live blobs, expanded across
+    // applied-batch groups (never-split). Groups holding a removed
+    // blob are captured by every commit — every commit drops the
+    // removed entry, so its siblings' batch parts must land with it.
+    let mut captured: HashSet<u8> = (0..BLOBS)
+        .filter(|&slot| {
+            let b = &s.volume.blobs[slot as usize];
+            mask & (1 << slot) != 0 && b.dirty && b.live
+        })
+        .collect();
+    if rules.respect_groups {
+        for group in &s.volume.groups {
+            let touches = group.iter().any(|&slot| captured.contains(&slot))
+                || group
+                    .iter()
+                    .any(|&slot| !s.volume.blobs[slot as usize].live);
+            if touches {
+                captured.extend(
+                    group
+                        .iter()
+                        .filter(|&&slot| s.volume.blobs[slot as usize].live),
+                );
+            }
+        }
+    }
+    // Enabled only when the commit changes the table: a captured
+    // dirty blob or a pending removal.
+    let removal_pending = s.volume.blobs.iter().any(|b| !b.live && b.dirty);
+    if captured.is_empty() && !removal_pending {
+        return Ok(false);
+    }
+
+    // I6 (never-split): each applied batch must resolve entirely or
+    // not at all. A slot is resolved if this commit captures it, an
+    // earlier commit did (committed_pubseq), a removal made its part
+    // unobservable, or its part is a CREATION (table assembly emits an
+    // entry for every live blob, so any commit makes the creation
+    // durable regardless of capture).
+    for pb in &s.volume.pending_batches {
+        let resolved = |slot: u8, bp: &Option<(u64, bool)>| match bp {
+            None => true,
+            Some((bp, created)) => {
+                *created
+                    || captured.contains(&slot)
+                    || !s.volume.blobs[slot as usize].live
+                    || s.volume.blobs[slot as usize].committed_pubseq >= *bp
+            }
+        };
+        let included = pb.iter().filter(|(&sl, bp)| resolved(sl, bp)).count();
+        if included > 0 && included < pb.len() {
+            return Err(Violation {
+                trace: trace.to_vec(),
+                reason: format!(
+                    "I6: commit captures a partial batch: capture {captured:?}, \
+                     batch {pb:?}"
+                ),
+            });
+        }
+    }
+
+    let seq = s.volume.seq;
+    s.volume.seq += 1;
+    let table_block = s.volume.allocate();
+    let mut table = Table::default();
+    let mut shadows = Vec::new();
+    let mut frees = Vec::new();
+    let mut resolved = Vec::new();
+    if s.volume.last_table != usize::MAX {
+        frees.push(s.volume.last_table);
+    }
+    for slot in 0..BLOBS {
+        if !s.volume.blobs[slot as usize].live {
+            // The entry is dropped by every commit; the removal is
+            // resolved when this commit confirms.
+            if s.volume.blobs[slot as usize].dirty {
+                s.volume.blobs[slot as usize].dirty = false;
+                s.volume.blobs[slot as usize].dirty_blocks.clear();
+                resolved.push((slot, s.volume.blobs[slot as usize].pubseq));
+            }
+            continue;
+        }
+        if !captured.contains(&slot) {
+            // Served verbatim from the last confirmed capture; dirty
+            // state (marks, manifest blocks, content frees) stays
+            // pending for a later capturing commit.
+            let b = &s.volume.blobs[slot as usize];
+            let mut entry = b.committed.clone().unwrap_or(Entry {
+                gen: b.gen,
+                ..Default::default()
+            });
+            // Visibility-leak mutation: the capture reads staged
+            // batch state, vouching for bytes the API never
+            // published (and that no manifest verifies).
+            if !rules.stage_invisible {
+                if let Some(staged) = s.volume.batch.as_ref().and_then(|b| b.get(&slot)) {
+                    entry = Entry {
+                        gen: b.gen,
+                        size: staged.size,
+                        runs: {
+                            let mut runs: BTreeMap<u8, (usize, Cell, Cell)> = b
+                                .runs
+                                .iter()
+                                .map(|(&l, r)| (l, (r.phys, r.cells.0, r.cells.1)))
+                                .collect();
+                            for (&l, sr) in &staged.runs {
+                                runs.insert(l, (sr.run.phys, sr.run.cells.0, sr.run.cells.1));
+                            }
+                            runs
+                        },
+                        shadow: b.shadow,
+                    };
+                }
+            }
+            table.blobs.insert(slot, entry);
+            continue;
+        }
+        let dirty_blocks = std::mem::take(&mut s.volume.blobs[slot as usize].dirty_blocks);
+        let was_dirty = s.volume.blobs[slot as usize].dirty;
+        s.volume.blobs[slot as usize].dirty = false;
+        resolved.push((slot, s.volume.blobs[slot as usize].pubseq));
+        // Content frees of a captured blob resolve when this commit
+        // confirms (the new entry stops referencing them).
+        let pending = std::mem::take(&mut s.volume.blobs[slot as usize].pending_frees);
+        for block in pending {
+            s.volume.pending_free.push((block, seq));
+        }
+        // Freeze everything this snapshot captures. Uncaptured dirty
+        // blobs keep their frozen coverage: their entries reference
+        // only already-frozen extents.
+        let size = s.volume.blobs[slot as usize].size;
+        if rules.freeze_at_snapshot {
+            for (&l, run) in s.volume.blobs[slot as usize].runs.iter_mut() {
+                run.frozen = run.frozen.max(coverage(size, l));
+            }
+        }
+        let b = &s.volume.blobs[slot as usize];
+        let mut entry = Entry {
+            gen: b.gen,
+            size,
+            runs: b
+                .runs
+                .iter()
+                .map(|(&l, r)| (l, (r.phys, r.cells.0, r.cells.1)))
+                .collect(),
+            shadow: b.shadow,
+        };
+        // A dirty blob with an odd, physically-backed tail gets a
+        // fresh shadow; the old one is superseded.
+        let needs_shadow = rules.shadow_tails
+            && was_dirty
+            && size % CELLS_PER_BLOCK == 1
+            && b.runs.contains_key(&(size / CELLS_PER_BLOCK));
+        if needs_shadow {
+            let tail_cell = b.runs[&(size / CELLS_PER_BLOCK)].cells.0;
+            let sh = s.volume.allocate();
+            if let Some(old) = s.volume.blobs[slot as usize].shadow.replace(sh) {
+                frees.push(old);
+            }
+            shadows.push((sh, tail_cell));
+            entry.shadow = Some(sh);
+        }
+        for l in dirty_blocks {
+            if entry.runs.contains_key(&l) {
+                table.manifest.push((slot, l));
+            }
+        }
+        table.blobs.insert(slot, entry);
+    }
+    table.manifest.sort_unstable();
+    let logical = s.volume.selective_logical(&captured);
+    s.attempts.push(logical.clone());
+    s.volume.in_flight = Some(InFlight {
+        seq,
+        phase: Phase::Snapshotted,
+        logical,
+        table,
+        table_block,
+        shadows,
+        frees,
+        resolved,
+    });
+    Ok(true)
+}
+
 /// Apply one action. Returns successor states (a crash fans out), or None if
 /// the action is not enabled in this state.
 fn step(
@@ -1318,8 +1535,11 @@ fn step(
             Ok(Some(vec![s]))
         }
         Action::Recreate(slot) => {
+            if mutations_blocked || batch_staged(&s, slot) {
+                return Ok(None);
+            }
             let b = &mut s.volume.blobs[slot as usize];
-            if mutations_blocked || b.live {
+            if b.live {
                 return Ok(None);
             }
             let gen = b.gen + 1;
@@ -1335,187 +1555,9 @@ fn step(
             if syncs_blocked || s.volume.in_flight.is_some() {
                 return Ok(None);
             }
-            // The capture set: requested dirty live blobs, expanded across
-            // applied-batch groups (never-split). Groups holding a removed
-            // blob are captured by every commit — every commit drops the
-            // removed entry, so its siblings' batch parts must land with it.
-            let mut captured: HashSet<u8> = (0..BLOBS)
-                .filter(|&slot| {
-                    let b = &s.volume.blobs[slot as usize];
-                    mask & (1 << slot) != 0 && b.dirty && b.live
-                })
-                .collect();
-            if rules.respect_groups {
-                for group in &s.volume.groups {
-                    let touches = group.iter().any(|&slot| captured.contains(&slot))
-                        || group
-                            .iter()
-                            .any(|&slot| !s.volume.blobs[slot as usize].live);
-                    if touches {
-                        captured.extend(
-                            group
-                                .iter()
-                                .filter(|&&slot| s.volume.blobs[slot as usize].live),
-                        );
-                    }
-                }
-            }
-            // Enabled only when the commit changes the table: a captured
-            // dirty blob or a pending removal.
-            let removal_pending = s.volume.blobs.iter().any(|b| !b.live && b.dirty);
-            if captured.is_empty() && !removal_pending {
+            if !begin_snapshot(&mut s, mask, rules, trace)? {
                 return Ok(None);
             }
-
-            // I6 (never-split): each applied batch must resolve entirely or
-            // not at all. A slot is resolved if this commit captures it, an
-            // earlier commit did (committed_pubseq), or a removal made its
-            // part unobservable.
-            for pb in &s.volume.pending_batches {
-                let resolved = |slot: u8, bp: &Option<u64>| match bp {
-                    None => true,
-                    Some(bp) => {
-                        captured.contains(&slot)
-                            || !s.volume.blobs[slot as usize].live
-                            || s.volume.blobs[slot as usize].committed_pubseq >= *bp
-                    }
-                };
-                let included = pb.iter().filter(|(&sl, bp)| resolved(sl, bp)).count();
-                if included > 0 && included < pb.len() {
-                    return Err(Violation {
-                        trace: trace.to_vec(),
-                        reason: format!(
-                            "I6: commit captures a partial batch: capture {captured:?}, \
-                             batch {pb:?}"
-                        ),
-                    });
-                }
-            }
-
-            let seq = s.volume.seq;
-            s.volume.seq += 1;
-            let table_block = s.volume.allocate();
-            let mut table = Table::default();
-            let mut shadows = Vec::new();
-            let mut frees = Vec::new();
-            let mut resolved = Vec::new();
-            if s.volume.last_table != usize::MAX {
-                frees.push(s.volume.last_table);
-            }
-            for slot in 0..BLOBS {
-                if !s.volume.blobs[slot as usize].live {
-                    // The entry is dropped by every commit; the removal is
-                    // resolved when this commit confirms.
-                    if s.volume.blobs[slot as usize].dirty {
-                        s.volume.blobs[slot as usize].dirty = false;
-                        s.volume.blobs[slot as usize].dirty_blocks.clear();
-                        resolved.push((slot, s.volume.blobs[slot as usize].pubseq));
-                    }
-                    continue;
-                }
-                if !captured.contains(&slot) {
-                    // Served verbatim from the last confirmed capture; dirty
-                    // state (marks, manifest blocks, content frees) stays
-                    // pending for a later capturing commit.
-                    let b = &s.volume.blobs[slot as usize];
-                    let mut entry = b.committed.clone().unwrap_or(Entry {
-                        gen: b.gen,
-                        ..Default::default()
-                    });
-                    // Visibility-leak mutation: the capture reads staged
-                    // batch state, vouching for bytes the API never
-                    // published (and that no manifest verifies).
-                    if !rules.stage_invisible {
-                        if let Some(staged) = s.volume.batch.as_ref().and_then(|b| b.get(&slot)) {
-                            entry = Entry {
-                                gen: b.gen,
-                                size: staged.size,
-                                runs: {
-                                    let mut runs: BTreeMap<u8, (usize, Cell, Cell)> = b
-                                        .runs
-                                        .iter()
-                                        .map(|(&l, r)| (l, (r.phys, r.cells.0, r.cells.1)))
-                                        .collect();
-                                    for (&l, sr) in &staged.runs {
-                                        runs.insert(
-                                            l,
-                                            (sr.run.phys, sr.run.cells.0, sr.run.cells.1),
-                                        );
-                                    }
-                                    runs
-                                },
-                                shadow: b.shadow,
-                            };
-                        }
-                    }
-                    table.blobs.insert(slot, entry);
-                    continue;
-                }
-                let dirty_blocks = std::mem::take(&mut s.volume.blobs[slot as usize].dirty_blocks);
-                let was_dirty = s.volume.blobs[slot as usize].dirty;
-                s.volume.blobs[slot as usize].dirty = false;
-                resolved.push((slot, s.volume.blobs[slot as usize].pubseq));
-                // Content frees of a captured blob resolve when this commit
-                // confirms (the new entry stops referencing them).
-                let pending = std::mem::take(&mut s.volume.blobs[slot as usize].pending_frees);
-                for block in pending {
-                    s.volume.pending_free.push((block, seq));
-                }
-                // Freeze everything this snapshot captures. Uncaptured dirty
-                // blobs keep their frozen coverage: their entries reference
-                // only already-frozen extents.
-                let size = s.volume.blobs[slot as usize].size;
-                if rules.freeze_at_snapshot {
-                    for (&l, run) in s.volume.blobs[slot as usize].runs.iter_mut() {
-                        run.frozen = run.frozen.max(coverage(size, l));
-                    }
-                }
-                let b = &s.volume.blobs[slot as usize];
-                let mut entry = Entry {
-                    gen: b.gen,
-                    size,
-                    runs: b
-                        .runs
-                        .iter()
-                        .map(|(&l, r)| (l, (r.phys, r.cells.0, r.cells.1)))
-                        .collect(),
-                    shadow: b.shadow,
-                };
-                // A dirty blob with an odd, physically-backed tail gets a
-                // fresh shadow; the old one is superseded.
-                let needs_shadow = rules.shadow_tails
-                    && was_dirty
-                    && size % CELLS_PER_BLOCK == 1
-                    && b.runs.contains_key(&(size / CELLS_PER_BLOCK));
-                if needs_shadow {
-                    let tail_cell = b.runs[&(size / CELLS_PER_BLOCK)].cells.0;
-                    let sh = s.volume.allocate();
-                    if let Some(old) = s.volume.blobs[slot as usize].shadow.replace(sh) {
-                        frees.push(old);
-                    }
-                    shadows.push((sh, tail_cell));
-                    entry.shadow = Some(sh);
-                }
-                for l in dirty_blocks {
-                    if entry.runs.contains_key(&l) {
-                        table.manifest.push((slot, l));
-                    }
-                }
-                table.blobs.insert(slot, entry);
-            }
-            table.manifest.sort_unstable();
-            let logical = s.volume.selective_logical(&captured);
-            s.attempts.push(logical.clone());
-            s.volume.in_flight = Some(InFlight {
-                seq,
-                phase: Phase::Snapshotted,
-                logical,
-                table,
-                table_block,
-                shadows,
-                frees,
-                resolved,
-            });
             Ok(Some(vec![s]))
         }
         Action::WriteMeta => {
@@ -1591,8 +1633,12 @@ fn step(
             let blobs = &s.volume.blobs;
             s.volume.pending_batches.retain(|pb| {
                 pb.iter().any(|(&slot, bp)| {
-                    bp.is_some_and(|bp| {
-                        blobs[slot as usize].live && blobs[slot as usize].committed_pubseq < bp
+                    // A created part is resolved by ANY confirmed commit:
+                    // this table emitted its entry.
+                    bp.is_some_and(|(bp, created)| {
+                        !created
+                            && blobs[slot as usize].live
+                            && blobs[slot as usize].committed_pubseq < bp
                     })
                 })
             });
@@ -1668,6 +1714,7 @@ fn step(
                 runs: BTreeMap::new(),
                 fresh: Vec::new(),
                 replaced: Vec::new(),
+                created: false,
             });
             if staged.size >= MAX_CELLS {
                 return Ok(None);
@@ -1689,6 +1736,7 @@ fn step(
                 runs: BTreeMap::new(),
                 fresh: Vec::new(),
                 replaced: Vec::new(),
+                created: false,
             });
             if staged.size == 0 {
                 return Ok(None);
@@ -1697,10 +1745,37 @@ fn step(
             s.volume.stage_cell(&mut s.disk, slot, 0, val);
             Ok(Some(vec![s]))
         }
+        Action::BatchCreate(slot) => {
+            if mutations_blocked || batch_staged(&s, slot) || s.volume.blobs[slot as usize].live {
+                return Ok(None);
+            }
+            let batch = s.volume.batch.get_or_insert_with(BTreeMap::new);
+            batch.insert(
+                slot,
+                StagedSlot {
+                    size: 0,
+                    runs: BTreeMap::new(),
+                    fresh: Vec::new(),
+                    replaced: Vec::new(),
+                    created: true,
+                },
+            );
+            Ok(Some(vec![s]))
+        }
         Action::BatchApply => {
             // Apply publishes under the commit lock: it never interleaves
             // with an in-flight commit's phases.
             if mutations_blocked || s.volume.in_flight.is_some() {
+                return Ok(None);
+            }
+            // A creation-bearing batch also begins its commit (apply_sync),
+            // which the latch blocks like any other sync.
+            let has_creation = s
+                .volume
+                .batch
+                .as_ref()
+                .is_some_and(|batch| batch.values().any(|staged| staged.created));
+            if has_creation && rules.atomic_create_commit && syncs_blocked {
                 return Ok(None);
             }
             let Some(batch) = s.volume.batch.take() else {
@@ -1709,6 +1784,26 @@ fn step(
             let mut record = BTreeMap::new();
             let mut members = Vec::new();
             for (slot, staged) in batch {
+                if staged.created {
+                    // Publish the creation: a fresh generation, empty,
+                    // dirty. Publish-sequence bookkeeping survives the
+                    // reset for never-split tracking.
+                    let b = &mut s.volume.blobs[slot as usize];
+                    let gen = b.gen + 1;
+                    let pubseq = b.pubseq + 1;
+                    let committed_pubseq = b.committed_pubseq;
+                    *b = BlobState {
+                        live: true,
+                        gen,
+                        dirty: true,
+                        pubseq,
+                        committed_pubseq,
+                        ..Default::default()
+                    };
+                    record.insert(slot, Some((pubseq, true)));
+                    members.push(slot);
+                    continue;
+                }
                 let b = &mut s.volume.blobs[slot as usize];
                 if !b.live {
                     // Removed mid-batch: its staged blocks are unreferenced.
@@ -1723,7 +1818,7 @@ fn step(
                 }
                 b.size = staged.size;
                 b.pubseq += 1;
-                record.insert(slot, Some(b.pubseq));
+                record.insert(slot, Some((b.pubseq, false)));
                 members.push(slot);
                 for block in staged.replaced {
                     s.volume.release_content(slot, block, rules);
@@ -1736,6 +1831,15 @@ fn step(
             if !record.is_empty() {
                 s.volume.merge_group(&members);
                 s.volume.pending_batches.push(record);
+            }
+            // The apply_sync requirement: publish and the batch's commit
+            // snapshot happen under ONE hold of the commit lock, so no
+            // other commit can emit the created blob's entry without
+            // capturing the whole group.
+            if has_creation && rules.atomic_create_commit {
+                let mask = members.iter().fold(0u8, |mask, &slot| mask | (1 << slot));
+                let started = begin_snapshot(&mut s, mask, rules, trace)?;
+                assert!(started, "a creation batch must begin its commit");
             }
             Ok(Some(vec![s]))
         }
@@ -1907,6 +2011,20 @@ mod tests {
         Action::Crash,
     ];
 
+    /// Batch creation workload: a batch recreates a removed blob alongside
+    /// staged writes to another blob, published and committed in one step.
+    const BATCH_CREATE: &[Action] = &[
+        Action::Append(0),
+        Action::Remove(1),
+        Action::BatchAppend(0),
+        Action::BatchCreate(1),
+        Action::BatchApply,
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Snapshot(ALL),
+        Action::Crash,
+    ];
+
     /// Batch overwrite workload: staged COW of committed cells plus batch
     /// drop (staged extents returned through deferred frees).
     const BATCH_COW: &[Action] = &[
@@ -1988,6 +2106,59 @@ mod tests {
     #[test]
     fn spec_holds_batch_remove() {
         assert_holds(BATCH_REMOVE, 8, 2, 10_000);
+    }
+
+    #[test]
+    fn spec_holds_batch_create() {
+        assert_holds(BATCH_CREATE, 8, 2, 1_000);
+    }
+
+    /// A staged creation must publish and begin its commit in one step.
+    /// Without that (modeling an apply that does not sync), an unrelated
+    /// commit emits the created blob's entry — making the creation durable —
+    /// while the batch's staged write to its sibling stays uncommitted: a
+    /// split batch (I6).
+    #[test]
+    fn mutation_create_commit_detected() {
+        let spec_trace: &[Action] = &[
+            // A third blob's dirty append gives the unrelated commit
+            // something to capture.
+            Action::Append(2),
+            // Remove blob 1 so the batch can stage its recreation alongside
+            // blob 0's staged write.
+            Action::Remove(1),
+            Action::BatchAppend(0),
+            Action::BatchCreate(1),
+            // Under SPEC the apply also begins the batch's commit. Finish
+            // it, after which the unrelated commit is harmless.
+            Action::BatchApply,
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Snapshot(0b100),
+            Action::WriteMeta,
+            Action::FsyncOk,
+        ];
+        assert!(
+            run_trace(spec_trace, &SPEC).is_ok(),
+            "spec must allow the trace"
+        );
+
+        let mutated_trace: &[Action] = &[
+            Action::Append(2),
+            Action::Remove(1),
+            Action::BatchAppend(0),
+            Action::BatchCreate(1),
+            Action::BatchApply,
+            Action::Snapshot(0b100),
+        ];
+        let rules = Rules {
+            atomic_create_commit: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(mutated_trace, &rules).is_err(),
+            "checker missed the premature creation"
+        );
     }
 
     /// Disabling the never-split group expansion must let a selective commit

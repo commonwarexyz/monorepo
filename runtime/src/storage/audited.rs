@@ -86,6 +86,20 @@ impl<B: crate::WriteBatch> crate::WriteBatch for Batch<B> {
         self.inner.remove(partition, name);
     }
 
+    async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+        self.auditor.event(b"batch_create", |hasher| {
+            hasher.update(partition.as_bytes());
+            hasher.update(name);
+        });
+        let inner = self.inner.create(partition, name).await?;
+        Ok(Blob {
+            auditor: self.auditor.clone(),
+            partition: partition.into(),
+            name: name.to_vec(),
+            inner,
+        })
+    }
+
     async fn apply(self) -> Result<(), Error> {
         self.auditor.event(b"batch_apply", |_| {});
         self.inner.apply().await

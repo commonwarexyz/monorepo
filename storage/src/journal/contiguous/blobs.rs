@@ -10,7 +10,6 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Blob as RBlob, Buf, Error as RError, IoBufMut, IoBufs,
 };
-use futures::future::try_join_all;
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
@@ -63,6 +62,23 @@ impl<E: Context> Partition<E> {
             .await
             .map_err(Error::Runtime)?;
         Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone())
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Stage the creation of a NEW blob with `batch` and wrap it as a [`Writer`]. The blob
+    /// exists (empty, durable) once the caller applies the batch. Until then the writer must
+    /// not be used.
+    pub(super) async fn open_into(
+        &self,
+        blob: u64,
+        batch: &mut E::Batch,
+    ) -> Result<Writer<E::Blob>, Error> {
+        let name = blob.to_be_bytes();
+        let blob = commonware_runtime::WriteBatch::create(batch, &self.name, &name)
+            .await
+            .map_err(Error::Runtime)?;
+        Writer::new(blob, 0, self.write_buffer.get(), self.page_cache.clone())
             .await
             .map_err(Error::Runtime)
     }
@@ -256,19 +272,21 @@ impl<E: Context> Writable<E> {
         })
     }
 
-    /// Make the tail durable, seal it, and open the next blob as the new tail.
+    /// Seal the tail and open the next blob as the new tail, staging the rollover with
+    /// `batch`: the filled tail's durability and the successor's creation commit together, so
+    /// "blob k+1 exists implies blob k is full and durable" holds atomically by construction.
     ///
-    /// Syncing before the next blob is created upholds the recovery invariant that whenever a
-    /// blob exists, every older blob is full and durable, so recovery can trust blob lengths.
-    pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
-        self.tail.sync().await.map_err(Error::Runtime)?;
+    /// The caller must apply the batch before mutating the journal again (the new tail's
+    /// creation is unpublished until then).
+    pub(super) async fn seal_tail_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
+        self.tail.sync_into(batch).await.map_err(Error::Runtime)?;
         self.metrics.synced.inc();
 
         let next_blob = self
             .tail_blob_index()
             .checked_add(1)
             .ok_or(Error::OffsetOverflow)?;
-        let new_writer = self.partition.open(next_blob).await?;
+        let new_writer = self.partition.open_into(next_blob, batch).await?;
         let old_writer = std::mem::replace(&mut self.tail, new_writer);
         let sealed = old_writer.seal().await.map_err(Error::Runtime)?;
         self.metrics.tracked.inc();
@@ -340,6 +358,25 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
+    /// Rewind the tail to `byte_offset`, staging the truncation with `batch`. Even when no
+    /// bytes drop, the tail's flushed state is staged for membership so the whole batch pins
+    /// it durably.
+    ///
+    /// # Invariants
+    ///
+    /// - `byte_offset <= tail size`
+    pub(super) async fn rewind_tail_into(
+        &mut self,
+        byte_offset: u64,
+        batch: &mut E::Batch,
+    ) -> Result<(), Error> {
+        assert!(byte_offset <= self.tail.size());
+        self.tail
+            .resize_into(byte_offset, batch)
+            .await
+            .map_err(Error::Runtime)
+    }
+
     /// Rewind into a sealed blob: demote it to the writable tail, rewinding to `byte_offset`,
     /// and discarding every newer blob.
     ///
@@ -392,6 +429,54 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
+    /// Rewind into a sealed blob, staging every mutation with `batch`: the target blob's
+    /// truncation (or durability membership) and the removal of every newer blob publish and
+    /// commit together, so no ordering discipline is needed. Removals are staged newest-first
+    /// so the sequential test fallback preserves a contiguous prefix mid-replay.
+    ///
+    /// # Invariants
+    ///
+    /// - `blob < tail_blob_index`
+    pub(super) async fn rewind_into_sealed_into(
+        &mut self,
+        blob: u64,
+        byte_offset: u64,
+        batch: &mut E::Batch,
+    ) -> Result<(), Error> {
+        let idx = blob
+            .checked_sub(self.oldest_blob_index)
+            .map(|idx| idx as usize)
+            .filter(|&idx| idx < self.sealed.len())
+            .ok_or_else(|| Error::Corruption(format!("rewind target blob {blob} not retained")))?;
+
+        // Reopen the target as the writable tail and stage its truncation. The fresh Writer
+        // gets a fresh page-cache id, so pages cached under the sealed handle's id are
+        // unreachable.
+        let mut new_writer = self.partition.open(blob).await?;
+        new_writer
+            .resize_into(byte_offset, batch)
+            .await
+            .map_err(Error::Runtime)?;
+
+        // Stage the removal of every newer blob. Capture the old tail before truncating
+        // `sealed` (which redefines `tail_blob`).
+        let old_tail_blob = self.tail_blob_index();
+        self.tail = new_writer;
+        for newer in ((blob + 1)..=old_tail_blob).rev() {
+            commonware_runtime::WriteBatch::remove(
+                batch,
+                &self.partition.name,
+                Some(&newer.to_be_bytes()),
+            );
+            self.metrics.tracked.dec();
+        }
+
+        // Sealed history now ends below the target, which is the tail.
+        self.sealed.truncate(idx);
+        self.sealed_snapshot = None;
+        Ok(())
+    }
+
     /// Stage the removal of every tracked blob with `batch`.
     ///
     /// Safe with live readers, like pruning: snapshot readers keep their own handles,
@@ -423,20 +508,6 @@ impl<E: Context> Writable<E> {
     /// The context blobs are opened with.
     pub(super) const fn context(&self) -> &E {
         &self.partition.context
-    }
-
-    /// Make every blob from `start_blob` onward durable.
-    pub(super) async fn sync_from(&mut self, start_blob: u64) -> Result<(), Error> {
-        let start_blob = start_blob.max(self.oldest_blob_index);
-        let dirty_sealed = &self.sealed[(start_blob - self.oldest_blob_index) as usize..];
-        try_join_all(dirty_sealed.iter().map(|sealed| sealed.sync()))
-            .await
-            .map_err(Error::Runtime)?;
-        self.metrics.synced.inc_by(dirty_sealed.len() as u64);
-
-        self.tail.sync().await.map_err(Error::Runtime)?;
-        self.metrics.synced.inc();
-        Ok(())
     }
 
     /// Stage the durability of every blob from `start_blob` onward with
@@ -847,6 +918,7 @@ mod tests {
     use super::*;
     use commonware_runtime::{deterministic, IoBufMut, Runner as _, Storage as _};
     use commonware_utils::{NZUsize, NZU16};
+    use futures::future::try_join_all;
 
     fn assert_insufficient_length(result: Result<(IoBufMut, usize), Error>) {
         assert!(matches!(
@@ -860,6 +932,22 @@ mod tests {
         /// (simulates a crash-artifact blob).
         pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
             self.partition.open(blob).await
+        }
+
+        /// Make every blob from `start_blob` onward durable, each with its own commit, used to
+        /// plant data-durable-without-offsets states that production code can no longer
+        /// produce.
+        pub(crate) async fn sync_from(&mut self, start_blob: u64) -> Result<(), Error> {
+            let start_blob = start_blob.max(self.oldest_blob_index);
+            let dirty_sealed = &self.sealed[(start_blob - self.oldest_blob_index) as usize..];
+            try_join_all(dirty_sealed.iter().map(|sealed| sealed.sync()))
+                .await
+                .map_err(Error::Runtime)?;
+            self.metrics.synced.inc_by(dirty_sealed.len() as u64);
+
+            self.tail.sync().await.map_err(Error::Runtime)?;
+            self.metrics.synced.inc();
+            Ok(())
         }
 
         /// Make one blob durable.

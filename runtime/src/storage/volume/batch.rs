@@ -33,13 +33,18 @@
 //! by the model). This is the [`crate::Blob`] contract's writer exclusivity
 //! applied to the batch as a deferred writer.
 //!
-//! # Removals
+//! # Removals and creations
 //!
-//! [`Batch::remove`] stages namespace removals that land atomically with
-//! the publish. Staged removals require [`Batch::apply_sync`]: a removal
-//! published without an immediate commit could be committed by an
-//! unrelated sync while the batch's writes stay uncommitted (an entry drop
-//! is global, so the never-split group cannot defer it).
+//! [`Batch::remove`] stages namespace removals and [`Batch::create`] stages
+//! blob creations. Both land atomically with the publish and require
+//! [`Batch::apply_sync`]. A removal published without an immediate commit
+//! could be committed by an unrelated sync while the batch's writes stay
+//! uncommitted (an entry drop is global, so the never-split group cannot
+//! defer it), and a creation is symmetric: table assembly emits an entry
+//! for every live blob, so a published-but-uncommitted creation would be
+//! persisted by any unrelated commit without the batch's other members.
+//! [`Batch::apply_sync`] publishes and commits under one hold of the commit
+//! lock, so no such commit can interleave.
 
 use super::{
     alloc::Extent,
@@ -48,11 +53,12 @@ use super::{
         chunk_of, stage_write, BlobCore, BlobInner, ChunkState, Ready, RunMeta, StagedBlob,
         StagedRun,
     },
-    unlink, Blob, Shared, BLOCK,
+    unlink, Blob, HandleTracker, Shared, BLOCK,
 };
-use crate::{Blob as _, Error, IoBuf, IoBufs};
+use crate::{Blob as _, Error, IoBuf, IoBufs, DEFAULT_BLOB_VERSION};
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
+use commonware_utils::sync::{AsyncMutex, Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -69,6 +75,13 @@ struct Staged {
     touched_only: bool,
 }
 
+/// A staged blob creation: the namespace entry publishes at apply.
+struct Creation {
+    partition: String,
+    name: Vec<u8>,
+    core: Arc<BlobCore>,
+}
+
 /// A batch of writes spanning multiple blobs of one volume, staged
 /// write-through and published atomically. See the module docs.
 pub struct Batch<S: crate::Storage> {
@@ -76,6 +89,7 @@ pub struct Batch<S: crate::Storage> {
     ready: Arc<Ready<S>>,
     staged: BTreeMap<u64, Staged>,
     removals: Vec<(String, Option<Vec<u8>>)>,
+    creations: Vec<Creation>,
     applied: bool,
 }
 
@@ -86,6 +100,7 @@ impl<S: crate::Storage> Batch<S> {
             ready,
             staged: BTreeMap::new(),
             removals: Vec::new(),
+            creations: Vec::new(),
             applied: false,
         }
     }
@@ -253,6 +268,49 @@ impl<S: crate::Storage> Batch<S> {
             .push((partition.into(), name.map(<[u8]>::to_vec)));
     }
 
+    /// Stage the creation of a NEW (empty) blob, returning a handle to it.
+    /// The name is validated at [`Self::apply_sync`], where the namespace
+    /// entry publishes and commits atomically with the rest of the batch.
+    /// Until then the blob is invisible to opens, scans, and commits, and
+    /// the returned handle must not be used.
+    pub fn create(&mut self, partition: &str, name: &[u8]) -> Result<Blob<S>, Error> {
+        super::super::validate_partition_name(partition)?;
+        self.ready.check_poisoned()?;
+        let (id, core) = {
+            let mut state = self.ready.state.lock();
+            let id = state.next_id;
+            state.next_id += 1;
+            // Register the handle count now so the returned handle's tracker
+            // works whether or not the batch ever applies.
+            *state.handles.entry(id).or_insert(0) += 1;
+            let core = Arc::new(BlobCore {
+                id,
+                partition: partition.into(),
+                name: name.to_vec(),
+                version: DEFAULT_BLOB_VERSION,
+                write_lock: AsyncMutex::new(()),
+                inner: Mutex::new(BlobInner {
+                    committed_entry: None,
+                    ..Default::default()
+                }),
+            });
+            (id, core)
+        };
+        self.creations.push(Creation {
+            partition: partition.into(),
+            name: name.to_vec(),
+            core: core.clone(),
+        });
+        Ok(Blob {
+            ready: self.ready.clone(),
+            core,
+            _tracker: Arc::new(HandleTracker {
+                ready: self.ready.clone(),
+                id,
+            }),
+        })
+    }
+
     /// Publish the staged state: pure RAM, under the commit lock, O(ops).
     /// The touched blobs form one applied-batch group that later commits
     /// capture all-or-nothing. A crash before the group commits discards
@@ -260,11 +318,16 @@ impl<S: crate::Storage> Batch<S> {
     ///
     /// # Panics
     ///
-    /// Panics if removals were staged (they require [`Self::apply_sync`]).
+    /// Panics if removals or creations were staged (they require
+    /// [`Self::apply_sync`]).
     pub async fn apply(mut self) -> Result<(), Error> {
         assert!(
             self.removals.is_empty(),
             "staged removals require apply_sync"
+        );
+        assert!(
+            self.creations.is_empty(),
+            "staged creations require apply_sync"
         );
         self.apply_inner(false).await
     }
@@ -279,7 +342,7 @@ impl<S: crate::Storage> Batch<S> {
         self.ready.check_poisoned()?;
         // Namespace changes serialize on the same lock (and in the same
         // order relative to the commit lock) as open/remove.
-        let _ns = if self.removals.is_empty() {
+        let _ns = if self.removals.is_empty() && self.creations.is_empty() {
             None
         } else {
             Some(self.shared.ns_lock.lock().await)
@@ -287,10 +350,11 @@ impl<S: crate::Storage> Batch<S> {
         let _commit = self.ready.commit_lock.lock().await;
         self.ready.check_poisoned()?;
 
-        // Validate every staged removal against a simulation of the
-        // namespace BEFORE publishing anything: an invalid batch applies
-        // nothing (Drop returns its extents).
-        if !self.removals.is_empty() {
+        // Validate every staged removal and creation against a simulation of
+        // the namespace BEFORE publishing anything: an invalid batch applies
+        // nothing (Drop returns its extents). Removals simulate first, so a
+        // batch may remove a name and recreate it.
+        if !self.removals.is_empty() || !self.creations.is_empty() {
             let state = self.ready.state.lock();
             let mut sim: BTreeMap<&String, BTreeSet<&Vec<u8>>> = state
                 .partitions
@@ -313,12 +377,43 @@ impl<S: crate::Storage> Batch<S> {
                     }
                 }
             }
+            for creation in &self.creations {
+                if !sim
+                    .entry(&creation.partition)
+                    .or_default()
+                    .insert(&creation.name)
+                {
+                    return Err(Error::BlobExists(
+                        creation.partition.clone(),
+                        hex(&creation.name),
+                    ));
+                }
+            }
         }
 
-        // Publish each blob's overlay (blob-id order; the commit lock keeps
-        // any snapshot from observing a partial publish).
+        // Publish staged creations first (their namespace entries must exist
+        // before any staged overlay against them publishes), then each
+        // blob's overlay (blob-id order; the commit lock keeps any snapshot
+        // from observing a partial publish).
         let staged = std::mem::take(&mut self.staged);
-        let mut roots: Vec<u64> = Vec::with_capacity(staged.len());
+        let mut roots: Vec<u64> = Vec::with_capacity(self.creations.len() + staged.len());
+        if !self.creations.is_empty() {
+            let mut state = self.ready.state.lock();
+            for creation in std::mem::take(&mut self.creations) {
+                let id = creation.core.id;
+                if !state.partitions.contains_key(&creation.partition) {
+                    state.partition_epoch += 1;
+                }
+                state
+                    .partitions
+                    .entry(creation.partition)
+                    .or_default()
+                    .insert(creation.name, id);
+                state.open.insert(id, creation.core);
+                state.meta_dirty = true;
+                roots.push(id);
+            }
+        }
         for (id, st) in staged {
             roots.push(id);
             let _guard = st.core.write_lock.lock().await;

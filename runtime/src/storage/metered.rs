@@ -129,6 +129,15 @@ impl<B: crate::WriteBatch> crate::WriteBatch for Batch<B> {
         self.inner.remove(partition, name);
     }
 
+    async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+        let inner = self.inner.create(partition, name).await?;
+        Ok(Blob {
+            inner,
+            partition: partition.into(),
+            metrics: Arc::new(MetricsHandle::new(self.metrics.clone())),
+        })
+    }
+
     async fn apply(self) -> Result<(), Error> {
         self.inner.apply().await
     }

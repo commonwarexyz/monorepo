@@ -748,6 +748,81 @@ async fn test_volume_batch_never_split() {
     }
 }
 
+/// A staged creation is invisible until `apply_sync` and then atomic with
+/// the batch: after a crash, either the created blob exists AND the batch's
+/// write landed, or neither did.
+#[tokio::test]
+async fn test_volume_batch_create_atomic() {
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(b"base"))
+        .await
+        .unwrap();
+    a.sync().await.unwrap();
+
+    // Stage a write plus a creation. Before apply, the creation must be
+    // invisible to the namespace and vanish wholesale across a crash.
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&a, 4, IoBuf::copy_from_slice(b"-more"))
+        .await
+        .unwrap();
+    let created = batch.create("p", b"n").unwrap();
+    assert!(!volume.scan("p").await.unwrap().contains(&b"n".to_vec()));
+    for seed in 0..4u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let names = recovered.scan("p").await.unwrap();
+        assert!(
+            !names.contains(&b"n".to_vec()),
+            "seed {seed}: creation leaked"
+        );
+        let (_, size) = recovered.open("p", b"a").await.unwrap();
+        assert_eq!(size, 4, "seed {seed}: staged write leaked");
+    }
+
+    // Apply: one commit covers the write, the creation, and bytes written
+    // to the created blob afterwards only once THEY are synced.
+    batch.apply_sync().await.unwrap();
+    created
+        .write_at(0, IoBuf::copy_from_slice(b"n-data"))
+        .await
+        .unwrap();
+    for seed in 0..4u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let names = recovered.scan("p").await.unwrap();
+        assert!(names.contains(&b"n".to_vec()), "seed {seed}: creation lost");
+        let (a, a_size) = recovered.open("p", b"a").await.unwrap();
+        assert_eq!(a_size, 9, "seed {seed}: batch write must commit");
+        let got = a.read_at(0, 9).await.unwrap().coalesce();
+        assert_eq!(got.as_ref(), b"base-more", "seed {seed}");
+        let (_, n_size) = recovered.open("p", b"n").await.unwrap();
+        assert_eq!(n_size, 0, "seed {seed}: unsynced post-create write leaked");
+    }
+
+    // A conflicting creation fails the apply loudly, applying nothing.
+    let mut batch = volume.batch().await.unwrap();
+    let _dup = batch.create("p", b"n").unwrap();
+    batch
+        .write_at(&a, 9, IoBuf::copy_from_slice(b"!"))
+        .await
+        .unwrap();
+    match batch.apply_sync().await {
+        Err(Error::BlobExists(partition, _)) => assert_eq!(partition, "p"),
+        other => panic!("expected BlobExists, got {other:?}"),
+    }
+    let (_, size) = volume.open("p", b"a").await.unwrap();
+    assert_eq!(size, 9, "failed batch must publish nothing");
+}
+
 /// A selective commit persists exactly the synced blob: an unrelated dirty
 /// blob's unsynced data vanishes with the crash, and a later sync of that
 /// blob commits everything it accumulated.

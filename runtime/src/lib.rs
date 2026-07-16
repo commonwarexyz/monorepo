@@ -115,6 +115,8 @@ stability_scope!(BETA {
         BlobOpenFailed(String, String, Arc<IoError>),
         #[error("blob missing: {0}/{1}")]
         BlobMissing(String, String),
+        #[error("blob exists: {0}/{1}")]
+        BlobExists(String, String),
         #[error("blob resize failed: {0}/{1} error: {2}")]
         BlobResizeFailed(String, String, Arc<IoError>),
         #[error("blob sync failed: {0}/{1} error: {2}")]
@@ -873,6 +875,24 @@ stability_scope!(BETA {
         /// batch's writes stay uncommitted.
         fn remove(&mut self, partition: &str, name: Option<&[u8]>);
 
+        /// Stage the creation of a NEW (empty) blob, returning a handle to
+        /// it. The creation is validated when the batch is applied: a name
+        /// that already exists fails the apply with [Error::BlobExists].
+        ///
+        /// Staged creations require [Self::apply_sync] for the same reason
+        /// as removals: a created blob's namespace entry enters every
+        /// commit's metadata, so it must land in the batch's own commit or
+        /// an unrelated commit could persist the creation while the batch's
+        /// other members stay uncommitted.
+        ///
+        /// The returned handle must not be read, written, or staged against
+        /// until the batch is applied.
+        fn create(
+            &mut self,
+            partition: &str,
+            name: &[u8],
+        ) -> impl Future<Output = Result<Self::Blob, Error>> + Send;
+
         /// Apply the staged operations atomically WITHOUT making them
         /// durable.
         ///
@@ -881,7 +901,8 @@ stability_scope!(BETA {
         ///
         /// # Panics
         ///
-        /// Panics if removals were staged (they require [Self::apply_sync]).
+        /// Panics if removals or creations were staged (they require
+        /// [Self::apply_sync]).
         fn apply(self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Apply the staged operations and make every staged blob durable:

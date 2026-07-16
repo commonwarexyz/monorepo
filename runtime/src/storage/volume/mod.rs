@@ -50,8 +50,10 @@
 //! them atomically: staging writes through to disk immediately (same I/O
 //! profile as unbatched writes), placed so that no snapshot can capture
 //! staged bytes; [`Batch::apply`] publishes in RAM under the commit lock,
-//! and [`Batch::apply_sync`] additionally commits. A batch dropped without
-//! apply (or lost to a crash) never happened.
+//! and [`Batch::apply_sync`] additionally commits. Batches also stage
+//! namespace changes — [`Batch::remove`] and [`Batch::create`] — which
+//! publish and commit with the batch (both require [`Batch::apply_sync`]).
+//! A batch dropped without apply (or lost to a crash) never happened.
 //!
 //! # Formal model
 //!
@@ -276,6 +278,10 @@ impl<S: crate::Storage> crate::WriteBatch for Batch<S> {
 
     fn remove(&mut self, partition: &str, name: Option<&[u8]>) {
         Self::remove(self, partition, name);
+    }
+
+    async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Blob<S>, Error> {
+        Self::create(self, partition, name)
     }
 
     async fn apply(self) -> Result<(), Error> {

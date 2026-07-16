@@ -413,11 +413,12 @@ where
     /// memory use: each batch's items are buffered in memory so their leaves can be hashed
     /// across the strategy.
     ///
-    /// Divergence is reachable even though [Self::sync] commits both sides in ONE batch: each
-    /// inner journal still syncs its own filled blobs at blob rollovers (either side can land
-    /// ahead across a crash), `new` rewinds the item journal past uncommitted items before
-    /// aligning, and the state-sync paths ([Self::from_components]) legitimately construct
-    /// pairs at divergent sizes.
+    /// Divergence is reachable even though [Self::sync] commits both sides in ONE batch: a
+    /// blob rollover commits atomically WITHIN each inner journal but independently of the
+    /// other journal (its batch is built deep inside that journal's append path and does not
+    /// capture the other's blobs), so either side can land ahead across a crash. `new` also
+    /// rewinds the item journal past uncommitted items before aligning, and the state-sync
+    /// paths ([Self::from_components]) legitimately construct pairs at divergent sizes.
     async fn align(
         merkle: &mut Merkle<F, E, H::Digest, S>,
         journal: &C,

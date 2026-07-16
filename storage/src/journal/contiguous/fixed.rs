@@ -52,11 +52,12 @@
 //! # Recovery
 //!
 //! The storage backend restores every blob to exactly its last-synced state after a crash, so
-//! recovery is verification, not repair. A filled blob is synced before the next blob is
-//! created (see `Writable::seal_tail`), so whenever a blob exists, every older blob is full and
-//! durable. Recovery walks the blob range from oldest to newest and checks each blob's byte
-//! length: every blob must hold whole items, every non-newest blob must be exactly full, and
-//! the newest blob (the append frontier) may be short. Any violation is corruption.
+//! recovery is verification, not repair. A rollover commits the filled blob's durability and
+//! the next blob's creation in ONE batch (see `Writable::seal_tail_into`), so "a blob exists"
+//! implies "every older blob is full and durable" atomically, by construction. Recovery walks
+//! the blob range from oldest to newest and checks each blob's byte length: every blob must
+//! hold whole items, every non-newest blob must be exactly full, and the newest blob (the
+//! append frontier) may be short. Any violation is corruption.
 //!
 //! # Consistency
 //!
@@ -465,10 +466,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Verify blob lengths from oldest to newest and return the recovered size.
     ///
-    /// A filled blob is synced before the next blob is created, and the backend restores every
-    /// blob to its last-synced state, so lengths are checkable facts: every blob must hold
-    /// whole items, every non-newest blob must be exactly full (relative to its capacity), and
-    /// the newest blob may be short. Any violation is corruption.
+    /// A rollover commits a filled blob's durability atomically with its successor's creation,
+    /// and the backend restores every blob to its last-synced state, so lengths are checkable
+    /// facts: every blob must hold whole items, every non-newest blob must be exactly full
+    /// (relative to its capacity), and the newest blob may be short. Any violation is
+    /// corruption.
     fn verify_blob_lengths(
         pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
@@ -692,6 +694,30 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     // Write pre-encoded items; shared by all append paths. Records no call metrics.
     async fn write_encoded(&mut self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+        self.write_encoded_inner(prepared, None).await
+    }
+
+    /// Append items, staging any blob rollover with the caller's `batch` instead of committing
+    /// it: the filled tail's durability, its successor's creation, and everything else the
+    /// caller stages land in ONE commit. The caller must apply the batch before any further
+    /// append, so the items must end exactly at (or before) the tail blob's boundary.
+    pub(in crate::journal::contiguous) async fn append_many_into<'a>(
+        &'a mut self,
+        items: Many<'a, A>,
+        batch: &mut E::Batch,
+    ) -> Result<u64, Error> {
+        let prepared = self.prepare_append(items);
+        self.write_encoded_inner(prepared, Some(batch)).await
+    }
+
+    // Write pre-encoded items. A rollover stages the filled tail's durability and its
+    // successor's creation in one batch: `rollover` when provided (the caller applies it),
+    // otherwise a batch built and committed here.
+    async fn write_encoded_inner(
+        &mut self,
+        prepared: PreparedAppend<A>,
+        mut rollover: Option<&mut E::Batch>,
+    ) -> Result<u64, Error> {
         let items_buf = prepared.buf;
         let items_count = items_buf.len() / A::SIZE;
         if items_count == 0 {
@@ -728,10 +754,27 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             self.bounds.end = new_size;
             written += batch_count;
 
-            // Seal the just-filled tail (fsyncing it) and open the next blob as the new tail.
-            // Every blob below the new tail is now durable, so dirty tracking restarts there.
+            // Roll over the just-filled tail: its durability and the successor's creation are
+            // ONE commit, so every blob below the new tail is durable once that commit lands
+            // and dirty tracking restarts there.
             if new_size.is_multiple_of(self.items_per_blob.get()) {
-                self.blobs.seal_tail().await?;
+                match rollover.as_deref_mut() {
+                    Some(batch) => {
+                        self.blobs.seal_tail_into(batch).await?;
+                        // The caller applies the batch. Until then the new tail's creation is
+                        // unpublished, so no further items may be written.
+                        assert!(
+                            written == items_count,
+                            "a staged rollover must end the append"
+                        );
+                    }
+                    None => {
+                        let mut batch =
+                            self.blobs.context().batch().await.map_err(Error::Runtime)?;
+                        self.blobs.seal_tail_into(&mut batch).await?;
+                        batch.apply_sync().await.map_err(Error::Runtime)?;
+                    }
+                }
                 self.dirty_from_blob = Some(self.blobs.tail_blob_index());
             }
         }
@@ -775,6 +818,49 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             self.blobs.rewind_tail(byte_offset).await?;
         } else {
             self.blobs.rewind_into_sealed(blob, byte_offset).await?;
+        }
+
+        self.bounds.end = size;
+        self.mark_dirty_from(blob);
+        self.metrics.update(
+            self.bounds.end,
+            self.bounds.start,
+            self.items_per_blob.get(),
+        );
+
+        Ok(())
+    }
+
+    /// Rewind the journal to `size`, staging every mutation (the rewound blob's truncation and
+    /// the removal of newer blobs) with `batch`: the whole rewind publishes and becomes durable
+    /// when the caller applies the batch, atomically with everything else it stages.
+    ///
+    /// Validation errors match [Self::rewind].
+    pub(in crate::journal::contiguous) async fn rewind_into(
+        &mut self,
+        size: u64,
+        batch: &mut E::Batch,
+    ) -> Result<(), Error> {
+        match size.cmp(&self.bounds.end) {
+            std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
+            std::cmp::Ordering::Equal => return Ok(()),
+            std::cmp::Ordering::Less => {}
+        }
+
+        if size < self.bounds.start {
+            return Err(Error::ItemPruned(size));
+        }
+
+        let blob = super::position_to_blob(size, self.items_per_blob.get());
+        let pos_in_blob = size - first_in_blob(self.bounds.start, blob, self.items_per_blob.get())?;
+        let byte_offset = Self::items_to_bytes(pos_in_blob)?;
+
+        if blob == self.blobs.tail_blob_index() {
+            self.blobs.rewind_tail_into(byte_offset, batch).await?;
+        } else {
+            self.blobs
+                .rewind_into_sealed_into(blob, byte_offset, batch)
+                .await?;
         }
 
         self.bounds.end = size;

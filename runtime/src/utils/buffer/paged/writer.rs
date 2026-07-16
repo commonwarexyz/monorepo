@@ -579,6 +579,41 @@ impl<B: Blob> Writer<B> {
         // Truncate the blob to exactly the new logical size.
         self.sync_state.resize(&self.blob, size).await?;
 
+        self.reposition_tip(size).await
+    }
+
+    /// Shrink the blob to `size` logical bytes, staging the truncation with `batch` instead of
+    /// performing it: the shrink publishes (and becomes durable) when the caller applies the
+    /// batch, atomically with everything else the batch stages. Buffered bytes are flushed
+    /// (unsynced) first so the staged truncation covers every retained byte. When `size` equals
+    /// the current size, this degrades to [`Self::sync_into`] (durability membership only).
+    ///
+    /// Once the resize is staged the batch is this blob's ONE writer: the caller must apply the
+    /// batch before mutating this writer again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` exceeds the current logical size.
+    pub async fn resize_into<T: crate::WriteBatch<Blob = B>>(
+        &mut self,
+        size: u64,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        let current = self.buffer.size();
+        assert!(size <= current, "resize_into cannot grow the blob");
+        if size == current {
+            return self.sync_into(batch).await;
+        }
+
+        self.sync_state.wait_for_pending().await?;
+        self.flush_internal(true, false).await?;
+        batch.resize(&self.blob, size).await?;
+
+        self.reposition_tip(size).await
+    }
+
+    /// Reposition the writer's read state after a shrink to `size`.
+    async fn reposition_tip(&mut self, size: u64) -> Result<(), Error> {
         // Evict cached pages at or beyond the new full-page boundary. The page at that boundary
         // (if partial) is now owned by the tip buffer, and anything above is beyond the new
         // size. Leaving their pre-resize contents in the cache lets `try_read_sync_into` (whose

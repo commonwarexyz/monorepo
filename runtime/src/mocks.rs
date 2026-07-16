@@ -555,6 +555,25 @@ impl<S: Storage + Clone> crate::WriteBatch for SequentialBatch<S> {
         ));
     }
 
+    /// The fallback creates the blob immediately (durably, by the
+    /// [`Storage::open`] contract) instead of staging it: exactly the
+    /// pre-batch behavior. The create-exclusive contract is still enforced,
+    /// eagerly instead of at apply.
+    async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+        match self.storage.scan(partition).await {
+            Ok(names) if names.iter().any(|existing| existing == name) => {
+                return Err(Error::BlobExists(
+                    partition.into(),
+                    commonware_formatting::hex(name),
+                ));
+            }
+            Ok(_) | Err(Error::PartitionMissing(_)) => {}
+            Err(err) => return Err(err),
+        }
+        let (blob, _) = self.storage.open(partition, name).await?;
+        Ok(blob)
+    }
+
     async fn apply(self) -> Result<(), Error> {
         self.apply_inner(false).await
     }

@@ -3,10 +3,10 @@
 //! Fuzz target contiguous journal crash recovery.
 //!
 //! A journal is an append-only log of items. Appends are buffered; `sync` pushes data
-//! to storage (and filled blobs sync opportunistically at rollover), and an unclean shutdown
+//! to storage (and every filled blob commits atomically at rollover), and an unclean shutdown
 //! loses anything not yet durable. The backend restores every blob to exactly its last-synced
-//! state, so on the next `init()` the journal recovers a consistent state by verification and
-//! bounded repair. This target tests recovering after storage faults.
+//! state, so on the next `init()` the journal recovers a consistent state by verification.
+//! This target tests recovering after storage faults.
 //!
 //! # Cycles
 //!
@@ -231,10 +231,15 @@ struct Expected {
 }
 
 impl Expected {
-    /// Successful append: not durable until the next sync, so only raise the ceiling.
-    fn appended(&mut self, item: Item) {
+    /// Successful append: not durable until the next sync, EXCEPT filled blobs — every blob
+    /// rollover commits the filled blob (and, for the variable journal, its offsets entries)
+    /// atomically before the append returns, so the durable floor rises to the last blob
+    /// boundary.
+    fn appended(&mut self, item: Item, items_per_section: u64) {
         self.values.push(item);
-        self.max_size = self.max_size.max(self.values.len() as u64);
+        let size = self.values.len() as u64;
+        self.max_size = self.max_size.max(size);
+        self.durable_len = self.durable_len.max(size - size % items_per_section);
     }
 
     /// Failed append: the item may have partially persisted, so only raise the ceiling.
@@ -610,7 +615,7 @@ async fn run_ops<J: FuzzJournal>(
                 match journal.append(item.clone()).await {
                     Ok(pos) => {
                         assert_eq!(pos, size_before, "append returned non-contiguous position");
-                        expected.appended(item);
+                        expected.appended(item, params.items_per_section);
                         true
                     }
                     Err(_) => {
@@ -846,7 +851,7 @@ where
             .await
             .expect("final append");
         assert_eq!(pos, size);
-        expected.appended(sentinel.clone());
+        expected.appended(sentinel.clone(), params.items_per_section);
         journal.sync().await.expect("final sync");
         expected.synced(journal.bounds());
         drop(journal);
