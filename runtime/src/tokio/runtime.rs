@@ -158,7 +158,7 @@ pub struct Config {
     /// Base directory for all storage operations.
     storage_directory: PathBuf,
 
-    /// Configuration for the [crate::storage::volume] that serves all
+    /// Configuration for the the storage volume that serves all
     /// storage. The volume file lives in the storage directory (at the
     /// configured partition and name), and grows in
     /// [VolumeConfig::growth_quantum] steps (64 MiB by default, to avoid

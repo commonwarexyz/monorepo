@@ -239,7 +239,7 @@ pub struct Config {
     /// Defaults to no faults being injected.
     storage_fault_cfg: FaultConfig,
 
-    /// Configuration for the [crate::storage::volume] that serves all
+    /// Configuration for the the storage volume that serves all
     /// storage (over the in-memory backend). Fault injection applies to the
     /// volume's inner file operations, and simulated crashes reconstruct
     /// the volume so its recovery protocol runs exactly as it would in

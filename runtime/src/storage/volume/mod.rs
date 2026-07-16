@@ -47,7 +47,7 @@
 //! frees, sacred superblock slot, shadowed frontier chunks, content-bound
 //! tables, poison latch, selective capture, and batch staging/publish with
 //! the never-split rule) is specified and exhaustively model-checked under
-//! crash and power loss in [`model`]; the implementation follows the
+//! crash and power loss in the `model` module (compiled with tests); the implementation follows the
 //! model's decisions exactly. Read the model docs before changing anything
 //! here.
 

@@ -1,6 +1,6 @@
 //! Volume tests: the generic storage contract suite, plus a torn-write
 //! power-loss harness that exercises the recovery protocol end-to-end (the
-//! runtime-level counterpart of the exhaustive model in [`super::model`]).
+//! runtime-level counterpart of the exhaustive `model` module).
 
 use super::{Config, Storage as Volume, BLOCK};
 use crate::{

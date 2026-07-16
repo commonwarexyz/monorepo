@@ -1,7 +1,7 @@
 //! Recovery: adopt the newest verifiable commit, repair, rebuild state.
 //!
 //! Runs once, lazily, before the first storage operation (single-flight,
-//! never re-entering the commit path). The exhaustive model in [`super::model`]
+//! never re-entering the commit path). The exhaustive `model` module (compiled with tests)
 //! is the specification for every decision here:
 //!
 //! - Candidate = valid superblock slot with the higher seq. Its table must

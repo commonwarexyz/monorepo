@@ -25,7 +25,7 @@
 //!
 //! Flushes write only bytes that have not yet reached the blob, so the blob is only ever
 //! extended: previously written bytes are never rewritten. Integrity and crash-atomicity are
-//! the storage backend's responsibility (see [`crate::storage::volume`]), so [Writer::new]
+//! the storage backend's responsibility (see the storage volume), so [Writer::new]
 //! trusts the blob's size as the logical size: a trailing partial page is just logical bytes
 //! and seeds the write buffer so appends continue within it.
 //!

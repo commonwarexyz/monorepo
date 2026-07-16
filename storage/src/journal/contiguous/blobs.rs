@@ -394,7 +394,7 @@ impl<E: Context> Writable<E> {
 
     /// Stage the removal of every tracked blob with `batch`.
     ///
-    /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles,
+    /// Safe with live readers, like pruning: snapshot readers keep their own handles,
     /// which the runtime's read-after-remove contract keeps valid.
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn stage_clear(&self, batch: &mut E::Batch) {

@@ -1,7 +1,7 @@
 //! A small durable record holding the pruning boundary and its pinned nodes.
 //!
 //! Pruning removes journal blobs holding nodes that root and proof generation still need. The
-//! [Pins] record preserves exactly that set: the pruning boundary and the digests of
+//! `Pins` record preserves exactly that set: the pruning boundary and the digests of
 //! [`Family::nodes_to_pin`] at that boundary. It is written durably BEFORE the journal prunes
 //! to the boundary, so a crash between the two leaves the record ahead of the journal — a
 //! state init reconciles by finishing the prune (the reverse order could discard digests

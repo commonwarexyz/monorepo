@@ -600,7 +600,7 @@ stability_scope!(BETA {
     /// # Crash contract
     ///
     /// Every runtime serves storage through the
-    /// [volume](crate::storage::volume), whose atomic commit is THE storage
+    /// the storage volume, whose atomic commit is THE storage
     /// contract structures may build on: after a crash, each blob reads back
     /// exactly the state captured by one commit (its last successful
     /// [`Blob::sync`], or a newer fully-landed commit), an applied [Batchable]
@@ -780,7 +780,7 @@ stability_scope!(BETA {
     /// apply them as one atomic unit.
     ///
     /// Every runtime serves batches through the
-    /// [volume](crate::storage::volume) backend, which applies and commits a
+    /// the storage volume backend, which applies and commits a
     /// batch ATOMICALLY: after a crash, either every staged operation is
     /// visible or none is, and [WriteBatch::apply_sync] is one commit with
     /// one fsync. Structures can therefore treat the crash windows between

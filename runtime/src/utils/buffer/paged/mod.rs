@@ -10,7 +10,7 @@
 //!
 //! All pages in a blob are full except for the very last page, which can be full or partial. A
 //! partial last page occupies exactly its logical bytes on the blob. Integrity and
-//! crash-atomicity are the storage backend's responsibility (see [`crate::storage::volume`]),
+//! crash-atomicity are the storage backend's responsibility (see the storage volume),
 //! so this layer performs no checksumming and never rewrites previously written bytes: appends
 //! reach the blob as physically append-only writes.
 

@@ -811,7 +811,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(true)
     }
 
-    /// Stage [Self::prune] with `batch`: the caller applies the batch. Returns true if a prune
+    /// Stage a prune with `batch`: the caller applies the batch. Returns true if a prune
     /// was staged.
     pub(super) async fn prune_into(
         &mut self,

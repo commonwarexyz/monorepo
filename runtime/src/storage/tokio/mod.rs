@@ -43,7 +43,7 @@ pub struct Config {
     pub maximum_buffer_size: usize,
     /// Bypass the kernel page cache for blob data I/O.
     ///
-    /// Intended for the volume file ([`crate::storage::volume`]), which
+    /// Intended for the volume file (the storage volume), which
     /// issues only whole-block, block-aligned I/O and keeps its own cache
     /// above this backend. Platform behavior is asymmetric:
     ///

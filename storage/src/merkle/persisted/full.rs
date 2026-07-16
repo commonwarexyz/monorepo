@@ -1,6 +1,6 @@
 //! A Merkle structure backed by a fixed-item-length journal.
 //!
-//! A [crate::journal] is used to store all unpruned nodes, and a small [Pins] record preserves
+//! A [crate::journal] is used to store all unpruned nodes, and a small `Pins` record preserves
 //! digests required for root and proof generation that would have otherwise been pruned.
 //!
 //! This module is generic over [`Family`], so it works for both MMR and MMB.
@@ -99,7 +99,7 @@ pub struct Config<S: Strategy> {
     /// the nodes.
     pub journal_partition: String,
 
-    /// The name of the `commonware-runtime::Storage` storage partition used for the [Pins]
+    /// The name of the `commonware-runtime::Storage` storage partition used for the `Pins`
     /// record containing pruned nodes that are still required to calculate the root and
     /// generate proofs.
     pub metadata_partition: String,
