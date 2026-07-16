@@ -1,152 +1,191 @@
 //! A small durable record that recovery reads before trusting anything on disk.
 //!
-//! A journal's contents are mostly recovered from its blobs: blob indexes give positions and
-//! blob lengths give item counts. Recovery walks the blobs from oldest to newest and stops at
-//! the first one that is missing or too short, since everything after a gap is unreachable.
-//! The [Checkpoint] records the three facts that blob state alone cannot provide:
+//! A journal's contents are recovered from its blobs: blob indexes give positions and blob
+//! lengths give item counts. The [Checkpoint] records the two facts that blob state alone
+//! cannot provide:
 //!
 //! - The pruning boundary, when it falls mid-blob (from
 //!   [Journal::init_at_size](super::fixed::Journal::init_at_size)): recovery needs the exact
 //!   position where the oldest blob's items begin.
-//! - The recovery watermark: a floor on the journal size that has been durably recorded. Items
-//!   below the watermark must survive a crash; items above it may be replayed, discarded, or (after
-//!   an in-place rewind followed by new appends) decode to a value from neither the pre- nor
-//!   post-rewind history.
 //! - The clear target, while a clear/reset is in progress: the target is recorded before any
 //!   blob is deleted, so a crash mid-clear is finished on reopen instead of being misread as
 //!   corruption.
+//!
+//! # Format
+//!
+//! The record is a single codec-encoded blob (`{partition_prefix}-metadata`, blob name
+//! `checkpoint`), rewritten wholesale on every change and then synced. The storage backend's
+//! per-blob atomic sync makes each rewrite an old-record-or-new-record transition, so no
+//! versioning or redundancy is needed. An empty blob is a fresh checkpoint. Any other content
+//! must decode exactly or the checkpoint is corrupt.
 //!
 //! # Invariants
 //!
 //! [Checkpoint] is a passive store; the journal upholds these by ordering its calls:
 //!
-//! - An entry advances only after the blob state it describes is durable.
-//! - An entry is lowered before blob state moves backward (rewind, clear).
-//!
-//! Together they keep the checkpoint a safe under-estimate of what is on disk: recovery may find
-//! more durable data than the checkpoint claims, never less.
+//! - The boundary advances only after the blob state it describes is durable.
+//! - A clear target is recorded before any blob is deleted.
 
-use crate::{
-    journal::Error,
-    metadata::{Config as MetadataConfig, Metadata},
-    Context,
-};
-use commonware_utils::sequence::VecU64;
+use crate::{journal::Error, Context};
+use commonware_codec::{DecodeExt as _, Encode as _, EncodeSize, Read, ReadExt as _, Write};
+use commonware_runtime::{Blob as _, Buf, BufMut};
 
-/// Key for the mid-blob pruning boundary. Absent when the boundary is blob-aligned (it is then
-/// derived from the oldest blob).
-const PRUNING_BOUNDARY_KEY: u64 = 1;
+/// Name of the blob holding the encoded record.
+const BLOB_NAME: &[u8] = b"checkpoint";
 
-/// Key for the target of an in-progress clear.
-const CLEAR_TARGET_KEY: u64 = 2;
+/// The durable contents of a checkpoint.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+struct Record {
+    /// The mid-blob pruning boundary, if any. Absent when the boundary is blob-aligned (it is
+    /// then derived from the oldest blob).
+    boundary_hint: Option<u64>,
 
-/// Key for the recovery watermark.
-const RECOVERY_WATERMARK_KEY: u64 = 3;
+    /// The target of an in-progress clear, if one was staged.
+    clear_target: Option<u64>,
+}
+
+impl Write for Record {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.boundary_hint.write(buf);
+        self.clear_target.write(buf);
+    }
+}
+
+impl EncodeSize for Record {
+    fn encode_size(&self) -> usize {
+        self.boundary_hint.encode_size() + self.clear_target.encode_size()
+    }
+}
+
+impl Read for Record {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            boundary_hint: Option::<u64>::read(buf)?,
+            clear_target: Option::<u64>::read(buf)?,
+        })
+    }
+}
 
 /// The journal's durable recovery checkpoint.
 pub(super) struct Checkpoint<E: Context> {
-    metadata: Metadata<E, u64, VecU64>,
+    context: E,
+    partition: String,
+    blob: E::Blob,
+    record: Record,
 }
 
 impl<E: Context> Checkpoint<E> {
     /// Open the checkpoint stored in `{partition_prefix}-metadata`.
     pub(super) async fn open(context: E, partition_prefix: &str) -> Result<Self, Error> {
-        let metadata = Metadata::<_, u64, VecU64>::init(
+        let partition = format!("{partition_prefix}-metadata");
+        let (blob, size) = context
+            .open(&partition, BLOB_NAME)
+            .await
+            .map_err(Error::Runtime)?;
+
+        // An empty blob is a fresh checkpoint. Anything else is a whole record: the backend
+        // restores the blob to exactly its last-synced state, so a decode failure is corruption.
+        let record = if size == 0 {
+            Record::default()
+        } else {
+            let size = usize::try_from(size).map_err(|_| Error::OffsetOverflow)?;
+            let bytes = blob.read_at(0, size).await.map_err(Error::Runtime)?;
+            Record::decode(bytes.coalesce())
+                .map_err(|err| Error::Corruption(format!("invalid checkpoint record: {err}")))?
+        };
+
+        Ok(Self {
             context,
-            MetadataConfig {
-                partition: format!("{partition_prefix}-metadata"),
-                codec_config: (),
-            },
-        )
-        .await?;
-        Ok(Self { metadata })
-    }
-
-    /// Read a `u64`-valued entry, if present.
-    fn get(&self, key: u64) -> Option<u64> {
-        self.metadata.get(&key).copied().map(u64::from)
-    }
-
-    /// The recovery watermark, if one has been recorded.
-    pub(super) fn watermark(&self) -> Option<u64> {
-        self.get(RECOVERY_WATERMARK_KEY)
+            partition,
+            blob,
+            record,
+        })
     }
 
     /// The recorded mid-blob pruning boundary, if any.
-    pub(super) fn boundary_hint(&self) -> Option<u64> {
-        self.get(PRUNING_BOUNDARY_KEY)
+    pub(super) const fn boundary_hint(&self) -> Option<u64> {
+        self.record.boundary_hint
     }
 
     /// The target of an in-progress clear, if one was staged.
-    pub(super) fn clear_target(&self) -> Option<u64> {
-        self.get(CLEAR_TARGET_KEY)
+    pub(super) const fn clear_target(&self) -> Option<u64> {
+        self.record.clear_target
     }
 
-    /// Durably record the boundary and watermark, writing only entries that changed.
+    /// Rewrite the record wholesale and make it durable.
+    async fn write(&mut self, record: Record) -> Result<(), Error> {
+        let bytes = record.encode();
+        // Trim any longer previous record before the sync publishes the new one atomically.
+        self.blob
+            .resize(bytes.len() as u64)
+            .await
+            .map_err(Error::Runtime)?;
+        self.blob
+            .write_at_sync(0, bytes)
+            .await
+            .map_err(Error::Runtime)?;
+        self.record = record;
+        Ok(())
+    }
+
+    /// Durably record the boundary, writing only if it changed.
+    ///
+    /// A blob-aligned boundary is derived from the oldest blob, so the hint is only kept while
+    /// the boundary is mid-blob.
     pub(super) async fn persist(
         &mut self,
         items_per_blob: u64,
         boundary: u64,
-        watermark: u64,
     ) -> Result<(), Error> {
-        // A blob-aligned boundary is derived from the oldest blob, so the entry is only kept
-        // while the boundary is mid-blob.
-        if boundary.is_multiple_of(items_per_blob) {
-            if self.boundary_hint().is_some() {
-                self.metadata.remove(&PRUNING_BOUNDARY_KEY);
-            }
-        } else if self.boundary_hint() != Some(boundary) {
-            self.metadata.put(PRUNING_BOUNDARY_KEY, boundary.into());
+        let boundary_hint = (!boundary.is_multiple_of(items_per_blob)).then_some(boundary);
+        let record = Record {
+            boundary_hint,
+            ..self.record
+        };
+        if record != self.record {
+            self.write(record).await?;
         }
-        if self.watermark() != Some(watermark) {
-            self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
-        }
-        // Always sync, even if this call staged nothing: `lower_watermark` stages without syncing,
-        // so skipping the sync when our own entries are unchanged could drop that pending change.
-        self.sync().await
+        Ok(())
     }
 
-    /// Lower the watermark to at most `limit`, returning whether it changed. Called before
-    /// blob state moves backward so the persisted watermark never exceeds surviving data.
-    /// The caller syncs.
-    pub(super) fn lower_watermark(&mut self, limit: u64) -> bool {
-        match self.watermark() {
-            Some(current) if current > limit => {
-                self.metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Durably record the intent to clear to `target`, lowering the watermark first.
+    /// Durably record the intent to clear to `target`.
     pub(super) async fn stage_clear(&mut self, target: u64) -> Result<(), Error> {
-        self.lower_watermark(target);
-        self.metadata.put(CLEAR_TARGET_KEY, target.into());
-        self.sync().await
+        let record = Record {
+            clear_target: Some(target),
+            ..self.record
+        };
+        if record != self.record {
+            self.write(record).await?;
+        }
+        Ok(())
     }
 
-    /// Durably complete a clear to `target`: drop the intent and record `target` as both the
-    /// boundary and the watermark.
+    /// Durably complete a clear to `target`: drop the intent and record `target` as the
+    /// boundary.
     pub(super) async fn finish_clear(
         &mut self,
         items_per_blob: u64,
         target: u64,
     ) -> Result<(), Error> {
-        self.metadata.remove(&CLEAR_TARGET_KEY);
-        self.persist(items_per_blob, target, target).await
-    }
-
-    /// Make staged entries durable.
-    pub(super) async fn sync(&mut self) -> Result<(), Error> {
-        self.metadata.sync().await?;
+        let record = Record {
+            boundary_hint: (!target.is_multiple_of(items_per_blob)).then_some(target),
+            clear_target: None,
+        };
+        if record != self.record {
+            self.write(record).await?;
+        }
         Ok(())
     }
 
     /// Remove the checkpoint's partition.
     pub(super) async fn destroy(self) -> Result<(), Error> {
-        self.metadata.destroy().await?;
-        Ok(())
+        drop(self.blob);
+        self.context
+            .remove(&self.partition, None)
+            .await
+            .map_err(Error::Runtime)
     }
 }
 
@@ -157,56 +196,33 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
     /// Direct-injection helpers used by tests (here and in the fixed journal) to plant states
-    /// the production API never produces: invalid or absent watermarks, a corrupt clear intent,
-    /// or wiped metadata.
+    /// the production API never produces: a stray boundary hint or clear intent, or an
+    /// undecodable record.
     impl<E: Context> Checkpoint<E> {
-        /// Set the watermark directly, or remove it with `None` (simulating a legacy journal).
-        pub(crate) fn set_watermark(&mut self, watermark: Option<u64>) {
-            match watermark {
-                Some(watermark) => {
-                    self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
-                }
-                None => {
-                    self.metadata.remove(&RECOVERY_WATERMARK_KEY);
-                }
-            }
+        /// Set and persist the mid-blob pruning boundary directly.
+        pub(crate) async fn set_boundary_hint(&mut self, boundary: u64) -> Result<(), Error> {
+            let record = Record {
+                boundary_hint: Some(boundary),
+                ..self.record
+            };
+            self.write(record).await
         }
 
-        /// Set the mid-blob pruning boundary directly.
-        pub(crate) fn set_boundary_hint(&mut self, boundary: u64) {
-            self.metadata.put(PRUNING_BOUNDARY_KEY, boundary.into());
+        /// Overwrite the record blob with undecodable bytes, simulating corruption.
+        pub(crate) async fn corrupt(&mut self) -> Result<(), Error> {
+            self.blob.resize(0).await.map_err(Error::Runtime)?;
+            self.blob
+                .write_at_sync(0, vec![0xFFu8; 3])
+                .await
+                .map_err(Error::Runtime)
         }
 
-        /// Stage a clear intent directly.
-        pub(crate) fn set_clear_target(&mut self, target: u64) {
-            self.metadata.put(CLEAR_TARGET_KEY, target.into());
+        /// Durably erase the record, simulating metadata deletion.
+        pub(crate) async fn clear(&mut self) -> Result<(), Error> {
+            self.record = Record::default();
+            self.blob.resize(0).await.map_err(Error::Runtime)?;
+            self.blob.sync().await.map_err(Error::Runtime)
         }
-
-        /// Remove every entry, simulating metadata corruption.
-        pub(crate) fn clear(&mut self) {
-            self.metadata.clear();
-        }
-    }
-
-    #[test_traced]
-    fn test_lower_watermark_only_lowers() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut checkpoint = Checkpoint::open(context, "lw").await.unwrap();
-
-            // No watermark recorded yet: nothing to lower.
-            assert!(!checkpoint.lower_watermark(5));
-            assert_eq!(checkpoint.watermark(), None);
-
-            checkpoint.persist(10, 0, 8).await.unwrap();
-            // Equal and higher limits are not lowerings.
-            assert!(!checkpoint.lower_watermark(8));
-            assert!(!checkpoint.lower_watermark(12));
-            assert_eq!(checkpoint.watermark(), Some(8));
-            // A strictly lower limit lowers.
-            assert!(checkpoint.lower_watermark(3));
-            assert_eq!(checkpoint.watermark(), Some(3));
-        });
     }
 
     #[test_traced]
@@ -215,12 +231,11 @@ mod tests {
         executor.start(|context| async move {
             {
                 let mut checkpoint = Checkpoint::open(context.child("a"), "rt").await.unwrap();
-                // A mid-blob boundary is kept; the watermark is recorded.
-                checkpoint.persist(10, 13, 25).await.unwrap();
+                // A mid-blob boundary is kept.
+                checkpoint.persist(10, 13).await.unwrap();
             }
             let checkpoint = Checkpoint::open(context.child("b"), "rt").await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), Some(13));
-            assert_eq!(checkpoint.watermark(), Some(25));
             assert_eq!(checkpoint.clear_target(), None);
         });
     }
@@ -232,12 +247,12 @@ mod tests {
             let mut checkpoint = Checkpoint::open(context, "align").await.unwrap();
 
             // A mid-blob boundary is recorded as a hint.
-            checkpoint.persist(10, 13, 0).await.unwrap();
+            checkpoint.persist(10, 13).await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), Some(13));
 
             // A later blob-aligned boundary drops the stale hint (it is derived from the
             // oldest blob).
-            checkpoint.persist(10, 20, 0).await.unwrap();
+            checkpoint.persist(10, 20).await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), None);
         });
     }
@@ -248,38 +263,36 @@ mod tests {
         executor.start(|context| async move {
             {
                 let mut checkpoint = Checkpoint::open(context.child("a"), "clear").await.unwrap();
-                checkpoint.persist(10, 0, 30).await.unwrap();
-                // Staging records the intent and lowers the watermark to the target.
+                checkpoint.persist(10, 13).await.unwrap();
+                // Staging records the intent alongside the existing boundary.
                 checkpoint.stage_clear(20).await.unwrap();
                 assert_eq!(checkpoint.clear_target(), Some(20));
-                assert_eq!(checkpoint.watermark(), Some(20));
+                assert_eq!(checkpoint.boundary_hint(), Some(13));
             }
             // A crash after staging leaves the intent durable.
             {
                 let mut checkpoint = Checkpoint::open(context.child("b"), "clear").await.unwrap();
                 assert_eq!(checkpoint.clear_target(), Some(20));
-                // Completing drops the intent and records the target as boundary and watermark.
+                // Completing drops the intent and records the target as the boundary.
                 checkpoint.finish_clear(10, 20).await.unwrap();
             }
             let checkpoint = Checkpoint::open(context.child("c"), "clear").await.unwrap();
             assert_eq!(checkpoint.clear_target(), None);
-            assert_eq!(checkpoint.watermark(), Some(20));
             // 20 is blob-aligned, so no hint is retained.
             assert_eq!(checkpoint.boundary_hint(), None);
         });
     }
 
     #[test_traced]
-    fn test_stage_clear_does_not_raise_watermark() {
+    fn test_undecodable_record_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut checkpoint = Checkpoint::open(context, "sc").await.unwrap();
-            checkpoint.persist(10, 0, 5).await.unwrap();
-
-            // Target above the current watermark: the intent is recorded but the watermark holds.
-            checkpoint.stage_clear(9).await.unwrap();
-            assert_eq!(checkpoint.clear_target(), Some(9));
-            assert_eq!(checkpoint.watermark(), Some(5));
+            {
+                let mut checkpoint = Checkpoint::open(context.child("a"), "bad").await.unwrap();
+                checkpoint.corrupt().await.unwrap();
+            }
+            let result = Checkpoint::open(context.child("b"), "bad").await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 }

@@ -2,14 +2,16 @@
 
 //! Fuzz test for oversized journal crash recovery.
 //!
-//! This test creates valid data, randomly corrupts storage, and verifies
-//! that recovery doesn't panic and leaves the journal in a consistent state.
+//! This test creates valid data, randomly corrupts storage, and verifies that recovery either
+//! reports loud corruption (structural damage a crash cannot produce, e.g. a partial index
+//! entry) or leaves the journal in a consistent state. It never panics or repairs silently
+//! wrong state.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler,
-    Error as RuntimeError, Runner, Storage as _, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Runner,
+    Storage as _, Supervisor as _,
 };
 use commonware_storage::journal::{
     segmented::oversized::{Config, Oversized, Record},
@@ -164,11 +166,6 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
 const INDEX_PARTITION: &str = "fuzz-index";
 const VALUE_PARTITION: &str = "fuzz-values";
 
-fn overlaps_existing_blob(offset: u64, write_len: usize, blob_size: u64) -> bool {
-    let end = offset.saturating_add(write_len as u64);
-    offset < blob_size && end > offset
-}
-
 fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
     Config {
         index_partition: INDEX_PARTITION.into(),
@@ -213,7 +210,7 @@ fn fuzz(input: FuzzInput) {
         drop(oversized);
 
         // Phase 2: Apply corruptions
-        let mut index_page_integrity_may_be_invalidated = false;
+        let corrupted = !input.corruptions.is_empty();
         for corruption in &input.corruptions {
             match corruption {
                 CorruptionType::TruncateIndex {
@@ -250,12 +247,6 @@ fn fuzz(input: FuzzInput) {
                     {
                         if size > 0 {
                             let offset = (size * (*offset_factor as u64)) / 256;
-                            // Overwriting existing index bytes can invalidate the fixed-journal
-                            // page-integrity checks. Pure extensions/truncations are handled by
-                            // lower-level tail trimming and should not require this allowance.
-                            if overlaps_existing_blob(offset, data.len(), size) {
-                                index_page_integrity_may_be_invalidated = true;
-                            }
                             let _ = blob.write_at_sync(offset, data.to_vec()).await;
                         }
                     }
@@ -301,17 +292,12 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        // Phase 3: Recovery - this should not panic
+        // Phase 3: Recovery - this should never panic. Structural damage that a crash cannot
+        // produce (e.g. a partial trailing index entry) surfaces as loud corruption.
         let mut recovered: Oversized<_, TestEntry, TestValue> =
             match Oversized::init(context.child("recovered"), cfg.clone()).await {
                 Ok(recovered) => recovered,
-                // Existing-byte overwrites in the paged index can invalidate fixed-journal
-                // integrity checks before oversized recovery has a chance to inspect entries.
-                Err(JournalError::Runtime(RuntimeError::InvalidChecksum))
-                    if index_page_integrity_may_be_invalidated =>
-                {
-                    return;
-                }
+                Err(JournalError::Corruption(_)) if corrupted => return,
                 Err(err) => panic!("Unexpected recovery failure: {err:?}"),
             };
 

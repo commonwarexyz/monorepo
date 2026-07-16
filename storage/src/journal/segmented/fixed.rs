@@ -33,7 +33,7 @@ use futures::{
     StreamExt,
 };
 use std::{marker::PhantomData, num::NonZeroUsize};
-use tracing::{trace, warn};
+use tracing::trace;
 
 /// State for replaying a single section's blob.
 struct ReplayState<B: Blob> {
@@ -60,15 +60,10 @@ pub struct Config {
 ///
 /// Each section is stored in a separate blob. Within each blob, items are fixed-size.
 ///
-/// # Repair
+/// # Recovery
 ///
-/// Like
-/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-/// and
-/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
-/// init by checking each blob's size.
+/// The storage backend guarantees per-blob atomic sync, so torn writes cannot survive a crash.
+/// Init verifies each blob's size holds whole items and returns [Error::Corruption] otherwise.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
@@ -91,24 +86,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 page_cache_ref: cfg.page_cache,
             },
         };
-        let mut manager = Manager::init(context, manager_cfg).await?;
+        let manager = Manager::init(context, manager_cfg).await?;
 
-        // Repair any blobs with trailing bytes (incomplete items from crash)
-        let sections: Vec<_> = manager.sections().collect();
-        for section in sections {
+        // The storage backend restores every blob to exactly its last-synced state after a
+        // crash, and every write is a whole item, so a partial trailing item is corruption.
+        for section in manager.sections() {
             let size = manager.size(section)?;
             if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
-                let valid_size = size - (size % Self::CHUNK_SIZE_U64);
-                warn!(
-                    section,
-                    invalid_size = size,
-                    new_size = valid_size,
-                    "trailing bytes detected: truncating"
-                );
-                manager.rewind_section(section, valid_size).await?;
-                // Startup repair is exceptional; make it durable immediately so callers do not
-                // need to track repaired sections separately.
-                manager.sync(section).await?;
+                return Err(Error::Corruption(format!(
+                    "section {section} has a partial item: {size} bytes"
+                )));
             }
         }
 
@@ -912,8 +899,10 @@ mod tests {
         });
     }
 
+    /// A partial trailing item cannot arise from a crash (per-blob atomic sync): init rejects
+    /// it as corruption.
     #[test_traced]
-    fn test_segmented_fixed_corruption_recovery() {
+    fn test_segmented_fixed_partial_item_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -937,27 +926,8 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to truncate");
             blob.sync().await.expect("failed to sync");
 
-            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            let count = {
-                let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("failed to replay");
-                pin_mut!(stream);
-
-                let mut count = 0;
-                while let Some(result) = stream.next().await {
-                    result.expect("should be ok");
-                    count += 1;
-                }
-                count
-            };
-            assert_eq!(count, 4);
-
-            journal.destroy().await.expect("failed to destroy");
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
@@ -1243,82 +1213,6 @@ mod tests {
                 assert_eq!(items.len(), 1, "Should have 1 item from section 3");
                 assert_eq!(items[0], (3, test_digest(300)));
             }
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_truncation_recovery_across_page_boundary() {
-        // Test that truncating a single byte from a blob that has items straddling a page boundary
-        // correctly recovers by removing the incomplete item.
-        //
-        // With PAGE_SIZE=44 and ITEM_SIZE=32:
-        // - Item 0: bytes 0-31
-        // - Item 1: bytes 32-63 (straddles page boundary at 44)
-        // - Item 2: bytes 64-95 (straddles page boundary at 88)
-        //
-        // After 3 items we have 96 bytes = 2 full pages + 8 bytes. Truncating 1 byte leaves 95
-        // bytes, which is not a multiple of 32. Recovery should truncate to 64 bytes (2 complete
-        // items).
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Append 3 items (just over 2 pages worth)
-            for i in 0u64..3 {
-                journal
-                    .append(1, &test_digest(i))
-                    .await
-                    .expect("failed to append");
-            }
-            journal.sync_all().await.expect("failed to sync");
-
-            // Verify all 3 items are readable
-            for i in 0u64..3 {
-                let item = journal.get(1, i).await.expect("failed to get");
-                assert_eq!(item, test_digest(i));
-            }
-            drop(journal);
-
-            // Truncate the blob by exactly 1 byte to simulate partial write
-            let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .expect("failed to open blob");
-            blob.resize(size - 1).await.expect("failed to truncate");
-            blob.sync().await.expect("failed to sync");
-            drop(blob);
-
-            // Reopen journal - should recover by truncating last page due to failed checksum, and
-            // end up with a correct blob size due to partial-item trimming.
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            // Verify section now has only 2 items
-            assert_eq!(journal.section_len(1).unwrap(), 2);
-
-            // Verify size is the expected multiple of ITEM_SIZE (this would fail if we didn't trim
-            // items and just relied on page-level checksum recovery).
-            assert_eq!(journal.size(1).unwrap(), 64);
-
-            // Items 0 and 1 should still be readable
-            let item0 = journal.get(1, 0).await.expect("failed to get item 0");
-            assert_eq!(item0, test_digest(0));
-            let item1 = journal.get(1, 1).await.expect("failed to get item 1");
-            assert_eq!(item1, test_digest(1));
-
-            // Item 2 should return ItemOutOfRange
-            let err = journal.get(1, 2).await;
-            assert!(
-                matches!(err, Err(Error::ItemOutOfRange(2))),
-                "expected ItemOutOfRange(2), got {:?}",
-                err
-            );
 
             journal.destroy().await.expect("failed to destroy");
         });

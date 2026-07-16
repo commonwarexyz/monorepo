@@ -94,7 +94,7 @@ use commonware_runtime::{
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
-use tracing::{trace, warn};
+use tracing::trace;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -117,14 +117,11 @@ pub struct Config<C> {
 }
 
 /// State for replaying a single section's blob.
-struct ReplayState<'a, B: Blob, C> {
+struct ReplayState<B: Blob, C> {
     section: u64,
-    // Need a [Writer] because replay may repair the blob by rewinding invalid trailing data.
-    blob: &'a mut Writer<B>,
     replay: Replay<B>,
     skip_bytes: u64,
     offset: u64,
-    valid_offset: u64,
     codec_config: C,
     compressed: bool,
     done: bool,
@@ -134,15 +131,11 @@ struct ReplayState<'a, B: Blob, C> {
 ///
 /// Each section is stored in a separate blob. Items are length-prefixed with a varint.
 ///
-/// # Repair
+/// # Recovery
 ///
-/// Like
-/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-/// and
-/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
-/// replay (not init) because any blob could have trailing bytes.
+/// The storage backend guarantees per-blob atomic sync, so torn frames cannot survive a crash.
+/// Replay reports an incomplete or undecodable frame as [Error::Corruption] instead of
+/// truncating.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,
 
@@ -205,12 +198,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 return Err(Error::ItemOutOfRange(start_offset));
             }
             let replay = blob.replay(buffer).await?;
-            blobs.push((section, blob, replay, codec_config.clone(), compressed));
+            blobs.push((section, replay, codec_config.clone(), compressed));
         }
 
         // Stream items as they are read to avoid occupying too much memory
-        Ok(stream::iter(blobs).flat_map(
-            move |(section, blob, replay, codec_config, compressed)| {
+        Ok(
+            stream::iter(blobs).flat_map(move |(section, replay, codec_config, compressed)| {
                 // Calculate initial skip bytes for first blob
                 let skip_bytes = if section == start_section {
                     start_offset
@@ -222,11 +215,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 stream::unfold(
                     ReplayState {
                         section,
-                        blob,
                         replay,
                         skip_bytes,
                         offset: 0,
-                        valid_offset: skip_bytes,
                         codec_config,
                         compressed,
                         done: false,
@@ -236,7 +227,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                             return None;
                         }
 
-                        let blob_size = state.replay.blob_size();
                         let mut batch: Vec<Result<(u64, u64, u32, V), Error>> = Vec::new();
                         loop {
                             // Ensure we have enough data for varint header.
@@ -273,82 +263,38 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                 continue;
                             }
 
-                            // Try to decode length prefix
-                            let before_remaining = state.replay.remaining();
+                            // Decode the length prefix. The backend restores every blob to its
+                            // last-synced state, so an incomplete varint at the tail is
+                            // corruption, not a torn write.
                             let (item_size, varint_len) =
                                 match decode_length_prefix(&mut state.replay) {
                                     Ok(result) => result,
                                     Err(err) => {
-                                        // Could be incomplete varint - check if reader exhausted
-                                        if state.replay.is_exhausted()
-                                            || before_remaining < MAX_U32_VARINT_SIZE
-                                        {
-                                            // Treat as trailing bytes
-                                            if state.valid_offset < blob_size
-                                                && state.offset < blob_size
-                                            {
-                                                warn!(
-                                                    blob = state.section,
-                                                    bad_offset = state.offset,
-                                                    new_size = state.valid_offset,
-                                                    "trailing bytes detected: truncating"
-                                                );
-                                                // Tail repair is exceptional; make it durable
-                                                // immediately so callers do not need to track
-                                                // replay-time repaired sections separately.
-                                                if let Err(err) =
-                                                    state.blob.resize(state.valid_offset).await
-                                                {
-                                                    batch.push(Err(err.into()));
-                                                    state.done = true;
-                                                    return Some((batch, state));
-                                                }
-                                                if let Err(err) = state.blob.sync().await {
-                                                    batch.push(Err(err.into()));
-                                                    state.done = true;
-                                                    return Some((batch, state));
-                                                }
-                                            }
-                                            state.done = true;
-                                            return if batch.is_empty() {
-                                                None
-                                            } else {
-                                                Some((batch, state))
-                                            };
+                                        if state.replay.is_exhausted() {
+                                            batch.push(Err(Error::Corruption(format!(
+                                                "incomplete frame header in section {} \
+                                                 at offset {}",
+                                                state.section, state.offset
+                                            ))));
+                                        } else {
+                                            batch.push(Err(err));
                                         }
-                                        batch.push(Err(err));
                                         state.done = true;
                                         return Some((batch, state));
                                     }
                                 };
 
-                            // Ensure we have enough data for item body
+                            // Ensure we have enough data for the item body. A short body is
+                            // corruption for the same reason.
                             match state.replay.ensure(item_size).await {
                                 Ok(true) => {}
                                 Ok(false) => {
-                                    // Incomplete item at end - truncate
-                                    warn!(
-                                        blob = state.section,
-                                        bad_offset = state.offset,
-                                        new_size = state.valid_offset,
-                                        "incomplete item at end: truncating"
-                                    );
-                                    if let Err(err) = state.blob.resize(state.valid_offset).await {
-                                        batch.push(Err(err.into()));
-                                        state.done = true;
-                                        return Some((batch, state));
-                                    }
-                                    if let Err(err) = state.blob.sync().await {
-                                        batch.push(Err(err.into()));
-                                        state.done = true;
-                                        return Some((batch, state));
-                                    }
+                                    batch.push(Err(Error::Corruption(format!(
+                                        "incomplete frame in section {} at offset {}",
+                                        state.section, state.offset
+                                    ))));
                                     state.done = true;
-                                    return if batch.is_empty() {
-                                        None
-                                    } else {
-                                        Some((batch, state))
-                                    };
+                                    return Some((batch, state));
                                 }
                                 Err(err) => {
                                     batch.push(Err(err.into()));
@@ -383,7 +329,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                         item_size as u32,
                                         decoded,
                                     )));
-                                    state.valid_offset = next_offset;
                                     state.offset = next_offset;
                                 }
                                 Err(err) => {
@@ -401,8 +346,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                     },
                 )
                 .flat_map(stream::iter)
-            },
-        ))
+            }),
+        )
     }
 
     /// Encode an item.
@@ -1062,14 +1007,12 @@ mod tests {
         });
     }
 
+    /// A durably committed partial frame header cannot arise from a crash: replay reports it
+    /// as corruption instead of truncating.
     #[test_traced]
-    fn test_journal_read_size_missing() {
-        // Initialize the deterministic context
+    fn test_journal_replay_incomplete_header_is_corruption() {
         let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
             let cfg = Config {
                 partition: "test-partition".into(),
                 compression: None,
@@ -1078,7 +1021,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Manually create a blob with incomplete size data
+            // Manually create a blob with an incomplete varint header.
             let section = 1u64;
             let blob_name = section.to_be_bytes();
             let (blob, _) = context
@@ -1086,7 +1029,7 @@ mod tests {
                 .await
                 .expect("Failed to create blob");
 
-            // Write incomplete varint by encoding u32::MAX (5 bytes) and truncating to 1 byte
+            // Write an incomplete varint by encoding u32::MAX (5 bytes) and truncating to 1 byte
             let mut incomplete_data = Vec::new();
             UInt(u32::MAX).write(&mut incomplete_data);
             incomplete_data.truncate(1);
@@ -1094,30 +1037,27 @@ mod tests {
                 .await
                 .expect("Failed to write incomplete data");
 
-            // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::<_, u64>::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
-            // Attempt to replay the journal
             let stream = journal
                 .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
-            let mut items = Vec::<(u64, u64)>::new();
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {err}"),
-                }
-            }
-            assert!(items.is_empty());
+            assert!(matches!(
+                stream.next().await,
+                Some(Err(Error::Corruption(_)))
+            ));
+            assert!(stream.next().await.is_none());
         });
     }
 
+    /// Trailing garbage after a committed frame surfaces as a loud replay error after the
+    /// valid items.
     #[test_traced]
-    fn test_journal_replay_reports_resize_error_on_trailing_bytes() {
+    fn test_journal_replay_reports_error_on_trailing_bytes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1128,13 +1068,8 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Leave one byte in the first page so the trailing bytes below cross the page
-            // boundary and repair must issue a physical resize.
             let section = 1u64;
             let item = [10u8; 1021];
-            let item_record_size =
-                UInt(item.encode_size() as u32).encode_size() + item.encode_size();
-            assert_eq!(item_record_size, PAGE_SIZE.get() as usize - 1);
 
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
@@ -1153,10 +1088,6 @@ mod tests {
             let mut journal = Journal::init(context.child("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                resize_rate: Some(1.0),
-                ..Default::default()
-            };
 
             let stream = journal
                 .replay(0, 0, NZUsize!(1024))
@@ -1171,25 +1102,20 @@ mod tests {
                 .expect("failed to replay valid item");
             assert_eq!(first, (section, 0, item.encode_size() as u32, item));
 
-            // The trailing bytes cross the page boundary, so repair must issue a physical resize.
-            match stream.next().await {
-                Some(Err(_)) => {}
-                other => {
-                    panic!("expected resize error while repairing trailing bytes, got {other:?}")
-                }
-            }
+            assert!(matches!(
+                stream.next().await,
+                Some(Err(Error::Corruption(_)))
+            ));
             assert!(stream.next().await.is_none());
         });
     }
 
+    /// A durably committed frame whose payload is shorter than its header claims is
+    /// corruption, not a repairable torn write.
     #[test_traced]
-    fn test_journal_read_item_missing() {
-        // Initialize the deterministic context
+    fn test_journal_replay_incomplete_item_is_corruption() {
         let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
             let cfg = Config {
                 partition: "test-partition".into(),
                 compression: None,
@@ -1216,36 +1142,29 @@ mod tests {
                 .await
                 .expect("Failed to write incomplete item");
 
-            // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::<_, u64>::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
-            // Attempt to replay the journal
             let stream = journal
                 .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
-            let mut items = Vec::<(u64, u64)>::new();
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {err}"),
-                }
-            }
-            assert!(items.is_empty());
+            assert!(matches!(
+                stream.next().await,
+                Some(Err(Error::Corruption(_)))
+            ));
+            assert!(stream.next().await.is_none());
         });
     }
 
+    /// A durably committed frame whose payload fails to decode is corruption surfaced as a
+    /// loud replay error, never repaired.
     #[test_traced]
-    fn test_journal_read_checksum_missing() {
-        // Initialize the deterministic context
+    fn test_journal_replay_undecodable_item_is_error() {
         let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
             let cfg = Config {
                 partition: "test-partition".into(),
                 compression: None,
@@ -1254,128 +1173,52 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Manually create a blob with missing checksum
+            // Manually create a blob holding a complete frame whose 9-byte payload cannot
+            // decode as a u64.
             let section = 1u64;
             let blob_name = section.to_be_bytes();
             let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
-
-            // Prepare item data
             let item_data = b"Test data";
-            let item_size = item_data.len() as u32;
-
-            // Write size (varint) and data, but no checksum
             let mut buf = Vec::new();
-            UInt(item_size).write(&mut buf);
+            UInt(item_data.len() as u32).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
             blob.write_at_sync(0, buf)
                 .await
-                .expect("Failed to write item without checksum");
+                .expect("Failed to write undecodable item");
 
-            // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
-            // Attempt to replay the journal
-            //
-            // This will truncate the leftover bytes from our manual write.
-            let stream = journal
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("unable to setup replay");
-            pin_mut!(stream);
-            let mut items = Vec::<(u64, u64)>::new();
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {err}"),
-                }
-            }
-            assert!(items.is_empty());
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_read_checksum_mismatch() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
-        executor.start(|context| async move {
-            // Create a journal configuration
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Manually create a blob with incorrect checksum
-            let section = 1u64;
-            let blob_name = section.to_be_bytes();
-            let (blob, _) = context
-                .open(&cfg.partition, &blob_name)
-                .await
-                .expect("Failed to create blob");
-
-            // Prepare item data
-            let item_data = b"Test data";
-            let item_size = item_data.len() as u32;
-            let incorrect_checksum: u32 = 0xDEADBEEF;
-
-            // Write size (varint), data, and incorrect checksum
-            let mut buf = Vec::new();
-            UInt(item_size).write(&mut buf);
-            BufMut::put_slice(&mut buf, item_data);
-            buf.put_u32(incorrect_checksum);
-            blob.write_at_sync(0, buf)
-                .await
-                .expect("Failed to write item with bad checksum");
-
-            // Initialize the journal
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("Failed to initialize journal");
-
-            // Attempt to replay the journal
             {
                 let stream = journal
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
-                let mut items = Vec::<(u64, u64)>::new();
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
-                    }
-                }
-                assert!(items.is_empty());
+                assert!(matches!(stream.next().await, Some(Err(_))));
+                assert!(stream.next().await.is_none());
             }
             drop(journal);
 
-            // Confirm blob is expected length
+            // No repair: the blob keeps its committed bytes.
             let (_, blob_size) = context
                 .open(&cfg.partition, &section.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 0);
+            assert_ne!(blob_size, 0);
         });
     }
 
+    /// A durable mid-frame truncation of a committed section cannot arise from a crash:
+    /// replay reports corruption after the intact sections and repairs nothing.
     #[test_traced]
     fn test_journal_truncation_recovery() {
-        // Initialize the deterministic context
         let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
             let cfg = Config {
                 partition: "test-partition".into(),
                 compression: None,
@@ -1389,10 +1232,8 @@ mod tests {
                 .await
                 .expect("Failed to initialize journal");
 
-            // Append 1 item to the first index
+            // Append 1 item to the first section and several to the second.
             journal.append(1, &1).await.expect("Failed to append data");
-
-            // Append multiple items to the second section
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
                 journal
@@ -1401,12 +1242,10 @@ mod tests {
                     .expect("Failed to append data");
                 journal.sync(*index).await.expect("Failed to sync blob");
             }
-
-            // Sync all sections and drop the journal
             journal.sync_all().await.expect("Failed to sync");
             drop(journal);
 
-            // Manually corrupt the end of the second blob
+            // Durably truncate the second blob mid-frame (external corruption).
             let (blob, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
@@ -1415,116 +1254,53 @@ mod tests {
                 .await
                 .expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
+            let corrupted_size = blob_size - 4;
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
-            // Attempt to replay the journal
-            let mut items = Vec::<(u64, u32)>::new();
+            // Replay yields section 1's item, the intact prefix of section 2, then corruption.
+            let mut items = Vec::<(u64, i32)>::new();
             {
                 let stream = journal
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
+                let mut corruption = false;
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
+                        Ok((section, _, _, item)) => items.push((section, item)),
+                        Err(Error::Corruption(_)) => {
+                            corruption = true;
+                            assert!(stream.next().await.is_none());
+                            break;
+                        }
+                        Err(err) => panic!("unexpected error: {err}"),
                     }
                 }
+                assert!(corruption, "expected corruption after truncated frame");
             }
+            assert_eq!(items, vec![(1, 1), (2, 2), (2, 3)]);
             drop(journal);
 
-            // Verify that replay stopped after corruption detected (the second blob).
-            assert_eq!(items.len(), 1);
-            assert_eq!(items[0].0, 1);
-            assert_eq!(items[0].1, 1);
-
-            // Confirm second blob was truncated.
+            // No repair: the blob keeps its truncated size.
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 0);
-
-            // Attempt to replay journal after truncation
-            let mut journal = Journal::init(context.child("third"), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
-
-            // Attempt to replay the journal
-            let mut items = Vec::<(u64, u32)>::new();
-            {
-                let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("unable to setup replay");
-                pin_mut!(stream);
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
-                    }
-                }
-            }
-
-            // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 1);
-            assert_eq!(items[0].0, 1);
-            assert_eq!(items[0].1, 1);
-
-            // Append a new item to truncated partition
-            let (_offset, _) = journal.append(2, &5).await.expect("Failed to append data");
-            journal.sync(2).await.expect("Failed to sync blob");
-
-            // Get the new item (offset is 0 since blob was truncated)
-            let item = journal.get(2, 0).await.expect("Failed to get item");
-            assert_eq!(item, 5);
-
-            // Drop the journal (data already synced)
-            drop(journal);
-
-            // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
-
-            // Attempt to replay the journal
-            let mut items = Vec::<(u64, u32)>::new();
-            {
-                let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("unable to setup replay");
-                pin_mut!(stream);
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
-                    }
-                }
-            }
-
-            // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 2);
-            assert_eq!(items[0].0, 1);
-            assert_eq!(items[0].1, 1);
-            assert_eq!(items[1].0, 2);
-            assert_eq!(items[1].1, 5);
+            assert_eq!(blob_size, corrupted_size);
         });
     }
 
+    /// Durable junk bytes appended past the committed frames cannot arise from a crash:
+    /// replay yields the valid items, then reports a loud error.
     #[test_traced]
     fn test_journal_handling_extra_data() {
-        // Initialize the deterministic context
         let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
             let cfg = Config {
                 partition: "test-partition".into(),
                 compression: None,
@@ -1538,11 +1314,12 @@ mod tests {
                 .await
                 .expect("Failed to initialize journal");
 
-            // Append 1 item to the first index
-            journal.append(1, &1).await.expect("Failed to append data");
-
-            // Append multiple items to the second index
-            let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
+            // Append 1 item to the first section and several to the second.
+            journal
+                .append(1, &1i32)
+                .await
+                .expect("Failed to append data");
+            let data_items = vec![(2u64, 2i32), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
                 journal
                     .append(*index, data)
@@ -1550,12 +1327,10 @@ mod tests {
                     .expect("Failed to append data");
                 journal.sync(*index).await.expect("Failed to sync blob");
             }
-
-            // Sync all sections and drop the journal
             journal.sync_all().await.expect("Failed to sync");
             drop(journal);
 
-            // Manually add extra data to the end of the second blob
+            // Durably append junk to the end of the second blob (external corruption).
             let (blob, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
@@ -1565,23 +1340,30 @@ mod tests {
                 .expect("Failed to add extra data");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.child("second"), cfg)
+            let mut journal = Journal::<_, i32>::init(context.child("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
-            // Attempt to replay the journal
+            // Replay yields the committed items, then errors on the junk.
             let mut items = Vec::<(u64, i32)>::new();
             let stream = journal
                 .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
+            let mut errored = false;
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {err}"),
+                    Ok((section, _, _, item)) => items.push((section, item)),
+                    Err(_) => {
+                        errored = true;
+                        assert!(stream.next().await.is_none());
+                        break;
+                    }
                 }
             }
+            assert!(errored, "expected error on junk trailing bytes");
+            assert_eq!(items, vec![(1, 1), (2, 2), (2, 3), (2, 4)]);
         });
     }
 

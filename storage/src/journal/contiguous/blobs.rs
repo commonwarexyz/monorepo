@@ -256,9 +256,14 @@ impl<E: Context> Writable<E> {
         })
     }
 
-    /// Seal the tail (no fsync) and open the next blob as the new tail.
+    /// Make the tail durable, seal it, and open the next blob as the new tail.
+    ///
+    /// Syncing before the next blob is created upholds the recovery invariant that whenever a
+    /// blob exists, every older blob is full and durable, so recovery can trust blob lengths.
     pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
-        // Open the next tail first so a failure leaves the current tail untouched.
+        self.tail.sync().await.map_err(Error::Runtime)?;
+        self.metrics.synced.inc();
+
         let next_blob = self
             .tail_blob_index()
             .checked_add(1)

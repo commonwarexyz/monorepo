@@ -1393,46 +1393,49 @@ mod tests {
         executor.start(full_flush_inner::<mmb::Family>);
     }
 
-    /// Flushed-but-unsynced nodes are lost on a crash, while synced nodes survive: the durability
-    /// barrier comes from `sync`, not `flush`.
+    /// Flushed-but-unsynced nodes are not guaranteed to survive a crash, while synced nodes
+    /// always do: the durability barrier comes from `sync`, not `flush`. The journal may
+    /// opportunistically persist more than the synced prefix (filled blobs sync at rollover),
+    /// so recovery lands anywhere between the synced and flushed sizes.
     fn full_flush_crash_inner<F: Family>() {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
         // Phase 1: durably sync a first batch of leaves, flush (but don't sync) a second batch,
         // then simulate an unclean shutdown.
         let executor = deterministic::Runner::default();
-        let (synced_size, checkpoint) = executor.start_and_recover(|context| async move {
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-            let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-                context.child("first"),
-                &hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+        let ((synced_size, flushed_size), checkpoint) =
+            executor.start_and_recover(|context| async move {
+                let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+                let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+                    context.child("first"),
+                    &hasher,
+                    test_config(&context),
+                )
+                .await
+                .unwrap();
 
-            let mut batch = mmr.new_batch();
-            for i in 0..50usize {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            mmr.apply_batch(&batch).unwrap();
-            mmr.sync().await.unwrap();
-            let synced_size = mmr.size();
+                let mut batch = mmr.new_batch();
+                for i in 0..50usize {
+                    batch = batch.add(&hasher, &test_digest(i));
+                }
+                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                mmr.apply_batch(&batch).unwrap();
+                mmr.sync().await.unwrap();
+                let synced_size = mmr.size();
 
-            let mut batch = mmr.new_batch();
-            for i in 50..100usize {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            mmr.apply_batch(&batch).unwrap();
-            mmr.flush().await.unwrap();
-            assert_eq!(Position::<F>::new(mmr.journal.size()), mmr.size());
+                let mut batch = mmr.new_batch();
+                for i in 50..100usize {
+                    batch = batch.add(&hasher, &test_digest(i));
+                }
+                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                mmr.apply_batch(&batch).unwrap();
+                mmr.flush().await.unwrap();
+                assert_eq!(Position::<F>::new(mmr.journal.size()), mmr.size());
 
-            synced_size
-        });
+                (synced_size, mmr.size())
+            });
 
-        // Phase 2: recover. Only the synced prefix survives.
+        // Phase 2: recover. At least the synced prefix survives, and nothing past the flush does.
         let executor = deterministic::Runner::from(checkpoint);
         executor.start(|context| async move {
             let mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -1442,7 +1445,8 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(mmr.size(), synced_size);
+            assert!(mmr.size() >= synced_size);
+            assert!(mmr.size() <= flushed_size);
         });
     }
 

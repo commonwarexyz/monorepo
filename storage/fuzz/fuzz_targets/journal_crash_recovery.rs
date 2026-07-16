@@ -3,9 +3,10 @@
 //! Fuzz target contiguous journal crash recovery.
 //!
 //! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` push data
-//! to storage, and an unclean shutdown loses anything not yet durable. On the next `init()` the
-//! journal must rebuild a consistent state from whatever survived. This target tests recovering
-//! after storage faults.
+//! to storage (and filled blobs sync opportunistically at rollover), and an unclean shutdown
+//! loses anything not yet durable. The backend restores every blob to exactly its last-synced
+//! state, so on the next `init()` the journal recovers a consistent state by verification and
+//! bounded repair. This target tests recovering after storage faults.
 //!
 //! # Cycles
 //!
@@ -17,7 +18,7 @@
 //!   4. Drop the journal without a clean shutdown: the crash. Unsynced data is lost.
 //!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
-//! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
+//! the same journal is the point: pruning-metadata and section-layout bugs often need a
 //! recover-then-mutate-then-recover sequence to appear, not just a single crash.
 //!
 //! # Expected
@@ -29,9 +30,10 @@
 //!
 //! # Faults
 //!
-//! The operation phase runs under write/sync/resize fault injection. The torn-write modes
-//! (`partial_write_rate`, `partial_resize_rate`) cut a write or truncation short, leaving the
-//! half-finished bytes a real crash would.
+//! The operation phase runs under write/sync/resize fault injection. The partial modes
+//! (`partial_write_rate`, `partial_resize_rate`) cut a write or truncation short, but only in
+//! the blob's working copy: a fault surfaces as a clean error, the cycle ends (the journal
+//! instance dies), and the crash discards everything unsynced, so recovery is exact.
 //!
 //! # Positions
 //!
@@ -566,8 +568,8 @@ fn assert_read(result: Result<Item, Error>, pos: u64, bounds: &Range<u64>) {
 
 /// Whether the cycle continues after the raw replay. Validation
 /// precedes any I/O, so an out-of-range start is deterministic: `< start` -> `ItemPruned`,
-/// `> end` -> `ItemOutOfRange` (`== end` is in range). An in-range start succeeds or hits a
-/// tail-repair I/O fault (ends the cycle); any other result is a bug.
+/// `> end` -> `ItemOutOfRange` (`== end` is in range). An in-range start succeeds or hits an
+/// I/O fault (ends the cycle); any other result is a bug.
 fn should_continue_raw_replay(
     result: Result<Vec<(u64, Item)>, Error>,
     start_pos: u64,
@@ -578,7 +580,7 @@ fn should_continue_raw_replay(
         Ok(_) if in_range => true,
         Err(Error::ItemPruned(_)) if start_pos < bounds.start => true,
         Err(Error::ItemOutOfRange(_)) if start_pos > bounds.end => true,
-        // An in-range start that failed with a non-validation error is a tail-repair I/O fault.
+        // An in-range start that failed with a non-validation error is an I/O fault.
         Err(e) if in_range && !matches!(e, Error::ItemPruned(_) | Error::ItemOutOfRange(_)) => {
             false
         }
@@ -609,7 +611,7 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
 }
 
 /// Run a cycle's ops under faults, updating `expected`. Stops early on any error that may have left
-/// the journal inconsistent (a mutable-method error or a tail-repair I/O fault); the caller then
+/// the journal inconsistent (a mutable-method error or a replay I/O fault); the caller then
 /// drops the journal to crash. Reads never fault, so a bad read panics instead of ending the cycle.
 async fn run_ops<J: FuzzJournal>(
     journal: &mut J,
@@ -721,8 +723,8 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Replay { buffer, start_pos } => {
-                // The clamped replay must return the full suffix matching `read()`, or hit a
-                // tail-repair I/O fault.
+                // The clamped replay must return the full suffix matching `read()`, or hit an
+                // I/O fault.
                 let bounds = journal.bounds();
                 let clamped = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
                 let clamped_ok = match journal.replay(clamped, NZUsize!(*buffer)).await {
@@ -741,7 +743,7 @@ async fn run_ops<J: FuzzJournal>(
                         "in-bounds replay at {clamped} (bounds [{}, {})) returned {e:?}",
                         bounds.start, bounds.end
                     ),
-                    // Tail-repair I/O fault: end the cycle.
+                    // I/O fault: end the cycle.
                     Err(_) => false,
                 };
                 clamped_ok

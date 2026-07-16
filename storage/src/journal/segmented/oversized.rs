@@ -476,7 +476,6 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 mod tests {
     use super::*;
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
-    use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Runner,
@@ -990,9 +989,6 @@ mod tests {
     fn test_recovery_corrupted_last_index_entry() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Use page size = entry size so each entry is on its own page.
-            // This allows corrupting just the last entry's page without affecting others.
-            // Physical page size = TestEntry::SIZE (20) + 12 (CRC record) = 32 bytes.
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
@@ -1013,7 +1009,7 @@ mod tests {
                     .await
                     .expect("Failed to init");
 
-            // Append 5 entries (each on its own page)
+            // Append 5 entries
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
@@ -1025,23 +1021,19 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Corrupt the last page's CRC to trigger page-level integrity failure
+            // Overwrite the last entry with junk whose decoded value location points far past
+            // the glob, so recovery treats it as invalid and rewinds it away.
             let (blob, size) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-
-            // Physical page size = 20 + 12 = 32 bytes
-            // 5 entries = 5 pages = 160 bytes total
-            // Last page CRC starts at offset 160 - 12 = 148
-            assert_eq!(size, 160);
-            let last_page_crc_offset = size - 12;
-            blob.write_at_sync(last_page_crc_offset, vec![0xFF; 12])
+            assert_eq!(size, 5 * TestEntry::SIZE as u64);
+            blob.write_at_sync(size - TestEntry::SIZE as u64, vec![0xFF; TestEntry::SIZE])
                 .await
                 .expect("Failed to corrupt");
             drop(blob);
 
-            // Reinitialize - should detect page corruption and truncate
+            // Reinitialize - should detect the invalid entry and rewind it away
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -1573,10 +1565,8 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
 
-            // Keep only first 2 index entries (2 full pages)
-            // Physical page size = logical (20) + CRC record (12) = 32 bytes
-            let physical_page_size = (TestEntry::SIZE + 12) as u64;
-            blob.resize(2 * physical_page_size)
+            // Keep only the first 2 index entries
+            blob.resize(2 * TestEntry::SIZE as u64)
                 .await
                 .expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
@@ -1700,52 +1690,20 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Simulate crash during write: truncate index to partial entry
-            // Each entry is TestEntry::SIZE (20) + 4 (CRC32) = 24 bytes
-            // Truncate to 3 full entries + 10 bytes of partial entry
+            // A durable partial entry cannot arise from a crash (per-blob atomic sync), so
+            // init rejects it as corruption.
             let (blob, _) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let partial_size = 3 * 24 + 10; // 3 full entries + partial
+            let partial_size = 3 * TestEntry::SIZE as u64 + 10; // 3 full entries + partial
             blob.resize(partial_size).await.expect("Failed to resize");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should handle partial entry gracefully
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to reinit");
-
-            // First 3 entries should still be valid
-            for i in 0..3u8 {
-                let entry = oversized.get(1, i as u64).await.expect("Failed to get");
-                assert_eq!(entry.id, i as u64);
-            }
-
-            // Entry 3 should not exist (partial entry was removed)
-            assert!(oversized.get(1, 3).await.is_err());
-
-            // Append new entry after recovery
-            let value: TestValue = [42; 16];
-            let entry = TestEntry::new(100, 0, 0);
-            let (pos, offset, size) = oversized
-                .append(1, entry, &value)
-                .await
-                .expect("Failed to append after recovery");
-            assert_eq!(pos, 3);
-
-            // Verify we can read the new entry
-            let retrieved = oversized.get(1, 3).await.expect("Failed to get new entry");
-            assert_eq!(retrieved.id, 100);
-            let retrieved_value = oversized
-                .get_value(1, offset, size)
-                .await
-                .expect("Failed to get new value");
-            assert_eq!(retrieved_value, value);
-
-            oversized.destroy().await.expect("Failed to destroy");
+            let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
+                Oversized::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
@@ -1770,7 +1728,8 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Truncate index to only partial data (less than one full entry)
+            // Truncate index to only partial data (less than one full entry): a durable
+            // partial entry cannot arise from a crash, so init rejects it as corruption.
             let (blob, _) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
@@ -1779,33 +1738,9 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should handle gracefully (rewind to 0)
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to reinit");
-
-            // No entries should exist
-            assert!(oversized.get(1, 0).await.is_err());
-
-            // Should be able to append after recovery
-            let value: TestValue = [99; 16];
-            let entry = TestEntry::new(100, 0, 0);
-            let (pos, offset, size) = oversized
-                .append(1, entry, &value)
-                .await
-                .expect("Failed to append after recovery");
-            assert_eq!(pos, 0);
-
-            let retrieved = oversized.get(1, 0).await.expect("Failed to get");
-            assert_eq!(retrieved.id, 100);
-            let retrieved_value = oversized
-                .get_value(1, offset, size)
-                .await
-                .expect("Failed to get value");
-            assert_eq!(retrieved_value, value);
-
-            oversized.destroy().await.expect("Failed to destroy");
+            let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
+                Oversized::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
@@ -1856,9 +1791,7 @@ mod tests {
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            // Physical page size = logical (20) + CRC record (12) = 32 bytes
-            let physical_page_size = (TestEntry::SIZE + 12) as u64;
-            blob.resize(2 * physical_page_size)
+            blob.resize(2 * TestEntry::SIZE as u64)
                 .await
                 .expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
@@ -2572,9 +2505,8 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Build a corrupted entry with offset near u64::MAX that would overflow.
-            // We need to write a valid page (with correct page-level CRC) containing
-            // the semantically-invalid entry data.
+            // Overwrite the entry with a semantically-invalid one whose offset near u64::MAX
+            // overflows when added to its size.
             let (blob, _) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
@@ -2586,24 +2518,9 @@ mod tests {
             (u64::MAX - 10).write(&mut entry_data); // value_offset (near max)
             100u32.write(&mut entry_data); // value_size (offset + size overflows)
             assert_eq!(entry_data.len(), TestEntry::SIZE);
-
-            // Build page-level CRC record (12 bytes):
-            // len1 (2) + crc1 (4) + len2 (2) + crc2 (4)
-            let crc = Crc32::checksum(&entry_data);
-            let len1 = TestEntry::SIZE as u16;
-            let mut crc_record = Vec::new();
-            crc_record.extend_from_slice(&len1.to_be_bytes()); // len1
-            crc_record.extend_from_slice(&crc.to_be_bytes()); // crc1
-            crc_record.extend_from_slice(&0u16.to_be_bytes()); // len2 (unused)
-            crc_record.extend_from_slice(&0u32.to_be_bytes()); // crc2 (unused)
-            assert_eq!(crc_record.len(), 12);
-
-            // Write the complete physical page: entry_data + crc_record
-            let mut page = entry_data;
-            page.extend_from_slice(&crc_record);
-            blob.write_at_sync(0, page)
+            blob.write_at_sync(0, entry_data)
                 .await
-                .expect("Failed to write corrupted page");
+                .expect("Failed to write corrupted entry");
             drop(blob);
 
             // Reinitialize - recovery should detect the invalid entry
