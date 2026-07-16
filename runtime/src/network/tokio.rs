@@ -216,7 +216,7 @@ pub struct Config {
     /// Timeout for establishing an outbound TCP connection.
     ///
     /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
-    dial_timeout: Duration,
+    connect_timeout: Duration,
     /// Read timeout for connections, after which the stream half returns
     /// [`Error::Timeout`] and is no longer reusable.
     ///
@@ -251,8 +251,8 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_dial_timeout(mut self, dial_timeout: Duration) -> Self {
-        self.dial_timeout = dial_timeout;
+    pub const fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
         self
     }
     /// See [Config]
@@ -281,8 +281,8 @@ impl Config {
         self.zero_linger
     }
     /// See [Config]
-    pub const fn dial_timeout(&self) -> Duration {
-        self.dial_timeout
+    pub const fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
     }
     /// See [Config]
     pub const fn read_timeout(&self) -> Duration {
@@ -303,7 +303,7 @@ impl Default for Config {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
-            dial_timeout: Duration::from_secs(10),
+            connect_timeout: Duration::from_secs(10),
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(60),
             read_buffer_size: 64 * 1024, // 64 KB
@@ -344,7 +344,7 @@ impl crate::Network for Network {
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
         // Create a new TCP stream
-        let stream = timeout(self.cfg.dial_timeout, TcpStream::connect(socket))
+        let stream = timeout(self.cfg.connect_timeout, TcpStream::connect(socket))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::ConnectionFailed)?;
@@ -411,14 +411,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn test_dial_timeout() {
-        let dial_timeout = Duration::from_millis(100);
+    async fn test_connect_timeout() {
+        let connect_timeout = Duration::from_millis(100);
         let network = TokioNetwork::Network::new(
-            TokioNetwork::Config::default().with_dial_timeout(dial_timeout),
+            TokioNetwork::Config::default().with_connect_timeout(connect_timeout),
             test_pool(),
         );
 
-        tests::test_network_dial_timeout(network, dial_timeout).await;
+        tests::test_network_connect_timeout(network, connect_timeout).await;
     }
 
     #[test_group("slow")]

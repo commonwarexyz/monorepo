@@ -100,7 +100,7 @@ pub struct NetworkConfig {
     /// Timeout for establishing an outbound TCP connection.
     ///
     /// Defaults to 10 seconds.
-    dial_timeout: Duration,
+    connect_timeout: Duration,
 
     /// Read/write timeout for network operations.
     ///
@@ -117,7 +117,7 @@ impl Default for NetworkConfig {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
-            dial_timeout: Duration::from_secs(10),
+            connect_timeout: Duration::from_secs(10),
             read_write_timeout: Duration::from_secs(60),
         }
     }
@@ -225,8 +225,8 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_dial_timeout(mut self, timeout: Duration) -> Self {
-        self.network_cfg.dial_timeout = timeout;
+    pub const fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.network_cfg.connect_timeout = timeout;
         self
     }
     /// See [Config]
@@ -287,8 +287,8 @@ impl Config {
         self.catch_panics
     }
     /// See [Config]
-    pub const fn dial_timeout(&self) -> Duration {
-        self.network_cfg.dial_timeout
+    pub const fn connect_timeout(&self) -> Duration {
+        self.network_cfg.connect_timeout
     }
     /// See [Config]
     pub const fn read_write_timeout(&self) -> Duration {
@@ -453,7 +453,7 @@ impl crate::Runner for Runner {
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     zero_linger: self.cfg.network_cfg.zero_linger,
-                    dial_timeout: self.cfg.network_cfg.dial_timeout,
+                    connect_timeout: self.cfg.network_cfg.connect_timeout,
                     read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
@@ -476,7 +476,7 @@ impl crate::Runner for Runner {
                 );
             } else {
                 let config = TokioNetworkConfig::default()
-                    .with_dial_timeout(self.cfg.network_cfg.dial_timeout)
+                    .with_connect_timeout(self.cfg.network_cfg.connect_timeout)
                     .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
