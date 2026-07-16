@@ -625,6 +625,18 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_connect_timeout() {
+        let connect_timeout = Duration::from_millis(100);
+        let network = test_network(Config {
+            connect_timeout,
+            ..Default::default()
+        })
+        .expect("Failed to start io_uring");
+
+        tests::test_network_connect_timeout(network, connect_timeout).await;
+    }
+
     #[test_group("slow")]
     #[tokio::test]
     async fn test_stress_trait() {

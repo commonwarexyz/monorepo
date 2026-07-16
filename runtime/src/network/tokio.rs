@@ -409,6 +409,18 @@ mod tests {
         .await;
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_connect_timeout() {
+        let connect_timeout = Duration::from_millis(100);
+        let network = TokioNetwork::Network::new(
+            TokioNetwork::Config::default().with_connect_timeout(connect_timeout),
+            test_pool(),
+        );
+
+        tests::test_network_connect_timeout(network, connect_timeout).await;
+    }
+
     #[test_group("slow")]
     #[tokio::test]
     async fn test_stress_trait() {
