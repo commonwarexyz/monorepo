@@ -59,7 +59,7 @@ unsafe impl<T: Send> Sync for Affine<T> {}
 
 impl<T> Affine<T> {
     /// Wrap `cell`, pinning access to the calling thread.
-    fn new(cell: T) -> Self {
+    pub(crate) fn new(cell: T) -> Self {
         Self {
             owner: thread::current().id(),
             cell,
@@ -69,7 +69,7 @@ impl<T> Affine<T> {
     /// Access the contents from the owning thread.
     ///
     /// Panics when called from any other thread.
-    fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         assert!(
             thread::current().id() == self.owner,
             "io_uring runtime operations must run on the runtime thread"

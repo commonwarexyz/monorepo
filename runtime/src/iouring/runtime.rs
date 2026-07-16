@@ -18,7 +18,7 @@
 //! alarm, delivering a stop signal) remain supported through the loop's
 //! latched wake state.
 
-use super::{IoUringLoop, RingConfig, new_ring, waker::Waker as RingWaker};
+use super::{IoUringLoop, RingConfig, driver::Affine, new_ring, waker::Waker as RingWaker};
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
@@ -46,6 +46,7 @@ use futures::task::{ArcWake, waker};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BinaryHeap},
     convert::Infallible,
     env,
@@ -433,11 +434,11 @@ impl crate::Runner for Runner {
         let process_executor = Arc::downgrade(&executor);
         Tasks::register_work(
             &executor.tasks,
-            Box::pin(process.collect(move |duration| Sleeper {
+            process.collect(move |duration| Sleeper {
                 executor: process_executor.clone(),
                 time: Instant::now() + duration.min(MAX_SLEEP),
                 registered: false,
-            })),
+            }),
         );
 
         // Get metrics
@@ -461,7 +462,7 @@ impl crate::Runner for Runner {
         let mut root = Box::pin(panicked.interrupt(f(context)));
 
         // Register the root task
-        Tasks::register_root(&executor.tasks);
+        let root_waker = Tasks::register_root(&executor.tasks);
 
         // Process tasks until the root task completes.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
@@ -472,36 +473,29 @@ impl crate::Runner for Runner {
                 let queue = executor.tasks.drain();
                 let mut output = None;
                 for id in queue {
-                    // Lookup the task (it may have completed already)
-                    let Some(t) = executor.tasks.get(id) else {
+                    // The root future lives on this stack frame, not in the
+                    // arena, so its typed output is captured un-erased.
+                    if id == ROOT_TASK {
+                        let mut cx = task::Context::from_waker(&root_waker);
+                        if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
+                            output = Some(result);
+                            break;
+                        }
+                        continue;
+                    }
+
+                    // Lookup the task (it may have completed already). The
+                    // Arc is cloned out so the arena lock is not held while
+                    // polling (a task spawning during its own poll would
+                    // otherwise deadlock).
+                    let Some(task) = executor.tasks.get(id) else {
                         continue;
                     };
 
-                    // Prepare task for polling with its cached waker.
-                    let mut cx = task::Context::from_waker(&t.waker);
-
-                    // Poll the task
-                    match &t.mode {
-                        Mode::Root => {
-                            if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
-                                output = Some(result);
-                                break;
-                            }
-                        }
-                        Mode::Work(future) => {
-                            // Get the future (if it still exists)
-                            let mut fut_opt = future.lock();
-                            let Some(fut) = fut_opt.as_mut() else {
-                                executor.tasks.remove(id);
-                                continue;
-                            };
-
-                            // Poll the task
-                            if fut.as_mut().poll(&mut cx).is_ready() {
-                                executor.tasks.remove(id);
-                                *fut_opt = None;
-                            }
-                        }
+                    // Poll the task with its cached waker.
+                    let mut cx = task::Context::from_waker(task.waker());
+                    if task.poll(&mut cx) {
+                        executor.tasks.remove(id);
                     }
                 }
 
@@ -545,12 +539,8 @@ impl crate::Runner for Runner {
         // upgrade their weak reference to the executor during drop).
         let teardown = catch_unwind(AssertUnwindSafe(|| {
             executor.sleeping.lock().clear();
-            let tasks = executor.tasks.clear();
-            for t in tasks {
-                let Mode::Work(future) = &t.mode else {
-                    continue;
-                };
-                *future.lock() = None;
+            for task in executor.tasks.clear() {
+                task.clear();
             }
 
             // Drop the root task to release any Context references it may
@@ -597,24 +587,78 @@ impl crate::Runner for Runner {
     }
 }
 
-/// The mode of a [Task].
-enum Mode {
-    Root,
-    Work(Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>),
+/// Task id reserved for the root future, which lives on the runtime thread's
+/// stack (so its typed output is captured un-erased) rather than in the arena.
+const ROOT_TASK: u128 = 0;
+
+/// Type-erased boundary for a spawned task.
+///
+/// The concrete future is stored inline in the task's single `Arc` allocation
+/// (there is no nested `Box<dyn Future>`), so the only dynamic dispatch on the
+/// poll path is this trait: inside the monomorphized [TaskCell] methods the
+/// compiler sees the concrete future type end to end.
+trait Erased: Send + Sync {
+    /// Poll the stored future, returning true once it has completed.
+    fn poll(&self, cx: &mut task::Context<'_>) -> bool;
+
+    /// Drop the stored future in place.
+    fn clear(&self);
+
+    /// The waker re-enqueuing this task.
+    fn waker(&self) -> &task::Waker;
 }
 
-/// A future being executed by the [Executor].
-struct Task {
-    mode: Mode,
+/// A spawned task: its waker plus the inline future.
+struct TaskCell<F> {
     /// Waker re-enqueuing this task, built once at registration.
     ///
     /// The waker's identity is stable for the task's lifetime, so re-polls
     /// present the same waker and `Waker::will_wake` lets waiters (e.g. the
     /// driver's slot wakers) skip refresh clones.
     waker: task::Waker,
+    /// The future, polled and cleared only on the executor thread (spawns run
+    /// inline, so no lock is needed).
+    ///
+    /// `None` once the future completed or teardown cleared it.
+    future: Affine<RefCell<Option<F>>>,
 }
 
-/// A waker for a [Task].
+impl<F> Erased for TaskCell<F>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    fn poll(&self, cx: &mut task::Context<'_>) -> bool {
+        self.future.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let Some(future) = slot.as_mut() else {
+                return true;
+            };
+            // SAFETY: the future lives inside this task's Arc allocation and
+            // is never moved out of it: completion (below) and teardown
+            // ([Erased::clear]) both drop it in place by overwriting the slot
+            // with None.
+            let future = unsafe { Pin::new_unchecked(future) };
+            if future.poll(cx).is_ready() {
+                *slot = None;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    fn clear(&self) {
+        self.future.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+
+    fn waker(&self) -> &task::Waker {
+        &self.waker
+    }
+}
+
+/// A waker for a task in the arena (or the root).
 struct TaskWaker {
     id: u128,
     tasks: Weak<Tasks>,
@@ -635,7 +679,7 @@ impl ArcWake for TaskWaker {
 /// All running tasks, plus whether the executor has shut down.
 struct Running {
     /// Tasks tracked by id.
-    tasks: BTreeMap<u128, Arc<Task>>,
+    tasks: BTreeMap<u128, Arc<dyn Erased>>,
     /// Set once the executor clears the arena at teardown. Registrations that
     /// race teardown from other threads are rejected (dropping their futures)
     /// instead of leaking into an arena nothing will ever poll again.
@@ -661,7 +705,8 @@ impl Tasks {
     /// Create a new task queue.
     const fn new(unpark: RingWaker) -> Self {
         Self {
-            counter: Mutex::new(0),
+            // Id 0 is reserved for the root task.
+            counter: Mutex::new(1),
             ready: Mutex::new(Vec::new()),
             running: Mutex::new(Running {
                 tasks: BTreeMap::new(),
@@ -679,25 +724,25 @@ impl Tasks {
         old
     }
 
-    /// Register the root task.
-    fn register_root(arc_self: &Arc<Self>) {
-        let id = arc_self.increment();
-        let task = Arc::new(Task {
-            mode: Mode::Root,
-            waker: Self::task_waker(arc_self, id),
-        });
-        arc_self.register(id, task);
+    /// Build the root task's waker and queue its first poll.
+    fn register_root(arc_self: &Arc<Self>) -> task::Waker {
+        let waker = Self::task_waker(arc_self, ROOT_TASK);
+        arc_self.queue(ROOT_TASK);
+        waker
     }
 
     /// Register a non-root task to be executed.
-    fn register_work(
-        arc_self: &Arc<Self>,
-        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    ) {
+    ///
+    /// The future is stored inline in the task's allocation, keeping its
+    /// concrete type visible to the compiler behind the [Erased] boundary.
+    fn register_work<F>(arc_self: &Arc<Self>, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let id = arc_self.increment();
-        let task = Arc::new(Task {
-            mode: Mode::Work(Mutex::new(Some(future))),
+        let task: Arc<dyn Erased> = Arc::new(TaskCell {
             waker: Self::task_waker(arc_self, id),
+            future: Affine::new(RefCell::new(Some(future))),
         });
         arc_self.register(id, task);
     }
@@ -716,7 +761,7 @@ impl Tasks {
     /// the arena has already been cleared, so inserting would leak the future
     /// (nothing polls or clears the arena again). Dropping the task's future
     /// releases its resources and resolves its handle with [Error::Closed].
-    fn register(&self, id: u128, task: Arc<Task>) {
+    fn register(&self, id: u128, task: Arc<dyn Erased>) {
         // Track as running until completion
         {
             let mut running = self.running.lock();
@@ -755,7 +800,7 @@ impl Tasks {
     ///
     /// We must return cloned here because we cannot hold the running lock while polling a task (will
     /// deadlock if [Self::register_work] is called).
-    fn get(&self, id: u128) -> Option<Arc<Task>> {
+    fn get(&self, id: u128) -> Option<Arc<dyn Erased>> {
         let running = self.running.lock();
         running.tasks.get(&id).cloned()
     }
@@ -766,13 +811,13 @@ impl Tasks {
     }
 
     /// Clear all tasks and reject future registrations.
-    fn clear(&self) -> Vec<Arc<Task>> {
+    fn clear(&self) -> Vec<Arc<dyn Erased>> {
         // Clear ready
         self.ready.lock().clear();
 
         // Clear running tasks and close the arena so registrations racing
         // teardown from other threads are dropped rather than leaked.
-        let tasks: BTreeMap<u128, Arc<Task>> = {
+        let tasks: BTreeMap<u128, Arc<dyn Erased>> = {
             let mut running = self.running.lock();
             running.closed = true;
             take(&mut running.tasks)
@@ -853,7 +898,7 @@ impl crate::Spawner for Context {
 
         match past {
             Execution::Shared(false) => {
-                Tasks::register_work(&executor.tasks, Box::pin(f));
+                Tasks::register_work(&executor.tasks, f);
             }
             // The single-threaded executor cannot absorb blocking work, and the
             // runtime manages no worker threads to offload it to. Support is
