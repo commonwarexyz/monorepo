@@ -398,7 +398,10 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
-        qmdb::any::{FixedConfig, unordered::fixed},
+        qmdb::{
+            InitParallelism,
+            any::{FixedConfig, unordered::fixed},
+        },
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, channel::oneshot, sync::TracedAsyncRwLock};
@@ -490,6 +493,7 @@ mod tests {
     fn db_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
         FixedConfig {
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),
                 metadata_partition: format!("{suffix}-mmr-metadata"),

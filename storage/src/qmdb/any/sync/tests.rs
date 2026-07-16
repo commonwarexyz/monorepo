@@ -6,10 +6,10 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    merkle::{self, Location},
+    merkle::{self, Location, mmr},
     qmdb::{
         self,
-        any::traits::DbAny,
+        any::{test::fixed_db_config_with_strategy, traits::DbAny},
         operation::Operation as OperationTrait,
         sync::{
             self, Engine, Target,
@@ -17,20 +17,22 @@ use crate::{
             resolver::{self, FetchResult, Resolver},
         },
     },
+    translator::TwoCap,
 };
 use commonware_codec::Encode;
-use commonware_cryptography::sha256::Digest;
-use commonware_macros::select;
+use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
+use commonware_macros::{select, test_traced};
+use commonware_parallel::{Manual, Sequential};
 use commonware_runtime::{
     BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _, deterministic,
 };
 use commonware_utils::{
-    NZU64,
+    NZU64, NZUsize,
     channel::{mpsc, oneshot},
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
 };
-use futures::{FutureExt, pin_mut};
+use futures::{FutureExt, future::join_all, pin_mut};
 use rand::Rng as _;
 use std::{
     num::NonZeroU64,
@@ -3002,3 +3004,104 @@ sync_tests_for_harness!(
     harnesses::UnorderedVariableMmbHarness,
     unordered_variable_mmb
 );
+
+/// State-sync rebuilds must honor the configured `init_parallelism` rather than deriving a worker
+/// count from the strategy. The partitioned ordered index is the only index type with a parallel
+/// build, and no partitioned db implements [qmdb::sync::Database] yet, so this exercises the
+/// shared [super::build_db] helper directly: `Serial` must spawn no snapshot workers even though
+/// the strategy's hint allows them, `Workers(2)` must spawn them, and both must rebuild the
+/// source root.
+#[test_traced]
+fn test_sync_build_honors_init_parallelism() {
+    type PartDb = crate::qmdb::any::ordered::fixed::partitioned::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        1,
+        Manual<Sequential>,
+    >;
+
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        // A strategy whose hint permits workers: a rebuild that ignored the configured
+        // `init_parallelism` would derive a parallel build from it.
+        let strategy = Manual::new(Sequential, NZUsize!(4));
+        let cfg = fixed_db_config_with_strategy::<TwoCap, _>(
+            "sync_honors_init_parallelism",
+            &context,
+            strategy,
+        );
+
+        // Build a committed source db (the test config's `init_parallelism` is `Serial`).
+        let mut db = PartDb::init(context.child("source"), cfg.clone())
+            .await
+            .unwrap();
+        let mut batch = db.new_batch();
+        for i in 0u64..500 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&(i * 7).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+        db.sync().await.unwrap();
+        let root = db.root();
+        let lower = db.sync_boundary();
+        let upper = db.bounds().end;
+        let pinned: Vec<Digest> = join_all(
+            <mmr::Family as merkle::Family>::nodes_to_pin(lower).map(|p| db.log.merkle.get_node(p)),
+        )
+        .await
+        .into_iter()
+        .map(|n| n.unwrap().unwrap())
+        .collect();
+        let journal = db.log.journal;
+
+        // A `Serial` rebuild must not spawn snapshot workers.
+        let synced: PartDb = super::build_db(
+            context.child("serial_rebuild"),
+            cfg.merkle_config.clone(),
+            journal,
+            cfg.translator.clone(),
+            Some(pinned.clone()),
+            non_empty_range!(lower, upper),
+            1024,
+            cfg.init_cache_size,
+            qmdb::InitParallelism::Serial,
+        )
+        .await
+        .unwrap();
+        assert_eq!(synced.root(), root);
+        assert!(
+            !context.encode().contains("snapshot_worker"),
+            "serial sync rebuild must not spawn snapshot workers"
+        );
+
+        // An explicit worker count must spawn workers and rebuild the same root.
+        let journal = synced.log.journal;
+        let synced: PartDb = super::build_db(
+            context.child("parallel_rebuild"),
+            cfg.merkle_config.clone(),
+            journal,
+            cfg.translator.clone(),
+            Some(pinned),
+            non_empty_range!(lower, upper),
+            1024,
+            cfg.init_cache_size,
+            qmdb::InitParallelism::Workers(NZUsize!(2)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(synced.root(), root);
+        assert!(
+            context.encode().contains("snapshot_worker"),
+            "explicit worker count must spawn snapshot workers"
+        );
+
+        synced.destroy().await.unwrap();
+    });
+}

@@ -95,6 +95,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
         },
         translator: OneCap,
         init_cache_size: Some(NZUsize!(3)),
+        init_parallelism: commonware_storage::qmdb::InitParallelism::Serial,
     }
 }
 
