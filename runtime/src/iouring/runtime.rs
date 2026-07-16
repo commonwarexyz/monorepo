@@ -387,7 +387,12 @@ impl crate::Runner for Runner {
             .max(self.cfg.network_cfg.connect_timeout);
         let (io, mut ioloop) =
             IoUringLoop::new(ring_cfg, &mut runtime_registry.sub_registry("iouring"));
-        let mut ring = new_ring(&ioloop.cfg).expect("unable to create io_uring instance");
+        let mut ring = new_ring(&ioloop.cfg).unwrap_or_else(|err| {
+            panic!(
+                "unable to create io_uring instance ({err}): this runtime requires Linux 6.1+ \
+                 (IORING_SETUP_SINGLE_ISSUER and IORING_SETUP_DEFER_TASKRUN)"
+            )
+        });
 
         // Initialize storage
         let storage = MeteredStorage::new(

@@ -200,6 +200,8 @@ pub enum DropOutcome {
         /// Whether an async-cancel SQE must be staged because an operation
         /// SQE is in flight.
         needs_sqe: bool,
+        /// Scheduled deadline tick leaving active timeout tracking, if any.
+        target_tick: Option<Tick>,
     },
     /// The request keeps running to completion without an observer (storage
     /// writes and syncs preserve durability semantics on caller drop).
@@ -644,15 +646,20 @@ impl Waiters {
             return DropOutcome::Detached;
         }
         match slot.state {
-            WaiterState::Active { .. } => {
+            WaiterState::Active { target_tick } => {
                 slot.state = WaiterState::CancelRequested;
                 DropOutcome::Cancel {
                     needs_sqe: slot.in_flight,
+                    target_tick,
                 }
             }
-            // Cancellation was already requested (e.g. by timeout expiry), so
-            // the existing wind-down path retires the slot.
-            WaiterState::CancelRequested => DropOutcome::Cancel { needs_sqe: false },
+            // Cancellation was already requested (e.g. by timeout expiry,
+            // which released deadline accounting), so the existing wind-down
+            // path retires the slot.
+            WaiterState::CancelRequested => DropOutcome::Cancel {
+                needs_sqe: false,
+                target_tick: None,
+            },
         }
     }
 
@@ -988,7 +995,10 @@ mod tests {
             let waiter_id = insert(&mut waiters, request, Some(tick));
             assert!(matches!(
                 waiters.mark_orphaned(waiter_id),
-                DropOutcome::Cancel { needs_sqe: false }
+                DropOutcome::Cancel {
+                    needs_sqe: false,
+                    target_tick: Some(_),
+                }
             ));
 
             match waiters.stage(waiter_id) {
@@ -1020,7 +1030,10 @@ mod tests {
             assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
             assert!(matches!(
                 waiters.mark_orphaned(waiter_id),
-                DropOutcome::Cancel { needs_sqe: true }
+                DropOutcome::Cancel {
+                    needs_sqe: true,
+                    ..
+                }
             ));
 
             match waiters.on_completion(waiter_id.user_data(), result) {

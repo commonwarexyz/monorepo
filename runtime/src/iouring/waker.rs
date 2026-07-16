@@ -62,7 +62,7 @@ const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 /// The runtime stages submissions on the loop thread itself, so the publish
 /// protocol is currently exercised only by tests and loom models. It is
 /// retained for a future cross-thread submission path.
-#[cfg_attr(not(any(test, feature = "loom")), allow(dead_code))]
+#[allow(dead_code)]
 const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
 /// Full sequence domain used by the packed submission counter (state >> 3).
 pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
@@ -271,7 +271,7 @@ impl Waker {
     /// The runtime stages submissions on the loop thread itself, so this is
     /// currently exercised only by tests and loom models. It is retained for
     /// a future cross-thread submission path.
-    #[cfg_attr(not(any(test, feature = "loom")), allow(dead_code))]
+    #[allow(dead_code)]
     #[inline]
     pub fn publish(&self) {
         // Use `Release` so that when `pending()` later observes a published-ahead

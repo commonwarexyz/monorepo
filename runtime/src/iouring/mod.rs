@@ -167,6 +167,10 @@
 //!   per-request timeouts.
 //! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
+//! - Parked terminal results count toward the capacity limit until their ticket is polled or
+//!   dropped, and capacity waiters themselves have no deadline protection (deadlines only apply
+//!   after admission). A task that retains a completed ticket indefinitely therefore withholds a
+//!   slot from waiting admissions, exactly as an unread completion channel did previously.
 
 use crate::telemetry::metrics::{Gauge, Register, raw};
 use io_uring::{
@@ -769,6 +773,14 @@ impl IoUringLoop {
     /// This is a no-op when no active deadlines exist. Expired stale wheel
     /// entries are ignored when waiter generation no longer matches.
     fn advance_timeouts(&mut self, shared: &mut Shared) {
+        // Release deadline accounting for ops whose tickets were dropped: the
+        // wheel is loop-owned, so drop paths queue removals instead. Without
+        // this the wheel would report the stale tick as the next deadline
+        // forever once it elapsed.
+        for tick in shared.released_deadlines.drain(..) {
+            self.timeout_wheel.remove(tick);
+        }
+
         // Fast path: no active deadlines means no clock read and no wheel scan.
         if self.timeout_wheel.next_deadline().is_none() {
             return;
@@ -1622,6 +1634,105 @@ mod tests {
             Poll::Ready(Err((_, Error::Timeout))) => {}
             other => panic!("expected recv deadline timeout, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_dropped_op_releases_wheel_deadline() {
+        // Verify dropping a deadline-carrying op future after first staging
+        // releases its timeout-wheel accounting: a leaked tick would make the
+        // wheel report an elapsed deadline forever, degrading park into a
+        // busy loop.
+        let mut harness = TestLoop::new(RingConfig {
+            max_request_timeout: Duration::from_secs(1),
+            timeout_wheel_tick: Duration::from_millis(5),
+            ..Default::default()
+        });
+        let (left, _right) = UnixStream::pair().unwrap();
+
+        let driver = Arc::clone(&harness.driver);
+        let mut recv = Box::pin(driver.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(8),
+            0,
+            8,
+            false,
+            Instant::now() + Duration::from_millis(50),
+        ));
+
+        // Admit and submit the recv (first staging schedules the deadline).
+        assert!(poll_once(&harness, &mut recv).is_pending());
+        harness.ioloop.turn(&mut harness.ring);
+        assert_eq!(harness.pending(), 1);
+
+        // Drop the future: orphan plus eager async-cancel.
+        drop(recv);
+        let start = Instant::now();
+        while harness.tracked() != 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "orphaned recv still tracked after {:?}",
+                start.elapsed()
+            );
+            harness.ioloop.turn(&mut harness.ring);
+            harness
+                .ioloop
+                .park(&mut harness.ring, Some(Duration::from_millis(10)));
+        }
+
+        // No waiters remain, so once the original deadline elapses the wheel
+        // must not report an active deadline.
+        std::thread::sleep(Duration::from_millis(100));
+        harness.ioloop.turn(&mut harness.ring);
+        assert_eq!(
+            harness.ioloop.timeout_wheel.next_deadline(),
+            None,
+            "dropped op leaked its timeout-wheel deadline"
+        );
+    }
+
+    #[test]
+    fn test_cross_thread_wake_lands_with_saturated_submission_queue() {
+        // Verify the wake poll wins its rearm retry against a single-slot SQ
+        // (where it competes with op SQEs for the only entry) so an
+        // out-of-band wake still unparks a blocked loop.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            max_request_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let (left, _right) = UnixStream::pair().unwrap();
+
+        // Keep a recv in flight so park blocks in the eventfd-backed path.
+        let driver = Arc::clone(&harness.driver);
+        let mut recv = Box::pin(driver.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+        harness.ioloop.turn(&mut harness.ring);
+        assert_eq!(harness.pending(), 1);
+
+        // Wake from a foreign thread after the loop has had time to block.
+        let waker = harness.ioloop.waker.clone();
+        let start = Instant::now();
+        let wake_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            waker.wake();
+        });
+        harness.ioloop.park(&mut harness.ring, None);
+        let elapsed = start.elapsed();
+        wake_thread.join().unwrap();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cross-thread wake did not unpark the loop: {elapsed:?}"
+        );
+
+        // Drop the recv before the harness so shutdown cancels it eagerly.
+        drop(recv);
     }
 
     #[test]

@@ -20,6 +20,7 @@
 //! moving an already-polled future to a raw thread.
 
 use super::{
+    Tick,
     request::{
         AcceptRequest, ConnectRequest, Output, RawSocketAddr, ReadAtRequest, RecvRequest, Request,
         SendRequest, SyncRequest, WriteAtRequest,
@@ -94,6 +95,9 @@ pub(crate) struct Shared {
     pub(super) staged: VecDeque<WaiterId>,
     /// Waiter ids needing an async-cancel SQE.
     pub(super) pending_cancels: VecDeque<WaiterId>,
+    /// Wheel ticks released by dropped tickets, awaiting removal by the loop
+    /// (the timeout wheel is loop-owned, so drop paths cannot touch it).
+    pub(super) released_deadlines: Vec<Tick>,
     /// Tasks waiting for a free waiter slot, woken all at once whenever a
     /// slot frees (a woken future re-registers if it loses the race).
     pub(super) capacity: Vec<Waker>,
@@ -119,6 +123,7 @@ impl Driver {
                 waiters: Waiters::new(capacity),
                 staged: VecDeque::with_capacity(capacity),
                 pending_cancels: VecDeque::with_capacity(capacity),
+                released_deadlines: Vec::new(),
                 capacity: Vec::new(),
                 closed: false,
             })),
@@ -385,10 +390,16 @@ fn orphan(driver: &Driver, id: WaiterId) {
         match shared.waiters.mark_orphaned(id) {
             // A parked result was dropped, freeing a slot.
             DropOutcome::Freed => std::mem::take(&mut shared.capacity),
-            DropOutcome::Cancel { needs_sqe } => {
+            DropOutcome::Cancel {
+                needs_sqe,
+                target_tick,
+            } => {
                 if needs_sqe {
                     shared.pending_cancels.push_back(id);
                 }
+                // Release deadline accounting for the transition out of
+                // active timeout tracking.
+                shared.released_deadlines.extend(target_tick);
                 Vec::new()
             }
             DropOutcome::Detached => Vec::new(),

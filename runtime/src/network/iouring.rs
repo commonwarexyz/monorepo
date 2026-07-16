@@ -321,7 +321,10 @@ pub struct Listener {
     pool: BufferPool,
     /// In-flight accept, retained so a cancelled accept future resumes the
     /// same request instead of losing an accepted connection.
-    #[allow(clippy::type_complexity)]
+    ///
+    /// A connection accepted between `accept` calls parks in the ticket's
+    /// waiter slot (holding its fd and the slot) until the next call takes it
+    /// or the listener drops.
     pending: Option<iouring::AcceptTicket>,
 }
 
