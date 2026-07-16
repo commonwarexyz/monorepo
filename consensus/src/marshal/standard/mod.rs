@@ -32,6 +32,7 @@ commonware_macros::stability_scope!(ALPHA {
     mod inline;
     pub use inline::Inline;
 
+    mod relay;
     mod validation;
 });
 
@@ -40,14 +41,15 @@ pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
-    use super::{Deferred, Inline, Standard};
+    use super::{Deferred, Inline, Standard, relay};
     use crate::{
         Automaton, CertifiableAutomaton, Heightable, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
+            application::gates::Gates,
             config::{Config, Start},
-            core::{Actor, CommitmentFallback, DigestFallback, Mailbox, cache},
+            core::{Actor, CommitmentFallback, DigestFallback, Mailbox, cache, durability::Durable as _, },
             mocks::{
                 application::Application,
                 harness::{
@@ -62,6 +64,7 @@ mod tests {
             resolver::handler,
         },
         simplex::{
+            Plan,
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{Finalization, Proposal},
         },
@@ -85,7 +88,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Quota, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Clock, Metrics, Quota, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic, Spawner,
     };
     use commonware_storage::{
         archive::{Archive as _, immutable, prunable},
@@ -7218,14 +7221,12 @@ mod tests {
         });
     }
 
-    /// A block admitted via `Proposed` must be broadcast straight from the
-    /// in-memory cache when `Forward` arrives: the `RecordingBuffer` reports
-    /// no `find_by_commitment` hits, so if the forward dispatches a block it
-    /// must have come from the in-memory slot populated by `Proposed`.
-    /// A subsequent `Forward` for the same `(round, commitment)` falls
-    /// through to storage because the slot is consumed.
+    /// A block relayed via `Proposed` must be dispatched to the buffer and
+    /// persisted, with the sync handle resolving durable. A subsequent
+    /// `Forward` for the same `(round, commitment)` serves the persisted
+    /// block from storage.
     #[test_traced("WARN")]
-    fn test_standard_proposed_is_served_from_in_memory_cache() {
+    fn test_standard_proposed_broadcasts_then_persists() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -7249,25 +7250,28 @@ mod tests {
             .await;
             let buffer = buffer.expect("buffer was provided");
 
-            assert!(mailbox.proposed(round, block.clone()).await);
-
             let targets = vec![participants[1].clone()];
-            mailbox.forward(round, digest, Recipients::Some(targets.clone()));
-            wait_until(&context, Duration::from_secs(5), "first forward", || {
+            let (ack, persist) = oneshot::channel();
+            mailbox.proposed(round, block.clone(), Recipients::Some(targets.clone()), ack);
+            wait_until(&context, Duration::from_secs(5), "proposed send", || {
                 !buffer.sends.lock().is_empty()
             })
             .await;
 
             let sends = buffer.sends();
-            assert_eq!(sends.len(), 1, "cached proposal must dispatch exactly once");
+            assert_eq!(sends.len(), 1, "proposal must dispatch exactly once");
             assert_eq!(sends[0].0, round);
             assert_eq!(sends[0].1.digest(), digest);
 
-            // The in-memory slot was consumed; a second forward for the same
-            // commitment must still succeed by falling back to storage (the
-            // block was persisted by `Proposed`, mirroring `Verified`).
+            // The message persists the block after broadcasting it, so the
+            // sync handle must resolve durable.
+            let sync = persist.await.expect("proposed sync handle missing");
+            assert!(sync.durable(round, "proposed").await);
+
+            // A forward for the same commitment must serve the persisted
+            // block from storage.
             mailbox.forward(round, digest, Recipients::Some(targets));
-            wait_until(&context, Duration::from_secs(5), "second forward", || {
+            wait_until(&context, Duration::from_secs(5), "forward send", || {
                 buffer.sends.lock().len() >= 2
             })
             .await;
@@ -7275,6 +7279,196 @@ mod tests {
             let sends = buffer.sends();
             assert_eq!(sends.len(), 2);
             assert_eq!(sends[1].1.digest(), digest);
+        });
+    }
+
+    /// A propose relay that finds no staged proposal must fall back to
+    /// forwarding the persisted block. Staging then flushing at certify (the
+    /// recovered-leader race) persists the block and resolves the
+    /// certification gate through the staged ack, so the subsequent relay
+    /// broadcast re-sends the block from storage instead of dropping it.
+    #[test_traced("WARN")]
+    fn test_standard_propose_relay_miss_forwards_persisted_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let digest = block.digest();
+
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &format!("relay-miss-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            let buffer = buffer.expect("buffer was provided");
+
+            // Stage the proposal as propose would, then flush it as certify
+            // does when certification wins the race against the relay.
+            let gates = Gates::new();
+            let (tx, rx) = oneshot::channel();
+            context.child("stager").spawn({
+                let gates = gates.clone();
+                let block = block.clone();
+                move |_| async move {
+                    gates
+                        .stage(round, digest, Arc::new(block), tx, "test")
+                        .await;
+                }
+            });
+            assert_eq!(rx.await.expect("id published"), digest);
+            let gate = gates.take(round, digest).expect("gate registered");
+            gates.flush_unrelayed(&mailbox, round, digest);
+            assert!(
+                gate.await.expect("gate resolved"),
+                "certify flush must resolve the gate durably"
+            );
+
+            // The relay finds nothing staged and must forward the persisted
+            // block instead of dropping the broadcast.
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            wait_until(&context, Duration::from_secs(5), "fallback send", || {
+                !buffer.sends.lock().is_empty()
+            })
+            .await;
+
+            let sends = buffer.sends();
+            assert_eq!(sends.len(), 1, "fallback must dispatch exactly once");
+            assert_eq!(sends[0].0, round);
+            assert_eq!(sends[0].1.digest(), digest);
+            assert!(matches!(sends[0].2, Recipients::All));
+        });
+    }
+
+    /// A propose relay with a staged proposal must dispatch it through the
+    /// `Proposed` message and complete the durability handshake. The block is
+    /// never persisted beforehand, so the forward fallback has nothing to
+    /// serve: only the staged-hit path can produce the send.
+    #[test_traced("WARN")]
+    fn test_standard_propose_relay_sends_staged_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let digest = block.digest();
+
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &format!("relay-hit-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            let buffer = buffer.expect("buffer was provided");
+
+            // Stage the proposal as propose would.
+            let gates = Gates::new();
+            let (tx, rx) = oneshot::channel();
+            context.child("stager").spawn({
+                let gates = gates.clone();
+                let block = block.clone();
+                move |_| async move {
+                    gates
+                        .stage(round, digest, Arc::new(block), tx, "test")
+                        .await;
+                }
+            });
+            assert_eq!(rx.await.expect("id published"), digest);
+            let gate = gates.take(round, digest).expect("gate registered");
+
+            // The relay must take the staged proposal and dispatch it.
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            wait_until(&context, Duration::from_secs(5), "staged send", || {
+                !buffer.sends.lock().is_empty()
+            })
+            .await;
+
+            let sends = buffer.sends();
+            assert_eq!(sends.len(), 1, "staged proposal must dispatch exactly once");
+            assert_eq!(sends[0].0, round);
+            assert_eq!(sends[0].1.digest(), digest);
+            assert!(matches!(sends[0].2, Recipients::All));
+            assert!(
+                gates.take_staged(round, digest).is_none(),
+                "relay must consume the staged proposal"
+            );
+
+            // The relayed proposal is persisted through the staged ack, so
+            // the certification gate resolves durably.
+            assert!(
+                gate.await.expect("gate resolved"),
+                "relay handshake must resolve the gate durably"
+            );
+        });
+    }
+
+    /// A proposer that relays conflicting blocks for the same round must not
+    /// be blocked by its own conflict: a leader that crashes after the send
+    /// may legitimately propose a different block for the round after
+    /// restart. The verified archive stores candidates with multi-put
+    /// semantics, so both `Proposed` handshakes must broadcast and resolve
+    /// durable.
+    #[test_traced("WARN")]
+    fn test_standard_proposed_conflicting_blocks_both_ack() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block_a = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block_b = make_raw_block(Sha256::hash(b""), Height::new(1), 200);
+            assert_ne!(block_a.digest(), block_b.digest());
+
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &format!("proposed-conflict-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            let buffer = buffer.expect("buffer was provided");
+
+            let (ack_a, persist_a) = oneshot::channel();
+            mailbox.proposed(round, block_a.clone(), Recipients::All, ack_a);
+            let (ack_b, persist_b) = oneshot::channel();
+            mailbox.proposed(round, block_b.clone(), Recipients::All, ack_b);
+
+            let sync_a = persist_a.await.expect("first proposed sync handle missing");
+            assert!(sync_a.durable(round, "proposed").await);
+            let sync_b = persist_b
+                .await
+                .expect("second proposed sync handle missing");
+            assert!(sync_b.durable(round, "proposed").await);
+
+            let sends = buffer.sends();
+            assert_eq!(sends.len(), 2, "both conflicting proposals must dispatch");
+            assert_eq!(sends[0].1.digest(), block_a.digest());
+            assert_eq!(sends[1].1.digest(), block_b.digest());
         });
     }
 

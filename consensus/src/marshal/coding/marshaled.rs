@@ -173,7 +173,7 @@ where
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
-    gates: Gates<Commitment>,
+    gates: Gates<Commitment, CodedBlock<B, C, H>>,
 
     build_duration: Timed,
     verify_duration: Timed,
@@ -471,7 +471,7 @@ where
                 // Publish only when the block is both valid and durable. App-invalid
                 // candidates may already be in the cache from the concurrent store above,
                 // so the gate verdict is the authority for consensus progress.
-                if let Some(application_valid) = gates::handle(verdict, durable) {
+                if let Some(application_valid) = gates::resolve(verdict, durable) {
                     tx.send_lossy(application_valid);
                 }
             }
@@ -663,11 +663,12 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. The block's persistence is enqueued
-    /// before the commitment is delivered, and the resulting sync handle is awaited only at
-    /// certification so it overlaps consensus voting. The commitment does not imply durability
-    /// on its own; [`CertifiableAutomaton::certify`] awaits the registered certification gate
-    /// before the finalize vote.
+    /// contain the proposed block's commitment when ready. The block is staged before the
+    /// commitment is delivered and handed to marshal when consensus requests the relay
+    /// broadcast, which persists it after the shards are sent. The resulting sync handle is
+    /// awaited only at certification so it overlaps consensus voting. The commitment does not
+    /// imply durability on its own. [`CertifiableAutomaton::certify`] awaits the registered
+    /// certification gate before the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn propose(
@@ -715,7 +716,8 @@ where
         context.spawn(move |runtime_context| {
             async move {
                 // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted before voting in consensus).
+                // for this round (persisted by a pre-crash propose that reached
+                // its relay broadcast).
                 //
                 // The pre-crash commitment may already have been broadcast,
                 // so building a fresh block would equivocate. The stored
@@ -738,15 +740,20 @@ where
                         );
                         return;
                     }
+                    // Stage the recovered block so the relay broadcast re-sends
+                    // its shards through the same handshake as a fresh
+                    // proposal. The relay-time persist deduplicates against the
+                    // pre-crash write, with the handle covering the original.
                     let commitment = block.commitment();
                     let round = consensus_context.round;
-                    let success = tx.send_lossy(commitment);
                     debug!(
                         ?round,
                         ?commitment,
-                        success,
-                        "reused verified block from marshal on leader recovery"
+                        "reusing verified block from marshal on leader recovery"
                     );
+                    gates
+                        .stage(round, commitment, Arc::new(block), tx, "recovered block")
+                        .await;
                     return;
                 }
 
@@ -796,15 +803,8 @@ where
                     let commitment = parent.commitment();
                     let round = consensus_context.round;
 
-                    let persist = marshal.verified_deferred(round, parent);
                     gates
-                        .persist_and_defer(
-                            round,
-                            commitment,
-                            tx,
-                            persist,
-                            "re-proposed boundary block",
-                        )
+                        .stage(round, commitment, parent, tx, "re-proposed boundary block")
                         .await;
                     return;
                 }
@@ -856,9 +856,14 @@ where
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
 
-                let persist = marshal.proposed_deferred(round, coded_block);
                 gates
-                    .persist_and_defer(round, commitment, tx, persist, "proposed block")
+                    .stage(
+                        round,
+                        commitment,
+                        Arc::new(coded_block),
+                        tx,
+                        "proposed block",
+                    )
                     .await;
             }
             .instrument(span)
@@ -1094,6 +1099,8 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+        self.gates.flush_unrelayed(&self.marshal, round, payload);
+
         // First, check for an in-progress certification gate task.
         let task = self.gates.take(round, payload);
         if let Some(task) = task {
@@ -1127,7 +1134,12 @@ where
         let Plan::Propose { round } = plan else {
             return Feedback::Ok;
         };
-        self.marshal.forward(round, commitment, Recipients::All)
+
+        let Some((block, ack)) = self.gates.take_staged(round, commitment) else {
+            debug!(%round, %commitment, "no staged proposal to relay, attempting forwarding");
+            return self.marshal.forward(round, commitment, Recipients::All);
+        };
+        self.marshal.proposed(round, block, Recipients::All, ack)
     }
 }
 

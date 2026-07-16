@@ -28,6 +28,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// `ptr` must point to allocated, writable memory of at least `size_of::<T>()` bytes.
 #[inline]
 unsafe fn zeroize_ptr<T>(ptr: *mut T) {
+    // SAFETY: The caller guarantees that `ptr` is valid for writes of `size_of::<T>()` bytes.
     unsafe {
         let slice = core::slice::from_raw_parts_mut(ptr as *mut u8, core::mem::size_of::<T>());
         slice.zeroize();

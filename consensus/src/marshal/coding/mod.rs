@@ -64,28 +64,29 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock,
-        marshal::{
-            ancestry::BlockProvider,
-            coding::{
-                Coding, Marshaled, MarshaledConfig, shards,
-                types::{CodedBlock, coding_config_for_participants, hash_context},
-            },
-            config::{Config, Start},
-            core,
-            mocks::{
-                application::Application,
-                harness::{
-                    self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
-                    LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
-                    UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
-                    setup_network_links, setup_network_with_participants,
-                },
-                verifying::MockVerifyingApp,
-            },
-            resolver::handler,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Relay, marshal::{
+        ancestry::BlockProvider,
+        coding::{
+            Coding, Marshaled, MarshaledConfig, shards,
+            types::{CodedBlock, coding_config_for_participants, hash_context},
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
+        config::{Config, Start},
+        core,
+        mocks::{
+            application::Application,
+            harness::{
+                self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
+                LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
+                UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
+                setup_network_links, setup_network_with_participants,
+            },
+            verifying::{GatedVerifyingApp, MockVerifyingApp},
+        },
+        resolver::handler,
+    },
+        simplex::{
+            Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal,
+        },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
     };
     use bytes::Bytes;
@@ -2827,8 +2828,9 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // Drive the leader-side propose path. `propose` must persist the
-            // block before returning the commitment.
+            // Drive the leader-side propose path. `propose` stages the block
+            // and returns the commitment. Durability is established by the
+            // certify flush below.
             let commitment = marshaled
                 .propose(propose_context)
                 .await
@@ -2875,12 +2877,122 @@ mod tests {
         });
     }
 
+    /// A propose relay with a staged proposal must send it through the shard
+    /// engine and complete the durability handshake. The freshly built block
+    /// is nowhere persisted at broadcast time, so the forward fallback has
+    /// nothing to serve: only the staged-hit path can seed the shard engine.
+    #[test_traced("WARN")]
+    fn test_marshaled_propose_relay_sends_staged_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+
+            let propose_round = Round::new(Epoch::zero(), View::new(1));
+            let propose_context = CodingCtx {
+                round: propose_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let block_to_propose = make_coding_block(
+                propose_context.clone(),
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let block_digest = block_to_propose.digest();
+            let expected_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                block_to_propose.clone(),
+                coding_config,
+                &Sequential,
+            )
+            .commitment();
+
+            let mock_app: MockVerifyingApp<CodingB, S> =
+                MockVerifyingApp::new().with_propose_result(block_to_propose);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let commitment = marshaled
+                .propose(propose_context)
+                .await
+                .await
+                .expect("propose should produce a commitment");
+            assert_eq!(commitment, expected_commitment);
+
+            // The relay must take the staged proposal and broadcast its
+            // shards, seeding the shard engine's local cache.
+            let subscription = shards.subscribe(commitment);
+            let _ = marshaled.broadcast(
+                commitment,
+                Plan::Propose {
+                    round: propose_round,
+                },
+            );
+            let cached = subscription
+                .await
+                .expect("shard engine must cache the relayed proposal");
+            assert_eq!(cached.digest(), block_digest);
+
+            // The relayed proposal is persisted through the staged ack, so
+            // certification resolves durably without a flush.
+            assert!(
+                marshaled
+                    .certify(propose_round, commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "certify must succeed for the relayed proposal"
+            );
+        });
+    }
+
     /// Regression: if marshal already holds a verified block for a round
     /// (say, persisted by a pre-crash propose whose notarize vote never
     /// reached the journal), a restarted leader's `propose` must return
     /// that block's commitment instead of rebuilding. The pre-crash
     /// commitment may already have been broadcast, so proposing a rebuilt
-    /// block for the same round would equivocate.
+    /// block for the same round would equivocate. The recovered proposal
+    /// must also be staged for the relay, so the broadcast re-sends its
+    /// shards and certification resolves through the deduplicated
+    /// re-persist.
     #[test_traced("WARN")]
     fn test_propose_reuses_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -2932,19 +3044,13 @@ mod tests {
             let commitment_a = coded_a.commitment();
             assert!(marshal.verified(round, coded_a).await);
 
-            // After restart, a fresh application would build a different
-            // block for the same round.
-            let block_b = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 200);
-            let coded_b: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                CodedBlock::new(block_b.clone(), coding_config, &Sequential);
-            let commitment_b = coded_b.commitment();
-            assert_ne!(
-                commitment_a, commitment_b,
-                "test requires distinct commitments"
-            );
-
-            let mock_app: MockVerifyingApp<CodingB, S> =
-                MockVerifyingApp::new().with_propose_result(block_b);
+            // The app cannot build (`propose` returns None) and its
+            // verification never completes, so the assertions below hold
+            // only if the stored block is reused as-is and certification
+            // resolves through the durability gate registered by the
+            // recovery staging.
+            let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
+                GatedVerifyingApp::new();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2964,6 +3070,24 @@ mod tests {
                 commitment, commitment_a,
                 "propose must reuse the block marshal already persisted for this round"
             );
+
+            // The relay broadcast must find the recovered proposal staged and
+            // re-persist it (a dedup no-op whose handle covers the pre-crash
+            // write), resolving the certification gate registered by the
+            // recovery path.
+            let _ = marshaled.broadcast(commitment, Plan::Propose { round });
+            let certify_rx = marshaled.certify(round, commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "recovered proposal must certify through the relay handshake"
+                    );
+                },
+                _ = verify_started => {
+                    panic!("certifying a recovered proposal must not run app verification");
+                },
+            }
         });
     }
 

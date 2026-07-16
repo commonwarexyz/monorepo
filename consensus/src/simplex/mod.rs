@@ -314,7 +314,10 @@
 //! Before sending a message, any pending `Journal` appends are synced to prevent inadvertent Byzantine
 //! behavior on restart (especially in the case of unclean shutdown). All appends made in the same event
 //! loop iteration are coalesced into a single sync that runs after messages are constructed and before
-//! any are broadcast (even if there is nothing to broadcast).
+//! any are broadcast (even if there is nothing to broadcast). The proposal payload relay is not a
+//! consensus message and is not gated on this sync: to lower view latency, it is requested as soon
+//! as the automaton returns a payload, which is safe because extra payload bytes (unlike votes)
+//! cannot form a conflicting certificate (see [`Plan::Propose`]).
 //!
 //! ## Automaton Failure Semantics
 //!
@@ -385,11 +388,22 @@ cfg_if::cfg_if! {
         /// Describes how a payload should be broadcast to the network.
         pub enum Plan<P: PublicKey> {
             /// Initial broadcast of a newly proposed block to all participants.
+            ///
+            /// Requested before the proposer's notarize vote is durable: a
+            /// proposer that crashes and restarts may emit this plan again
+            /// with a different payload for the same round. Consumers must
+            /// tolerate multiple candidates per round (at most one is ever
+            /// referenced by the proposer's signed votes).
             Propose {
                 /// The round in which the block was proposed.
                 round: Round,
             },
             /// Forward a block to a specific set of peers.
+            ///
+            /// Requested only for a proposal already backed by a certificate.
+            /// Forwarding is best-effort help for lagging peers and advertises
+            /// nothing about the sender's own state, so it needs no durability
+            /// ordering.
             Forward {
                 /// The round in which the forwarded block was proposed.
                 round: Round,

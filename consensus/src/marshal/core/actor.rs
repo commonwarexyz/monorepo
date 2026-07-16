@@ -127,8 +127,6 @@ where
     strategy: T,
 
     // ---------- State ----------
-    // Last proposed block
-    last_proposed_block: Option<(Round, V::Commitment, Arc<V::Block>)>,
     // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
     // Application delivery cursor
@@ -246,7 +244,6 @@ where
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
-                last_proposed_block: None,
                 floor,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
@@ -615,60 +612,37 @@ where
                 if matches!(&recipients, Recipients::Some(peers) if peers.is_empty()) {
                     return;
                 }
-                let block = match self.take_proposed(round, commitment) {
-                    Some(block) => block,
-                    None => {
-                        let Some(block) = self.find_block_by_commitment(buffer, commitment).await
-                        else {
-                            debug!(?commitment, "block not found for forwarding");
-                            return;
-                        };
-                        block
-                    }
+                let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
+                    debug!(?commitment, "block not found for forwarding");
+                    return;
                 };
                 buffer.send(round, block, recipients);
             }
             Message::Proposed {
-                round, block, ack, ..
+                round,
+                block,
+                recipients,
+                ack,
+                ..
             } => {
-                self.ingest(Arc::clone(&block), buffer, application, resolver)
+                // To lower view latency as much as possible while preserving
+                // safety, we broadcast the block before persisting it
+                // (durability is not required until certify). A leader that
+                // crashes here may broadcast a conflicting block for the same
+                // round after restart. This is tolerated: extra block bytes
+                // cannot form a conflicting certificate (unlike votes), block
+                // storage tolerates multiple candidates per round (see
+                // [Mailbox::get_verified]), and the propose paths skip or
+                // reuse a recovered block on restart.
+                buffer.send(round, Arc::clone(&block), recipients);
+                self.persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
-                let digest = block.digest();
-
-                // If the round has already been pruned by tip advancement,
-                // `put_verified` is a no-op because the round is below
-                // the retention floor (and no longer is required by consensus
-                // to make progress). A duplicate delivery is also a no-op, with
-                // the handle still covering the original write's durability.
-                let handle = self
-                    .cache
-                    .put_verified(round, digest, block.as_ref().clone().into())
-                    .await;
-
-                // Retain the block in memory so the subsequent `Forward` can
-                // broadcast it without reloading from storage. An older retained
-                // proposal (if any) is overwritten.
-                let commitment = V::commitment(&block);
-                self.last_proposed_block = Some((round, commitment, block));
-                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Verified {
                 round, block, ack, ..
             } => {
-                self.ingest(Arc::clone(&block), buffer, application, resolver)
+                self.persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
-                let digest = block.digest();
-
-                // If the round has already been pruned by tip advancement,
-                // `put_verified` is a no-op because the round is below
-                // the retention floor (and no longer is required by consensus
-                // to make progress). A duplicate delivery is also a no-op, with
-                // the handle still covering the original write's durability.
-                let handle = self
-                    .cache
-                    .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
-                    .await;
-                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Certified {
                 round, block, ack, ..
@@ -701,7 +675,7 @@ where
                     let (notarization, block) = join(notarization_sync, block_sync).await;
                     notarization.and(block)
                 });
-                ack.expect("durable ack present").send_lossy(handle);
+                ack.send_lossy(handle);
             }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
@@ -1196,6 +1170,32 @@ where
                 Request::finalized_block_by_round(commitment, round),
             )
             .ignore();
+    }
+
+    /// Ingests `block` and persists it as a verify-stage candidate for `round`,
+    /// delivering the write's durable-sync handle through `ack`.
+    ///
+    /// If the round has already been pruned by tip advancement, `put_verified`
+    /// is a no-op because the round is below the retention floor (and no longer
+    /// is required by consensus to make progress). A duplicate delivery is also
+    /// a no-op, with the handle still covering the original write's durability.
+    async fn persist_verified<Buf: Buffer<V>>(
+        &mut self,
+        round: Round,
+        block: Arc<V::Block>,
+        ack: oneshot::Sender<Handle<()>>,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) {
+        self.ingest(Arc::clone(&block), buffer, application, resolver)
+            .await;
+        let digest = block.digest();
+        let handle = self
+            .cache
+            .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
+            .await;
+        ack.send_lossy(handle);
     }
 
     /// Notifies subscribers of a validated block and applies it to any
@@ -1804,16 +1804,6 @@ where
     }
 
     // -------------------- Prunable Storage --------------------
-
-    /// If a block previously accepted via [`Message::Proposed`] matches the
-    /// supplied `(round, commitment)`, remove and return it.
-    fn take_proposed(&mut self, round: Round, commitment: V::Commitment) -> Option<Arc<V::Block>> {
-        let (cached_round, cached_commitment, _) = self.last_proposed_block.as_ref()?;
-        if *cached_round != round || *cached_commitment != commitment {
-            return None;
-        }
-        self.last_proposed_block.take().map(|(_, _, block)| block)
-    }
 
     /// Sync both finalization archives to durable storage, blocking the actor
     /// until they are durable.

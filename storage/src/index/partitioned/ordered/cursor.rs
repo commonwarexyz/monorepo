@@ -262,7 +262,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
                 self.state = State::NeedNext { from: offset + 2 };
             }
             State::Done => {
-                // Append at the oldest position (run end), re-creating the key if it was emptied.
+                // Append at the run end, re-creating the key if it was emptied.
                 let end = self.backing.len();
                 if self.backing.insert(end, value) {
                     self.keys.inc();

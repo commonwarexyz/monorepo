@@ -179,17 +179,17 @@ impl crate::Network for Network {
             .map_err(|_| Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+        if let Some(tcp_nodelay) = self.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
         }
 
         // Set SO_LINGER to zero if configured
-        if self.zero_linger {
-            if let Err(err) = stream.set_zero_linger() {
-                warn!(?err, "failed to set SO_LINGER");
-            }
+        if self.zero_linger
+            && let Err(err) = stream.set_zero_linger()
+        {
+            warn!(?err, "failed to set SO_LINGER");
         }
 
         // Convert the stream to a std::net::TcpStream
@@ -250,17 +250,17 @@ impl crate::Listener for Listener {
             .map_err(|_| Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+        if let Some(tcp_nodelay) = self.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
         }
 
         // Set SO_LINGER to zero if configured
-        if self.zero_linger {
-            if let Err(err) = stream.set_zero_linger() {
-                warn!(?err, "failed to set SO_LINGER");
-            }
+        if self.zero_linger
+            && let Err(err) = stream.set_zero_linger()
+        {
+            warn!(?err, "failed to set SO_LINGER");
         }
 
         // Convert the stream to a std::net::TcpStream

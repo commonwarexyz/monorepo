@@ -373,10 +373,6 @@ where
 
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
-///
-/// # Panics
-///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
 async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,

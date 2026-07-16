@@ -39,6 +39,10 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     /// An unordered delete just emits a `Delete` at the resolved location.
     const STAGES_DELETES: bool = true;
 
+    /// An unordered staged read carries no cached payload, so ancestor-diff resolutions can
+    /// be staged directly.
+    const STAGES_ANCESTORS: Option<()> = Some(());
+
     fn key(&self) -> &K {
         &self.0
     }
