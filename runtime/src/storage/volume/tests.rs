@@ -27,6 +27,185 @@ async fn test_volume_storage_contract() {
     run_storage_tests(volume_over_memory()).await;
 }
 
+/// Log of inner blob I/O: (write?, offset, len).
+type IoLog = Arc<Mutex<Vec<(bool, u64, usize)>>>;
+
+/// An inner storage wrapper recording every read and write the volume issues
+/// to the volume file.
+#[derive(Clone)]
+struct Recording {
+    inner: memory::Storage,
+    log: IoLog,
+}
+
+impl Recording {
+    fn new(pool: BufferPool) -> Self {
+        Self {
+            inner: memory::Storage::new(pool),
+            log: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl crate::Storage for Recording {
+    type Blob = RecordingBlob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (blob, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            RecordingBlob {
+                inner: blob,
+                log: self.log.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+#[derive(Clone)]
+struct RecordingBlob {
+    inner: memory::Blob,
+    log: IoLog,
+}
+
+impl crate::Blob for RecordingBlob {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.log.lock().push((false, offset, len));
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.log.lock().push((false, offset, len));
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let buf = bufs.into().coalesce();
+        self.log.lock().push((true, offset, buf.len()));
+        self.inner.write_at(offset, buf).await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at(offset, bufs).await?;
+        self.sync().await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> crate::Handle<()> {
+        crate::Handle::ready(self.sync().await)
+    }
+}
+
+/// Every inner write and read the volume issues — plain writes, batch
+/// staging, commit metadata (checksums, shadows, table, superblock),
+/// recovery reads, and recovery repairs — must be a whole number of blocks
+/// at a block-aligned offset, so a direct-I/O inner file's alignment
+/// contract holds by construction.
+#[tokio::test]
+async fn test_volume_inner_io_block_aligned() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"a").await.unwrap();
+    let (other, _) = volume.open("p", b"b").await.unwrap();
+    // Sub-block appends into the shared tail block, each committed
+    // (whole-tail-block rewrites + shadow/table/superblock writes).
+    for i in 0..4u64 {
+        blob.write_at(i * 100, IoBuf::copy_from_slice(&[7u8; 100]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+    // Multi-block append (run of blocks) and a mid-write gap (zero fill).
+    blob.write_at(500, IoBuf::copy_from_slice(&[8u8; 3 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    // Committed overwrite (COW read-back + relocation).
+    blob.write_at(10, IoBuf::copy_from_slice(&[9u8; 100]))
+        .await
+        .unwrap();
+    // Resize down (boundary chunk CRC read-back) and back up (zero
+    // extension), then commit.
+    blob.resize(BLOCK + 7).await.unwrap();
+    blob.resize(2 * BLOCK + 9).await.unwrap();
+    blob.sync().await.unwrap();
+    // Batch: staged tail append + fresh-extent staging, published and
+    // committed as one group.
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&blob, 2 * BLOCK + 9, IoBuf::copy_from_slice(&[1u8; 300]))
+        .await
+        .unwrap();
+    batch
+        .write_at(&other, 0, IoBuf::copy_from_slice(&[2u8; 300]))
+        .await
+        .unwrap();
+    batch.apply_sync().await.unwrap();
+    // Verified reads.
+    let got = blob.read_at(0, 2 * BLOCK as usize).await.unwrap();
+    assert_eq!(got.coalesce().len(), 2 * BLOCK as usize);
+    drop(blob);
+    drop(other);
+    drop(volume);
+
+    // Reopen: recovery (slots, table, manifest verification, shadow splice
+    // repair of the partial tails) and hydration read back through the log.
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let (blob, size) = volume.open("p", b"a").await.unwrap();
+    assert_eq!(size, 2 * BLOCK + 9 + 300);
+    let got = blob.read_at(0, size as usize).await.unwrap();
+    assert_eq!(got.coalesce().len(), size as usize);
+
+    let log = recording.log.lock();
+    let writes = log.iter().filter(|(w, _, _)| *w).count();
+    let reads = log.iter().filter(|(w, _, _)| !*w).count();
+    assert!(writes >= 20, "workload too small: {writes} writes");
+    assert!(reads >= 10, "workload too small: {reads} reads");
+    for &(write, offset, len) in log.iter() {
+        let op = if write { "write" } else { "read" };
+        assert!(
+            offset.is_multiple_of(BLOCK),
+            "unaligned {op} offset {offset} (len {len})"
+        );
+        assert!(
+            (len as u64).is_multiple_of(BLOCK),
+            "{op} at {offset} not whole blocks (len {len})"
+        );
+    }
+}
+
 /// A growth quantum provisions the volume file in coarse steps; growth stays
 /// automatic and unbounded, and provisioning survives reopen.
 #[tokio::test]
@@ -101,6 +280,13 @@ type Unsynced = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
 /// and can materialize power-loss outcomes: each unsynced BLOCK-granular
 /// piece independently lands, vanishes, or tears (block filled with
 /// garbage).
+///
+/// The volume issues only whole-block writes, so the tail block's committed
+/// prefix is rewritten (with identical bytes) by every append that lands in
+/// it — at a crash, the whole tail block is pending, not just the appended
+/// suffix. Tearing it destroys committed bytes on disk, which the shadow
+/// splice restores at recovery (tail-block tearing was always in the
+/// model).
 #[derive(Clone)]
 struct Tearing {
     inner: memory::Storage,

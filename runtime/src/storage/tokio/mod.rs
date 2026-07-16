@@ -41,6 +41,25 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
 pub struct Config {
     pub storage_directory: PathBuf,
     pub maximum_buffer_size: usize,
+    /// Bypass the kernel page cache for blob data I/O.
+    ///
+    /// Intended for the volume file ([`crate::storage::volume`]), which
+    /// issues only whole-block, block-aligned I/O and keeps its own cache
+    /// above this backend. Platform behavior is asymmetric:
+    ///
+    /// - Linux: the blob is opened with `O_DIRECT`. Every read and write
+    ///   must use 4096-aligned offsets, lengths, and buffer addresses.
+    ///   Unaligned I/O through a direct blob is API misuse and asserts.
+    /// - macOS: `F_NOCACHE` is applied after open (best-effort; there is no
+    ///   `O_DIRECT`). Unaligned I/O is permitted and simply flows through
+    ///   the page cache.
+    /// - Other platforms: ignored.
+    ///
+    /// Direct blobs place data at physical offset 4096 (instead of directly
+    /// after the 8-byte header) so block-aligned logical offsets stay
+    /// block-aligned on disk. A blob written in one mode is NOT readable in
+    /// the other.
+    pub direct_io: bool,
 }
 
 impl Config {
@@ -48,7 +67,14 @@ impl Config {
         Self {
             storage_directory,
             maximum_buffer_size,
+            direct_io: false,
         }
+    }
+
+    /// See [`Self::direct_io`].
+    pub const fn with_direct_io(mut self, direct_io: bool) -> Self {
+        self.direct_io = direct_io;
+        self
     }
 }
 
@@ -169,19 +195,59 @@ impl crate::Storage for Storage {
 
         #[cfg(unix)]
         {
-            // Convert to a blocking std::fs::File
-            let file = file.into_std().await;
+            let file = if self.cfg.direct_io {
+                // Header handling above is sub-block and unaligned, so it ran
+                // on the buffered handle; data I/O runs on a fresh handle in
+                // the platform's cache-bypass mode.
+                drop(file);
+                let mut options = fs::OpenOptions::new();
+                options.read(true).write(true);
+                #[cfg(target_os = "linux")]
+                options.custom_flags(libc::O_DIRECT);
+                let file = options
+                    .open(&path)
+                    .await
+                    .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?
+                    .into_std()
+                    .await;
+                // macOS has no O_DIRECT; F_NOCACHE drops pages after I/O and
+                // imposes no alignment requirement. Best-effort: a failure
+                // leaves the blob buffered (correct, just double-cached).
+                #[cfg(target_os = "macos")]
+                // SAFETY: fcntl with an integer argument on an owned open fd.
+                unsafe {
+                    libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&file), libc::F_NOCACHE, 1);
+                }
+                file
+            } else {
+                // Convert to a blocking std::fs::File
+                file.into_std().await
+            };
+
+            // Direct blobs place data at a block-aligned offset; recompute
+            // the logical size against that shift.
+            let logical_size = if self.cfg.direct_io {
+                len.saturating_sub(unix::DIRECT_DATA_OFFSET)
+            } else {
+                logical_size
+            };
 
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone()),
+                Self::Blob::new(
+                    partition.into(),
+                    name,
+                    file,
+                    self.pool.clone(),
+                    self.cfg.direct_io,
+                ),
                 logical_size,
                 blob_version,
             ))
         }
         #[cfg(not(unix))]
         {
-            // Construct the blob
+            // Construct the blob (`direct_io` is ignored off Unix).
             Ok((
                 Self::Blob::new(partition.into(), name, file, self.pool.clone()),
                 logical_size,
@@ -300,6 +366,44 @@ mod tests {
             pool,
             Default::default(),
         );
+        run_storage_tests(storage).await;
+    }
+
+    /// The production composition with the page cache bypassed: a volume
+    /// over the filesystem backend opened with [Config::direct_io]. On
+    /// Linux this exercises the `O_DIRECT` alignment contract end-to-end
+    /// (and requires a filesystem supporting `O_DIRECT`); on macOS it
+    /// exercises the `F_NOCACHE` path.
+    #[tokio::test]
+    async fn test_volume_storage_direct() {
+        let mut rng = sys_rng();
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_volume_direct_{}",
+            rng.random::<u64>()
+        ));
+        let config = Config::new(storage_directory, 2 * 1024 * 1024).with_direct_io(true);
+        let pool = test_pool();
+        let storage = crate::storage::volume::Storage::new(
+            Storage::new(config, pool.clone()),
+            pool,
+            Default::default(),
+        );
+        run_storage_tests(storage).await;
+    }
+
+    /// Raw (volume-less) blob I/O over a direct storage. macOS `F_NOCACHE`
+    /// imposes no alignment requirement, so the unaligned contract suite
+    /// passes as-is. On Linux, unaligned I/O through a direct blob is API
+    /// misuse (it asserts), so this composition is non-Linux by design —
+    /// direct storage on Linux is exercised through the volume above.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn test_storage_direct() {
+        let mut rng = sys_rng();
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_direct_{}", rng.random::<u64>()));
+        let config = Config::new(storage_directory, 2 * 1024 * 1024).with_direct_io(true);
+        let storage = Storage::new(config, test_pool());
         run_storage_tests(storage).await;
     }
 
@@ -435,6 +539,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
+                direct_io: false,
             },
             test_pool(),
         );
@@ -464,6 +569,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
+                direct_io: false,
             },
             test_pool(),
         );
@@ -517,6 +623,7 @@ mod tests {
                 Config {
                     storage_directory: storage_directory.clone(),
                     maximum_buffer_size: 1024 * 1024,
+                    direct_io: false,
                 },
                 test_pool(),
             );

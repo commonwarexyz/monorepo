@@ -57,6 +57,10 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 }
 
 /// Configuration for a [Storage].
+// TODO: support direct I/O (`O_DIRECT`) like `storage::tokio::Config::direct_io`.
+// O_DIRECT is native to io_uring, but the port is not mechanical: it needs the
+// block-aligned data offset (in place of the 8-byte header shift) and an
+// alignment contract on every buffer submitted through the ring.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Where to store blobs.
