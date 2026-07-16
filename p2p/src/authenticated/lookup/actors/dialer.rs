@@ -14,7 +14,7 @@ use crate::{
     },
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
     StreamOf, spawn_cell,
@@ -34,6 +34,9 @@ type SupervisorMailbox<E, C> =
 pub struct Config<C: Signer> {
     /// Configuration for the stream.
     pub stream_cfg: StreamConfig<C>,
+
+    /// Maximum duration of an outbound dial attempt.
+    pub dial_timeout: Duration,
 
     /// The frequency at which to dial a single peer from the queue. This also limits the rate at
     /// which we attempt to dial peers in general.
@@ -58,6 +61,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
 
     // ---------- Configuration ----------
     stream_cfg: StreamConfig<C>,
+    dial_timeout: Duration,
     dial_frequency: Duration,
     peer_connection_cooldown: Duration,
     allow_private_ips: bool,
@@ -76,6 +80,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
             context: ContextCell::new(context),
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
+            dial_timeout: cfg.dial_timeout,
             dial_frequency: cfg.dial_frequency,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             allow_private_ips: cfg.allow_private_ips,
@@ -103,40 +108,51 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
             let config = self.stream_cfg.clone();
             let mut supervisor = supervisor.clone();
             let allow_private_ips = self.allow_private_ips;
+            let dial_timeout = self.dial_timeout;
             move |mut context| async move {
-                // Resolve ingress to socket addresses (filtered by private IP policy)
-                let addresses: Vec<_> = ingress
-                    .resolve_filtered(&context, allow_private_ips)
-                    .await
-                    .map(Iterator::collect)
-                    .unwrap_or_default();
-                let Some(&address) = addresses.choose(&mut context) else {
-                    debug!(?ingress, "failed to resolve or no valid addresses");
-                    return;
-                };
-
-                // Attempt to dial peer
-                let (sink, stream) = match context.dial(address).await {
-                    Ok(stream) => stream,
-                    Err(err) => {
-                        debug!(?err, "failed to dial peer");
+                let timeout = context.sleep(dial_timeout);
+                let dial = async {
+                    // Resolve ingress to socket addresses (filtered by private IP policy)
+                    let addresses: Vec<_> = ingress
+                        .resolve_filtered(&context, allow_private_ips)
+                        .await
+                        .map(Iterator::collect)
+                        .unwrap_or_default();
+                    let Some(&address) = addresses.choose(&mut context) else {
+                        debug!(?ingress, "failed to resolve or no valid addresses");
                         return;
-                    }
-                };
-                debug!(?peer, ?address, "dialed peer");
+                    };
 
-                // Upgrade connection
-                let connection = match dial(context, config, peer.clone(), stream, sink).await {
-                    Ok(instance) => instance,
-                    Err(err) => {
-                        debug!(?err, "failed to upgrade connection");
-                        return;
-                    }
-                };
-                debug!(?peer, ?address, "upgraded connection");
+                    // Attempt to dial peer
+                    let (sink, stream) = match context.dial(address).await {
+                        Ok(stream) => stream,
+                        Err(err) => {
+                            debug!(?err, "failed to dial peer");
+                            return;
+                        }
+                    };
+                    debug!(?peer, ?address, "dialed peer");
 
-                // Start peer to handle messages
-                let _ = supervisor.spawn(connection, reservation);
+                    // Upgrade connection
+                    let connection = match dial(context, config, peer.clone(), stream, sink).await {
+                        Ok(instance) => instance,
+                        Err(err) => {
+                            debug!(?err, "failed to upgrade connection");
+                            return;
+                        }
+                    };
+                    debug!(?peer, ?address, "upgraded connection");
+
+                    // Start peer to handle messages
+                    let _ = supervisor.spawn(connection, reservation);
+                };
+
+                select! {
+                    _ = dial => {},
+                    _ = timeout => {
+                        debug!(?peer, ?ingress, "dial attempt timed out");
+                    },
+                }
             }
         });
     }
