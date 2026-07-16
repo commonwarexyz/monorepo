@@ -226,9 +226,20 @@ where
             let _ = processed_height.try_set(last_processed_height.get());
         }
         let floor = pending_floor_anchor.map_or_else(
-            || Floor::resolved(last_processed_height, last_processed_round),
+            || {
+                Floor::resolved(
+                    last_processed_height,
+                    last_processed_round,
+                    config.hint_activation,
+                )
+            },
             |finalization| {
-                Floor::awaiting_anchor(last_processed_height, last_processed_round, finalization)
+                Floor::awaiting_anchor(
+                    last_processed_height,
+                    last_processed_round,
+                    config.hint_activation,
+                    finalization,
+                )
             },
         );
 

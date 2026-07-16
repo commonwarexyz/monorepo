@@ -211,7 +211,9 @@ pub enum Finalized {
 /// A raw resolver key for backfilling data.
 ///
 /// An absent certification hint decodes as false, preserving the legacy wire
-/// format. A true hint appends one byte and requires an upgraded peer.
+/// format. A true hint appends one byte that legacy providers cannot decode,
+/// so hinted requests are only issued once the configured activation epoch is
+/// reached and every provider is expected to be upgraded.
 #[derive(Clone, Copy)]
 pub enum Key<D: Digest> {
     /// Fetch a block by consensus commitment.
@@ -338,7 +340,12 @@ impl<D: Digest> Request<D> {
         }
     }
 
-    pub(crate) fn into_inner(self) -> ResolverFetch<Key<D>, Annotation> {
+    /// Converts the request into a resolver fetch.
+    ///
+    /// `hinted` gates whether the peer-visible key may carry a certification
+    /// hint. When false, every key uses the legacy hint-free encoding that all
+    /// providers understand; local processing annotations are unaffected.
+    pub(crate) fn into_inner(self, hinted: bool) -> ResolverFetch<Key<D>, Annotation> {
         let (key, subscriber) = match self.kind {
             RequestKind::Notarized {
                 round,
@@ -346,7 +353,7 @@ impl<D: Digest> Request<D> {
             } => (
                 Key::Notarized {
                     round,
-                    known_certified,
+                    known_certified: known_certified && hinted,
                 },
                 Annotation::Notarization { round },
             ),
@@ -357,21 +364,21 @@ impl<D: Digest> Request<D> {
             RequestKind::CertifiedBlock { commitment, height } => (
                 Key::Block {
                     commitment,
-                    known_certified: true,
+                    known_certified: hinted,
                 },
                 Annotation::Certified { height },
             ),
             RequestKind::FinalizedBlockByHeight { commitment, height } => (
                 Key::Block {
                     commitment,
-                    known_certified: true,
+                    known_certified: hinted,
                 },
                 Annotation::Finalized(Finalized::ByHeight { height }),
             ),
             RequestKind::FinalizedBlockByRound { commitment, round } => (
                 Key::Block {
                     commitment,
-                    known_certified: true,
+                    known_certified: hinted,
                 },
                 Annotation::Finalized(Finalized::ByRound { round }),
             ),
@@ -382,12 +389,6 @@ impl<D: Digest> Request<D> {
             subscriber,
             span,
         }
-    }
-}
-
-impl<D: Digest> From<Request<D>> for ResolverFetch<Key<D>, Annotation> {
-    fn from(fetch: Request<D>) -> Self {
-        fetch.into_inner()
     }
 }
 
@@ -659,6 +660,30 @@ mod tests {
 
     type D = Sha256Digest;
 
+    #[derive(Debug, Eq, PartialEq)]
+    enum LegacyKey<D: Digest> {
+        Block(D),
+        Finalized { height: Height },
+        Notarized { round: Round },
+    }
+
+    impl<D: Digest> Read for LegacyKey<D> {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+            match u8::read(buf)? {
+                BLOCK_REQUEST => Ok(Self::Block(D::read(buf)?)),
+                FINALIZED_REQUEST => Ok(Self::Finalized {
+                    height: Height::read(buf)?,
+                }),
+                NOTARIZED_REQUEST => Ok(Self::Notarized {
+                    round: Round::read(buf)?,
+                }),
+                i => Err(CodecError::InvalidEnum(i)),
+            }
+        }
+    }
+
     const fn block(commitment: D) -> Key<D> {
         Key::Block {
             commitment,
@@ -815,6 +840,48 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_decoder_rolling_upgrade_compatibility() {
+        let commitment = Sha256::fill(0xab);
+        let round = Round::new(Epoch::new(3), View::new(7));
+        let unhinted = [
+            (block(commitment), LegacyKey::Block(commitment)),
+            (
+                Key::Finalized {
+                    height: Height::new(7),
+                },
+                LegacyKey::Finalized {
+                    height: Height::new(7),
+                },
+            ),
+            (notarized(round), LegacyKey::Notarized { round }),
+        ];
+
+        for (request, expected) in unhinted {
+            assert_eq!(
+                LegacyKey::<D>::decode_cfg(request.encode().as_ref(), &()).unwrap(),
+                expected
+            );
+        }
+
+        let hinted = [
+            Key::Block {
+                commitment,
+                known_certified: true,
+            },
+            Key::Notarized {
+                round,
+                known_certified: true,
+            },
+        ];
+        for request in hinted {
+            assert!(matches!(
+                LegacyKey::<D>::decode_cfg(request.encode().as_ref(), &()),
+                Err(CodecError::ExtraData(1))
+            ));
+        }
+    }
+
+    #[test]
     fn test_certified_hint_only_appends_true_to_legacy_encoding() {
         let commitment = Sha256::fill(0xab);
         let round = Round::new(Epoch::new(3), View::new(7));
@@ -920,6 +987,21 @@ mod tests {
     }
 
     #[test]
+    fn test_subject_rejects_trailing_hint_data() {
+        let commitment = Sha256::hash(b"trailing-hint");
+        let round = Round::new(Epoch::new(3), View::new(7));
+
+        for request in [block(commitment), notarized(round)] {
+            let mut encoded = request.encode().to_vec();
+            encoded.extend_from_slice(&[1, 0]);
+            assert!(matches!(
+                Key::<D>::decode_cfg(encoded.as_slice(), &()),
+                Err(CodecError::ExtraData(1))
+            ));
+        }
+    }
+
+    #[test]
     fn test_certified_hint_separates_resolver_keys() {
         use std::collections::HashSet;
 
@@ -951,6 +1033,41 @@ mod tests {
             assert!(keys.insert(unhinted));
             assert!(keys.insert(hinted));
         }
+    }
+
+    #[test]
+    fn test_into_inner_gates_certification_hints() {
+        let commitment = Sha256::hash(b"hint-gating");
+        let round = Round::new(Epoch::new(3), View::new(7));
+        let certified = [
+            Request::certified(round),
+            Request::certified_block(commitment, Height::new(7)),
+            Request::finalized_block_by_height(commitment, Height::new(7)),
+            Request::finalized_block_by_round(commitment, round),
+        ];
+
+        let known_certified = |key: &Key<D>| match key {
+            Key::Block {
+                known_certified, ..
+            }
+            | Key::Notarized {
+                known_certified, ..
+            } => *known_certified,
+            Key::Finalized { .. } => unreachable!("finalized keys carry no hint"),
+        };
+        for request in certified {
+            let hinted = request.into_inner(true);
+            let unhinted = request.into_inner(false);
+            assert!(known_certified(&hinted.key));
+            assert!(!known_certified(&unhinted.key));
+            // Only the peer-visible key changes; local processing does not.
+            assert_eq!(hinted.subscriber, unhinted.subscriber);
+        }
+
+        // Fully validated notarized fetches never carry the hint.
+        let notarized = Request::notarized(round);
+        assert!(!known_certified(&notarized.into_inner(true).key));
+        assert!(!known_certified(&notarized.into_inner(false).key));
     }
 
     #[test]

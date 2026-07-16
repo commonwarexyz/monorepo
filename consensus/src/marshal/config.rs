@@ -62,6 +62,17 @@ where
     /// Startup anchor for marshal's processed floor.
     pub start: Start<P::Scheme, C, B>,
 
+    /// Epoch at which backfill requests begin carrying certification hints.
+    ///
+    /// Certification hints let providers skip re-encoding payloads the
+    /// requester already trusts when using erasure coding, but they extend the
+    /// request wire format in a way legacy software cannot decode. Activation is
+    /// therefore hardfork-style: every participant must run hint-aware software
+    /// before this epoch begins. Until the processed floor reaches the activation
+    /// epoch, requests use the legacy hint-free encoding. `None` never
+    /// activates hints.
+    pub hint_activation: Option<Epoch>,
+
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
 

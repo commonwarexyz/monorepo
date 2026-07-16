@@ -329,6 +329,7 @@ mod tests {
             start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
+            hint_activation: Some(Epoch::zero()),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),
