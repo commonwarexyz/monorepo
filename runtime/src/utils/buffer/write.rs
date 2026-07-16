@@ -235,8 +235,8 @@ impl<B: Blob> Write<B> {
     /// Flush buffered bytes to the blob and stage the blob's durability
     /// with `batch`: the flushed (and any earlier unsynced) bytes become
     /// durable when the batch is applied with
-    /// [`crate::WriteBatch::apply_sync`] — on atomic backends, atomically
-    /// with everything else the batch stages.
+    /// [`crate::WriteBatch::apply_sync`], atomically with everything else
+    /// the batch stages.
     pub async fn sync_into<T: crate::WriteBatch<Blob = B>>(
         &mut self,
         batch: &mut T,

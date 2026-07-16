@@ -53,7 +53,7 @@ use crate::{
     storage::{
         audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
         memory::Storage as MemStorage, metered::Storage as MeteredStorage,
-        switch::Storage as SwitchStorage, volume::Storage as VolumeStorage,
+        volume::Storage as VolumeStorage,
     },
     telemetry::metrics::{
         add_attribute, raw, task::Label, validate_label, Counter, CounterFamily, GaugeFamily,
@@ -239,11 +239,12 @@ pub struct Config {
     /// Defaults to no faults being injected.
     storage_fault_cfg: FaultConfig,
 
-    /// When set, storage is served through a [crate::storage::volume] over
-    /// the in-memory backend (fault injection then applies to the volume's
-    /// inner file operations). Simulated crashes reconstruct the volume so
-    /// its recovery protocol runs exactly as it would in production.
-    storage_volume: Option<VolumeConfig>,
+    /// Configuration for the [crate::storage::volume] that serves all
+    /// storage (over the in-memory backend). Fault injection applies to the
+    /// volume's inner file operations, and simulated crashes reconstruct
+    /// the volume so its recovery protocol runs exactly as it would in
+    /// production.
+    storage_volume_cfg: VolumeConfig,
 
     /// Buffer pool configuration for network I/O.
     network_buffer_pool_cfg: BufferPoolConfig,
@@ -279,7 +280,7 @@ impl Config {
             timeout: None,
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
-            storage_volume: None,
+            storage_volume_cfg: VolumeConfig::default(),
             network_buffer_pool_cfg,
             storage_buffer_pool_cfg,
         }
@@ -342,14 +343,9 @@ impl Config {
         self
     }
 
-    /// Serve storage through a [crate::storage::volume] (single-file backend
-    /// with atomic group commit) over the in-memory backend.
-    ///
-    /// Storage faults then inject into the volume's inner file operations,
-    /// and simulated crashes (`start_and_recover`) exercise the volume's
-    /// recovery protocol.
-    pub fn with_storage_volume(mut self, cfg: VolumeConfig) -> Self {
-        self.storage_volume = Some(cfg);
+    /// Override the [VolumeConfig] of the volume that serves all storage.
+    pub fn with_volume_config(mut self, cfg: VolumeConfig) -> Self {
+        self.storage_volume_cfg = cfg;
         self
     }
 
@@ -913,7 +909,7 @@ impl Tasks {
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
-type Storage = MeteredStorage<AuditedStorage<SwitchStorage<FaultyStorage<MemStorage>>>>;
+type Storage = MeteredStorage<AuditedStorage<VolumeStorage<FaultyStorage<MemStorage>>>>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
@@ -964,16 +960,10 @@ impl Context {
             rng.clone(),
             storage_fault_config,
         );
-        let switch = match cfg.storage_volume {
-            Some(volume_cfg) => SwitchStorage::Volume(VolumeStorage::new(
-                faulty,
-                storage_buffer_pool.clone(),
-                volume_cfg,
-            )),
-            None => SwitchStorage::Direct(faulty),
-        };
+        let volume =
+            VolumeStorage::new(faulty, storage_buffer_pool.clone(), cfg.storage_volume_cfg);
         let storage = MeteredStorage::new(
-            AuditedStorage::new(switch, auditor.clone()),
+            AuditedStorage::new(volume, auditor.clone()),
             &mut runtime_registry,
         );
 
@@ -1059,21 +1049,14 @@ impl Context {
         // handle) dies here, and its recovery protocol re-runs from the
         // durable image on first use.
         let storage = {
-            let switch = checkpoint.storage.inner().inner();
-            let volume_cfg = switch.volume_config();
-            let fault_cfg = switch.inner().config();
-            let mem = switch.inner().inner().clone();
+            let volume = checkpoint.storage.inner().inner();
+            let volume_cfg = volume.config().clone();
+            let fault_cfg = volume.inner().config();
+            let mem = volume.inner().inner().clone();
             let faulty = FaultyStorage::new(mem, checkpoint.rng.clone(), fault_cfg);
-            let switch = match volume_cfg {
-                Some(cfg) => SwitchStorage::Volume(VolumeStorage::new(
-                    faulty,
-                    storage_buffer_pool.clone(),
-                    cfg,
-                )),
-                None => SwitchStorage::Direct(faulty),
-            };
+            let volume = VolumeStorage::new(faulty, storage_buffer_pool.clone(), volume_cfg);
             MeteredStorage::new(
-                AuditedStorage::new(switch, checkpoint.auditor.clone()),
+                AuditedStorage::new(volume, checkpoint.auditor.clone()),
                 &mut runtime_registry,
             )
         };
@@ -1127,7 +1110,8 @@ impl Context {
         self.executor().auditor.clone()
     }
 
-    /// Compute a [Sha256] digest of all storage contents.
+    /// Compute a [Sha256] digest of all storage contents (the bytes of the
+    /// volume file held by the in-memory backend).
     pub fn storage_audit(&self) -> Digest {
         self.storage.inner().inner().inner().inner().audit()
     }
@@ -1887,37 +1871,6 @@ mod tests {
     }
 
     #[test]
-    fn test_recover_volume_storage() {
-        // Serve storage through a volume: recovery must reconstruct the
-        // volume (dropping its in-RAM state) so synced data survives a
-        // simulated crash, unsynced data vanishes, and the volume's own
-        // recovery protocol runs on the surviving image.
-        let cfg = deterministic::Config::default().with_storage_volume(VolumeConfig::default());
-        let executor = deterministic::Runner::new(cfg);
-        let partition = "test_partition";
-
-        let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let (synced, _) = context.open(partition, b"synced").await.unwrap();
-            synced.write_at(0, b"durable").await.unwrap();
-            synced.sync().await.unwrap();
-            let (unsynced, _) = context.open(partition, b"unsynced").await.unwrap();
-            unsynced.write_at(0, b"ephemeral").await.unwrap();
-        });
-
-        let executor = Runner::from(checkpoint);
-        executor.start(|context| async move {
-            let (blob, len) = context.open(partition, b"synced").await.unwrap();
-            assert_eq!(len, 7);
-            let read = blob.read_at(0, 7).await.unwrap().coalesce();
-            assert_eq!(read.as_ref(), b"durable");
-            // The blob's creation committed (durably created), but its
-            // unsynced bytes are gone.
-            let (_, len) = context.open(partition, b"unsynced").await.unwrap();
-            assert_eq!(len, 0);
-        });
-    }
-
-    #[test]
     fn test_recover_dns_mappings_persist() {
         // Initialize the first runtime
         let executor = deterministic::Runner::default();
@@ -2252,16 +2205,14 @@ mod tests {
 
     #[test]
     fn test_storage_fault_injection_and_recovery() {
-        // Phase 1: Run with 100% sync failure rate
-        let cfg = deterministic::Config::default().with_storage_fault_config(FaultConfig {
-            sync_rate: Some(1.0),
-            ..Default::default()
-        });
-
+        // Phase 1: Fail a sync via fault injection. Faults are enabled only
+        // after the blob exists (opening a blob commits its creation through
+        // the volume, which a 100% sync failure rate would already break).
         let (result, checkpoint) =
-            deterministic::Runner::new(cfg).start_and_recover(|ctx| async move {
+            deterministic::Runner::default().start_and_recover(|ctx| async move {
                 let (blob, _) = ctx.open("test_fault", b"blob").await.unwrap();
                 blob.write_at(0, b"data".to_vec()).await.unwrap();
+                ctx.storage_fault_config().write().sync_rate = Some(1.0);
                 blob.sync().await // This should fail due to fault injection
             });
 
@@ -2311,10 +2262,13 @@ mod tests {
             // Disable faults
             storage_fault_cfg.write().sync_rate = Some(0.0);
 
-            // Sync should succeed again
-            blob.sync()
-                .await
-                .expect("sync should succeed with faults disabled");
+            // The failed commit poisoned the volume: it can no longer vouch
+            // for durability, so sync keeps failing until a restart
+            // re-runs recovery.
+            assert!(
+                blob.sync().await.is_err(),
+                "volume must stay poisoned after a failed commit"
+            );
         });
     }
 

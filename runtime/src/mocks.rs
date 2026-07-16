@@ -447,6 +447,121 @@ macro_rules! forward_context {
     };
 }
 
+/// One staged [SequentialBatch] operation.
+enum SequentialOp<B> {
+    Write(B, u64, IoBufs),
+    Resize(B, u64),
+    /// Durability-only membership: the blob is synced at `apply_sync`.
+    Sync(B),
+    Remove(String, Option<Vec<u8>>),
+}
+
+/// A test-only [crate::WriteBatch] that replays staged operations IN ORDER
+/// at apply — exactly the behavior of issuing them unbatched, with no
+/// cross-blob atomicity.
+///
+/// Real runtime contexts batch atomically through the
+/// [volume](crate::storage::volume). The mock context wrappers in this
+/// module cannot reach the wrapped context's batch (their blob types wrap
+/// the inner ones), so they satisfy [crate::Batchable] with this fallback:
+/// staged operations drive the wrapper's own blob and remove operations,
+/// preserving the wrapper's interception (gating, fault injection).
+pub struct SequentialBatch<S: Storage> {
+    storage: S,
+    ops: Vec<SequentialOp<S::Blob>>,
+    removals: usize,
+}
+
+impl<S: Storage> SequentialBatch<S> {
+    /// Start an empty batch over `storage`.
+    pub const fn new(storage: S) -> Self {
+        Self {
+            storage,
+            ops: Vec::new(),
+            removals: 0,
+        }
+    }
+
+    async fn apply_inner(mut self, sync: bool) -> Result<(), Error> {
+        assert!(
+            self.removals == 0 || sync,
+            "staged removals require apply_sync"
+        );
+        // Replay writes and resizes in staging order.
+        for op in &mut self.ops {
+            match op {
+                SequentialOp::Write(blob, offset, bufs) => {
+                    blob.write_at(*offset, mem::take(bufs)).await?;
+                }
+                SequentialOp::Resize(blob, len) => blob.resize(*len).await?,
+                SequentialOp::Sync(_) | SequentialOp::Remove(..) => {}
+            }
+        }
+        if !sync {
+            return Ok(());
+        }
+        // Durability pass: sync every staged blob (in staging order; a blob
+        // staged more than once syncs more than once), then removals (which
+        // are durable by the [`Storage::remove`] contract).
+        for op in &self.ops {
+            match op {
+                SequentialOp::Write(blob, ..)
+                | SequentialOp::Resize(blob, _)
+                | SequentialOp::Sync(blob) => {
+                    blob.sync().await?;
+                }
+                SequentialOp::Remove(..) => {}
+            }
+        }
+        for op in self.ops {
+            if let SequentialOp::Remove(partition, name) = op {
+                self.storage.remove(&partition, name.as_deref()).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<S: Storage + Clone> crate::WriteBatch for SequentialBatch<S> {
+    type Blob = S::Blob;
+
+    async fn write_at(
+        &mut self,
+        blob: &Self::Blob,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.ops
+            .push(SequentialOp::Write(blob.clone(), offset, bufs.into()));
+        Ok(())
+    }
+
+    async fn resize(&mut self, blob: &Self::Blob, len: u64) -> Result<(), Error> {
+        self.ops.push(SequentialOp::Resize(blob.clone(), len));
+        Ok(())
+    }
+
+    fn sync(&mut self, blob: &Self::Blob) {
+        self.ops.push(SequentialOp::Sync(blob.clone()));
+    }
+
+    fn remove(&mut self, partition: &str, name: Option<&[u8]>) {
+        self.removals += 1;
+        self.ops.push(SequentialOp::Remove(
+            partition.into(),
+            name.map(<[u8]>::to_vec),
+        ));
+    }
+
+    async fn apply(self) -> Result<(), Error> {
+        self.apply_inner(false).await
+    }
+
+    async fn apply_sync(self) -> Result<(), Error> {
+        self.apply_inner(true).await
+    }
+}
+
 /// Context wrapper whose blobs defer [Blob::start_sync] and can gate blocking syncs in tests.
 #[derive(Clone)]
 pub struct DelayedSyncContext<E> {
@@ -487,10 +602,10 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
 }
 
 impl<E: Storage + Clone + Send + Sync + 'static> crate::Batchable for DelayedSyncContext<E> {
-    type Batch = crate::storage::sequential::Batch<Self>;
+    type Batch = SequentialBatch<Self>;
 
     async fn batch(&self) -> Result<Self::Batch, Error> {
-        Ok(crate::storage::sequential::Batch::new(self.clone()))
+        Ok(SequentialBatch::new(self.clone()))
     }
 }
 
@@ -723,10 +838,10 @@ pub struct SyncFaultContext<E> {
 forward_context!(SyncFaultContext, fail_partition);
 
 impl<E: Storage + Clone + Send + Sync + 'static> crate::Batchable for SyncFaultContext<E> {
-    type Batch = crate::storage::sequential::Batch<Self>;
+    type Batch = SequentialBatch<Self>;
 
     async fn batch(&self) -> Result<Self::Batch, Error> {
-        Ok(crate::storage::sequential::Batch::new(self.clone()))
+        Ok(SequentialBatch::new(self.clone()))
     }
 }
 
@@ -1112,5 +1227,61 @@ mod tests {
             let received = recv_handle.await.unwrap();
             assert_eq!(received.coalesce(), b"ABC");
         });
+    }
+
+    mod sequential_batch {
+        use crate::{
+            mocks::SequentialBatch, storage::memory, telemetry::metrics::Registry, Blob as _,
+            BufferPool, BufferPoolConfig, Storage as _, WriteBatch as _,
+        };
+
+        fn test_storage() -> memory::Storage {
+            let mut registry = Registry::default();
+            memory::Storage::new(BufferPool::new(
+                BufferPoolConfig::for_storage(),
+                &mut registry,
+            ))
+        }
+
+        /// Staged operations are invisible until apply, then replay in order;
+        /// staged removals land at apply_sync.
+        #[tokio::test]
+        async fn test_sequential_batch_applies_in_order() {
+            let storage = test_storage();
+            let (a, _) = storage.open("p", b"a").await.unwrap();
+            let (b, _) = storage.open("p", b"b").await.unwrap();
+            let (dead, _) = storage.open("p", b"dead").await.unwrap();
+            dead.write_at(0, b"x".as_slice()).await.unwrap();
+
+            let mut batch = SequentialBatch::new(storage.clone());
+            batch.write_at(&a, 0, b"hello".as_slice()).await.unwrap();
+            batch.write_at(&b, 0, b"world!".as_slice()).await.unwrap();
+            // A later staged resize wins over the earlier write (in-order replay).
+            batch.resize(&b, 5).await.unwrap();
+            batch.remove("p", Some(b"dead"));
+
+            // Nothing is visible before apply.
+            let (_, len) = storage.open("p", b"a").await.unwrap();
+            assert_eq!(len, 0);
+
+            batch.apply_sync().await.unwrap();
+            let (a, len) = storage.open("p", b"a").await.unwrap();
+            assert_eq!(len, 5);
+            let got = a.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(got.as_ref(), b"hello");
+            let (_, len) = storage.open("p", b"b").await.unwrap();
+            assert_eq!(len, 5);
+            assert!(!storage.scan("p").await.unwrap().contains(&b"dead".to_vec()));
+        }
+
+        /// Removals require apply_sync.
+        #[tokio::test]
+        #[should_panic(expected = "staged removals require apply_sync")]
+        async fn test_sequential_batch_apply_rejects_removals() {
+            let storage = test_storage();
+            let mut batch = SequentialBatch::new(storage);
+            batch.remove("p", None);
+            let _ = batch.apply().await;
+        }
     }
 }

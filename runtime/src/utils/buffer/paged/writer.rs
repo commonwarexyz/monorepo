@@ -516,8 +516,8 @@ impl<B: Blob> Writer<B> {
     /// Flushes buffered data to the blob and stages the blob's durability
     /// with `batch`: the flushed (and any earlier unsynced) bytes become
     /// durable when the batch is applied with
-    /// [`crate::WriteBatch::apply_sync`] — on atomic backends, atomically
-    /// with everything else the batch stages.
+    /// [`crate::WriteBatch::apply_sync`], atomically with everything else
+    /// the batch stages.
     pub async fn sync_into<T: crate::WriteBatch<Blob = B>>(
         &mut self,
         batch: &mut T,
@@ -1344,65 +1344,72 @@ mod tests {
     fn test_append_owned_bypass_with_synced_partial_page() {
         // A large owned append on top of a synced partial page must first flush the fill bytes
         // that complete the partial page before writing the bulk directly.
+        let all: Vec<u8> = (0..500).map(|i| (i % 247) as u8).collect();
         let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let (blob, blob_size) = context
-                .open("test_partition", b"owned_partial")
-                .await
-                .unwrap();
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
-                .await
-                .unwrap();
+        let (_, checkpoint) = executor.start_and_recover({
+            let all = all.clone();
+            |context: deterministic::Context| async move {
+                let (blob, blob_size) = context
+                    .open("test_partition", b"owned_partial")
+                    .await
+                    .unwrap();
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                    .await
+                    .unwrap();
 
-            // Durably write a 50-byte partial page.
-            let all: Vec<u8> = (0..500).map(|i| (i % 247) as u8).collect();
-            append.append(&all[..50]).await.unwrap();
-            append.sync().await.unwrap();
+                // Durably write a 50-byte partial page.
+                append.append(&all[..50]).await.unwrap();
+                append.sync().await.unwrap();
 
-            // 450 more bytes: 53 fill the first page, 3 whole pages (309 bytes) bypass the
-            // buffer, 88 remain in the tip.
-            append
-                .append_owned(IoBuf::from(all[50..].to_vec()))
-                .await
-                .unwrap();
-            assert_eq!(append.size(), 500);
-            let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
-            assert_eq!(read_buf, &all[..]);
+                // 450 more bytes: 53 fill the first page, 3 whole pages (309 bytes) bypass the
+                // buffer, 88 remain in the tip.
+                append
+                    .append_owned(IoBuf::from(all[50..].to_vec()))
+                    .await
+                    .unwrap();
+                assert_eq!(append.size(), 500);
+                let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
+                assert_eq!(read_buf, &all[..]);
+            }
+        });
 
-            // The direct write is not durable until sync: dropping without one preserves only the
-            // synced 50-byte prefix.
-            drop(append);
-            let (blob, blob_size) = context
-                .open("test_partition", b"owned_partial")
-                .await
-                .unwrap();
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
-                .await
-                .unwrap();
-            assert_eq!(append.size(), 50);
-            let read_buf = append.read_at(0, 50).await.unwrap().coalesce();
-            assert_eq!(read_buf, &all[..50]);
+        // The direct write is not durable until sync: a crash without one preserves only the
+        // synced 50-byte prefix.
+        deterministic::Runner::from(checkpoint).start(|context: deterministic::Context| {
+            async move {
+                let (blob, blob_size) = context
+                    .open("test_partition", b"owned_partial")
+                    .await
+                    .unwrap();
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(append.size(), 50);
+                let read_buf = append.read_at(0, 50).await.unwrap().coalesce();
+                assert_eq!(read_buf, &all[..50]);
 
-            // Repeating the owned append after recovery and syncing makes everything durable,
-            // exercising the fill path for the recovered partial page.
-            append
-                .append_owned(IoBuf::from(all[50..].to_vec()))
-                .await
-                .unwrap();
-            append.sync().await.unwrap();
-            drop(append);
+                // Repeating the owned append after recovery and syncing makes everything durable,
+                // exercising the fill path for the recovered partial page.
+                append
+                    .append_owned(IoBuf::from(all[50..].to_vec()))
+                    .await
+                    .unwrap();
+                append.sync().await.unwrap();
+                drop(append);
 
-            let (blob, blob_size) = context
-                .open("test_partition", b"owned_partial")
-                .await
-                .unwrap();
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
-                .await
-                .unwrap();
-            assert_eq!(append.size(), 500);
-            let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
-            assert_eq!(read_buf, &all[..]);
+                let (blob, blob_size) = context
+                    .open("test_partition", b"owned_partial")
+                    .await
+                    .unwrap();
+                let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                    .await
+                    .unwrap();
+                assert_eq!(append.size(), 500);
+                let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
+                assert_eq!(read_buf, &all[..]);
+            }
         });
     }
 
@@ -2065,23 +2072,27 @@ mod tests {
     fn test_sync_failed_range_sync_does_not_mark_clean() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let name = b"failed_range_sync";
-            let (blob, size) = context.open("test_partition", name).await.unwrap();
+            let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
-            // Keep the write buffered so sync attempts the clean `write_at_sync` path.
+            // Keep the write buffered so sync flushes it with a durability step.
             append.append(b"abc").await.unwrap();
 
-            // Removing the blob makes the range-sync flush fail.
-            context.remove("test_partition", Some(name)).await.unwrap();
+            // Fail the flush's durability barrier: the bytes land but are not
+            // durable. A fresh writer starts dirty, so the flush uses a write
+            // followed by a full sync.
+            blob.fail_next_sync();
             assert!(append.sync().await.is_err());
 
-            // The failed `write_at_sync` must leave a pending full-sync barrier, so a
-            // later sync cannot report success.
-            assert!(append.sync().await.is_err());
+            // The failed durability step must leave the writer dirty, so the next
+            // sync issues a full durability barrier instead of reporting clean.
+            append.sync().await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.len() as u64, blob.size());
+            assert_eq!(full_syncs, 1);
         });
     }
 

@@ -379,6 +379,9 @@ where
         sync_db = H::apply_ops(sync_db, original_ops_data.clone()).await;
         // commit already done in apply_ops
 
+        // Make the sync db durable before dropping: the reopen below sees the
+        // blobs as-is (no crash discards unsynced partial writes).
+        sync_db.sync().await.unwrap();
         drop(sync_db);
 
         // Add more operations and commit the target database

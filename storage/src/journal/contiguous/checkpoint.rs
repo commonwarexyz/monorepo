@@ -7,11 +7,9 @@
 //! [Journal::init_at_size](super::fixed::Journal::init_at_size)) or because a clear removed
 //! every blob and the new tail has not been recreated yet.
 //!
-//! A clear (reset) writes the boundary record in the SAME batch as the blob removals, so on
-//! atomic backends the whole reset is one old-state-or-new-state transition and no staged
-//! intent is needed. On per-blob backends the batch applies sequentially, so a crash mid-clear
-//! can leave partial state; those backends are not crash-safe for this format (torn-write
-//! immunity and clear atomicity both come from the backend).
+//! A clear (reset) writes the boundary record in the SAME batch as the blob removals, so the
+//! whole reset is one old-state-or-new-state transition and no staged intent is needed
+//! (torn-write immunity and clear atomicity both come from the runtime's atomic storage).
 //!
 //! # Format
 //!
@@ -125,8 +123,7 @@ impl<E: Context> Checkpoint<E> {
     }
 
     /// Stage a wholesale record rewrite with `batch` (durable when the
-    /// batch is applied, atomically with everything else it stages on
-    /// atomic backends).
+    /// batch is applied, atomically with everything else it stages).
     async fn write_into(&mut self, record: Record, batch: &mut E::Batch) -> Result<(), Error> {
         let bytes = record.encode();
         batch

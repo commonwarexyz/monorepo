@@ -104,14 +104,6 @@ impl Storage {
     }
 }
 
-impl crate::Batchable for Storage {
-    type Batch = super::sequential::Batch<Self>;
-
-    async fn batch(&self) -> Result<Self::Batch, Error> {
-        Ok(super::sequential::Batch::new(self.clone()))
-    }
-}
-
 impl crate::Storage for Storage {
     type Blob = Blob;
 
@@ -488,6 +480,17 @@ mod tests {
     async fn test_iouring_storage() {
         // Verify the io_uring storage backend satisfies the shared storage trait suite.
         let (storage, storage_directory) = create_test_storage();
+        run_storage_tests(storage).await;
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    /// The production composition: a volume over the io_uring backend.
+    #[tokio::test]
+    async fn test_iouring_volume_storage() {
+        let (storage, storage_directory) = create_test_storage();
+        let mut registry = Registry::default();
+        let pool = test_pool(&mut registry.sub_registry("volume_pool"));
+        let storage = crate::storage::volume::Storage::new(storage, pool, Default::default());
         run_storage_tests(storage).await;
         let _ = std::fs::remove_dir_all(storage_directory);
     }

@@ -597,6 +597,16 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// # Crash contract
+    ///
+    /// Every runtime serves storage through the
+    /// [volume](crate::storage::volume), whose atomic commit is THE storage
+    /// contract structures may build on: after a crash, each blob reads back
+    /// exactly the state captured by one commit (its last successful
+    /// [`Blob::sync`], or a newer fully-landed commit), an applied [Batchable]
+    /// batch is never split across commits, and corruption is loud (every
+    /// read is checksum-verified), never silent truncation.
+    ///
     /// # Partition Names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
@@ -767,21 +777,14 @@ stability_scope!(BETA {
 });
 stability_scope!(BETA {
     /// A [Storage] that can stage operations spanning multiple blobs and
-    /// apply them as one unit.
+    /// apply them as one atomic unit.
     ///
-    /// This is a capability trait every runtime storage implements, but the
-    /// STRENGTH of the unit is backend-defined:
-    ///
-    /// - The volume backend applies and commits a batch ATOMICALLY: after a
-    ///   crash, either every staged operation is visible or none is, and
-    ///   [WriteBatch::apply_sync] is one commit with one fsync.
-    /// - Plain per-blob backends fall back to a sequential batch that
-    ///   replays the staged operations in order at apply — exactly the
-    ///   behavior of issuing them unbatched, with no cross-blob atomicity.
-    ///
-    /// Structures use ONE code path against this trait: their recovery
-    /// logic must stay correct under the sequential fallback, while the
-    /// volume collapses every crash window between the staged operations.
+    /// Every runtime serves batches through the
+    /// [volume](crate::storage::volume) backend, which applies and commits a
+    /// batch ATOMICALLY: after a crash, either every staged operation is
+    /// visible or none is, and [WriteBatch::apply_sync] is one commit with
+    /// one fsync. Structures can therefore treat the crash windows between
+    /// staged operations as nonexistent.
     pub trait Batchable: Storage {
         /// The staged-batch type.
         type Batch: WriteBatch<Blob = Self::Blob>;
@@ -791,7 +794,7 @@ stability_scope!(BETA {
     }
 
     /// A set of storage operations staged across blobs and applied as one
-    /// unit (see [Batchable] for the per-backend strength of "one unit").
+    /// atomic unit (see [Batchable]).
     ///
     /// # Writer exclusivity
     ///
@@ -810,9 +813,8 @@ stability_scope!(BETA {
 
         /// Stage a write of `bufs` to `blob` at `offset`.
         ///
-        /// When the bytes reach storage is backend-defined (the volume
-        /// writes through immediately; the sequential fallback writes at
-        /// apply). They are never observable through the blob before
+        /// Staged bytes may reach storage immediately (the volume writes
+        /// through), but they are never observable through the blob before
         /// [Self::apply] and never durable before [Self::apply_sync].
         fn write_at(
             &mut self,
@@ -830,8 +832,8 @@ stability_scope!(BETA {
 
         /// Include `blob` in the batch without staging bytes: its
         /// previously written (unsynced) state becomes durable with
-        /// [Self::apply_sync] — on atomic backends, atomically with the
-        /// rest of the batch. Blobs with staged writes are always included.
+        /// [Self::apply_sync], atomically with the rest of the batch. Blobs
+        /// with staged writes are always included.
         fn sync(&mut self, blob: &Self::Blob);
 
         /// Stage a namespace removal (a blob, or a whole partition when
@@ -842,8 +844,8 @@ stability_scope!(BETA {
         /// batch's writes stay uncommitted.
         fn remove(&mut self, partition: &str, name: Option<&[u8]>);
 
-        /// Apply the staged operations (atomically on atomic backends; in
-        /// staging order otherwise) WITHOUT making them durable.
+        /// Apply the staged operations atomically WITHOUT making them
+        /// durable.
         ///
         /// # Panics
         ///
@@ -851,8 +853,7 @@ stability_scope!(BETA {
         fn apply(self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Apply the staged operations and make every staged blob durable:
-        /// one atomic commit on atomic backends, a sync per staged blob (in
-        /// staging order, possibly more than once) on the fallback.
+        /// one atomic commit.
         fn apply_sync(self) -> impl Future<Output = Result<(), Error>> + Send;
     }
 });

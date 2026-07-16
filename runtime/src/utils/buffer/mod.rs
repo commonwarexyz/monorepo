@@ -190,6 +190,13 @@ mod tests {
 
         /// Number of range-scoped write syncs.
         range_syncs: usize,
+
+        /// Fail the next `write_at_sync` after the write lands (the bytes
+        /// reach `data` but not `durable`).
+        fail_next_write_at_sync: bool,
+
+        /// Fail the next full `sync` without updating `durable`.
+        fail_next_sync: bool,
     }
 
     /// Test blob with separate visible and durable state.
@@ -222,6 +229,17 @@ mod tests {
 
         pub fn size(&self) -> u64 {
             self.state.lock().data.len() as u64
+        }
+
+        /// Make the next `write_at_sync` fail its durability step: the write
+        /// lands, the sync error is returned.
+        pub fn fail_next_write_at_sync(&self) {
+            self.state.lock().fail_next_write_at_sync = true;
+        }
+
+        /// Make the next full `sync` fail without making anything durable.
+        pub fn fail_next_sync(&self) {
+            self.state.lock().fail_next_sync = true;
         }
 
         fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -274,8 +292,12 @@ mod tests {
             let buf = buf.into().coalesce();
             let mut state = self.state.lock();
             Self::write(&mut state.data, offset, buf.as_ref())?;
-            Self::write(&mut state.durable, offset, buf.as_ref())?;
             state.writes += 1;
+            if std::mem::take(&mut state.fail_next_write_at_sync) {
+                let err = std::io::Error::other("injected write_at_sync failure");
+                return Err(Error::Io(err.into()));
+            }
+            Self::write(&mut state.durable, offset, buf.as_ref())?;
             state.range_syncs += 1;
             Ok(())
         }
@@ -288,6 +310,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             let mut state = self.state.lock();
+            if std::mem::take(&mut state.fail_next_sync) {
+                let err = std::io::Error::other("injected sync failure");
+                return Err(Error::Io(err.into()));
+            }
             state.durable = state.data.clone();
             state.full_syncs += 1;
             Ok(())
@@ -1728,21 +1754,25 @@ mod tests {
     fn test_write_sync_failed_range_sync_does_not_mark_clean() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let name = b"failed_range_sync";
-            let (blob, size) = context.open("partition", name).await.unwrap();
-            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+            let blob = SyncTrackingBlob::new();
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
             writer.sync().await.unwrap();
+            let (_, _, baseline_full_syncs, _) = blob.snapshot();
 
             // Keep the write buffered so sync attempts the clean `write_at_sync` path.
             writer.write_at(0, b"abc").await.unwrap();
 
-            // Removing the blob makes the range-sync flush fail.
-            context.remove("partition", Some(name)).await.unwrap();
+            // Fail the range sync: the bytes land but are not durable.
+            blob.fail_next_write_at_sync();
             assert!(writer.sync().await.is_err());
 
-            // The failed `write_at_sync` must leave a pending full-sync barrier, so a
-            // later sync cannot report success.
-            assert!(writer.sync().await.is_err());
+            // The failed `write_at_sync` must leave the writer dirty, so the next
+            // sync issues a full durability barrier instead of reporting clean.
+            writer.sync().await.unwrap();
+            let (durable, _, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable, b"abc");
+            assert_eq!(full_syncs, baseline_full_syncs + 1);
+            assert_eq!(range_syncs, 0);
         });
     }
 

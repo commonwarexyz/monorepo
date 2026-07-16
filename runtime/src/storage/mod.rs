@@ -95,11 +95,9 @@ stability_scope!(ALPHA {
     pub mod audited;
     pub mod faulty;
     pub mod memory;
-    pub mod switch;
-    pub mod volume;
 });
 stability_scope!(BETA {
-    pub mod sequential;
+    pub mod volume;
 });
 stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
     pub mod iouring;

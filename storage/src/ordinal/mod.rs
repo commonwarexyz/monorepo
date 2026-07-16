@@ -235,12 +235,8 @@ mod tests {
                 .await
                 .expect("Failed to put data");
 
-            // Force flush failure by removing the underlying blob before sync.
-            let section = 0u64.to_be_bytes();
-            context
-                .remove(&cfg.partition, Some(&section))
-                .await
-                .expect("Failed to remove blob");
+            // Force flush failure by injecting storage sync faults.
+            context.storage_fault_config().write().sync_rate = Some(1.0);
 
             // Sync must observe the durability failure.
             assert!(store.sync().await.is_err(), "sync unexpectedly succeeded");

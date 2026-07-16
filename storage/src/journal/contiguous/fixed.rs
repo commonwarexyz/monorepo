@@ -545,8 +545,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Partition::select(&context, &cfg.partition).await?;
 
         // One batch resets everything: every blob partition removal plus the cleared-boundary
-        // record. On atomic backends the reset is old-state-or-new-state; init then recovers
-        // the cleared journal (a boundary hint with no blobs) and recreates the tail.
+        // record. The reset is old-state-or-new-state; init then recovers the cleared journal
+        // (a boundary hint with no blobs) and recreates the tail.
         let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         let mut batch = context.batch().await.map_err(Error::Runtime)?;
         Self::stage_reset(&context, &cfg.partition, &mut checkpoint, size, &mut batch).await?;
@@ -620,8 +620,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Durably persist the current state of the structure, including the checkpoint's pruning
-    /// boundary — one batch, so on atomic backends the data and the boundary record commit
-    /// together with a single sync.
+    /// boundary — one batch, so the data and the boundary record commit together with a
+    /// single sync.
     pub async fn sync(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
@@ -893,10 +893,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Crash Safety
     ///
-    /// The blob removals and the cleared-boundary record land in ONE batch: on atomic backends
-    /// a crash leaves the journal either in its prior state or with bounds
-    /// `new_size..new_size`. Per-blob backends apply the batch sequentially and are not
-    /// crash-safe here.
+    /// The blob removals and the cleared-boundary record land in ONE batch: a crash leaves
+    /// the journal either in its prior state or with bounds `new_size..new_size`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.

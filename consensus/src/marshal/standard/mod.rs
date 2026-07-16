@@ -2997,10 +2997,10 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
             context.sleep(Duration::from_millis(10)).await;
 
-            // Sync failures are fatal to the local storage state. They must not be
-            // converted into a `false` certification/verification verdict.
-            context.storage_fault_config().write().sync_rate = Some(1.0);
-
+            // Warm the verified cache's storage with a healthy round so the
+            // faulty round below appends to existing blobs: creating a blob
+            // commits immediately, which would surface the fault at persist
+            // rather than at the sync barrier under test.
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = B::new::<Sha256>(
@@ -3013,9 +3013,26 @@ mod tests {
                 Height::new(1),
                 100,
             );
+            let _ = marshal.verified(round, block.clone()).await;
+
+            // Sync failures are fatal to the local storage state. They must not be
+            // converted into a `false` certification/verification verdict.
+            context.storage_fault_config().write().sync_rate = Some(1.0);
+
+            let next_round = Round::new(Epoch::zero(), View::new(2));
+            let next_block = B::new::<Sha256>(
+                Ctx {
+                    round: next_round,
+                    leader: default_leader(),
+                    parent: (View::new(1), block.digest()),
+                },
+                block.digest(),
+                Height::new(2),
+                100,
+            );
             // `verified` awaits the durable-sync handle internally; a storage sync
             // failure must panic here (fatal), never resolve to a recoverable verdict.
-            let _ = marshal.verified(round, block).await;
+            let _ = marshal.verified(next_round, next_block).await;
         });
     }
 
@@ -3053,8 +3070,8 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
             context.sleep(Duration::from_millis(10)).await;
 
-            context.storage_fault_config().write().sync_rate = Some(1.0);
-
+            // Warm the storage with a healthy round so the faulty round below
+            // appends to existing blobs (see the verified twin).
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = B::new::<Sha256>(
@@ -3067,15 +3084,33 @@ mod tests {
                 Height::new(1),
                 100,
             );
-            let _ = marshal.certified(round, block).await;
+            let _ = marshal.certified(round, block.clone()).await;
+
+            context.storage_fault_config().write().sync_rate = Some(1.0);
+
+            let next_round = Round::new(Epoch::zero(), View::new(2));
+            let next_block = B::new::<Sha256>(
+                Ctx {
+                    round: next_round,
+                    leader: default_leader(),
+                    parent: (View::new(1), block.digest()),
+                },
+                block.digest(),
+                Height::new(2),
+                100,
+            );
+            let _ = marshal.certified(next_round, next_block).await;
         });
     }
 
     // A notarization's durable sync is observed by the actor's sync pool rather than
     // a consensus caller. The fatal policy must still apply: a sync failure panics
-    // the actor instead of being silently swallowed.
+    // the actor instead of being silently swallowed. The first failed commit
+    // poisons the volume, so every subsequent storage operation surfaces the
+    // fault too; which fatal site trips first is scheduling-dependent, so the
+    // expectation pins only that the injected fault is fatal.
     #[test_traced("WARN")]
-    #[should_panic(expected = "failed to sync notarization")]
+    #[should_panic(expected = "injected storage fault")]
     fn test_notarization_sync_failure_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -3106,8 +3141,8 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
             context.sleep(Duration::from_millis(10)).await;
 
-            context.storage_fault_config().write().sync_rate = Some(1.0);
-
+            // Warm the storage with a healthy round so the faulty round below
+            // appends to existing blobs (see the verified twin).
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = B::new::<Sha256>(
@@ -3126,6 +3161,31 @@ mod tests {
                 QUORUM,
             );
             StandardHarness::report_notarization(&mut mailbox, notarization).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            context.storage_fault_config().write().sync_rate = Some(1.0);
+
+            let next_round = Round::new(Epoch::zero(), View::new(2));
+            let next_block = B::new::<Sha256>(
+                Ctx {
+                    round: next_round,
+                    leader: default_leader(),
+                    parent: (View::new(1), block.digest()),
+                },
+                block.digest(),
+                Height::new(2),
+                100,
+            );
+            let next_notarization = StandardHarness::make_notarization(
+                Proposal::new(
+                    next_round,
+                    View::new(1),
+                    StandardHarness::commitment(&next_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_notarization(&mut mailbox, next_notarization).await;
 
             // The failure surfaces asynchronously when the pool observes the sync.
             context.sleep(Duration::from_secs(5)).await;

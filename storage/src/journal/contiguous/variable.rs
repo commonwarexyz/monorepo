@@ -1043,8 +1043,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Initialize an empty [Journal] at the given logical `size`.
     ///
     /// This discards any existing data and offsets: the data partition removal, the offsets
-    /// blob removals, and the offsets boundary record land in ONE batch, so on atomic backends
-    /// the reset is old-state-or-new-state.
+    /// blob removals, and the offsets boundary record land in ONE batch, so the reset is
+    /// old-state-or-new-state.
     ///
     /// Returns a journal with journal.bounds() == Range{start: size, end: size}
     /// and next append at position `size`.
@@ -1513,11 +1513,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Stage the durability of dirty data blobs and the offsets journal
-    /// with `batch`. Data is staged before offsets: the sequential fallback
-    /// syncs in staging order, preserving the data-then-offsets ordering
-    /// that keeps durable offsets at or behind durable data (which init
-    /// repairs by truncating the unindexed data suffix). On the volume the
-    /// whole batch commits atomically and no crash can separate them.
+    /// with `batch`: the whole batch commits atomically, so no crash can
+    /// separate data from offsets. Data is still staged before offsets so a
+    /// sequentially replayed batch (the test-only mock fallback) preserves
+    /// the data-then-offsets ordering that keeps durable offsets at or
+    /// behind durable data (which init repairs by truncating the unindexed
+    /// data suffix).
     async fn commit_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
         if let Some(start_blob) = self.dirty_from_blob {
             self.blobs.sync_from_into(start_blob, batch).await?;
@@ -1527,7 +1528,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Durably persist the journal: dirty data blobs and the offsets
-    /// journal, one batch, one commit on atomic backends.
+    /// journal, one batch, one commit.
     pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
@@ -1569,8 +1570,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
     /// The data blob removals, the offsets blob removals, and the offsets boundary record land
-    /// in ONE batch, so on atomic backends a crash leaves the journal either in its prior
-    /// state or fully cleared.
+    /// in ONE batch, so a crash leaves the journal either in its prior state or fully cleared.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
@@ -1605,10 +1605,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// describe prefixes of one shared history (see the type docs), so reconciliation is a
     /// bounded comparison of sizes: no frame is ever scanned or decoded.
     ///
-    /// On the volume backend the tail repair is unreachable: data and offsets commit in ONE
-    /// batch, so their durable frontiers can never diverge. It is kept for per-blob backends
-    /// (MemStorage and the sequential batch fallback), whose apply syncs data before offsets
-    /// and can crash between the two.
+    /// Through the runtime's volume-backed storage the tail repair is unreachable: data and
+    /// offsets commit in ONE batch, so their durable frontiers can never diverge. It is kept
+    /// as a defensive repair for sequentially replayed batches (the test-only mock fallback),
+    /// whose apply syncs data before offsets and can crash between the two.
     ///
     /// Returns the recovered bounds (`pruning_boundary..size`).
     async fn align(
@@ -6125,9 +6125,8 @@ mod tests {
         });
     }
 
-    /// Drive a rewind plus a rollover-crossing unsynced append through a crash, on plain
-    /// MemStorage and again under the volume backend: both provide per-blob atomic sync, so
-    /// recovery lands on the same state (the rewound prefix plus the blob sealed at rollover).
+    /// Drive a rewind plus a rollover-crossing unsynced append through a crash: recovery lands
+    /// on the rewound prefix plus the blob sealed at rollover.
     fn variable_rewind_rollover_crash(runner: deterministic::Runner) {
         fn test_cfg(context: &deterministic::Context) -> Config<()> {
             Config {
@@ -6176,15 +6175,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_rewind_rollover_crash_memory() {
+    fn test_variable_rewind_rollover_crash() {
         variable_rewind_rollover_crash(deterministic::Runner::default());
-    }
-
-    #[test_traced]
-    fn test_variable_rewind_rollover_crash_volume() {
-        variable_rewind_rollover_crash(deterministic::Runner::new(
-            deterministic::Config::default()
-                .with_storage_volume(deterministic::VolumeConfig::default()),
-        ));
     }
 }

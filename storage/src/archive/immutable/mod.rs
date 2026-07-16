@@ -305,16 +305,8 @@ mod tests {
     }
 
     #[test]
-    fn test_crash_consistency_memory() {
+    fn test_crash_consistency() {
         archive_crash_consistency(deterministic::Runner::default());
-    }
-
-    #[test]
-    fn test_crash_consistency_volume() {
-        archive_crash_consistency(deterministic::Runner::new(
-            deterministic::Config::default()
-                .with_storage_volume(deterministic::VolumeConfig::default()),
-        ));
     }
 
     #[test]

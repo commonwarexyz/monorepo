@@ -4,6 +4,7 @@ use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwor
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+pub use crate::storage::volume::Config as VolumeConfig;
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
-    storage::metered::Storage as MeteredStorage,
+    storage::{metered::Storage as MeteredStorage, volume::Storage as VolumeStorage},
     telemetry::metrics::{
         add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
         Register, Registered, Registry,
@@ -157,6 +158,13 @@ pub struct Config {
     /// Base directory for all storage operations.
     storage_directory: PathBuf,
 
+    /// Configuration for the [crate::storage::volume] that serves all
+    /// storage. The volume file lives in the storage directory (at the
+    /// configured partition and name), and grows in
+    /// [VolumeConfig::growth_quantum] steps (64 MiB by default, to avoid
+    /// churning filesystem extent metadata on file-backed storage).
+    storage_volume_cfg: VolumeConfig,
+
     /// Maximum buffer size for operations on blobs.
     ///
     /// Tokio sets the default value to 2MB.
@@ -184,6 +192,10 @@ impl Config {
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
+            storage_volume_cfg: VolumeConfig {
+                growth_quantum: 64 * 1024 * 1024, // 64 MiB
+                ..VolumeConfig::default()
+            },
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
@@ -235,6 +247,11 @@ impl Config {
     /// See [Config]
     pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
         self.storage_directory = p.into();
+        self
+    }
+    /// See [Config]
+    pub fn with_volume_config(mut self, cfg: VolumeConfig) -> Self {
+        self.storage_volume_cfg = cfg;
         self
     }
     /// See [Config]
@@ -400,35 +417,39 @@ impl crate::Runner for Runner {
             );
         }
 
-        // Initialize storage
+        // Initialize storage: a volume (single-file backend with atomic
+        // group commit) over the filesystem backend. Volume recovery runs
+        // lazily on the first storage operation.
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
                 let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
-                let storage = MeteredStorage::new(
-                    IoUringStorage::start(
-                        IoUringConfig {
-                            storage_directory: self.cfg.storage_directory.clone(),
-                            iouring_config: Default::default(),
-                            thread_stack_size: self.cfg.thread_stack_size,
-                        },
-                        &mut iouring_registry,
-                        storage_buffer_pool.clone(),
-                    ),
-                    &mut runtime_registry,
+                let inner = IoUringStorage::start(
+                    IoUringConfig {
+                        storage_directory: self.cfg.storage_directory.clone(),
+                        iouring_config: Default::default(),
+                        thread_stack_size: self.cfg.thread_stack_size,
+                    },
+                    &mut iouring_registry,
+                    storage_buffer_pool.clone(),
                 );
             } else {
-                let storage = MeteredStorage::new(
-                    TokioStorage::new(
-                        TokioStorageConfig::new(
-                            self.cfg.storage_directory.clone(),
-                            self.cfg.maximum_buffer_size,
-                        ),
-                        storage_buffer_pool.clone(),
+                let inner = TokioStorage::new(
+                    TokioStorageConfig::new(
+                        self.cfg.storage_directory.clone(),
+                        self.cfg.maximum_buffer_size,
                     ),
-                    &mut runtime_registry,
+                    storage_buffer_pool.clone(),
                 );
             }
         }
+        let storage = MeteredStorage::new(
+            VolumeStorage::new(
+                inner,
+                storage_buffer_pool.clone(),
+                self.cfg.storage_volume_cfg.clone(),
+            ),
+            &mut runtime_registry,
+        );
 
         // Initialize network
         cfg_if::cfg_if! {
@@ -506,9 +527,9 @@ impl crate::Runner for Runner {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
-        type Storage = MeteredStorage<IoUringStorage>;
+        type Storage = MeteredStorage<VolumeStorage<IoUringStorage>>;
     } else {
-        type Storage = MeteredStorage<TokioStorage>;
+        type Storage = MeteredStorage<VolumeStorage<TokioStorage>>;
     }
 }
 

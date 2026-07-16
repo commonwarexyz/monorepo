@@ -69,14 +69,6 @@ impl Storage {
     }
 }
 
-impl crate::Batchable for Storage {
-    type Batch = super::sequential::Batch<Self>;
-
-    async fn batch(&self) -> Result<Self::Batch, Error> {
-        Ok(super::sequential::Batch::new(self.clone()))
-    }
-}
-
 impl crate::Storage for Storage {
     #[cfg(unix)]
     type Blob = unix::Blob;
@@ -292,6 +284,22 @@ mod tests {
             env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
+        run_storage_tests(storage).await;
+    }
+
+    /// The production composition: a volume over the filesystem backend.
+    #[tokio::test]
+    async fn test_volume_storage() {
+        let mut rng = sys_rng();
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_volume_{}", rng.random::<u64>()));
+        let config = Config::new(storage_directory, 2 * 1024 * 1024);
+        let pool = test_pool();
+        let storage = crate::storage::volume::Storage::new(
+            Storage::new(config, pool.clone()),
+            pool,
+            Default::default(),
+        );
         run_storage_tests(storage).await;
     }
 

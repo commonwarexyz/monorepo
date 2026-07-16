@@ -14,11 +14,13 @@
 //! > is never split across commits. Every read verifies a CRC32C; a
 //! > mismatch is loud corruption, never silent truncation.
 //!
-//! Storage structures above a volume can therefore delete their own
-//! torn-write detection, recovery machinery, and cross-blob sync-ordering
-//! discipline: torn tails, partial frames, and (through [`Batch`]) cross-
-//! blob skew are impossible by construction, and the deterministic
-//! runtime's crash model becomes the production model.
+//! Every runtime serves ALL storage through a volume over its platform
+//! backend, so this is the crash contract of every runtime context.
+//! Storage structures can therefore delete their own torn-write detection,
+//! recovery machinery, and cross-blob sync-ordering discipline: torn
+//! tails, partial frames, and (through [`Batch`]) cross-blob skew are
+//! impossible by construction, and the deterministic runtime's crash model
+//! is the production model.
 //!
 //! A commit may make MORE data durable than a caller explicitly synced (the
 //! single inner fsync covers every pending write of the volume file, which

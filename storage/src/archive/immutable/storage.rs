@@ -225,10 +225,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         self.syncs.inc();
 
         // ONE batch stages everything: freezer table writes and journal
-        // appends, ordinal writes, and the commit record. On atomic
-        // backends the whole sync is a single commit with a single fsync;
-        // on the sequential fallback the apply syncs in staging order, so
-        // the record still lands last (the pre-batch ordering).
+        // appends, ordinal writes, and the commit record. The whole sync is
+        // a single commit with a single fsync. The record is still staged
+        // last, so a sequentially replayed batch (the test-only mock
+        // fallback) syncs it last (the pre-batch ordering).
         let mut batch = self.context.batch().await?;
         let checkpoint = self.freezer.sync_into(&mut batch).await?;
         self.ordinal.sync_into(&mut batch).await?;
