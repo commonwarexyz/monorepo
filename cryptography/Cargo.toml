@@ -101,7 +101,6 @@ std = [
 	"blake3/std",
 	"bytes/std",
 	"chacha20poly1305/getrandom",
-	"chacha20poly1305/std",
 	"commonware-codec/std",
 	"commonware-formatting/std",
 	"commonware-macros/std",

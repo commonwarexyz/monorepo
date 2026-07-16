@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV RUST_VERSION=1.96.0
-ENV GUNGRAUN_VERSION=0.19.1
+ENV GUNGRAUN_VERSION=0.19.4
 ENV PATH="/usr/local/cargo/bin:${PATH}"
 
 RUN apt-get update && \

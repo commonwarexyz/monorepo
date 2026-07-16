@@ -1691,9 +1691,8 @@ mod test {
 
     #[test]
     fn try_map_collect_vec_parallel_returns_an_error() {
-        let result: Result<Vec<usize>, usize> =
-            parallel_strategy()
-                .try_map_collect_vec(0..128, |i| if i == 17 || i == 42 { Err(i) } else { Ok(i) });
+        let result: Result<Vec<usize>, usize> = parallel_strategy()
+            .try_map_collect_vec(0..128, |i| if i == 17 || i == 42 { Err(i) } else { Ok(i) });
 
         assert!(matches!(result, Err(17 | 42)));
     }
