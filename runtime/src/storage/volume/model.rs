@@ -91,7 +91,12 @@ enum Cell {
     Zero,
     /// Unverifiable residue in an uncommitted region (never expected).
     Garbage,
-    Val { slot: u8, gen: u8, cell: u8, ver: u8 },
+    Val {
+        slot: u8,
+        gen: u8,
+        cell: u8,
+        ver: u8,
+    },
 }
 
 /// Durable content of one disk block.
@@ -189,8 +194,8 @@ impl Disk {
 
     /// Every possible durable disk after power loss (pending writes resolve
     /// per block; fsyncgate residue is simply gone).
-    fn crash_outcomes(&self) -> Vec<Disk> {
-        let mut outcomes = vec![Disk {
+    fn crash_outcomes(&self) -> Vec<Self> {
+        let mut outcomes = vec![Self {
             durable: self.durable.clone(),
             pending: BTreeMap::new(),
             stale_cache: BTreeMap::new(),
@@ -340,13 +345,19 @@ enum Action {
 
 /// Committed-cell coverage of logical block `lblock` for a blob of `size`.
 fn coverage(size: u8, lblock: u8) -> u8 {
-    size.saturating_sub(lblock * CELLS_PER_BLOCK).min(CELLS_PER_BLOCK)
+    size.saturating_sub(lblock * CELLS_PER_BLOCK)
+        .min(CELLS_PER_BLOCK)
 }
 
 impl Volume {
     fn fresh() -> Self {
         Self {
-            blobs: (0..BLOBS).map(|_| BlobState { live: true, ..Default::default() }).collect(),
+            blobs: (0..BLOBS)
+                .map(|_| BlobState {
+                    live: true,
+                    ..Default::default()
+                })
+                .collect(),
             free: (RESERVED..BLOCKS).collect(),
             pending_free: Vec::new(),
             seq: 1,
@@ -375,7 +386,12 @@ impl Volume {
         let b = &mut self.blobs[slot as usize];
         let ver = b.vers.entry(cell).or_insert(0);
         *ver += 1;
-        Cell::Val { slot, gen: b.gen, cell, ver: *ver }
+        Cell::Val {
+            slot,
+            gen: b.gen,
+            cell,
+            ver: *ver,
+        }
     }
 
     fn mark_dirty(&mut self, slot: u8, lblock: Option<u8>) {
@@ -397,15 +413,16 @@ impl Volume {
                 continue;
             }
             let cells = (0..b.size)
-                .map(|i| match b.runs.get(&(i / CELLS_PER_BLOCK)) {
-                    Some(run) => {
-                        if i % CELLS_PER_BLOCK == 0 {
-                            run.cells.0
-                        } else {
-                            run.cells.1
-                        }
-                    }
-                    None => Cell::Zero,
+                .map(|i| {
+                    b.runs
+                        .get(&(i / CELLS_PER_BLOCK))
+                        .map_or(Cell::Zero, |run| {
+                            if i.is_multiple_of(CELLS_PER_BLOCK) {
+                                run.cells.0
+                            } else {
+                                run.cells.1
+                            }
+                        })
                 })
                 .collect();
             blobs.push(Some((b.gen, cells)));
@@ -422,24 +439,44 @@ impl Volume {
             None => {
                 // Hole or fresh block: allocate, zero-fill the sibling cell.
                 let phys = self.allocate();
-                let cells = if idx == 0 { (val, Cell::Zero) } else { (Cell::Zero, val) };
+                let cells = if idx == 0 {
+                    (val, Cell::Zero)
+                } else {
+                    (Cell::Zero, val)
+                };
                 disk.write(phys, Block::Data(cells.0, cells.1));
-                self.blobs[slot as usize]
-                    .runs
-                    .insert(lblock, Run { phys, cells, frozen: 0 });
+                self.blobs[slot as usize].runs.insert(
+                    lblock,
+                    Run {
+                        phys,
+                        cells,
+                        frozen: 0,
+                    },
+                );
             }
             Some(run) => {
-                let cells = if idx == 0 { (val, run.cells.1) } else { (run.cells.0, val) };
+                let cells = if idx == 0 {
+                    (val, run.cells.1)
+                } else {
+                    (run.cells.0, val)
+                };
                 if idx >= run.frozen {
                     disk.write(run.phys, Block::Data(cells.0, cells.1));
-                    self.blobs[slot as usize].runs.insert(lblock, Run { cells, ..run });
+                    self.blobs[slot as usize]
+                        .runs
+                        .insert(lblock, Run { cells, ..run });
                 } else {
                     let phys = self.allocate();
                     disk.write(phys, Block::Data(cells.0, cells.1));
                     self.release(run.phys, rules);
-                    self.blobs[slot as usize]
-                        .runs
-                        .insert(lblock, Run { phys, cells, frozen: 0 });
+                    self.blobs[slot as usize].runs.insert(
+                        lblock,
+                        Run {
+                            phys,
+                            cells,
+                            frozen: 0,
+                        },
+                    );
                 }
             }
         }
@@ -451,8 +488,12 @@ impl Volume {
 /// authority for the frozen cell of partial tail blocks.
 fn verify_manifest(disk: &Disk, table: &Table) -> bool {
     for &(slot, lblock) in &table.manifest {
-        let Some(entry) = table.blobs.get(&slot) else { continue };
-        let Some(&(phys, c0, c1)) = entry.runs.get(&lblock) else { continue };
+        let Some(entry) = table.blobs.get(&slot) else {
+            continue;
+        };
+        let Some(&(phys, c0, c1)) = entry.runs.get(&lblock) else {
+            continue;
+        };
         let partial_tail = coverage(entry.size, lblock) == 1;
         let shadow_ok = || {
             entry
@@ -465,7 +506,11 @@ fn verify_manifest(disk: &Disk, table: &Table) -> bool {
                     // The committed cell is recoverable from the shadow even
                     // if a post-snapshot append tore this block; without a
                     // shadow the on-disk cell must match directly.
-                    if entry.shadow.is_some() { shadow_ok() } else { *d0 == c0 }
+                    if entry.shadow.is_some() {
+                        shadow_ok()
+                    } else {
+                        *d0 == c0
+                    }
                 } else {
                     *d0 == c0 && *d1 == c1
                 }
@@ -486,14 +531,24 @@ fn read_cell(disk: &Disk, entry: &Entry, cell: u8) -> Result<Cell, String> {
     let Some(&(phys, c0, c1)) = entry.runs.get(&(cell / CELLS_PER_BLOCK)) else {
         return Ok(Cell::Zero);
     };
-    let expected = if cell % CELLS_PER_BLOCK == 0 { c0 } else { c1 };
+    let expected = if cell.is_multiple_of(CELLS_PER_BLOCK) {
+        c0
+    } else {
+        c1
+    };
     match disk.read(phys) {
         Block::Data(d0, d1) => {
-            let got = if cell % CELLS_PER_BLOCK == 0 { *d0 } else { *d1 };
+            let got = if cell.is_multiple_of(CELLS_PER_BLOCK) {
+                *d0
+            } else {
+                *d1
+            };
             if got == expected {
                 Ok(got)
             } else {
-                Err(format!("phys {phys}: cell {cell} = {got:?}, expected {expected:?}"))
+                Err(format!(
+                    "phys {phys}: cell {cell} = {got:?}, expected {expected:?}"
+                ))
             }
         }
         other => Err(format!("phys {phys}: {other:?}")),
@@ -595,7 +650,14 @@ fn rebuild(adopted: &Adopted) -> Volume {
                     .runs
                     .iter()
                     .map(|(&l, &(phys, c0, c1))| {
-                        (l, Run { phys, cells: (c0, c1), frozen: coverage(e.size, l) })
+                        (
+                            l,
+                            Run {
+                                phys,
+                                cells: (c0, c1),
+                                frozen: coverage(e.size, l),
+                            },
+                        )
                     })
                     .collect(),
                 shadow: e.shadow,
@@ -628,11 +690,12 @@ fn queue_repairs(disk: &mut Disk, adopted: &Adopted, rules: &Rules) {
             continue;
         }
         let tail = entry.size / CELLS_PER_BLOCK;
-        let (Some(&(phys, _, _)), Some(shadow)) = (entry.runs.get(&tail), entry.shadow)
-        else {
+        let (Some(&(phys, _, _)), Some(shadow)) = (entry.runs.get(&tail), entry.shadow) else {
             continue;
         };
-        let Block::Shadow(sc) = disk.read(shadow) else { continue };
+        let Block::Shadow(sc) = disk.read(shadow) else {
+            continue;
+        };
         let sc = *sc;
         // Positional sub-block write of the committed fragment: the sibling
         // cell keeps whatever the block held (garbage if torn/virgin).
@@ -677,8 +740,11 @@ fn initial_state(actions: u8, crashes: u8) -> State {
         init_table.blobs.insert(slot, Entry::default());
     }
     let mut disk = Disk::empty();
-    disk.durable[0] =
-        Block::Super { seq: 0, table: RESERVED, bound: init_table.clone() };
+    disk.durable[0] = Block::Super {
+        seq: 0,
+        table: RESERVED,
+        bound: init_table.clone(),
+    };
     disk.durable[RESERVED] = Block::Table(init_table);
     let mut volume = Volume::fresh();
     volume.free.retain(|&b| b != RESERVED);
@@ -757,7 +823,7 @@ fn recovery_states(
         out.push(State {
             disk,
             volume: rebuild(&adopted),
-            baseline: logical.clone(),
+            baseline: logical,
             attempts: Vec::new(),
             latched: false,
             actions_left,
@@ -807,7 +873,11 @@ fn step(
     // never saw the failure.
     let poisoned = s.volume.poisoned;
     let mutations_blocked = poisoned;
-    let syncs_blocked = if rules.latch_on_failure { s.latched || poisoned } else { false };
+    let syncs_blocked = if rules.latch_on_failure {
+        s.latched || poisoned
+    } else {
+        false
+    };
 
     match action {
         Action::Append(slot) => {
@@ -879,7 +949,8 @@ fn step(
                     .runs
                     .contains_key(&(cell / CELLS_PER_BLOCK))
                 {
-                    s.volume.write_cell(&mut s.disk, rules, slot, cell, Cell::Zero);
+                    s.volume
+                        .write_cell(&mut s.disk, rules, slot, cell, Cell::Zero);
                 }
             }
             s.volume.blobs[slot as usize].size = new_size;
@@ -908,7 +979,12 @@ fn step(
                 return Ok(None);
             }
             let gen = b.gen + 1;
-            *b = BlobState { live: true, gen, dirty: true, ..Default::default() };
+            *b = BlobState {
+                live: true,
+                gen,
+                dirty: true,
+                ..Default::default()
+            };
             Ok(Some(vec![s]))
         }
         Action::Snapshot => {
@@ -989,24 +1065,33 @@ fn step(
             Ok(Some(vec![s]))
         }
         Action::WriteMeta => {
-            let Some(inf) = s.volume.in_flight.clone() else { return Ok(None) };
+            let Some(inf) = s.volume.in_flight.clone() else {
+                return Ok(None);
+            };
             if inf.phase != Phase::Snapshotted {
                 return Ok(None);
             }
             for &(block, cell) in &inf.shadows {
                 s.disk.write(block, Block::Shadow(cell));
             }
-            s.disk.write(inf.table_block, Block::Table(inf.table.clone()));
+            s.disk
+                .write(inf.table_block, Block::Table(inf.table.clone()));
             let slot = 1 - s.volume.sacred;
             s.disk.write(
                 slot,
-                Block::Super { seq: inf.seq, table: inf.table_block, bound: inf.table.clone() },
+                Block::Super {
+                    seq: inf.seq,
+                    table: inf.table_block,
+                    bound: inf.table,
+                },
             );
             s.volume.in_flight.as_mut().unwrap().phase = Phase::MetaWritten;
             Ok(Some(vec![s]))
         }
         Action::FsyncOk => {
-            let Some(inf) = s.volume.in_flight.clone() else { return Ok(None) };
+            let Some(inf) = s.volume.in_flight.clone() else {
+                return Ok(None);
+            };
             if syncs_blocked || inf.phase != Phase::MetaWritten {
                 return Ok(None);
             }
@@ -1014,8 +1099,11 @@ fn step(
             s.volume.sacred = 1 - s.volume.sacred;
             s.volume.last_table = inf.table_block;
             // Extents dropped by this commit (or earlier) become allocatable.
-            let (now, later): (Vec<_>, Vec<_>) =
-                s.volume.pending_free.drain(..).partition(|&(_, fs)| fs <= inf.seq);
+            let (now, later): (Vec<_>, Vec<_>) = s
+                .volume
+                .pending_free
+                .drain(..)
+                .partition(|&(_, fs)| fs <= inf.seq);
             s.volume.pending_free = later;
             for (block, _) in now {
                 s.volume.free.push(block);
@@ -1045,7 +1133,9 @@ fn step(
             Ok(Some(vec![s]))
         }
         Action::FsyncFail => {
-            let Some(inf) = s.volume.in_flight.clone() else { return Ok(None) };
+            let Some(inf) = s.volume.in_flight.clone() else {
+                return Ok(None);
+            };
             if inf.phase != Phase::MetaWritten {
                 return Ok(None);
             }
@@ -1251,22 +1341,37 @@ mod tests {
     /// rolls back a confirmed commit.
     #[test]
     fn mutation_freeze_at_snapshot_detected() {
-        let rules = Rules { freeze_at_snapshot: false, ..SPEC };
-        assert!(check(CORE, 9, 2, &rules).is_err(), "checker missed the freeze bug");
+        let rules = Rules {
+            freeze_at_snapshot: false,
+            ..SPEC
+        };
+        assert!(
+            check(CORE, 9, 2, &rules).is_err(),
+            "checker missed the freeze bug"
+        );
     }
 
     /// Disabling shadow tails must reintroduce shared-tail-block loss.
     #[test]
     fn mutation_shadow_tails_detected() {
-        let rules = Rules { shadow_tails: false, ..SPEC };
-        assert!(check(CORE, 9, 2, &rules).is_err(), "checker missed tail tearing");
+        let rules = Rules {
+            shadow_tails: false,
+            ..SPEC
+        };
+        assert!(
+            check(CORE, 9, 2, &rules).is_err(),
+            "checker missed tail tearing"
+        );
     }
 
     /// Disabling losing-slot zeroing must reintroduce stale-slot
     /// resurrection.
     #[test]
     fn mutation_zero_losing_slot_detected() {
-        let rules = Rules { zero_losing_slot: false, ..SPEC };
+        let rules = Rules {
+            zero_losing_slot: false,
+            ..SPEC
+        };
         let core = check(CORE, 9, 2, &rules);
         let recycle = check(RECYCLE, 8, 2, &rules);
         assert!(
@@ -1279,18 +1384,30 @@ mod tests {
     /// referenced by the fallback commit.
     #[test]
     fn mutation_deferred_frees_detected() {
-        let rules = Rules { deferred_frees: false, ..SPEC };
+        let rules = Rules {
+            deferred_frees: false,
+            ..SPEC
+        };
         let core = check(CORE, 9, 2, &rules);
         let recycle = check(RECYCLE, 8, 2, &rules);
-        assert!(core.is_err() || recycle.is_err(), "checker missed premature reuse");
+        assert!(
+            core.is_err() || recycle.is_err(),
+            "checker missed premature reuse"
+        );
     }
 
     /// Disabling the failure latch must surface a durability lie: a sync
     /// confirms after the fsync that covered its data failed.
     #[test]
     fn mutation_latch_detected() {
-        let rules = Rules { latch_on_failure: false, ..SPEC };
-        assert!(check(LATCH, 8, 2, &rules).is_err(), "checker missed the latch leak");
+        let rules = Rules {
+            latch_on_failure: false,
+            ..SPEC
+        };
+        assert!(
+            check(LATCH, 8, 2, &rules).is_err(),
+            "checker missed the latch leak"
+        );
     }
 
     /// Disabling the superblock->table binding (the stored table CRC) must
@@ -1299,8 +1416,14 @@ mod tests {
     /// confirmed commit. This bug was FOUND by this model.
     #[test]
     fn mutation_table_binding_detected() {
-        let rules = Rules { bind_table: false, ..SPEC };
-        assert!(check(CORE, 9, 2, &rules).is_err(), "checker missed table aliasing");
+        let rules = Rules {
+            bind_table: false,
+            ..SPEC
+        };
+        assert!(
+            check(CORE, 9, 2, &rules).is_err(),
+            "checker missed table aliasing"
+        );
     }
 
     /// A torn first init must re-run instead of bricking. Init is TWO syncs:
@@ -1329,7 +1452,11 @@ mod tests {
         disk.durable[RESERVED] = Block::Table(Table::default());
         disk.write(
             0,
-            Block::Super { seq: 0, table: RESERVED, bound: Table::default() },
+            Block::Super {
+                seq: 0,
+                table: RESERVED,
+                bound: Table::default(),
+            },
         );
         for outcome in disk.crash_outcomes() {
             match adopt(&outcome, &SPEC) {

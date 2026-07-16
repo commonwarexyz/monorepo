@@ -56,7 +56,9 @@ impl Allocator {
         let mut cursor = reserved;
         for extent in extents {
             assert!(
-                extent.offset % BLOCK == 0 && extent.len % BLOCK == 0 && extent.len > 0,
+                extent.offset.is_multiple_of(BLOCK)
+                    && extent.len.is_multiple_of(BLOCK)
+                    && extent.len > 0,
                 "unaligned extent {extent:?}"
             );
             assert!(
@@ -103,7 +105,9 @@ impl Allocator {
     /// them (deferred frees are the caller's responsibility).
     pub(super) fn free(&mut self, extent: Extent) {
         assert!(
-            extent.offset % BLOCK == 0 && extent.len % BLOCK == 0 && extent.len > 0,
+            extent.offset.is_multiple_of(BLOCK)
+                && extent.len.is_multiple_of(BLOCK)
+                && extent.len > 0,
             "unaligned free {extent:?}"
         );
         let mut offset = extent.offset;
@@ -122,7 +126,10 @@ impl Allocator {
 
         // Coalesce with the next range.
         if let Some((&next_offset, &next_len)) = self.free.range(extent.offset..).next() {
-            assert!(extent.offset + extent.len <= next_offset, "double free {extent:?}");
+            assert!(
+                extent.offset + extent.len <= next_offset,
+                "double free {extent:?}"
+            );
             if extent.offset + extent.len == next_offset {
                 self.free.remove(&next_offset);
                 len += next_len;
@@ -139,7 +146,7 @@ impl Allocator {
     }
 
     /// Offset one past the last allocated byte.
-    pub(super) fn end(&self) -> u64 {
+    pub(super) const fn end(&self) -> u64 {
         self.end
     }
 }
@@ -193,11 +200,17 @@ mod tests {
 
     #[test]
     fn test_rebuild_infers_gaps() {
-        let used = [ext(RESERVED + BLOCK, BLOCK), ext(RESERVED + 4 * BLOCK, 2 * BLOCK)];
+        let used = [
+            ext(RESERVED + BLOCK, BLOCK),
+            ext(RESERVED + 4 * BLOCK, 2 * BLOCK),
+        ];
         let mut alloc = Allocator::rebuild(RESERVED, used);
         assert_eq!(alloc.end(), RESERVED + 6 * BLOCK);
         // Gaps: [RESERVED, +BLOCK) and [RESERVED+2*BLOCK, RESERVED+4*BLOCK).
-        assert_eq!(alloc.allocate(2 * BLOCK), ext(RESERVED + 2 * BLOCK, 2 * BLOCK));
+        assert_eq!(
+            alloc.allocate(2 * BLOCK),
+            ext(RESERVED + 2 * BLOCK, 2 * BLOCK)
+        );
         assert_eq!(alloc.allocate(BLOCK), ext(RESERVED, BLOCK));
         assert_eq!(alloc.allocate(BLOCK), ext(RESERVED + 6 * BLOCK, BLOCK));
     }
