@@ -64,7 +64,7 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Relay,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay,
         marshal::{
             ancestry::BlockProvider,
             coding::{
@@ -539,7 +539,10 @@ mod tests {
                 resolver_tx
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Notarized { round },
+                            key: handler::Key::Notarized {
+                                round,
+                                known_certified: false,
+                            },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization { round },
                                 tracing::Span::none(),
@@ -563,6 +566,365 @@ mod tests {
             assert!(
                 marshal.get_finalization(height).await.is_none(),
                 "dishonest deliveries must not archive a finalization"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certified_block_delivery_is_lazy() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certified-block-lazy",
+                provider,
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (_, block) = missing_candidate(participants[0].clone());
+            let commitment = block.commitment();
+            let height = block.height();
+            let alternate_config = coding_config_for_participants((NUM_VALIDATORS + 3) as u16);
+            let alternate: TestCodedBlock =
+                CodedBlock::new(block.inner().clone(), alternate_config, &Sequential);
+            assert_eq!(alternate.digest(), block.digest());
+            assert_ne!(alternate.commitment(), commitment);
+            resolver.respond_to_next_fetch(alternate.inner().encode());
+
+            let block = marshal
+                .subscribe_by_commitment(
+                    commitment,
+                    core::CommitmentFallback::FetchByCommitment { height },
+                )
+                .await
+                .expect("certified block delivery missing");
+
+            assert!(resolver.wait_for_delivery_response().await);
+            assert!(resolver.fetches().iter().any(|fetch| matches!(
+                fetch.key,
+                handler::Key::Block {
+                    commitment: requested,
+                    known_certified: true,
+                } if requested == commitment
+            )));
+            assert_eq!(block.commitment(), commitment);
+            assert!(
+                block.shard(0).is_none(),
+                "certified resolver delivery should defer erasure encoding"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certified_parent_delivery_is_lazy() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certified-parent-lazy",
+                provider,
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (block_context, block) = missing_candidate(participants[0].clone());
+            let commitment = block.commitment();
+            let round = block_context.round;
+            let notarization = CodingHarness::make_notarization(
+                Proposal::new(round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            resolver.respond_to_next_fetch((notarization, block.inner().clone()).encode());
+
+            let block = marshal
+                .subscribe_by_commitment(
+                    commitment,
+                    core::CommitmentFallback::FetchByRound {
+                        round,
+                        known_certified: true,
+                    },
+                )
+                .await
+                .expect("certified parent delivery missing");
+
+            assert!(resolver.wait_for_delivery_response().await);
+            assert!(resolver.fetches().iter().any(|fetch| matches!(
+                fetch.key,
+                handler::Key::Notarized {
+                    round: requested,
+                    known_certified: true,
+                } if requested == round
+            )));
+            assert_eq!(block.commitment(), commitment);
+            assert!(
+                block.shard(0).is_none(),
+                "certified parent delivery should defer erasure encoding"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_untrusted_notarized_delivery_reencodes() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-untrusted-notarized-reencodes",
+                provider,
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (block_context, block) = missing_candidate(participants[0].clone());
+            let commitment = block.commitment();
+            let round = block_context.round;
+            let notarization = CodingHarness::make_notarization(
+                Proposal::new(round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            resolver.respond_to_next_fetch((notarization, block).encode());
+
+            let block = marshal
+                .subscribe_by_commitment(
+                    commitment,
+                    core::CommitmentFallback::FetchByRound {
+                        round,
+                        known_certified: false,
+                    },
+                )
+                .await
+                .expect("untrusted notarized delivery missing");
+
+            assert!(resolver.wait_for_delivery_response().await);
+            assert!(resolver.fetches().iter().any(|fetch| matches!(
+                fetch.key,
+                handler::Key::Notarized {
+                    round: requested,
+                    known_certified: false,
+                } if requested == round
+            )));
+            assert_eq!(block.commitment(), commitment);
+            assert!(
+                block.shard(0).is_some(),
+                "untrusted resolver delivery must validate the coded wrapper"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certified_block_rejects_inner_digest_mismatch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certified-block-digest-mismatch",
+                provider,
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (_, expected) = missing_candidate(participants[0].clone());
+            let commitment = expected.commitment();
+            let mismatched = make_coding_block(
+                expected.context(),
+                expected.parent(),
+                expected.height(),
+                200,
+            );
+            assert_ne!(mismatched.digest(), expected.digest());
+            resolver.respond_to_next_fetch(mismatched.encode());
+
+            let subscription = marshal.subscribe_by_commitment(
+                commitment,
+                core::CommitmentFallback::FetchByCommitment {
+                    height: expected.height(),
+                },
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(!resolver.wait_for_delivery_response().await);
+            drop(subscription);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certified_block_rejects_trailing_bytes() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certified-block-trailing-bytes",
+                provider,
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (_, block) = missing_candidate(participants[0].clone());
+            let commitment = block.commitment();
+            let mut payload = block.inner().encode().to_vec();
+            payload.push(0);
+            resolver.respond_to_next_fetch(Bytes::from(payload));
+
+            let subscription = marshal.subscribe_by_commitment(
+                commitment,
+                core::CommitmentFallback::FetchByCommitment {
+                    height: block.height(),
+                },
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                !resolver.wait_for_delivery_response().await,
+                "certified delivery with trailing bytes must be rejected"
+            );
+            drop(subscription);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certified_parent_rejects_invalid_certificate() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certified-parent-invalid-certificate",
+                provider,
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (block_context, block) = missing_candidate(participants[0].clone());
+            let commitment = block.commitment();
+            let round = block_context.round;
+            let mut notarization = CodingHarness::make_notarization(
+                Proposal::new(round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            notarization.proposal.parent = View::new(1);
+            resolver.respond_to_next_fetch((notarization, block.inner().clone()).encode());
+
+            let subscription = marshal.subscribe_by_commitment(
+                commitment,
+                core::CommitmentFallback::FetchByRound {
+                    round,
+                    known_certified: true,
+                },
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(!resolver.wait_for_delivery_response().await);
+            drop(subscription);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_producer_uses_application_payload_for_certified_requests() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let (mut marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certified-producer-payload",
+                provider,
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let resolver_tx = resolver
+                .sender
+                .clone()
+                .expect("recording resolver should keep its sender");
+
+            let (block_context, block) = missing_candidate(participants[0].clone());
+            let commitment = block.commitment();
+            let round = block_context.round;
+            assert!(marshal.verified(round, block.clone()).await);
+            let notarization = CodingHarness::make_notarization(
+                Proposal::new(round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            CodingHarness::report_notarization(&mut marshal, notarization.clone()).await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver_tx
+                    .enqueue(handler::Message::Produce {
+                        key: handler::Key::Block {
+                            commitment,
+                            known_certified: true,
+                        },
+                        response,
+                    })
+                    .accepted()
+            );
+            assert_eq!(
+                response_rx.await.expect("certified block response missing"),
+                block.inner().encode()
+            );
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver_tx
+                    .enqueue(handler::Message::Produce {
+                        key: handler::Key::Notarized {
+                            round,
+                            known_certified: true,
+                        },
+                        response,
+                    })
+                    .accepted()
+            );
+            assert_eq!(
+                response_rx
+                    .await
+                    .expect("certified notarized response missing"),
+                (notarization, block.inner().clone()).encode()
             );
         });
     }
@@ -715,7 +1077,10 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Key::Notarized { round: request_round },
+                        handler::Key::Notarized {
+                            round: request_round,
+                            known_certified: false,
+                        },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
                 )),
@@ -789,7 +1154,10 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Key::Notarized { round: request_round },
+                        handler::Key::Notarized {
+                            round: request_round,
+                            known_certified: false,
+                        },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
                 )),
@@ -1849,7 +2217,10 @@ mod tests {
             // coding shard buffer and registers local waiters.
             let block_rx = marshal.subscribe_by_commitment(
                 missing_commitment,
-                core::CommitmentFallback::FetchByRound { round },
+                core::CommitmentFallback::FetchByRound {
+                    round,
+                    known_certified: false,
+                },
             );
 
             // Allow core actor to register the underlying buffer subscription.
@@ -2555,7 +2926,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            resolver.respond_to_next_fetch(coded_floor.encode());
+            resolver.respond_to_next_fetch(coded_floor.inner().encode());
             mailbox.set_floor(finalization);
             context.sleep(Duration::from_secs(5)).await;
         })

@@ -1999,7 +1999,10 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| matches!(
                         (&fetch.key, &fetch.subscriber),
                         (
-                            handler::Key::Notarized { round: request_round },
+                            handler::Key::Notarized {
+                                round: request_round,
+                                known_certified: false,
+                            },
                             handler::Annotation::Notarization { round: subscriber_round },
                         ) if *request_round == round && *subscriber_round == round
                     )),
@@ -2110,7 +2113,10 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| matches!(
                         (&fetch.key, &fetch.subscriber),
                         (
-                            handler::Key::Notarized { round: request_round },
+                            handler::Key::Notarized {
+                                round: request_round,
+                                known_certified: false,
+                            },
                             handler::Annotation::Notarization { round: subscriber_round },
                         ) if *request_round == round && *subscriber_round == round
                     )),
@@ -2191,7 +2197,10 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Key::Notarized { round: request_round },
+                        handler::Key::Notarized {
+                            round: request_round,
+                            known_certified: false,
+                        },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
                 )),
@@ -2260,7 +2269,10 @@ mod tests {
                         resolver.fetches().iter().any(|fetch| {
                             matches!(
                                 fetch.key,
-                                handler::Key::Notarized { round } if round == parent_round
+                                handler::Key::Notarized {
+                                    round,
+                                    known_certified: true,
+                                } if round == parent_round
                             ) && matches!(
                                 fetch.subscriber,
                                 handler::Annotation::Notarization { round }
@@ -2274,7 +2286,7 @@ mod tests {
                 let fetches = resolver.fetches();
                 assert!(
                     fetches.iter().all(|fetch| {
-                        !matches!(fetch.key, handler::Key::Block(_))
+                        !matches!(fetch.key, handler::Key::Block { .. })
                             && !matches!(
                                 fetch.subscriber,
                                 handler::Annotation::Certified { height }
@@ -2388,6 +2400,7 @@ mod tests {
                         producer: StaticProducer::new(
                             handler::Key::Notarized {
                                 round: parent_round,
+                                known_certified: true,
                             },
                             Bytes::from_static(b"not a valid notarization"),
                         ),
@@ -3817,7 +3830,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&floor_block)
                         )
                     })
@@ -3830,7 +3843,10 @@ mod tests {
             assert!(mailbox.verified(served_round, served.clone()).await);
             let (response, response_rx) = oneshot::channel();
             resolver.enqueue(handler::Message::Produce {
-                key: handler::Key::Block(StandardHarness::commitment(&served)),
+                key: handler::Key::Block {
+                    commitment: StandardHarness::commitment(&served),
+                    known_certified: true,
+                },
                 response,
             });
             assert_eq!(response_rx.await.unwrap(), served.encode());
@@ -4014,7 +4030,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&floor_block)
                         )
                     })
@@ -4040,7 +4056,7 @@ mod tests {
                 .find(|fetch| {
                     matches!(
                         fetch.key,
-                        handler::Key::Block(commitment)
+                        handler::Key::Block { commitment, .. }
                             if commitment == StandardHarness::commitment(&floor_block)
                     )
                 })
@@ -4134,7 +4150,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&floor_block)
                         )
                     })
@@ -4305,7 +4321,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&floor_block)
                         )
                     })
@@ -4333,7 +4349,7 @@ mod tests {
                     !matches!(
                         (&fetch.key, &fetch.subscriber),
                         (
-                            handler::Key::Block(commitment),
+                            handler::Key::Block { commitment, .. },
                             handler::Annotation::Finalized(handler::Finalized::ByHeight { height })
                         ) if *commitment == missing.digest() && *height == Height::new(6)
                     )
@@ -4351,7 +4367,7 @@ mod tests {
                         matches!(
                             (&fetch.key, &fetch.subscriber),
                             (
-                                handler::Key::Block(commitment),
+                                handler::Key::Block { commitment, .. },
                                 handler::Annotation::Finalized(
                                     handler::Finalized::ByHeight { height }
                                 )
@@ -4423,7 +4439,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&floor_block)
                         )
                     })
@@ -4440,7 +4456,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&next_block)
                         )
                     })
@@ -4490,7 +4506,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&old_floor_block)
                         )
                     })
@@ -4519,7 +4535,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&new_floor_block)
                         )
                     })
@@ -4563,7 +4579,7 @@ mod tests {
                 .find(|fetch| {
                     matches!(
                         fetch.key,
-                        handler::Key::Block(commitment)
+                        handler::Key::Block { commitment, .. }
                             if commitment == StandardHarness::commitment(&old_floor_block)
                     )
                 })
@@ -4599,7 +4615,7 @@ mod tests {
                 .find(|fetch| {
                     matches!(
                         fetch.key,
-                        handler::Key::Block(commitment)
+                        handler::Key::Block { commitment, .. }
                             if commitment == StandardHarness::commitment(&new_floor_block)
                     )
                 })
@@ -4668,7 +4684,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&floor_block)
                         )
                     })
@@ -4760,7 +4776,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Block(commitment)
+                            handler::Key::Block { commitment, .. }
                                 if commitment == StandardHarness::commitment(&floor_block)
                         )
                     })
@@ -4969,6 +4985,7 @@ mod tests {
                 missing,
                 CommitmentFallback::FetchByRound {
                     round: stale_floor_round,
+                    known_certified: false,
                 },
             );
             wait_until(
@@ -4979,7 +4996,7 @@ mod tests {
                     resolver.active_fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Notarized { round } if round == stale_floor_round
+                            handler::Key::Notarized { round, .. } if round == stale_floor_round
                         )
                     })
                 },
@@ -5014,7 +5031,7 @@ mod tests {
                     resolver.active_fetches().iter().all(|fetch| {
                         !matches!(
                             fetch.key,
-                            handler::Key::Notarized { round } if round == stale_floor_round
+                            handler::Key::Notarized { round, .. } if round == stale_floor_round
                         )
                     })
                 },
@@ -5155,7 +5172,10 @@ mod tests {
             let missing = Sha256::hash(b"missing-before-stale-floor");
             let _subscription = mailbox.subscribe_by_commitment(
                 missing,
-                CommitmentFallback::FetchByRound { round: floor_round },
+                CommitmentFallback::FetchByRound {
+                    round: floor_round,
+                    known_certified: false,
+                },
             );
             wait_until(
                 &context,
@@ -5165,7 +5185,7 @@ mod tests {
                     resolver.active_fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Notarized { round } if round == floor_round
+                            handler::Key::Notarized { round, .. } if round == floor_round
                         )
                     })
                 },
@@ -5190,7 +5210,7 @@ mod tests {
                     resolver.active_fetches().iter().all(|fetch| {
                         !matches!(
                             fetch.key,
-                            handler::Key::Notarized { round } if round == floor_round
+                            handler::Key::Notarized { round, .. } if round == floor_round
                         )
                     })
                 },
@@ -5319,7 +5339,10 @@ mod tests {
 
             let subscription = mailbox.subscribe_by_commitment(
                 notarization.proposal.payload,
-                CommitmentFallback::FetchByRound { round },
+                CommitmentFallback::FetchByRound {
+                    round,
+                    known_certified: false,
+                },
             );
 
             wait_until(
@@ -5331,7 +5354,10 @@ mod tests {
                         matches!(
                             (&fetch.key, &fetch.subscriber),
                             (
-                                handler::Key::Notarized { round: request_round },
+                                handler::Key::Notarized {
+                                    round: request_round,
+                                    known_certified: false,
+                                },
                                 handler::Annotation::Notarization { round: subscriber_round },
                             ) if *request_round == round && *subscriber_round == round
                         )
@@ -5345,7 +5371,10 @@ mod tests {
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Notarized { round },
+                            key: handler::Key::Notarized {
+                                round,
+                                known_certified: false,
+                            },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization { round },
                                 tracing::Span::none(),
@@ -5407,6 +5436,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Notarized {
                                 round: requested_round,
+                                known_certified: false,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization {
@@ -5454,7 +5484,10 @@ mod tests {
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Notarized { round },
+                            key: handler::Key::Notarized {
+                                round,
+                                known_certified: false,
+                            },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization { round },
                                 tracing::Span::none(),
@@ -5619,7 +5652,10 @@ mod tests {
             mailbox.hint_notarized(round, Sha256::hash(b"missing-at-processed-round"));
             let subscription = mailbox.subscribe_by_commitment(
                 Sha256::hash(b"missing-subscription-at-processed-round"),
-                CommitmentFallback::FetchByRound { round },
+                CommitmentFallback::FetchByRound {
+                    round,
+                    known_certified: false,
+                },
             );
 
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
@@ -5832,7 +5868,10 @@ mod tests {
             mailbox.hint_notarized(round, Sha256::hash(b"missing-after-restart"));
             let subscription = mailbox.subscribe_by_commitment(
                 Sha256::hash(b"missing-subscription-after-restart"),
-                CommitmentFallback::FetchByRound { round },
+                CommitmentFallback::FetchByRound {
+                    round,
+                    known_certified: false,
+                },
             );
 
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
@@ -5898,7 +5937,10 @@ mod tests {
 
             let mut subscription = mailbox.subscribe_by_commitment(
                 StandardHarness::commitment(&block),
-                CommitmentFallback::FetchByRound { round },
+                CommitmentFallback::FetchByRound {
+                    round,
+                    known_certified: false,
+                },
             );
             context.sleep(Duration::from_millis(100)).await;
             assert!(
@@ -5914,7 +5956,10 @@ mod tests {
                         matches!(
                             (&fetch.key, &fetch.subscriber),
                             (
-                                handler::Key::Notarized { round: request_round },
+                                handler::Key::Notarized {
+                                    round: request_round,
+                                    known_certified: false,
+                                },
                                 handler::Annotation::Notarization { round: subscriber_round },
                             ) if *request_round == round && *subscriber_round == round
                         )
@@ -5928,7 +5973,10 @@ mod tests {
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Notarized { round },
+                            key: handler::Key::Notarized {
+                                round,
+                                known_certified: false,
+                            },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization { round },
                                 tracing::Span::none(),
@@ -6022,7 +6070,10 @@ mod tests {
             let fetches_before = resolver.fetches().len();
             let mut subscription = mailbox.subscribe_by_commitment(
                 Sha256::hash(b"missing-before-anchor-ack"),
-                CommitmentFallback::FetchByRound { round: floor_round },
+                CommitmentFallback::FetchByRound {
+                    round: floor_round,
+                    known_certified: false,
+                },
             );
             let barrier = make_raw_block(floor_block.digest(), Height::new(6), 600);
 
@@ -6041,7 +6092,7 @@ mod tests {
                         && resolver.fetches().iter().any(|fetch| {
                             matches!(
                                 fetch.key,
-                                handler::Key::Notarized { round } if round == floor_round
+                                handler::Key::Notarized { round, .. } if round == floor_round
                             )
                         })
                 },
@@ -6078,15 +6129,20 @@ mod tests {
             )
             .await;
             let missing = Sha256::hash(b"missing-before-set-floor");
-            let _subscription = mailbox
-                .subscribe_by_commitment(missing, CommitmentFallback::FetchByRound { round });
+            let _subscription = mailbox.subscribe_by_commitment(
+                missing,
+                CommitmentFallback::FetchByRound {
+                    round,
+                    known_certified: false,
+                },
+            );
             wait_until(
                 &context,
                 Duration::from_secs(5),
                 "round-bound fetch",
                 || {
                     resolver.active_fetches().iter().any(|fetch| {
-                        matches!(fetch.key, handler::Key::Notarized { round: r } if r == round)
+                        matches!(fetch.key, handler::Key::Notarized { round: r, .. } if r == round)
                     })
                 },
             )
@@ -6100,14 +6156,14 @@ mod tests {
                 "round-bound prune",
                 || {
                     resolver.active_fetches().iter().all(|fetch| {
-                        !matches!(fetch.key, handler::Key::Notarized { round: r } if r == round)
+                        !matches!(fetch.key, handler::Key::Notarized { round: r, .. } if r == round)
                     })
                 },
             )
             .await;
             assert!(
                 resolver.active_fetches().iter().all(|fetch| {
-                    !matches!(fetch.key, handler::Key::Notarized { round: r } if r == round)
+                    !matches!(fetch.key, handler::Key::Notarized { round: r, .. } if r == round)
                 }),
                 "processed finalization after set_floor must prune existing round-bound fetches"
             );
@@ -6271,6 +6327,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Notarized {
                                 round: Round::new(Epoch::zero(), View::new(1)),
+                                known_certified: false,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization {
@@ -6772,7 +6829,7 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| {
                     matches!(
                         fetch.key,
-                        handler::Key::Block(commitment)
+                        handler::Key::Block { commitment, .. }
                             if commitment == StandardHarness::commitment(&fork)
                     )
                 })
@@ -6784,7 +6841,7 @@ mod tests {
                 .find(|fetch| {
                     matches!(
                         fetch.key,
-                        handler::Key::Block(commitment)
+                        handler::Key::Block { commitment, .. }
                             if commitment == StandardHarness::commitment(&fork)
                     )
                 })
@@ -6801,7 +6858,10 @@ mod tests {
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Block(StandardHarness::commitment(&next)),
+                            key: handler::Key::Block {
+                                commitment: StandardHarness::commitment(&next),
+                                known_certified: true,
+                            },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Finalized(handler::Finalized::ByHeight {
                                     height: Height::new(2),
@@ -6820,7 +6880,10 @@ mod tests {
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Block(StandardHarness::commitment(&above)),
+                            key: handler::Key::Block {
+                                commitment: StandardHarness::commitment(&above),
+                                known_certified: true,
+                            },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Finalized(handler::Finalized::ByHeight {
                                     height: Height::new(3),

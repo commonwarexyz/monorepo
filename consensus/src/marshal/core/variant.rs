@@ -69,10 +69,13 @@ pub trait Variant: Clone + Send + Sync + 'static {
     where
         S: Scheme<Self::Commitment>;
 
-    /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
+    /// Returns the codec configuration used to decode an untrusted [`Self::Block`]
+    /// received over the wire.
     ///
     /// The returned configuration may bind `expected_commitment` so that decoding rejects
-    /// blocks that do not match the expected commitment.
+    /// blocks that do not match the expected commitment. Resolver requests for locally
+    /// certified commitments decode [`Self::ApplicationBlock`] instead and reconstruct the
+    /// wrapper with [`Self::from_application_block`].
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: Self::Commitment,

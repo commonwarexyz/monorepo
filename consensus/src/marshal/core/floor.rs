@@ -321,7 +321,8 @@ mod tests {
             fetches[1],
             Fetch {
                 key: Key::Notarized {
-                    round: request_round
+                    round: request_round,
+                    ..
                 },
                 subscriber: Annotation::Notarization {
                     round: subscriber_round
@@ -389,7 +390,7 @@ mod tests {
         assert_eq!(fetches.len(), 2);
         assert!(matches!(fetches[0].key, Key::Finalized { height } if height == Height::new(6)));
         assert!(
-            matches!(fetches[1].key, Key::Notarized { round: request_round } if request_round == round(6))
+            matches!(fetches[1].key, Key::Notarized { round: request_round, .. } if request_round == round(6))
         );
 
         let mut resolver = TestResolver::default();

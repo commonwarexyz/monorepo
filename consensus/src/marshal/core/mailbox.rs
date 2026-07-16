@@ -237,7 +237,10 @@ impl From<DigestFallback> for CommitmentFallback {
     fn from(fallback: DigestFallback) -> Self {
         match fallback {
             DigestFallback::Wait => Self::Wait,
-            DigestFallback::FetchByRound { round } => Self::FetchByRound { round },
+            DigestFallback::FetchByRound { round } => Self::FetchByRound {
+                round,
+                known_certified: false,
+            },
         }
     }
 }
@@ -260,7 +263,14 @@ pub enum CommitmentFallback {
     ///
     /// The returned block is heightable once decoded, but that is too late for
     /// the in-flight resolver key or pruning bound.
-    FetchByRound { round: Round },
+    FetchByRound {
+        round: Round,
+        /// Whether the caller already trusts the requested commitment.
+        ///
+        /// Trusted requests transfer only the application block and rebuild any
+        /// variant-specific wrapper from the certified commitment.
+        known_certified: bool,
+    },
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
     ///
@@ -273,6 +283,11 @@ pub enum CommitmentFallback {
     /// retention, not part of response validity: a fetched block is delivered
     /// if its commitment matches, and certified storage uses the decoded block
     /// height.
+    ///
+    /// The commitment must come from a locally verified certificate or
+    /// finalization. Marshal trusts the complete commitment, including any
+    /// variant-specific coding metadata, and validates the returned application
+    /// block against its inner digest.
     FetchByCommitment { height: Height },
 }
 
@@ -734,6 +749,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// that it may never become available.
     ///
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
+    /// [`CommitmentFallback::FetchByCommitment`] requires `commitment` to be locally certified or
+    /// finalized; use a round-bound fallback when the commitment is not already trusted.
     /// Digest-keyed subscriptions only support waiting locally or fetching by round.
     ///
     /// Delivery makes no durability promise. A delivered block may not have been persisted by
@@ -1308,7 +1325,10 @@ mod tests {
         let (wait, _wait_rx) = subscribe_by_commitment_message(1, CommitmentFallback::Wait);
         let (by_round, _by_round_rx) = subscribe_by_commitment_message(
             2,
-            CommitmentFallback::FetchByRound { round: round(2) },
+            CommitmentFallback::FetchByRound {
+                round: round(2),
+                known_certified: true,
+            },
         );
         let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_message(
             3,
@@ -1333,7 +1353,10 @@ mod tests {
         assert!(matches!(
             &drained[1],
             TestMessage::SubscribeByCommitment {
-                fallback: CommitmentFallback::FetchByRound { round: found },
+                fallback: CommitmentFallback::FetchByRound {
+                    round: found,
+                    known_certified: true,
+                },
                 ..
             } if *found == round(2)
         ));
@@ -1358,7 +1381,10 @@ mod tests {
 
         let (pending_open, mut pending_open_rx) = subscribe_by_commitment_message(
             2,
-            CommitmentFallback::FetchByRound { round: round(2) },
+            CommitmentFallback::FetchByRound {
+                round: round(2),
+                known_certified: true,
+            },
         );
         overflow
             .messages
