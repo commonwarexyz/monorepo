@@ -33,8 +33,8 @@
 //!
 //! - `Writable` owns the files: the contiguous sealed blobs plus the one writable tail.
 //!
-//! - `Checkpoint` owns the durable recovery hints (mid-blob pruning boundary, staged clear
-//!   target) consulted before trusting blob state on startup.
+//! - `Checkpoint` owns the durable recovery hint (a mid-blob pruning boundary) consulted
+//!   before trusting blob state on startup.
 //!
 //! # Open Blobs
 //!
@@ -46,8 +46,8 @@
 //! Blobs are stored in the legacy partition (`cfg.partition`) if it already contains data;
 //! otherwise they are stored in `{cfg.partition}-blobs`.
 //!
-//! The checkpoint (the durable recovery record: pruning boundary and any in-progress clear
-//! intent) is stored in `{cfg.partition}-metadata`.
+//! The checkpoint (the durable recovery record: a pruning boundary that blob state cannot
+//! derive) is stored in `{cfg.partition}-metadata`.
 //!
 //! # Recovery
 //!
@@ -66,15 +66,16 @@
 //! # Pruning
 //!
 //! The `prune` method allows the `Journal` to prune blobs consisting entirely of items prior to a
-//! given point in history.
+//! given point in history. The blob removals and the boundary record land in ONE batch, so a
+//! crash leaves the journal either unpruned or fully pruned.
 //!
 //! # Clearing / reset
 //!
 //! Clearing wipes all data and restarts the journal at a new size.
 //!
-//! To stay crash-safe, a clear records its target size in the checkpoint *before* deleting any
-//! blob. If a crash interrupts the deletion, reopening sees that recorded target and finishes the
-//! clear, rather than mistaking the half-deleted blobs for corruption.
+//! To stay crash-safe, a clear records its target size in the checkpoint in the SAME batch as
+//! the blob removals. If a crash lands after the batch, reopening sees the recorded target and
+//! recovers the cleared journal.
 //!
 //! Callers reach this through `clear_to_size` (clear an open journal) or `init_at_size` (open
 //! straight into a cleared, empty journal at a given size).
@@ -110,7 +111,6 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use tracing::warn;
 
 // Reusable scratch for [`Reader::probe_items`], grown to the largest probe served on the
 // thread. Probes run per shard on the hot read path, where a fresh zeroed allocation per call
@@ -368,7 +368,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     async fn init_with_checkpoint(
         context: E,
         cfg: Config,
-        mut checkpoint: Checkpoint<E>,
+        checkpoint: Checkpoint<E>,
     ) -> Result<Self, Error> {
         let blob_partition = Partition::select(&context, &cfg.partition).await?;
         let partition = Partition::new(
@@ -384,11 +384,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             cfg.items_per_blob.get(),
             checkpoint.boundary_hint(),
         )?;
-
-        // Persist the reconciled boundary so a stale hint does not linger.
-        checkpoint
-            .persist(cfg.items_per_blob.get(), pruning_boundary)
-            .await?;
 
         // Seal every blob below the tail and assemble the blobs.
         let tail_blob = super::position_to_blob(size, cfg.items_per_blob.get());
@@ -409,8 +404,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Recover the journal bounds from the checkpoint and blob state.
     ///
-    /// A boundary hint that lags blob state is repaired from the blob boundary; a hint ahead of
-    /// blob state or an invalid blob length is corruption.
+    /// A mid-blob boundary hint referencing anything but the oldest blob, or an invalid blob
+    /// length, is corruption.
     fn recover_bounds(
         pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
@@ -431,7 +426,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// retained blob.
     ///
     /// A missing or blob-aligned hint means the blob boundary is authoritative. A mid-blob hint
-    /// is trusted only when it belongs to the current oldest blob.
+    /// must belong to the current oldest blob: prune stages its blob removals and boundary
+    /// record in one batch, and a clear removes every blob in the same batch as its record, so
+    /// a hint referencing any other blob cannot arise and is corruption.
     fn recover_pruning_boundary(
         boundary_hint: Option<u64>,
         oldest_blob: Option<u64>,
@@ -458,16 +455,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let hint_blob = super::position_to_blob(boundary_hint, items_per_blob);
         if hint_blob == oldest_blob {
             Ok(boundary_hint)
-        } else if hint_blob < oldest_blob {
-            warn!(
-                hint_blob,
-                oldest_blob, "crash repair: boundary hint stale, computing from blobs"
-            );
-            Ok(blob_boundary)
         } else {
-            // A hint ahead of blob state should never arise: prune removes blobs before
-            // sync persists the checkpoint, and a clear removes every blob in the same
-            // batch as its record.
             Err(Error::Corruption(format!(
                 "boundary hint references blob {hint_blob} \
                  but oldest blob is blob {oldest_blob}"
@@ -577,14 +565,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         checkpoint.clear_into(target, batch).await
     }
 
-    /// Make dirty blobs durable.
-    async fn flush_dirty_blobs(&mut self) -> Result<(), Error> {
-        let Some(start_blob) = self.dirty_from_blob else {
-            return Ok(());
-        };
-        self.blobs.sync_from(start_blob).await
-    }
-
     /// Stage the durability of every dirty blob and the checkpoint's pruning
     /// boundary with `batch`, so blob data and the boundary record land in
     /// ONE batch.
@@ -592,7 +572,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Dirty tracking resets immediately: the caller must apply the batch
     /// (storage failures are fatal, so an abandoned batch has no recovery
     /// path anyway).
-    pub(super) async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
+    pub(crate) async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
         if let Some(start_blob) = self.dirty_from_blob {
             self.blobs.sync_from_into(start_blob, batch).await?;
             self.dirty_from_blob = None;
@@ -820,9 +800,24 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
     ///
-    /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
-    /// event of failure as items are always pruned in order from oldest to newest.
+    /// The dirty retained blobs, the blob removals, and the boundary record land in ONE batch,
+    /// so the prune is old-state-or-new-state.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
+        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
+        if !self.prune_into(min_item_pos, &mut batch).await? {
+            return Ok(false);
+        }
+        batch.apply_sync().await.map_err(Error::Runtime)?;
+        Ok(true)
+    }
+
+    /// Stage [Self::prune] with `batch`: the caller applies the batch. Returns true if a prune
+    /// was staged.
+    pub(super) async fn prune_into(
+        &mut self,
+        min_item_pos: u64,
+        batch: &mut E::Batch,
+    ) -> Result<bool, Error> {
         // Calculate the blob that would contain min_item_pos, capped to the tail (which is
         // guaranteed to exist by our invariant).
         let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
@@ -833,19 +828,22 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(false);
         }
 
-        // Make all dirty blobs durable before removing any: the prune target may be
-        // justified by an appended-but-unflushed item (e.g. a consumer's commit record), and
-        // removals are durable, so pruning without this barrier could leave a recovered
-        // journal whose surviving items no longer justify its boundary. Dirty blobs below the
-        // prune point are flushed too: removal may be interrupted, and recovery truncates at
-        // the first torn item, so an unsynced survivor below the boundary could discard
-        // every synced blob behind it.
-        self.flush_dirty_blobs().await?;
-        self.dirty_from_blob = None;
+        // Stage the durability of dirty retained blobs with the same batch: the prune target
+        // may be justified by an appended-but-unflushed item (e.g. a consumer's commit
+        // record), and the removals must not become durable without it. Dirty blobs below the
+        // prune point need no staging: the batch removes them.
+        if let Some(dirty) = self.dirty_from_blob {
+            self.blobs
+                .sync_from_into(dirty.max(min_blob), batch)
+                .await?;
+            self.dirty_from_blob = None;
+        }
 
-        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
-        self.blobs.prune(min_blob).await?;
-        self.bounds.start = new_boundary;
+        self.bounds.start = super::blob_first_position(min_blob, self.items_per_blob.get())?;
+        self.checkpoint
+            .persist_into(self.items_per_blob.get(), self.bounds.start, batch)
+            .await?;
+        self.blobs.prune_into(min_blob, batch);
 
         self.metrics.update(
             self.bounds.end,
@@ -1254,6 +1252,14 @@ impl<E: Context, A: CodecFixedShared> authenticated::Inner<E> for Journal<E, A> 
             bagging,
         )
         .await
+    }
+
+    fn context(&self) -> &E {
+        self.blobs.context()
+    }
+
+    async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
+        Self::sync_into(self, batch).await
     }
 }
 
@@ -1994,10 +2000,11 @@ mod tests {
         });
     }
 
-    /// A crash between prune's blob removals and the checkpoint sync leaves a mid-blob boundary
-    /// hint referencing a removed blob. Recovery repairs the boundary from the oldest blob.
+    /// A mid-blob boundary hint referencing a removed blob is not a reachable crash state:
+    /// prune stages its blob removals and boundary record in one batch. Verify it is rejected
+    /// as corruption.
     #[test_traced]
-    fn test_fixed_journal_stale_pruning_metadata_repaired_from_blobs() {
+    fn test_fixed_journal_stale_boundary_hint_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -2016,27 +2023,21 @@ mod tests {
             assert_eq!(journal.bounds(), 7..17);
             drop(journal);
 
-            // Remove the boundary hint's blob, simulating a crash mid-prune before the
-            // checkpoint caught up. The hint of 7 is now stale.
+            // Remove the boundary hint's blob, planting a mid-blob hint (7) that references
+            // a blob behind the oldest retained one.
             context
                 .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
                 .await
                 .expect("failed to remove stale oldest blob");
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to recover journal");
-            assert_eq!(journal.bounds(), 10..17);
-            assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
-            assert_eq!(journal.read(16).await.unwrap(), test_digest(9));
-
-            journal.destroy().await.unwrap();
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
-    /// A boundary hint ahead of the oldest blob is not a reachable crash state: prune removes
-    /// blobs before sync persists the checkpoint, and clear_to_size stages a clear intent for
-    /// atomicity. Verify it is rejected as corruption.
+    /// A boundary hint ahead of the oldest blob is not a reachable crash state: prune stages
+    /// its blob removals and boundary record in one batch, and a clear removes every blob in
+    /// the same batch as its record. Verify it is rejected as corruption.
     #[test_traced]
     fn test_fixed_journal_boundary_hint_ahead_of_blobs_is_corruption() {
         let executor = deterministic::Runner::default();

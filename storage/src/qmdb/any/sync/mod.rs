@@ -8,7 +8,7 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable},
+        contiguous::{fixed, variable, Contiguous},
     },
     merkle::{self, full, Location},
     qmdb::{
@@ -71,7 +71,7 @@ where
     I: IndexFactory<T, Value = Location<F>>,
     H: Hasher,
     T: Translator,
-    C: Mutable<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {

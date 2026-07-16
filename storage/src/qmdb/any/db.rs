@@ -6,7 +6,7 @@ use super::operation::{update::Update, Operation};
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        authenticated,
+        authenticated::{self, Inner},
         contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
@@ -686,7 +686,7 @@ where
     F: Family,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<F, U>>,
+    C: Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -837,7 +837,7 @@ where
     pub async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
-        self.log.commit().await?;
+        self.log.sync().await?;
         Ok(())
     }
 

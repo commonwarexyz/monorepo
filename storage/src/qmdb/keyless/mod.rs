@@ -129,7 +129,7 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
+    C: authenticated::Inner<E, Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -179,6 +179,37 @@ where
         Ok(db)
     }
 
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
+    #[tracing::instrument(name = "qmdb.keyless.db.sync", level = "info", skip_all)]
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
+        self.journal.sync().await?;
+        Ok(())
+    }
+
+    /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
+    #[tracing::instrument(name = "qmdb.keyless.db.commit", level = "info", skip_all)]
+    pub async fn commit(&mut self) -> Result<(), Error<F>> {
+        let _timer = self.metrics.commit_timer();
+        self.metrics.commit_calls.inc();
+        self.journal.sync().await?;
+        Ok(())
+    }
+}
+
+impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors
@@ -443,26 +474,6 @@ where
         Ok(())
     }
 
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
-    #[tracing::instrument(name = "qmdb.keyless.db.sync", level = "info", skip_all)]
-    pub async fn sync(&mut self) -> Result<(), Error<F>> {
-        let _timer = self.metrics.sync_timer();
-        self.metrics.sync_calls.inc();
-        self.journal.sync().await?;
-        Ok(())
-    }
-
-    /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
-    #[tracing::instrument(name = "qmdb.keyless.db.commit", level = "info", skip_all)]
-    pub async fn commit(&mut self) -> Result<(), Error<F>> {
-        let _timer = self.metrics.commit_timer();
-        self.metrics.commit_calls.inc();
-        self.journal.commit().await?;
-        Ok(())
-    }
-
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
@@ -550,7 +561,7 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::{journal::contiguous::Mutable, qmdb::verify_proof};
+    use crate::qmdb::verify_proof;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
     use commonware_runtime::{deterministic, Supervisor as _};
@@ -586,7 +597,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -648,7 +659,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -695,7 +706,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -746,7 +757,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -819,7 +830,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         const ELEMENTS: u64 = 50;
@@ -861,7 +872,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -889,7 +900,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -946,7 +957,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1029,7 +1040,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1127,7 +1138,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         let v1 = V::Value::make(1);
@@ -1178,7 +1189,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         let v1 = V::Value::make(10);
@@ -1214,7 +1225,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1242,7 +1253,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1280,7 +1291,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         let batch = db.new_batch();
@@ -1317,7 +1328,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1407,7 +1418,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         // Build a db with some values.
@@ -1480,7 +1491,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, Sha256, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         const ELEMENTS: u64 = 100;
@@ -1560,7 +1571,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1593,7 +1604,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1636,7 +1647,7 @@ pub(crate) mod tests {
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         let v1 = V::Value::make(1);
@@ -1663,7 +1674,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1693,7 +1704,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         let base_val = V::Value::make(10);
@@ -1735,7 +1746,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1769,7 +1780,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         const BATCHES: u64 = 20;
@@ -1812,7 +1823,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -1844,7 +1855,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         let base_val = V::Value::make(10);
@@ -1889,7 +1900,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         const N: u64 = 500;
@@ -1928,7 +1939,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         let parent = db
@@ -1966,7 +1977,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         let parent = db
@@ -1991,7 +2002,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         let parent = db
@@ -2024,7 +2035,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
         // Build the child while the parent is still pending.
@@ -2062,7 +2073,7 @@ pub(crate) mod tests {
     ) -> core::ops::Range<Location<F>>
     where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2091,7 +2102,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2196,7 +2207,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2249,7 +2260,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2300,7 +2311,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2347,7 +2358,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2387,7 +2398,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2438,7 +2449,7 @@ pub(crate) mod tests {
         mut db_b: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2480,7 +2491,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2515,7 +2526,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2581,7 +2592,7 @@ pub(crate) mod tests {
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2630,7 +2641,7 @@ pub(crate) mod tests {
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2670,7 +2681,7 @@ pub(crate) mod tests {
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2771,7 +2782,7 @@ pub(crate) mod tests {
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {

@@ -29,7 +29,7 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable},
+        contiguous::{fixed, variable, Contiguous},
     },
     merkle::{
         full::{self, Merkle},
@@ -113,7 +113,7 @@ where
     I: IndexFactory<T, Value = Location<F>>,
     H: Hasher,
     T: Translator,
-    J: Mutable<Item = Operation<F, U>>,
+    J: authenticated::Inner<E, Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {

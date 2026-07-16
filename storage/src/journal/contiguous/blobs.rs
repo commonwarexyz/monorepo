@@ -277,13 +277,35 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
-    /// Drop every blob below `min_blob` and remove its file, oldest-first. Safe with live readers:
-    /// snapshot readers keep their own handles, which the runtime's read-after-remove contract keeps
-    /// valid.
+    /// Drop every blob below `min_blob`, staging each removal with `batch`. Safe with live
+    /// readers: snapshot readers keep their own handles, which the runtime's read-after-remove
+    /// contract keeps valid.
     ///
     /// # Invariants
     ///
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
+    pub(super) fn prune_into(&mut self, min_blob: u64, batch: &mut E::Batch) {
+        assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
+        let drop_count = (min_blob - self.oldest_blob_index) as usize;
+        let prev_oldest_blob_index = self.oldest_blob_index;
+        self.sealed.drain(..drop_count);
+        self.sealed_snapshot = None;
+        self.oldest_blob_index = min_blob;
+
+        for blob in prev_oldest_blob_index..min_blob {
+            commonware_runtime::WriteBatch::remove(
+                batch,
+                &self.partition.name,
+                Some(&blob.to_be_bytes()),
+            );
+            self.metrics.tracked.dec();
+            self.metrics.pruned.inc();
+        }
+    }
+
+    /// Test-only [Self::prune_into] variant with immediately durable removals, used to plant
+    /// data-pruned-ahead-of-offsets states that production code can no longer produce.
+    #[cfg(test)]
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
         let drop_count = (min_blob - self.oldest_blob_index) as usize;

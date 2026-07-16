@@ -24,6 +24,7 @@ use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::WriteBatch as _;
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -348,22 +349,32 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item: EncodeShared>,
+    C: Inner<E, Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
-    /// Durably persist the journal's items without persisting the Merkle structure, which is
-    /// re-derived from the journal on startup. This is faster than [Self::sync] (one storage
-    /// commit instead of two) at the cost of that realignment work on reopen.
-    pub async fn commit(&mut self) -> Result<(), Error<F>> {
-        // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
-        // limit memory bloat.
-        try_join!(
-            self.journal.sync().map_err(Error::Journal),
-            self.merkle.flush().map_err(Error::Merkle)
-        )?;
-
-        Ok(())
+    /// Durably persist the journal's items and the Merkle structure: both stage into ONE
+    /// batch, so the whole sync is a single commit with a single fsync and no realignment
+    /// is required on startup.
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
+        let mut batch = self
+            .journal
+            .context()
+            .batch()
+            .await
+            .map_err(|err| Error::Journal(JournalError::Runtime(err)))?;
+        self.journal
+            .sync_into(&mut batch)
+            .await
+            .map_err(Error::Journal)?;
+        self.merkle
+            .sync_into(&mut batch)
+            .await
+            .map_err(Error::Merkle)?;
+        batch
+            .apply_sync()
+            .await
+            .map_err(|err| Error::Journal(JournalError::Runtime(err)))
     }
 }
 
@@ -401,6 +412,12 @@ where
     /// structure are added. Items are added in batches of size `apply_batch_size` to bound peak
     /// memory use: each batch's items are buffered in memory so their leaves can be hashed
     /// across the strategy.
+    ///
+    /// Divergence is reachable even though [Self::sync] commits both sides in ONE batch: each
+    /// inner journal still syncs its own filled blobs at blob rollovers (either side can land
+    /// ahead across a crash), `new` rewinds the item journal past uncommitted items before
+    /// aligning, and the state-sync paths ([Self::from_components]) legitimately construct
+    /// pairs at divergent sizes.
     async fn align(
         merkle: &mut Merkle<F, E, H::Digest, S>,
         journal: &C,
@@ -681,17 +698,6 @@ where
 
         Ok(())
     }
-
-    /// Durably persist the journal's items and the Merkle structure, ensuring no realignment
-    /// is required on startup.
-    pub async fn sync(&mut self) -> Result<(), Error<F>> {
-        try_join!(
-            self.journal.sync().map_err(Error::Journal),
-            self.merkle.sync().map_err(Error::Merkle)
-        )?;
-
-        Ok(())
-    }
 }
 
 /// The number of items to apply to the Merkle structure in a single batch.
@@ -729,14 +735,14 @@ macro_rules! impl_journal_new {
                 let mut merkle = Merkle::init(context.child("merkle"), &hasher, merkle_cfg).await?;
                 Self::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE).await?;
 
-                journal.sync().await?;
-                merkle.sync().await?;
-
-                Ok(Self {
+                let mut authenticated = Self {
                     merkle,
                     journal,
                     hasher,
-                })
+                };
+                authenticated.sync().await?;
+
+                Ok(authenticated)
             }
         }
     };
@@ -895,7 +901,7 @@ impl<F, E, C, H, S> Mutable for Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item: EncodeShared>,
+    C: Inner<E, Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
@@ -978,6 +984,16 @@ pub trait Inner<E: Context>: Mutable {
     where
         Self: Sized,
         Self::Item: EncodeShared;
+
+    /// The storage context the journal operates on.
+    fn context(&self) -> &E;
+
+    /// Stage [Mutable::sync] with `batch`: all pending state becomes durable when the caller
+    /// applies the batch, atomically with everything else it stages.
+    fn sync_into(
+        &mut self,
+        batch: &mut E::Batch,
+    ) -> impl core::future::Future<Output = Result<(), JournalError>> + Send;
 }
 
 #[cfg(test)]

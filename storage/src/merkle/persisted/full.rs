@@ -561,6 +561,19 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         Ok(())
     }
 
+    /// [Self::sync], staged with `batch`: the flushed nodes become durable when the caller
+    /// applies the batch, atomically with everything else it stages.
+    pub(crate) async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error<F>> {
+        self.flush_internal().await?;
+
+        if self.journal_dirty {
+            self.journal.sync_into(batch).await?;
+            self.journal_dirty = false;
+        }
+
+        Ok(())
+    }
+
     /// Append nodes cached in the in-memory structure that are missing from the journal, then
     /// prune them from the in-memory structure. Sets [Self::journal_dirty] when nodes are
     /// appended.

@@ -4,10 +4,7 @@
 
 use crate::{
     index::Unordered as UnorderedIndex,
-    journal::{
-        contiguous::{Contiguous, Mutable},
-        Error as JournalError,
-    },
+    journal::{authenticated, contiguous::Contiguous, Error as JournalError},
     merkle::{
         self, hasher::Hasher as _, mem::Mem, storage::Storage as MerkleStorage, Graftable,
         Location, Position,
@@ -375,7 +372,7 @@ where
     F: merkle::Graftable,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -524,11 +521,11 @@ where
         }
 
         // The sync boundary may be advanced by applied-but-uncommitted operations, and the
-        // pruning metadata persisted below durably records it. Commit the log first so
+        // pruning metadata persisted below durably records it. Sync the log first so
         // recovery can replay to that boundary: otherwise a crash before the log prune
         // recovers the older durable floor alongside newer pruning metadata and fails to
         // initialize the bitmap.
-        self.any.log.commit().await?;
+        self.any.log.sync().await?;
 
         // Prune the bitmap to the sync boundary (most aggressive safe location).
         self.any.prune_bitmap(sync_boundary);
@@ -760,7 +757,7 @@ where
     F: merkle::Graftable,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -803,7 +800,7 @@ where
     F: merkle::Graftable,
     E: Context,
     U: Update + 'static,
-    C: Mutable<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,

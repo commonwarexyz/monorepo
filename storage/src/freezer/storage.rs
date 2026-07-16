@@ -403,11 +403,15 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     ///
     /// A crash after the table sync but before the caller commits the returned
     /// [Checkpoint] leaves the table "stale-ahead": slots reference journal records
-    /// past the checkpoint. Every such record is durable (the journal is synced
-    /// before the table) and its chain passes through every older head for the slot,
-    /// so walking the chain recovers the committed head (or empties the slot when
-    /// the whole chain is uncommitted). Must run before the journal is rewound to
-    /// the checkpoint.
+    /// past the checkpoint. [Freezer::sync_into] callers that stage the checkpoint in
+    /// the same batch (the immutable archive) never produce this state, but the
+    /// checkpoint contract does not require it: [Freezer::sync] makes the table
+    /// durable while the caller persists the returned checkpoint separately, and any
+    /// caller may reopen from an older checkpoint it kept. Every stale-ahead record
+    /// is durable (the journal is synced before the table) and its chain passes
+    /// through every older head for the slot, so walking the chain recovers the
+    /// committed head (or empties the slot when the whole chain is uncommitted).
+    /// Must run before the journal is rewound to the checkpoint.
     ///
     /// Returns (modified, resizable) where:
     /// - modified: whether any slots were rewritten

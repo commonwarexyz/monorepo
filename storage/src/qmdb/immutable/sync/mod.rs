@@ -1,6 +1,6 @@
 use crate::{
     index::unordered::Index,
-    journal::{authenticated, contiguous::Mutable},
+    journal::authenticated,
     merkle::{
         full::{self, Merkle},
         Family, Location,
@@ -28,9 +28,10 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
+    C: authenticated::Inner<E, Item = Operation<F, K, V>>
+        + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    C::Config: Clone + Send,
+    <C as sync::Journal<F>>::Config: Clone + Send,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -39,7 +40,7 @@ where
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config, S>;
+    type Config = immutable::Config<T, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 

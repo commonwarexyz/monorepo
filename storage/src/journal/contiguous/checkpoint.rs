@@ -14,10 +14,11 @@
 //! # Format
 //!
 //! The record is a single codec-encoded blob (`{partition_prefix}-metadata`, blob name
-//! `checkpoint`), rewritten wholesale on every change and then synced. The storage backend's
-//! per-blob atomic sync makes each rewrite an old-record-or-new-record transition, so no
-//! versioning or redundancy is needed. An empty blob is a fresh checkpoint. Any other content
-//! must decode exactly or the checkpoint is corrupt.
+//! `checkpoint`), rewritten wholesale on every change and staged with the batch of the
+//! mutation it describes. The storage backend's atomic commit makes each rewrite an
+//! old-record-or-new-record transition, so no versioning or redundancy is needed. An empty
+//! blob is a fresh checkpoint. Any other content must decode exactly or the checkpoint is
+//! corrupt.
 //!
 //! # Invariants
 //!
@@ -106,22 +107,6 @@ impl<E: Context> Checkpoint<E> {
         self.record.boundary_hint
     }
 
-    /// Rewrite the record wholesale and make it durable.
-    async fn write(&mut self, record: Record) -> Result<(), Error> {
-        let bytes = record.encode();
-        // Trim any longer previous record before the sync publishes the new one atomically.
-        self.blob
-            .resize(bytes.len() as u64)
-            .await
-            .map_err(Error::Runtime)?;
-        self.blob
-            .write_at_sync(0, bytes)
-            .await
-            .map_err(Error::Runtime)?;
-        self.record = record;
-        Ok(())
-    }
-
     /// Stage a wholesale record rewrite with `batch` (durable when the
     /// batch is applied, atomically with everything else it stages).
     async fn write_into(&mut self, record: Record, batch: &mut E::Batch) -> Result<(), Error> {
@@ -138,24 +123,10 @@ impl<E: Context> Checkpoint<E> {
         Ok(())
     }
 
-    /// Durably record the boundary, writing only if it changed.
+    /// Stage the boundary record with `batch`, writing only if it changed.
     ///
     /// A blob-aligned boundary is derived from the oldest blob, so the hint is only kept while
     /// the boundary is mid-blob.
-    pub(super) async fn persist(
-        &mut self,
-        items_per_blob: u64,
-        boundary: u64,
-    ) -> Result<(), Error> {
-        let boundary_hint = (!boundary.is_multiple_of(items_per_blob)).then_some(boundary);
-        let record = Record { boundary_hint };
-        if record != self.record {
-            self.write(record).await?;
-        }
-        Ok(())
-    }
-
-    /// [Self::persist], staged with `batch` instead of written durably.
     pub(super) async fn persist_into(
         &mut self,
         items_per_blob: u64,
@@ -205,9 +176,37 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
     /// Direct-injection helpers used by tests (here and in the fixed and variable journals)
-    /// to plant states the production API only produces mid-crash-window: a boundary hint, or
+    /// to plant states the production API only produces inside a batch: a boundary hint, or
     /// an undecodable record.
     impl<E: Context> Checkpoint<E> {
+        /// Rewrite the record wholesale and make it durable.
+        async fn write(&mut self, record: Record) -> Result<(), Error> {
+            let bytes = record.encode();
+            // Trim any longer previous record before the sync publishes the new one atomically.
+            self.blob
+                .resize(bytes.len() as u64)
+                .await
+                .map_err(Error::Runtime)?;
+            self.blob
+                .write_at_sync(0, bytes)
+                .await
+                .map_err(Error::Runtime)?;
+            self.record = record;
+            Ok(())
+        }
+
+        /// [Checkpoint::persist_into] with an immediately applied batch.
+        pub(crate) async fn persist(
+            &mut self,
+            items_per_blob: u64,
+            boundary: u64,
+        ) -> Result<(), Error> {
+            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+            self.persist_into(items_per_blob, boundary, &mut batch)
+                .await?;
+            batch.apply_sync().await.map_err(Error::Runtime)
+        }
+
         /// Set and persist the pruning boundary directly.
         pub(crate) async fn set_boundary_hint(&mut self, boundary: u64) -> Result<(), Error> {
             let record = Record {

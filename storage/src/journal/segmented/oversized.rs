@@ -27,9 +27,10 @@
 //!   concurrently, so index entries may reference values that never landed. During
 //!   initialization, the index is rewound to the last entry whose value range fits the
 //!   durable glob (found by binary search: value offsets are appended in monotone order).
-//! - A crash during `prune` (index sections removed, glob sections not) leaves glob
-//!   sections with no index section. These orphan sections are removed during
-//!   initialization.
+//! - A crash during `prune` (index sections removed, glob sections not) or between a fresh
+//!   section's glob-blob creation and its index-blob creation (append writes the value
+//!   first, and blob creation is durable at open) leaves glob sections with no index
+//!   section. These orphan sections are removed during initialization.
 //!
 //! Glob bytes past the last indexed value (from a sync whose glob landed but whose index
 //! did not) are unreferenced and left in place: subsequent appends write after them and

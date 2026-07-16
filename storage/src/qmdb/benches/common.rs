@@ -602,7 +602,7 @@ pub async fn gen_random_kv<F, M>(
 
     // Seed the db with `num_elements` entries. `seed_batch` caps how many seeds accumulate before a
     // merkleize+apply (bounding the batch); `None` seeds in a single batch. Each apply is followed by
-    // a `commit`, whose `merkle.flush()` writes the in-memory merkle nodes to the journal and prunes
+    // a `commit`, whose merkle flush writes the in-memory merkle nodes to the journal and prunes
     // them from memory -- without that, a large build accumulates the whole merkle in RAM.
     {
         let mut batch = db.new_batch();
