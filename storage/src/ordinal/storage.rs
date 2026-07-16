@@ -28,6 +28,7 @@ impl<V: CodecFixed<Cfg = ()>> Record<V> {
     fn encode(value: &V) -> Vec<u8> {
         let mut buf = Vec::with_capacity(Self::SIZE);
         value.write(&mut buf);
+        assert_eq!(buf.len(), V::SIZE, "write() did not write expected bytes");
         let crc = Crc32::checksum(&buf);
         crc.write(&mut buf);
         buf
