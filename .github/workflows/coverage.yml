@@ -61,7 +61,7 @@ jobs:
       run: |
         sed -i.bak '/fuzz/d' Cargo.toml
     - name: Install coverage tooling
-      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.133
     - name: Normalize flags for paths

@@ -273,7 +273,7 @@ impl Freelist {
     /// finally dropped, otherwise the buffer leaks.
     #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer)> {
-        // TODO: migrate to `try_update` once MSRV is >= 1.95
+        // Loom's atomic implementation does not provide `try_update`.
         #[allow(deprecated)]
         let slot = self
             .created

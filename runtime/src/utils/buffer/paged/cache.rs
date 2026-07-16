@@ -894,9 +894,7 @@ mod tests {
         *,
     };
     use crate::{
-        Buf, BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _,
-        Spawner as _, Storage as _, Supervisor as _, buffer::paged::CHECKSUM_SIZE, deterministic,
-        telemetry::metrics::Registry,
+        Buf, BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _, Spawner as _, Storage as _, Supervisor as _, buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry,
     };
     use commonware_codec::ReadExt as _;
     use commonware_cryptography::Crc32;

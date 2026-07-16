@@ -609,6 +609,7 @@ impl IoBufMut {
     /// Panics if `len > capacity()`.
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: The caller guarantees that all bytes in `0..len` are initialized.
         unsafe {
             assert!(
                 len <= self.capacity(),
@@ -807,6 +808,7 @@ unsafe impl BufMut for IoBufMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
+        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunk.
         unsafe {
             match &mut self.inner {
                 IoBufMutInner::Bytes(b) => b.advance_mut(cnt),
@@ -1795,6 +1797,7 @@ impl IoBufsMut {
     ///
     /// Panics if `len` exceeds total capacity.
     pub(crate) unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: The caller guarantees that all bytes in `0..len` are initialized.
         unsafe {
             let capacity = self.capacity();
             assert!(
@@ -1964,6 +1967,7 @@ unsafe impl BufMut for IoBufsMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
+        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunks.
         unsafe {
             match &mut self.inner {
                 IoBufsMutInner::Single(buf) => buf.advance_mut(cnt),
@@ -2343,6 +2347,7 @@ unsafe impl BufMut for Builder {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
+        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunk.
         unsafe {
             self.buf.advance_mut(cnt);
         }

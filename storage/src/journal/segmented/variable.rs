@@ -87,6 +87,9 @@ use crate::journal::{
         FrameInfo, PrefixedItem, decode_item, decode_length_prefix, encode_frame_into, find_frame,
         read_frame_at,
     },
+    frame::{
+        FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
+    },
 };
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
@@ -666,7 +669,7 @@ mod tests {
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
     use commonware_runtime::{Blob, BufMut, Runner, Storage, Supervisor as _, deterministic};
-    use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
+    use commonware_utils::{NZU16, sequence::FixedBytes, NZUsize};
     use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
