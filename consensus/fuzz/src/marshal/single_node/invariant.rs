@@ -18,6 +18,7 @@ use std::collections::{BTreeSet, HashSet};
 pub fn check_all<H: TestHarness>(
     ready_prefix: u64,
     application_segment_bounds: &[usize],
+    application_ordering_exclusions: &BTreeSet<usize>,
     segment_starts: &[u64],
     expected_redeliveries: &[Vec<Height>],
     application_delivered: &[(Height, D)],
@@ -26,6 +27,7 @@ pub fn check_all<H: TestHarness>(
     check_ready_prefix_delivered(ready_prefix, application_delivered);
     check_segment_ordering(
         application_segment_bounds,
+        application_ordering_exclusions,
         segment_starts,
         application_delivered,
     );
@@ -68,6 +70,7 @@ pub fn check_ready_prefix_delivered(ready_prefix: u64, application_delivered: &[
 /// not precise enough for this delivery-order invariant.
 pub fn check_segment_ordering(
     segment_bounds: &[usize],
+    ordering_exclusions: &BTreeSet<usize>,
     segment_starts: &[u64],
     application_delivered: &[(Height, D)],
 ) {
@@ -83,7 +86,9 @@ pub fn check_segment_ordering(
         }
         let segment = application_delivered[start_idx..end_idx]
             .iter()
-            .map(|(height, _)| *height)
+            .enumerate()
+            .filter(|(offset, _)| !ordering_exclusions.contains(&(start_idx + offset)))
+            .map(|(_, (height, _))| *height)
             .filter(|height| height.get() != 0)
             .collect::<Vec<_>>();
         if segment.is_empty() {
