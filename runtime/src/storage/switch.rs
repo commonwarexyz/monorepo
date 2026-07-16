@@ -45,6 +45,91 @@ impl<S: crate::Storage> Storage<S> {
     }
 }
 
+impl<S: crate::Batchable> crate::Batchable for Storage<S> {
+    type Batch = Batch<S>;
+
+    async fn batch(&self) -> Result<Batch<S>, Error> {
+        match self {
+            Self::Direct(s) => Ok(Batch::Direct(s.batch().await?)),
+            Self::Volume(v) => Ok(Batch::Volume(v.batch().await?)),
+        }
+    }
+}
+
+/// A batch from either storage model.
+pub enum Batch<S: crate::Batchable> {
+    Direct(S::Batch),
+    Volume(volume::Batch<S>),
+}
+
+/// Unwrap a direct blob handle (batches only stage blobs from their own
+/// storage mode).
+fn direct_blob<S: crate::Batchable>(blob: &Blob<S>) -> &S::Blob {
+    match blob {
+        Blob::Direct(b) => b,
+        Blob::Volume(_) => panic!("volume blob staged in a direct batch"),
+    }
+}
+
+/// Unwrap a volume blob handle.
+fn volume_blob<S: crate::Batchable>(blob: &Blob<S>) -> &volume::Blob<S> {
+    match blob {
+        Blob::Volume(b) => b,
+        Blob::Direct(_) => panic!("direct blob staged in a volume batch"),
+    }
+}
+
+impl<S: crate::Batchable> crate::WriteBatch for Batch<S> {
+    type Blob = Blob<S>;
+
+    async fn write_at(
+        &mut self,
+        blob: &Self::Blob,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Direct(b) => b.write_at(direct_blob(blob), offset, bufs).await,
+            Self::Volume(b) => b.write_at(volume_blob(blob), offset, bufs).await,
+        }
+    }
+
+    async fn resize(&mut self, blob: &Self::Blob, len: u64) -> Result<(), Error> {
+        match self {
+            Self::Direct(b) => b.resize(direct_blob(blob), len).await,
+            Self::Volume(b) => b.resize(volume_blob(blob), len).await,
+        }
+    }
+
+    fn sync(&mut self, blob: &Self::Blob) {
+        match self {
+            Self::Direct(b) => b.sync(direct_blob(blob)),
+            Self::Volume(b) => b.sync(volume_blob(blob)),
+        }
+    }
+
+    fn remove(&mut self, partition: &str, name: Option<&[u8]>) {
+        match self {
+            Self::Direct(b) => b.remove(partition, name),
+            Self::Volume(b) => b.remove(partition, name),
+        }
+    }
+
+    async fn apply(self) -> Result<(), Error> {
+        match self {
+            Self::Direct(b) => b.apply().await,
+            Self::Volume(b) => b.apply().await,
+        }
+    }
+
+    async fn apply_sync(self) -> Result<(), Error> {
+        match self {
+            Self::Direct(b) => b.apply_sync().await,
+            Self::Volume(b) => b.apply_sync().await,
+        }
+    }
+}
+
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S>;
 

@@ -82,6 +82,63 @@ impl<S> Storage<S> {
     }
 }
 
+impl<S: crate::Batchable> crate::Batchable for Storage<S> {
+    type Batch = Batch<S::Batch>;
+
+    async fn batch(&self) -> Result<Self::Batch, Error> {
+        Ok(Batch {
+            inner: self.inner.batch().await?,
+            metrics: self.metrics.clone(),
+        })
+    }
+}
+
+/// A batch wrapper that tracks metrics for staged operations.
+pub struct Batch<B> {
+    inner: B,
+    metrics: Arc<Metrics>,
+}
+
+impl<B: crate::WriteBatch> crate::WriteBatch for Batch<B> {
+    type Blob = Blob<B::Blob>;
+
+    async fn write_at(
+        &mut self,
+        blob: &Self::Blob,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        self.metrics.storage_writes.inc();
+        self.metrics
+            .storage_write_bytes
+            .inc_by(bufs.remaining() as u64);
+        self.inner.write_at(&blob.inner, offset, bufs).await
+    }
+
+    async fn resize(&mut self, blob: &Self::Blob, len: u64) -> Result<(), Error> {
+        self.metrics.storage_resizes.inc();
+        self.inner.resize(&blob.inner, len).await
+    }
+
+    fn sync(&mut self, blob: &Self::Blob) {
+        self.inner.sync(&blob.inner);
+    }
+
+    fn remove(&mut self, partition: &str, name: Option<&[u8]>) {
+        self.inner.remove(partition, name);
+    }
+
+    async fn apply(self) -> Result<(), Error> {
+        self.inner.apply().await
+    }
+
+    async fn apply_sync(self) -> Result<(), Error> {
+        self.metrics.storage_syncs.inc();
+        self.inner.apply_sync().await
+    }
+}
+
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 

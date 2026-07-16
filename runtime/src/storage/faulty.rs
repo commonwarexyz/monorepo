@@ -231,6 +231,17 @@ fn injected_io_error() -> IoError {
     IoError::other("injected storage fault")
 }
 
+impl<S: crate::Storage + Clone> crate::Batchable for Storage<S> {
+    type Batch = super::sequential::Batch<Self>;
+
+    async fn batch(&self) -> Result<Self::Batch, Error> {
+        // The sequential fallback drives this wrapper's own blob and remove
+        // operations, so staged operations inject faults exactly like
+        // unbatched ones.
+        Ok(super::sequential::Batch::new(self.clone()))
+    }
+}
+
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 

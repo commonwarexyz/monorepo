@@ -151,49 +151,84 @@ pub(super) struct Table {
     pub manifest: Vec<(u64, u64)>,
 }
 
+impl Entry {
+    /// Encode this entry's byte run within a table.
+    ///
+    /// Entries encode independently so commits can reuse cached encodings
+    /// for blobs they do not capture (table assembly is O(captured), not
+    /// O(all blobs)). The concatenation of per-entry runs is byte-identical
+    /// to the monolithic [`Table::encode`].
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 + self.name.len() + self.runs.len() * 24);
+        out.put_u64(self.id);
+        out.put_u32(self.partition);
+        out.put_u32(self.name.len() as u32);
+        out.put_slice(&self.name);
+        out.put_u16(self.version);
+        out.put_u64(self.size);
+        out.put_u32(self.runs.len() as u32);
+        for r in &self.runs {
+            out.put_u64(r.logical);
+            out.put_u64(r.physical);
+            out.put_u64(r.len);
+        }
+        out.put_u32(self.checksums.len() as u32);
+        for c in &self.checksums {
+            out.put_u64(c.first_chunk);
+            out.put_u32(c.count);
+            out.put_u64(c.offset);
+            out.put_u32(c.crc);
+        }
+        out.put_u32(self.tail_crc);
+        match self.shadow {
+            Some(offset) => {
+                out.put_u8(1);
+                out.put_u64(offset);
+            }
+            None => out.put_u8(0),
+        }
+        out
+    }
+}
+
 impl Table {
     /// Encode with a terminating CRC32C.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(1024);
-        out.put_u64(self.seq);
-        out.put_u64(self.next_id);
-        out.put_u32(self.partitions.len() as u32);
-        for p in &self.partitions {
+        Self::assemble(
+            self.seq,
+            self.next_id,
+            &self.partitions,
+            self.blobs.iter().map(Entry::encode).collect(),
+            &self.manifest,
+        )
+    }
+
+    /// Assemble a table's bytes from pre-encoded entry runs (in blob-id
+    /// order). This is the single definition of the table format; the
+    /// commit path feeds it cached entry encodings.
+    pub fn assemble(
+        seq: u64,
+        next_id: u64,
+        partitions: &[String],
+        entries: Vec<impl AsRef<[u8]>>,
+        manifest: &[(u64, u64)],
+    ) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            1024 + entries.iter().map(|e| e.as_ref().len()).sum::<usize>() + manifest.len() * 16,
+        );
+        out.put_u64(seq);
+        out.put_u64(next_id);
+        out.put_u32(partitions.len() as u32);
+        for p in partitions {
             out.put_u32(p.len() as u32);
             out.put_slice(p.as_bytes());
         }
-        out.put_u32(self.blobs.len() as u32);
-        for b in &self.blobs {
-            out.put_u64(b.id);
-            out.put_u32(b.partition);
-            out.put_u32(b.name.len() as u32);
-            out.put_slice(&b.name);
-            out.put_u16(b.version);
-            out.put_u64(b.size);
-            out.put_u32(b.runs.len() as u32);
-            for r in &b.runs {
-                out.put_u64(r.logical);
-                out.put_u64(r.physical);
-                out.put_u64(r.len);
-            }
-            out.put_u32(b.checksums.len() as u32);
-            for c in &b.checksums {
-                out.put_u64(c.first_chunk);
-                out.put_u32(c.count);
-                out.put_u64(c.offset);
-                out.put_u32(c.crc);
-            }
-            out.put_u32(b.tail_crc);
-            match b.shadow {
-                Some(offset) => {
-                    out.put_u8(1);
-                    out.put_u64(offset);
-                }
-                None => out.put_u8(0),
-            }
+        out.put_u32(entries.len() as u32);
+        for e in entries {
+            out.put_slice(e.as_ref());
         }
-        out.put_u32(self.manifest.len() as u32);
-        for &(id, chunk) in &self.manifest {
+        out.put_u32(manifest.len() as u32);
+        for &(id, chunk) in manifest {
             out.put_u64(id);
             out.put_u64(chunk);
         }

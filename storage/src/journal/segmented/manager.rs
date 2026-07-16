@@ -11,7 +11,7 @@ use commonware_runtime::{
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
+    Blob, BufferPool, Error as RError, Handle, Metrics, Storage, WriteBatch,
 };
 use futures::future::{join_all, try_join_all};
 use std::{
@@ -24,11 +24,22 @@ use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Send + Sync {
+    /// The wrapped blob type (staged into batches by [`Self::sync_into`]).
+    type Blob: Blob;
+
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> u64;
 
     /// Ensure all data accepted by this buffer is durably persisted.
     fn sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
+
+    /// Flush buffered bytes and stage the blob's durability with `batch`
+    /// (durable when the batch is applied with
+    /// [`commonware_runtime::WriteBatch::apply_sync`]).
+    fn sync_into<T: WriteBatch<Blob = Self::Blob>>(
+        &mut self,
+        batch: &mut T,
+    ) -> impl Future<Output = Result<(), RError>> + Send;
 
     /// Start making data currently accepted by this buffer durable.
     ///
@@ -45,12 +56,18 @@ pub trait SectionBuffer: Send + Sync {
 }
 
 impl<B: Blob> SectionBuffer for Writer<B> {
+    type Blob = B;
+
     fn size(&self) -> u64 {
         Self::size(self)
     }
 
     async fn sync(&mut self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn sync_into<T: WriteBatch<Blob = B>>(&mut self, batch: &mut T) -> Result<(), RError> {
+        Self::sync_into(self, batch).await
     }
 
     async fn start_sync(&mut self) -> Handle<()> {
@@ -67,12 +84,18 @@ impl<B: Blob> SectionBuffer for Writer<B> {
 }
 
 impl<B: Blob> SectionBuffer for Write<B> {
+    type Blob = B;
+
     fn size(&self) -> u64 {
         Self::size(self)
     }
 
     async fn sync(&mut self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn sync_into<T: WriteBatch<Blob = B>>(&mut self, batch: &mut T) -> Result<(), RError> {
+        Self::sync_into(self, batch).await
     }
 
     async fn start_sync(&mut self) -> Handle<()> {
@@ -91,7 +114,7 @@ impl<B: Blob> SectionBuffer for Write<B> {
 /// Factory for creating section buffers from raw blobs.
 pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
     /// The buffer type produced by this factory.
-    type Buffer: SectionBuffer;
+    type Buffer: SectionBuffer<Blob = B>;
 
     /// Create a new buffer wrapping the given blob with the specified size.
     fn create(
@@ -281,6 +304,31 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             .collect();
         let count = futures.len() as u64;
         try_join_all(futures).await.map_err(Error::Runtime)?;
+        self.synced.inc_by(count);
+        Ok(())
+    }
+
+    /// Stage the durability of the given `sections` with `batch`: buffered
+    /// bytes are flushed and each section's blob becomes durable when the
+    /// batch is applied.
+    pub async fn sync_into<T: WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        sections: impl crate::Sections,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        let sections = sections.sections().collect::<BTreeSet<_>>();
+        for &section in &sections {
+            self.prune_guard(section)?;
+        }
+        let mut count = 0;
+        for (_, blob) in self
+            .blobs
+            .iter_mut()
+            .filter(|(section, _)| sections.contains(section))
+        {
+            blob.sync_into(batch).await.map_err(Error::Runtime)?;
+            count += 1;
+        }
         self.synced.inc_by(count);
         Ok(())
     }
@@ -546,18 +594,28 @@ mod tests {
         wait_for_syncs: Arc<AtomicUsize>,
     }
 
-    struct TestBuffer {
+    struct TestBuffer<B: Blob> {
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
         syncing: Option<SharedSync>,
+        _marker: std::marker::PhantomData<B>,
     }
 
-    impl SectionBuffer for TestBuffer {
+    impl<B: Blob> SectionBuffer for TestBuffer<B> {
+        type Blob = B;
+
         fn size(&self) -> u64 {
             0
         }
 
         async fn sync(&mut self) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn sync_into<T: WriteBatch<Blob = B>>(
+            &mut self,
+            _batch: &mut T,
+        ) -> Result<(), RError> {
             Ok(())
         }
 
@@ -591,13 +649,14 @@ mod tests {
     }
 
     impl<B: Blob> BufferFactory<B> for TestFactory {
-        type Buffer = TestBuffer;
+        type Buffer = TestBuffer<B>;
 
         async fn create(&self, _blob: B, _size: u64) -> Result<Self::Buffer, RError> {
             Ok(TestBuffer {
                 pending: self.pending.clone(),
                 wait_for_syncs: self.wait_for_syncs.clone(),
                 syncing: None,
+                _marker: std::marker::PhantomData,
             })
         }
     }

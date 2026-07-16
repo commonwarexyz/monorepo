@@ -25,7 +25,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Batchable, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner,
 };
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use rand_core::CryptoRng;
@@ -62,7 +62,7 @@ where
 
 pub struct Actor<E, B, V, C, H, A, S, L, T>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Batchable + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -94,7 +94,7 @@ where
 
 impl<E, B, V, C, H, A, S, L, T> Actor<E, B, V, C, H, A, S, L, T>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Batchable + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,

@@ -18,6 +18,85 @@ impl<S: crate::Storage> Storage<S> {
     }
 }
 
+impl<S: crate::Batchable> crate::Batchable for Storage<S> {
+    type Batch = Batch<S::Batch>;
+
+    async fn batch(&self) -> Result<Self::Batch, Error> {
+        self.auditor.event(b"batch", |_| {});
+        Ok(Batch {
+            auditor: self.auditor.clone(),
+            inner: self.inner.batch().await?,
+        })
+    }
+}
+
+/// A batch wrapper that records staged operations with the auditor.
+pub struct Batch<B> {
+    auditor: Arc<Auditor>,
+    inner: B,
+}
+
+impl<B: crate::WriteBatch> crate::WriteBatch for Batch<B> {
+    type Blob = Blob<B::Blob>;
+
+    async fn write_at(
+        &mut self,
+        blob: &Self::Blob,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        self.auditor.event(b"batch_write_at", |hasher| {
+            hasher.update(blob.partition.as_bytes());
+            hasher.update(&blob.name);
+            hasher.update(offset.to_be_bytes());
+            hasher.update_bufs(&bufs);
+        });
+        self.inner.write_at(&blob.inner, offset, bufs).await
+    }
+
+    async fn resize(&mut self, blob: &Self::Blob, len: u64) -> Result<(), Error> {
+        self.auditor.event(b"batch_resize", |hasher| {
+            hasher.update(blob.partition.as_bytes());
+            hasher.update(&blob.name);
+            hasher.update(len.to_be_bytes());
+        });
+        self.inner.resize(&blob.inner, len).await
+    }
+
+    fn sync(&mut self, blob: &Self::Blob) {
+        self.auditor.event(b"batch_sync", |hasher| {
+            hasher.update(blob.partition.as_bytes());
+            hasher.update(&blob.name);
+        });
+        self.inner.sync(&blob.inner);
+    }
+
+    fn remove(&mut self, partition: &str, name: Option<&[u8]>) {
+        self.auditor.event(b"batch_remove", |hasher| {
+            hasher.update(partition.as_bytes());
+            match name {
+                Some(name) => {
+                    hasher.update([1]);
+                    hasher.update(name);
+                }
+                None => hasher.update([0]),
+            }
+        });
+        self.inner.remove(partition, name);
+    }
+
+    async fn apply(self) -> Result<(), Error> {
+        self.auditor.event(b"batch_apply", |_| {});
+        self.inner.apply().await
+    }
+
+    async fn apply_sync(self) -> Result<(), Error> {
+        self.auditor.event(b"batch_apply_sync", |_| {});
+        self.inner.apply_sync().await
+    }
+}
+
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 

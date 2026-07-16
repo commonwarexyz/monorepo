@@ -281,6 +281,21 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         self.index.sync(&sections).await
     }
 
+    /// Stage the durability of both journals' `sections` with `batch`.
+    ///
+    /// Values are staged before the index, so the sequential fallback syncs
+    /// them in the same glob-before-index order as [Self::sync]; on atomic
+    /// backends the batch commits both together.
+    pub async fn sync_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        sections: impl crate::Sections,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        let sections = sections.sections().collect::<Vec<_>>();
+        self.values.sync_into(&sections, batch).await?;
+        self.index.sync_into(&sections, batch).await
+    }
+
     /// Start syncing both journals for the given `sections`.
     ///
     /// The returned handle completes once both journals' syncs complete, failing with the first

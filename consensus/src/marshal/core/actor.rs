@@ -40,7 +40,7 @@ use commonware_runtime::{
         metrics::{Gauge, GaugeExt, MetricsExt as _},
         traces::TracedExt as _,
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    Batchable, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
@@ -93,7 +93,7 @@ enum PooledSync {
 /// behind.
 pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
-    E: BufferPooler + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRng + Spawner + Metrics + Clock + Batchable,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -159,7 +159,7 @@ where
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
-    E: BufferPooler + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRng + Spawner + Metrics + Clock + Batchable,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<

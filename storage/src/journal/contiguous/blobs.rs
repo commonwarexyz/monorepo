@@ -370,14 +370,25 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
-    /// Remove every blob and start an empty journal with its tail at `tail_blob`.
+    /// Stage the removal of every tracked blob with `batch`.
     ///
-    /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
-    /// the runtime's read-after-remove contract keeps valid.
-    pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
+    /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles,
+    /// which the runtime's read-after-remove contract keeps valid.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn stage_clear(&self, batch: &mut E::Batch) {
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
-            self.partition.remove(blob).await?;
+            commonware_runtime::WriteBatch::remove(
+                batch,
+                &self.partition.name,
+                Some(&blob.to_be_bytes()),
+            );
         }
+    }
+
+    /// Reset to an empty journal with its tail at `tail_blob` (the staged removals must have
+    /// been applied).
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn finish_clear(&mut self, tail_blob: u64) -> Result<(), Error> {
         let _ = self.metrics.tracked.try_set(0);
         self.tail = self.partition.open(tail_blob).await?;
         self.metrics.tracked.inc();
@@ -385,6 +396,11 @@ impl<E: Context> Writable<E> {
         self.sealed.clear();
         self.sealed_snapshot = None;
         Ok(())
+    }
+
+    /// The context blobs are opened with.
+    pub(super) const fn context(&self) -> &E {
+        &self.partition.context
     }
 
     /// Make every blob from `start_blob` onward durable.
@@ -397,6 +413,26 @@ impl<E: Context> Writable<E> {
         self.metrics.synced.inc_by(dirty_sealed.len() as u64);
 
         self.tail.sync().await.map_err(Error::Runtime)?;
+        self.metrics.synced.inc();
+        Ok(())
+    }
+
+    /// Stage the durability of every blob from `start_blob` onward with
+    /// `batch`: buffered tail bytes are flushed (unsynced) and each dirty
+    /// blob becomes durable when the batch is applied.
+    pub(super) async fn sync_from_into(
+        &mut self,
+        start_blob: u64,
+        batch: &mut E::Batch,
+    ) -> Result<(), Error> {
+        let start_blob = start_blob.max(self.oldest_blob_index);
+        let dirty_sealed = &self.sealed[(start_blob - self.oldest_blob_index) as usize..];
+        for sealed in dirty_sealed {
+            sealed.sync_into(batch);
+        }
+        self.metrics.synced.inc_by(dirty_sealed.len() as u64);
+
+        self.tail.sync_into(batch).await.map_err(Error::Runtime)?;
         self.metrics.synced.inc();
         Ok(())
     }

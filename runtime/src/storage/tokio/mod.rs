@@ -69,6 +69,14 @@ impl Storage {
     }
 }
 
+impl crate::Batchable for Storage {
+    type Batch = super::sequential::Batch<Self>;
+
+    async fn batch(&self) -> Result<Self::Batch, Error> {
+        Ok(super::sequential::Batch::new(self.clone()))
+    }
+}
+
 impl crate::Storage for Storage {
     #[cfg(unix)]
     type Blob = unix::Blob;

@@ -9,8 +9,8 @@ use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::{boxed, select_loop};
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
-    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
-    Spawner, Storage, StreamOf, Supervisor as _,
+    tokio as tokio_runtime, Batchable, BufferPooler, Clock, Listener, Metrics, Network, Runner,
+    SinkOf, Spawner, Storage, StreamOf, Supervisor as _,
 };
 use commonware_storage::{
     mmr,
@@ -695,7 +695,7 @@ where
 #[boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Batchable + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = any::create_config(&context);
     let database = any::Database::init(context.child("database"), db_config).await?;
@@ -707,7 +707,7 @@ where
 #[boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Batchable + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = current::create_config(&context);
     let database = current::Database::init(context.child("database"), db_config).await?;
@@ -719,7 +719,7 @@ where
 #[boxed]
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Batchable + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = immutable::create_config(&context);
     let database = immutable::Database::init(context.child("database"), db_config).await?;
@@ -734,7 +734,7 @@ async fn run_immutable_full_source<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Batchable + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = immutable::create_config(&context);
     let database = immutable::Database::init(context.child("database"), db_config).await?;
@@ -746,7 +746,7 @@ where
 #[boxed]
 async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Batchable + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = keyless::create_config(&context);
     let database = keyless::Database::init(context.child("database"), db_config).await?;
@@ -761,7 +761,7 @@ async fn run_keyless_full_source<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Batchable + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = keyless::create_config(&context);
     let database = keyless::Database::init(context.child("database"), db_config).await?;
@@ -775,7 +775,7 @@ async fn run_immutable_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Batchable + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = immutable_compact::create_config(&context);
     let database = immutable_compact::Database::init(context.child("database"), db_config).await?;
@@ -789,7 +789,7 @@ async fn run_keyless_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Batchable + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = keyless_compact::create_config(&context);
     let database = keyless_compact::Database::init(context.child("database"), db_config).await?;

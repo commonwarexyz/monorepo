@@ -87,6 +87,13 @@ impl<B: Blob> Sealed<B> {
         self.inner.blob.sync().await
     }
 
+    /// Stage the blob's durability with `batch`: pending bytes become
+    /// durable when the batch is applied with
+    /// [`crate::WriteBatch::apply_sync`].
+    pub fn sync_into<T: crate::WriteBatch<Blob = B>>(&self, batch: &mut T) {
+        batch.sync(&self.inner.blob);
+    }
+
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no
     /// partial page.
     fn partial_offset(&self) -> u64 {

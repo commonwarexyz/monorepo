@@ -35,8 +35,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Counter, EncodeStruct, GaugeExt, GaugeFamily, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
-    Storage as RuntimeStorage,
+    Batchable, Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use rand_core::CryptoRng;
@@ -117,7 +116,7 @@ pub struct Config<C: Signer, P, B> {
 
 pub struct Actor<E, P, B, H, C, V>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Batchable,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -143,7 +142,7 @@ where
 
 impl<E, P, B, H, C, V> Actor<E, P, B, H, C, V>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Batchable,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,

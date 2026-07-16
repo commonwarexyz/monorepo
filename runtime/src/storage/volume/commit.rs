@@ -1,10 +1,19 @@
-//! The group commit: snapshot -> write -> fsync -> finalize.
+//! The commit: snapshot -> write -> fsync -> finalize.
 //!
-//! Commits serialize on `Ready::commit_lock`. The snapshot briefly takes
-//! each dirty blob's write lock (in id order) to capture a coherent entry
-//! and raise its freeze boundary; writers never block on the fsync itself.
-//! A clean sync returns immediately. Any failure during the write or fsync
-//! phase permanently poisons the volume (see `Ready::poisoned`).
+//! Commits serialize on `Ready::commit_lock` and are SELECTIVE: a commit
+//! captures only the blobs it is rooted at (the synced blob, a batch's
+//! blobs, a removal's ids), expanded across applied-batch groups so an
+//! applied batch is never split across commits. Every other blob's table
+//! entry is served verbatim from its cached committed encoding; uncaptured
+//! dirty state (dirty marks, manifest chunks, content frees) stays pending
+//! for a later commit that captures the blob.
+//!
+//! The snapshot briefly takes each captured blob's write lock (in id order)
+//! to capture a coherent entry and raise its freeze boundary; writers never
+//! block on the fsync itself. A clean sync returns immediately. Any failure
+//! during the write or fsync phase permanently poisons the volume (see
+//! `Ready::poisoned`): a failed fsync is a volume-wide (physical) event, so
+//! the latch covers every blob, captured or not.
 
 use super::{
     alloc::{block_align, Extent},
@@ -13,8 +22,9 @@ use super::{
     BLOCK,
 };
 use crate::{Blob as _, Error, IoBuf};
+use bytes::Bytes;
 use commonware_cryptography::Crc32;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 /// A planned write for the commit's WRITE phase.
 struct MetaWrite {
@@ -27,25 +37,41 @@ struct Snapshot {
     seq: u64,
     table_extent: Extent,
     writes: Vec<MetaWrite>,
-    /// (blob core, its new committed entry) for every dirty blob.
+    /// (blob core, its new committed entry) for every captured dirty blob.
     committed: Vec<(Arc<BlobCore>, Entry)>,
+    /// The capture set (groups it covers are cleared at finalize).
+    capture: BTreeSet<u64>,
     /// The previous confirmed table extent (freed on confirmation).
     old_table: Option<Extent>,
 }
 
-/// Commit all dirty state. Returns without I/O when clean.
-pub(super) async fn commit<S: crate::Storage>(ready: &Ready<S>) -> Result<(), Error> {
+/// Commit the dirty state of the blobs rooted at `roots` (expanded across
+/// applied-batch groups). Returns without I/O when that state is clean.
+pub(super) async fn commit<S: crate::Storage>(
+    ready: &Ready<S>,
+    roots: &[u64],
+) -> Result<(), Error> {
     let _commit = ready.commit_lock.lock().await;
+    commit_locked(ready, roots).await
+}
+
+/// [`commit`] with `Ready::commit_lock` already held by the caller.
+pub(super) async fn commit_locked<S: crate::Storage>(
+    ready: &Ready<S>,
+    roots: &[u64],
+) -> Result<(), Error> {
     ready.check_poisoned()?;
 
-    {
+    let capture = {
         let state = ready.state.lock();
-        if state.dirty.is_empty() && !state.meta_dirty {
+        let capture = state.expand_capture(roots);
+        if !state.meta_dirty && state.dirty.iter().all(|id| !capture.contains(id)) {
             return Ok(());
         }
-    }
+        capture
+    };
 
-    let snapshot = match take_snapshot(ready).await {
+    let snapshot = match take_snapshot(ready, capture).await {
         Ok(s) => s,
         Err(e) => {
             // Snapshot allocates extents and mutates freeze/dirty state; a
@@ -83,16 +109,28 @@ pub(super) async fn commit<S: crate::Storage>(ready: &Ready<S>) -> Result<(), Er
 }
 
 /// Capture the commit's content and allocate/encode its metadata writes.
-async fn take_snapshot<S: crate::Storage>(ready: &Ready<S>) -> Result<Snapshot, Error> {
+async fn take_snapshot<S: crate::Storage>(
+    ready: &Ready<S>,
+    capture: BTreeSet<u64>,
+) -> Result<Snapshot, Error> {
     // Assign the seq and advance the freeze epoch before touching blobs:
     // writes racing the snapshot land with `born > snapshot_seq` and are
     // exempt from freezing (their extents are invisible to this commit).
+    // Uncaptured dirty blobs lose that exemption too (their young extents
+    // are not referenced by any table): conservatively over-frozen, which
+    // costs an extra COW on a later in-place rewrite but is always safe.
     let (seq, dirty_ids) = {
         let mut state = ready.state.lock();
         let seq = state.seq;
         state.seq += 1;
         state.snapshot_seq = seq;
-        (seq, state.dirty.iter().copied().collect::<Vec<_>>())
+        let dirty_ids: Vec<u64> = state
+            .dirty
+            .iter()
+            .copied()
+            .filter(|id| capture.contains(id))
+            .collect();
+        (seq, dirty_ids)
     };
 
     let mut writes = Vec::new();
@@ -122,6 +160,13 @@ async fn take_snapshot<S: crate::Storage>(ready: &Ready<S>) -> Result<Snapshot, 
                 .into_iter()
                 .collect();
             state.dirty.remove(&id);
+
+            // Content frees of a captured blob resolve when this commit
+            // confirms: its new entry stops referencing them.
+            let pending = std::mem::take(&mut inner.pending_frees);
+            for extent in pending {
+                state.defer_free(extent, seq, None);
+            }
 
             // Dense chunk CRC array over [0, last backed chunk]; hole
             // positions are never consulted (holes are identified from the
@@ -230,11 +275,19 @@ async fn take_snapshot<S: crate::Storage>(ready: &Ready<S>) -> Result<Snapshot, 
         committed.push((blob, entry));
     }
 
-    // Assemble the table: dormant entries verbatim, open blobs' committed
-    // entries (cached for clean blobs, fresh for dirty ones).
+    // Assemble the table: captured blobs re-encode; everything else is
+    // served from its cached encoded entry (encoded lazily on first use),
+    // so assembly is O(captured + concatenation).
     let (old_table, table_extent) = {
         let mut state = ready.state.lock();
         state.meta_dirty = false;
+
+        // Encodings embed partition indexes: a changed partition LIST
+        // invalidates every cached encoding.
+        if state.encoded_epoch != state.partition_epoch {
+            state.encoded.clear();
+            state.encoded_epoch = state.partition_epoch;
+        }
 
         let partitions: Vec<String> = state.partitions.keys().cloned().collect();
         let pindex = |p: &str, partitions: &[String]| {
@@ -244,18 +297,30 @@ async fn take_snapshot<S: crate::Storage>(ready: &Ready<S>) -> Result<Snapshot, 
                 .expect("known partition") as u32
         };
 
-        let mut blobs: Vec<Entry> = state.dormant.values().cloned().collect();
+        // Fresh encodings for captured blobs.
         for (blob, entry) in &mut committed {
             entry.partition = pindex(&blob.partition, &partitions);
-            blobs.push(entry.clone());
+            state.encoded.insert(entry.id, Bytes::from(entry.encode()));
         }
-        for (id, core) in &state.open {
-            if committed.iter().any(|(b, _)| b.id == *id) {
+        // Cache misses among served blobs (first commit after recovery or
+        // an epoch change).
+        let mut missing: Vec<(u64, Bytes)> = Vec::new();
+        for (&id, (partition, entry)) in &state.dormant {
+            if state.encoded.contains_key(&id) {
                 continue;
             }
-            // Clean open blob: its cached committed entry (set by the last
-            // commit that covered it), or a fresh empty entry (created but
-            // never written).
+            let mut entry = entry.clone();
+            entry.partition = pindex(partition, &partitions);
+            missing.push((id, Bytes::from(entry.encode())));
+        }
+        for (&id, core) in &state.open {
+            if state.encoded.contains_key(&id) {
+                continue;
+            }
+            // Served open blob: its cached committed entry (set by the last
+            // commit that captured it), or a fresh empty entry (created but
+            // never captured). Never derived from live state, which may
+            // hold uncommitted writes.
             let inner = core.inner.lock();
             if inner.removed {
                 continue;
@@ -265,26 +330,32 @@ async fn take_snapshot<S: crate::Storage>(ready: &Ready<S>) -> Result<Snapshot, 
                 partition: 0,
                 name: core.name.clone(),
                 version: core.version,
-                size: inner.size,
+                size: 0,
                 runs: Vec::new(),
                 checksums: Vec::new(),
                 tail_crc: 0,
                 shadow: None,
             });
             entry.partition = pindex(&core.partition, &partitions);
-            blobs.push(entry);
+            missing.push((id, Bytes::from(entry.encode())));
         }
-        blobs.sort_by_key(|e| e.id);
+        for (id, bytes) in missing {
+            state.encoded.insert(id, bytes);
+        }
         manifest.sort_unstable();
+        debug_assert_eq!(
+            state.encoded.len(),
+            state.dormant.len()
+                + state
+                    .open
+                    .values()
+                    .filter(|core| !core.inner.lock().removed)
+                    .count(),
+            "encoded-entry cache out of sync with the namespace"
+        );
 
-        let table = Table {
-            seq,
-            next_id: state.next_id,
-            partitions,
-            blobs,
-            manifest,
-        };
-        let bytes = table.encode();
+        let entries: Vec<Bytes> = state.encoded.values().cloned().collect();
+        let bytes = Table::assemble(seq, state.next_id, &partitions, entries, &manifest);
         let extent = state.alloc.allocate(block_align(bytes.len() as u64));
         let superblock_offset = Superblock::slot_offset(1 - state.sacred_slot);
         let sb = Superblock {
@@ -309,6 +380,7 @@ async fn take_snapshot<S: crate::Storage>(ready: &Ready<S>) -> Result<Snapshot, 
         table_extent,
         writes,
         committed,
+        capture,
         old_table,
     })
 }
@@ -323,6 +395,16 @@ fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
         state.defer_free(old, seq, None);
     }
     state.table_extent = Some(snapshot.table_extent);
+    // Applied-batch groups covered by this capture are committed. Capture
+    // expansion guarantees all-or-nothing coverage (never-split).
+    state.groups.retain(|group| {
+        let covered = group.iter().any(|id| snapshot.capture.contains(id));
+        debug_assert!(
+            !covered || group.iter().all(|id| snapshot.capture.contains(id)),
+            "commit split an applied batch group"
+        );
+        !covered
+    });
     state.apply_frees();
     drop(state);
 

@@ -323,7 +323,7 @@ pub(super) async fn recover<S: crate::Storage>(
             meta.push(extent);
         }
         committed_meta.insert(entry.id, meta);
-        dormant.insert(entry.id, entry.clone());
+        dormant.insert(entry.id, (partition.clone(), entry.clone()));
     }
 
     let state = State {
@@ -345,6 +345,10 @@ pub(super) async fn recover<S: crate::Storage>(
         next_id: table.next_id,
         dirty: Default::default(),
         meta_dirty: false,
+        groups: Vec::new(),
+        encoded: Default::default(),
+        partition_epoch: 0,
+        encoded_epoch: 0,
         provisioned: len,
     };
 
@@ -408,6 +412,10 @@ async fn init_fresh<S: crate::Storage>(
         next_id: 0,
         dirty: Default::default(),
         meta_dirty: false,
+        groups: Vec::new(),
+        encoded: Default::default(),
+        partition_epoch: 0,
+        encoded_epoch: 0,
         provisioned: 2 * BLOCK + block_align(bytes.len() as u64),
     };
     Ok(Ready {

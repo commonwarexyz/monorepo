@@ -953,6 +953,37 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         })
     }
 
+    /// [Self::sync], staged with `batch` instead of synced directly: the
+    /// oversized journals and the table become durable when the batch is
+    /// applied, and the returned [Checkpoint] describes exactly that state.
+    pub async fn sync_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        batch: &mut T,
+    ) -> Result<Checkpoint, Error> {
+        self.oversized
+            .sync_into(&self.modified_sections, batch)
+            .await?;
+        self.modified_sections.clear();
+
+        if self.should_resize() && self.resize_progress.is_none() {
+            self.start_resize().await?;
+        }
+        if self.resize_progress.is_some() {
+            self.advance_resize().await?;
+        }
+
+        // Table entries are written directly to the blob; stage its
+        // durability with the batch.
+        batch.sync(&self.table);
+
+        let oversized_size = self.oversized.size(self.current_section)?;
+        Ok(Checkpoint {
+            section: self.current_section,
+            oversized_size,
+            table_size: self.table_size,
+        })
+    }
+
     /// Close the [Freezer] and return a [Checkpoint] for recovery.
     pub async fn close(mut self) -> Result<Checkpoint, Error> {
         // If we're mid-resize, complete it

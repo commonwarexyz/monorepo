@@ -1,15 +1,17 @@
 //! A small durable record that recovery reads before trusting anything on disk.
 //!
 //! A journal's contents are recovered from its blobs: blob indexes give positions and blob
-//! lengths give item counts. The [Checkpoint] records the two facts that blob state alone
-//! cannot provide:
+//! lengths give item counts. The [Checkpoint] records the one fact that blob state alone
+//! cannot provide: the pruning boundary, when it cannot be derived from the oldest blob —
+//! either because it falls mid-blob (from
+//! [Journal::init_at_size](super::fixed::Journal::init_at_size)) or because a clear removed
+//! every blob and the new tail has not been recreated yet.
 //!
-//! - The pruning boundary, when it falls mid-blob (from
-//!   [Journal::init_at_size](super::fixed::Journal::init_at_size)): recovery needs the exact
-//!   position where the oldest blob's items begin.
-//! - The clear target, while a clear/reset is in progress: the target is recorded before any
-//!   blob is deleted, so a crash mid-clear is finished on reopen instead of being misread as
-//!   corruption.
+//! A clear (reset) writes the boundary record in the SAME batch as the blob removals, so on
+//! atomic backends the whole reset is one old-state-or-new-state transition and no staged
+//! intent is needed. On per-blob backends the batch applies sequentially, so a crash mid-clear
+//! can leave partial state; those backends are not crash-safe for this format (torn-write
+//! immunity and clear atomicity both come from the backend).
 //!
 //! # Format
 //!
@@ -23,12 +25,12 @@
 //!
 //! [Checkpoint] is a passive store; the journal upholds these by ordering its calls:
 //!
-//! - The boundary advances only after the blob state it describes is durable.
-//! - A clear target is recorded before any blob is deleted.
+//! - The boundary advances only after the blob state it describes is durable (or in the same
+//!   batch as it).
 
 use crate::{journal::Error, Context};
 use commonware_codec::{DecodeExt as _, Encode as _, EncodeSize, Read, ReadExt as _, Write};
-use commonware_runtime::{Blob as _, Buf, BufMut};
+use commonware_runtime::{Blob as _, Buf, BufMut, WriteBatch as _};
 
 /// Name of the blob holding the encoded record.
 const BLOB_NAME: &[u8] = b"checkpoint";
@@ -36,24 +38,22 @@ const BLOB_NAME: &[u8] = b"checkpoint";
 /// The durable contents of a checkpoint.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 struct Record {
-    /// The mid-blob pruning boundary, if any. Absent when the boundary is blob-aligned (it is
-    /// then derived from the oldest blob).
+    /// The pruning boundary, when blob state cannot derive it. Kept while the boundary is
+    /// mid-blob; also written (possibly blob-aligned) by a clear, whose batch removes every
+    /// blob. A blob-aligned hint is dropped by the next persist once the recreated blob state
+    /// derives it.
     boundary_hint: Option<u64>,
-
-    /// The target of an in-progress clear, if one was staged.
-    clear_target: Option<u64>,
 }
 
 impl Write for Record {
     fn write(&self, buf: &mut impl BufMut) {
         self.boundary_hint.write(buf);
-        self.clear_target.write(buf);
     }
 }
 
 impl EncodeSize for Record {
     fn encode_size(&self) -> usize {
-        self.boundary_hint.encode_size() + self.clear_target.encode_size()
+        self.boundary_hint.encode_size()
     }
 }
 
@@ -63,7 +63,6 @@ impl Read for Record {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             boundary_hint: Option::<u64>::read(buf)?,
-            clear_target: Option::<u64>::read(buf)?,
         })
     }
 }
@@ -104,14 +103,9 @@ impl<E: Context> Checkpoint<E> {
         })
     }
 
-    /// The recorded mid-blob pruning boundary, if any.
+    /// The recorded pruning boundary, if any.
     pub(super) const fn boundary_hint(&self) -> Option<u64> {
         self.record.boundary_hint
-    }
-
-    /// The target of an in-progress clear, if one was staged.
-    pub(super) const fn clear_target(&self) -> Option<u64> {
-        self.record.clear_target
     }
 
     /// Rewrite the record wholesale and make it durable.
@@ -130,6 +124,23 @@ impl<E: Context> Checkpoint<E> {
         Ok(())
     }
 
+    /// Stage a wholesale record rewrite with `batch` (durable when the
+    /// batch is applied, atomically with everything else it stages on
+    /// atomic backends).
+    async fn write_into(&mut self, record: Record, batch: &mut E::Batch) -> Result<(), Error> {
+        let bytes = record.encode();
+        batch
+            .resize(&self.blob, bytes.len() as u64)
+            .await
+            .map_err(Error::Runtime)?;
+        batch
+            .write_at(&self.blob, 0, bytes)
+            .await
+            .map_err(Error::Runtime)?;
+        self.record = record;
+        Ok(())
+    }
+
     /// Durably record the boundary, writing only if it changed.
     ///
     /// A blob-aligned boundary is derived from the oldest blob, so the hint is only kept while
@@ -140,41 +151,42 @@ impl<E: Context> Checkpoint<E> {
         boundary: u64,
     ) -> Result<(), Error> {
         let boundary_hint = (!boundary.is_multiple_of(items_per_blob)).then_some(boundary);
-        let record = Record {
-            boundary_hint,
-            ..self.record
-        };
+        let record = Record { boundary_hint };
         if record != self.record {
             self.write(record).await?;
         }
         Ok(())
     }
 
-    /// Durably record the intent to clear to `target`.
-    pub(super) async fn stage_clear(&mut self, target: u64) -> Result<(), Error> {
-        let record = Record {
-            clear_target: Some(target),
-            ..self.record
-        };
-        if record != self.record {
-            self.write(record).await?;
-        }
-        Ok(())
-    }
-
-    /// Durably complete a clear to `target`: drop the intent and record `target` as the
-    /// boundary.
-    pub(super) async fn finish_clear(
+    /// [Self::persist], staged with `batch` instead of written durably.
+    pub(super) async fn persist_into(
         &mut self,
         items_per_blob: u64,
+        boundary: u64,
+        batch: &mut E::Batch,
+    ) -> Result<(), Error> {
+        let boundary_hint = (!boundary.is_multiple_of(items_per_blob)).then_some(boundary);
+        let record = Record { boundary_hint };
+        if record != self.record {
+            self.write_into(record, batch).await?;
+        }
+        Ok(())
+    }
+
+    /// Stage the cleared-boundary record with `batch`: the hint is written even when
+    /// blob-aligned, because the cleared journal has no blobs to derive the boundary from
+    /// until its tail is recreated on the next open.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn clear_into(
+        &mut self,
         target: u64,
+        batch: &mut E::Batch,
     ) -> Result<(), Error> {
         let record = Record {
-            boundary_hint: (!target.is_multiple_of(items_per_blob)).then_some(target),
-            clear_target: None,
+            boundary_hint: Some(target),
         };
         if record != self.record {
-            self.write(record).await?;
+            self.write_into(record, batch).await?;
         }
         Ok(())
     }
@@ -195,15 +207,14 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
-    /// Direct-injection helpers used by tests (here and in the fixed journal) to plant states
-    /// the production API never produces: a stray boundary hint or clear intent, or an
-    /// undecodable record.
+    /// Direct-injection helpers used by tests (here and in the fixed and variable journals)
+    /// to plant states the production API only produces mid-crash-window: a boundary hint, or
+    /// an undecodable record.
     impl<E: Context> Checkpoint<E> {
-        /// Set and persist the mid-blob pruning boundary directly.
+        /// Set and persist the pruning boundary directly.
         pub(crate) async fn set_boundary_hint(&mut self, boundary: u64) -> Result<(), Error> {
             let record = Record {
                 boundary_hint: Some(boundary),
-                ..self.record
             };
             self.write(record).await
         }
@@ -236,7 +247,6 @@ mod tests {
             }
             let checkpoint = Checkpoint::open(context.child("b"), "rt").await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), Some(13));
-            assert_eq!(checkpoint.clear_target(), None);
         });
     }
 
@@ -258,27 +268,28 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_clear_lifecycle_survives_crash() {
+    fn test_clear_records_boundary_atomically() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            use commonware_runtime::{Batchable as _, WriteBatch as _};
             {
                 let mut checkpoint = Checkpoint::open(context.child("a"), "clear").await.unwrap();
                 checkpoint.persist(10, 13).await.unwrap();
-                // Staging records the intent alongside the existing boundary.
-                checkpoint.stage_clear(20).await.unwrap();
-                assert_eq!(checkpoint.clear_target(), Some(20));
-                assert_eq!(checkpoint.boundary_hint(), Some(13));
+                // A clear stages the target as the boundary — even blob-aligned,
+                // since the cleared journal has no blobs to derive it from.
+                let mut batch = context.batch().await.unwrap();
+                checkpoint.clear_into(20, &mut batch).await.unwrap();
+                batch.apply_sync().await.unwrap();
+                assert_eq!(checkpoint.boundary_hint(), Some(20));
             }
-            // A crash after staging leaves the intent durable.
             {
                 let mut checkpoint = Checkpoint::open(context.child("b"), "clear").await.unwrap();
-                assert_eq!(checkpoint.clear_target(), Some(20));
-                // Completing drops the intent and records the target as the boundary.
-                checkpoint.finish_clear(10, 20).await.unwrap();
+                assert_eq!(checkpoint.boundary_hint(), Some(20));
+                // Once blob state derives an aligned boundary again, persist
+                // drops the hint.
+                checkpoint.persist(10, 20).await.unwrap();
             }
             let checkpoint = Checkpoint::open(context.child("c"), "clear").await.unwrap();
-            assert_eq!(checkpoint.clear_target(), None);
-            // 20 is blob-aligned, so no hint is retained.
             assert_eq!(checkpoint.boundary_hint(), None);
         });
     }

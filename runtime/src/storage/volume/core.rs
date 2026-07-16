@@ -26,6 +26,7 @@ use super::{
     BLOCK,
 };
 use crate::{Blob as _, BufferPool, Error, IoBuf};
+use bytes::Bytes;
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
 use commonware_utils::sync::{AsyncMutex, Mutex};
@@ -79,10 +80,15 @@ pub(super) struct BlobInner {
     /// Durable shadow block from the last commit covering this blob.
     pub shadow: Option<u64>,
     /// The entry the last confirmed commit wrote for this blob (None until
-    /// first committed with content). Used verbatim for clean blobs at
-    /// table assembly — never derived from live state, which may already
-    /// contain post-snapshot writes.
+    /// first committed with content). Used verbatim for blobs a commit does
+    /// not capture — never derived from live state, which may already
+    /// contain uncommitted writes.
     pub committed_entry: Option<Entry>,
+    /// Extents dropped by uncommitted state changes (COW, resize-down),
+    /// released once a commit CAPTURING this blob confirms. Freeing at the
+    /// next commit would recycle extents that commit's table (serving this
+    /// blob's cached committed entry) still references.
+    pub pending_frees: Vec<Extent>,
     /// Unlinked from the namespace (handles may still read).
     pub removed: bool,
 }
@@ -127,9 +133,10 @@ pub(super) struct State {
     pub open: BTreeMap<u64, Arc<BlobCore>>,
     /// Handle count per open blob id.
     pub handles: BTreeMap<u64, usize>,
-    /// Committed entries for blobs NOT opened this run, served verbatim into
-    /// every table and hydrated into `open` on first open.
-    pub dormant: BTreeMap<u64, Entry>,
+    /// Committed entries for blobs NOT opened this run (with their
+    /// partition names), served verbatim into every table and hydrated into
+    /// `open` on first open.
+    pub dormant: BTreeMap<u64, (String, Entry)>,
     pub alloc: super::alloc::Allocator,
     /// (extent, free once this seq confirms, optional removed-blob gate).
     pub pending_free: Vec<(Extent, u64, Option<u64>)>,
@@ -152,6 +159,19 @@ pub(super) struct State {
     pub dirty: BTreeSet<u64>,
     /// Namespace changed (create/remove) since the last commit.
     pub meta_dirty: bool,
+    /// Applied-but-uncommitted batch groups: disjoint blob-id sets, merged
+    /// when batches share blobs, cleared when a commit captures them. A
+    /// commit's capture set is expanded across these (never-split).
+    pub groups: Vec<BTreeSet<u64>>,
+    /// Cached encoded table entries by blob id, so table assembly re-encodes
+    /// only captured blobs. Invalidated per blob on capture/removal and
+    /// wholesale when the partition list changes (encodings embed partition
+    /// indexes).
+    pub encoded: BTreeMap<u64, Bytes>,
+    /// Bumped whenever the partition LIST changes (not its contents).
+    pub partition_epoch: u64,
+    /// `partition_epoch` the `encoded` cache was built against.
+    pub encoded_epoch: u64,
     /// Bytes of the volume file known to exist (growth high-water mark).
     pub provisioned: u64,
 }
@@ -161,6 +181,35 @@ impl State {
     /// blobs' extents, once the last handle drops).
     pub fn defer_free(&mut self, extent: Extent, free_at: u64, gate: Option<u64>) {
         self.pending_free.push((extent, free_at, gate));
+    }
+
+    /// Expand `roots` across applied-batch groups: the capture set of a
+    /// commit rooted at these blobs (never-split rule).
+    pub fn expand_capture(&self, roots: &[u64]) -> BTreeSet<u64> {
+        let mut capture: BTreeSet<u64> = roots.iter().copied().collect();
+        for group in &self.groups {
+            if group.iter().any(|id| capture.contains(id)) {
+                capture.extend(group.iter().copied());
+            }
+        }
+        capture
+    }
+
+    /// Merge `ids` into the applied-batch groups (shared blobs coalesce).
+    pub fn merge_group(&mut self, ids: impl IntoIterator<Item = u64>) {
+        let mut merged: BTreeSet<u64> = ids.into_iter().collect();
+        if merged.is_empty() {
+            return;
+        }
+        self.groups.retain(|group| {
+            if group.iter().any(|id| merged.contains(id)) {
+                merged.extend(group.iter().copied());
+                false
+            } else {
+                true
+            }
+        });
+        self.groups.push(merged);
     }
 
     /// Apply deferred frees eligible under the current confirmed seq.
@@ -226,6 +275,95 @@ pub(super) async fn ensure_provisioned<S: crate::Storage>(
     Ok(())
 }
 
+/// A run staged by a batch: the run it will publish at apply, plus whether
+/// its extent is batch-private (allocated by the batch, invisible to every
+/// snapshot and table, hence always writable in place).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct StagedRun {
+    pub meta: RunMeta,
+    pub private: bool,
+}
+
+/// A batch's staged overlay for one blob: run splices, size, CRCs, and tail
+/// state that publish only at apply. Invisible to readers and commits.
+///
+/// While an overlay holds staged content, the batch is the blob's ONE
+/// writer (the [`crate::Blob`] contract's writer exclusivity applied to the
+/// batch as a deferred writer): a direct write into the staged region would
+/// rewrite bytes whose staged expected content the overlay already recorded
+/// — found by the model (`storage::volume::model`).
+#[derive(Debug, Default)]
+pub(super) struct StagedBlob {
+    /// Staged logical size.
+    pub size: u64,
+    /// Overlay runs keyed by logical start (replacing base runs at the same
+    /// key). Merged with the base runs, coverage stays non-overlapping.
+    pub runs: BTreeMap<u64, StagedRun>,
+    /// Base run keys superseded by the overlay (splices, staged shrink).
+    pub removed: BTreeSet<u64>,
+    /// Staged chunk CRCs.
+    pub crcs: BTreeMap<u64, u32>,
+    /// Staged frontier span: (chunk, bytes of its written span).
+    pub tail: Option<(u64, Vec<u8>)>,
+    /// Base extents replaced by staged COW/shrink (pending-freed at apply).
+    pub replaced: Vec<Extent>,
+    /// Extents allocated by the batch, still referenced by the overlay
+    /// (freed if the batch is dropped unapplied).
+    pub fresh: Vec<Extent>,
+    /// Whether apply must bump the read generation (relocation or shrink).
+    pub relocated: bool,
+}
+
+impl StagedBlob {
+    /// Start an overlay over a blob whose published size is `size`.
+    pub fn new(size: u64) -> Self {
+        Self {
+            size,
+            ..Default::default()
+        }
+    }
+
+    /// The merged (overlay-over-base) run covering `at`:
+    /// (logical start, run, private).
+    pub fn covering(&self, inner: &BlobInner, at: u64) -> Option<(u64, RunMeta, bool)> {
+        if let Some((&l, sr)) = self.runs.range(..=at).next_back() {
+            if at < l + sr.meta.len {
+                return Some((l, sr.meta, sr.private));
+            }
+        }
+        inner
+            .runs
+            .range(..=at)
+            .next_back()
+            .filter(|(l, r)| {
+                !self.removed.contains(l) && !self.runs.contains_key(l) && at < **l + r.len
+            })
+            .map(|(&l, r)| (l, *r, false))
+    }
+
+    /// The first merged backed logical start at or after `from`.
+    pub fn next_backed(&self, inner: &BlobInner, from: u64) -> Option<u64> {
+        let overlay = self.runs.range(from..).next().map(|(&l, _)| l);
+        let base = inner
+            .runs
+            .range(from..)
+            .find(|(l, _)| !self.removed.contains(l) && !self.runs.contains_key(l))
+            .map(|(&l, _)| l);
+        match (overlay, base) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// The merged backed span of `chunk`: (physical base, span len).
+    pub fn chunk_span(&self, inner: &BlobInner, chunk: u64) -> Option<(u64, u64)> {
+        let chunk_start = chunk * BLOCK;
+        let (logical, run, _) = self.covering(inner, chunk_start)?;
+        let span = (logical + run.len - chunk_start).min(BLOCK);
+        Some((run.physical + (chunk_start - logical), span))
+    }
+}
+
 /// One planned stretch: a single inner write plus its state updates,
 /// published only after the write completes (a failed write publishes
 /// nothing; its bytes land in space no table references).
@@ -244,6 +382,11 @@ struct Stretch {
     last_span: (u64, Vec<u8>),
     /// COW: the replaced chunk's block to defer-free (+ generation bump).
     replaced: Option<Extent>,
+    /// Extent allocated for this stretch (Fresh/COW), for staged-overlay
+    /// bookkeeping. Unused by the publish path (the run records it).
+    allocated: Option<Extent>,
+    /// Staged mode: whether the written extent is batch-private.
+    private: bool,
 }
 
 /// Write `data` at `offset`. The blob's `write_lock` MUST be held.
@@ -263,7 +406,7 @@ pub(super) async fn write_locked<S: crate::Storage>(
 
     let mut cursor = offset;
     while cursor < end {
-        let stretch = plan_stretch(ready, blob, cursor, end, &data, offset).await?;
+        let stretch = plan_stretch(ready, blob, None, cursor, end, &data, offset).await?;
         ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
         ready
             .file
@@ -283,11 +426,53 @@ pub(super) async fn write_locked<S: crate::Storage>(
     Ok(())
 }
 
+/// Stage `data` at `offset` into a batch overlay: the same planning and
+/// write-through as [`write_locked`], but every state change accumulates in
+/// `staged` instead of the blob's published state. The blob's `write_lock`
+/// MUST be held.
+pub(super) async fn stage_write<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+    staged: &mut StagedBlob,
+    offset: u64,
+    data: IoBuf,
+) -> Result<(), Error> {
+    ready.check_poisoned()?;
+    if data.is_empty() {
+        return Ok(());
+    }
+    let end = offset
+        .checked_add(data.len() as u64)
+        .ok_or(Error::OffsetOverflow)?;
+
+    let mut cursor = offset;
+    while cursor < end {
+        let stretch = plan_stretch(ready, blob, Some(staged), cursor, end, &data, offset).await?;
+        ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
+        ready
+            .file
+            .write_at(stretch.physical, IoBuf::copy_from_slice(&stretch.bytes))
+            .await?;
+        cursor = stretch.end;
+        let inner = blob.inner.lock();
+        publish_staged(&inner, staged, stretch);
+    }
+    staged.size = staged.size.max(end);
+    Ok(())
+}
+
 /// Plan the next stretch starting at `cursor` (performing any COW/CRC
 /// read-backs needed to make the plan self-contained).
+///
+/// With `staged` set, planning runs against the merged overlay-over-base
+/// view and follows the batch placement rule: batch-private extents are
+/// writable in place; published extents only at or beyond BOTH the
+/// published size and the freeze boundary (bytes no snapshot can capture);
+/// everything else relocates to a fresh extent published only at apply.
 async fn plan_stretch<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
+    staged: Option<&StagedBlob>,
     cursor: u64,
     end: u64,
     data: &IoBuf,
@@ -303,6 +488,7 @@ async fn plan_stretch<S: crate::Storage>(
             run_logical: u64,
             run: RunMeta,
             fill_from: u64,
+            private: bool,
         },
         /// Fresh extent for `[chunk_base, stretch_end)` (zero-lead below the
         /// write; the chunk base is unbacked).
@@ -312,7 +498,8 @@ async fn plan_stretch<S: crate::Storage>(
             chunk_base: u64,
             seq: u64,
         },
-        /// The cursor's chunk is frozen: COW its backed span.
+        /// The cursor's chunk may not be written in place: COW its backed
+        /// span.
         Cow {
             span_physical: u64,
             span_len: u64,
@@ -327,13 +514,37 @@ async fn plan_stretch<S: crate::Storage>(
         let chunk = chunk_of(cursor);
         let chunk_start = chunk * BLOCK;
 
-        match inner.covering(chunk_start) {
-            Some((run_logical, run)) => {
+        // Merged coverage and placement: the base view for published
+        // writes, the overlay-over-base view for staged writes.
+        let covering = staged.map_or_else(
+            || {
+                inner
+                    .covering(chunk_start)
+                    .map(|(logical, run)| (logical, run, false))
+            },
+            |st| st.covering(&inner, chunk_start),
+        );
+        match covering {
+            Some((run_logical, run, private)) => {
                 let backed_end = run_logical + run.len;
-                let writable = run.born > state.snapshot_seq || cursor >= inner.freeze_size;
+                let writable = match staged {
+                    // Base freeze rule: young extents are exempt; otherwise
+                    // only bytes at or beyond the freeze boundary.
+                    None => run.born > state.snapshot_seq || cursor >= inner.freeze_size,
+                    // Batch placement rule: private extents always; a
+                    // published extent only for bytes no snapshot can
+                    // capture (at or beyond BOTH the published size and the
+                    // freeze boundary; the born exemption does not apply —
+                    // young extents are still published to readers).
+                    Some(_) => private || cursor >= inner.size.max(inner.freeze_size),
+                };
                 if !writable {
-                    let (span_physical, span_len) =
-                        inner.chunk_span(chunk).expect("covered chunk has a span");
+                    let (span_physical, span_len) = staged
+                        .map_or_else(
+                            || inner.chunk_span(chunk),
+                            |st| st.chunk_span(&inner, chunk),
+                        )
+                        .expect("covered chunk has a span");
                     let extent = state.alloc.allocate(BLOCK);
                     Plan::Cow {
                         span_physical,
@@ -354,6 +565,7 @@ async fn plan_stretch<S: crate::Storage>(
                         run_logical,
                         run,
                         fill_from,
+                        private,
                     }
                 }
             }
@@ -361,11 +573,11 @@ async fn plan_stretch<S: crate::Storage>(
                 // Unbacked chunk: fresh extent from this chunk's base to the
                 // end of the write (or the next backed run, which must not
                 // be overlapped).
-                let next_backed = inner
-                    .runs
-                    .range(chunk_start..)
-                    .next()
-                    .map(|(&l, _)| l)
+                let next_backed = staged
+                    .map_or_else(
+                        || inner.runs.range(chunk_start..).next().map(|(&l, _)| l),
+                        |st| st.next_backed(&inner, chunk_start),
+                    )
                     .unwrap_or(u64::MAX);
                 let stretch_end = end.min(next_backed);
                 let len = block_align(stretch_end - chunk_start);
@@ -386,6 +598,7 @@ async fn plan_stretch<S: crate::Storage>(
             run_logical,
             run,
             fill_from,
+            private,
         } => {
             // Assemble the write: zeros over the gap, then the data slice.
             let d0 = (cursor - data_base) as usize;
@@ -401,7 +614,8 @@ async fn plan_stretch<S: crate::Storage>(
             let last_chunk = chunk_of(stretch_end - 1);
             let base = first_chunk * BLOCK;
 
-            let prefix = read_span_prefix(ready, blob, &run, run_logical, base, fill_from).await?;
+            let prefix =
+                read_span_prefix(ready, blob, staged, &run, run_logical, base, fill_from).await?;
             let span_end = (run_logical + run.len).max(stretch_end);
             let chunk_cap = (last_chunk + 1) * BLOCK;
             let suffix_end = span_end.min(chunk_cap);
@@ -449,6 +663,8 @@ async fn plan_stretch<S: crate::Storage>(
                 crcs,
                 last_span,
                 replaced: None,
+                allocated: None,
+                private,
             })
         }
         Plan::Fresh {
@@ -491,6 +707,8 @@ async fn plan_stretch<S: crate::Storage>(
                 crcs,
                 last_span,
                 replaced: None,
+                allocated: Some(extent),
+                private: true,
             })
         }
         Plan::Cow {
@@ -539,17 +757,20 @@ async fn plan_stretch<S: crate::Storage>(
                     offset: span_physical - (span_physical % BLOCK),
                     len: BLOCK,
                 }),
+                allocated: Some(extent),
+                private: true,
             })
         }
     }
 }
 
 /// Source the first affected chunk's committed prefix `[base, fill_from)`:
-/// from the in-memory tail buffer when it describes this chunk, otherwise a
+/// from an in-memory tail buffer when one describes this chunk, otherwise a
 /// read-back (rare: mid-run in-place overwrites of unfrozen chunks).
 async fn read_span_prefix<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
+    staged: Option<&StagedBlob>,
     run: &RunMeta,
     run_logical: u64,
     base: u64,
@@ -559,10 +780,30 @@ async fn read_span_prefix<S: crate::Storage>(
     if prefix_len == 0 {
         return Ok(Vec::new());
     }
+    let chunk = chunk_of(base);
     {
         let inner = blob.inner.lock();
-        if inner.tail_chunk == chunk_of(base) && inner.tail.len() >= prefix_len {
-            return Ok(inner.tail[..prefix_len].to_vec());
+        match staged {
+            Some(st) => {
+                // The staged tail wins for chunks the batch touched; the
+                // published tail is valid only for untouched chunks.
+                if let Some((tail_chunk, tail)) = &st.tail {
+                    if *tail_chunk == chunk && tail.len() >= prefix_len {
+                        return Ok(tail[..prefix_len].to_vec());
+                    }
+                }
+                if !st.crcs.contains_key(&chunk)
+                    && inner.tail_chunk == chunk
+                    && inner.tail.len() >= prefix_len
+                {
+                    return Ok(inner.tail[..prefix_len].to_vec());
+                }
+            }
+            None => {
+                if inner.tail_chunk == chunk && inner.tail.len() >= prefix_len {
+                    return Ok(inner.tail[..prefix_len].to_vec());
+                }
+            }
         }
     }
     let phys = run.physical + (base - run_logical);
@@ -582,9 +823,8 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
     let (logical, run) = stretch.run;
 
     if let Some(replaced) = stretch.replaced {
-        let seq = state.seq;
         cow_remap(&mut inner, logical, run);
-        state.defer_free(replaced, seq, None);
+        inner.pending_frees.push(replaced);
         inner.generation += 1;
     } else {
         match inner.runs.get_mut(&logical) {
@@ -608,6 +848,95 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
         inner.tail = span;
     }
     state.dirty.insert(blob.id);
+}
+
+/// Record a completed stretch in a batch overlay. Caller holds the blob
+/// write lock.
+fn publish_staged(inner: &BlobInner, staged: &mut StagedBlob, stretch: Stretch) {
+    let (logical, run) = stretch.run;
+    if let Some(extent) = stretch.allocated {
+        staged.fresh.push(extent);
+    }
+    if let Some(replaced) = stretch.replaced {
+        cow_remap_staged(inner, staged, logical, run);
+        staged.replaced.push(replaced);
+        staged.relocated = true;
+    } else {
+        match staged.runs.get_mut(&logical) {
+            Some(existing) if existing.meta.physical == run.physical => {
+                existing.meta.len = existing.meta.len.max(run.len);
+            }
+            _ => {
+                staged.runs.insert(
+                    logical,
+                    StagedRun {
+                        meta: run,
+                        private: stretch.private,
+                    },
+                );
+            }
+        }
+    }
+
+    for (chunk, crc) in stretch.crcs {
+        staged.crcs.insert(chunk, crc);
+    }
+    // Refresh the staged tail if this stretch reaches the staged frontier.
+    let (chunk, span) = stretch.last_span;
+    let tail_chunk = staged.tail.as_ref().map(|(c, _)| *c);
+    if stretch.end >= staged.size || chunk >= tail_chunk.unwrap_or(inner.tail_chunk) {
+        staged.tail = Some((chunk, span));
+    }
+}
+
+/// Remap one staged-COW'd chunk: split the merged covering run around it in
+/// the overlay (mirrors [`cow_remap`] without touching published state).
+fn cow_remap_staged(inner: &BlobInner, staged: &mut StagedBlob, chunk_start: u64, fresh: RunMeta) {
+    let (old_logical, old_run, old_private) = staged
+        .covering(inner, chunk_start)
+        .expect("COW of unbacked chunk");
+    debug_assert!(!old_private, "private chunks are written in place");
+    let old_end = old_logical + old_run.len;
+    let chunk_end = chunk_start + BLOCK;
+
+    // Detach the source run from the merged view.
+    if staged.runs.remove(&old_logical).is_none() {
+        staged.removed.insert(old_logical);
+    }
+    if old_logical < chunk_start {
+        staged.runs.insert(
+            old_logical,
+            StagedRun {
+                meta: RunMeta {
+                    len: chunk_start - old_logical,
+                    capacity: chunk_start - old_logical,
+                    ..old_run
+                },
+                private: old_private,
+            },
+        );
+    }
+    if old_end > chunk_end {
+        staged.runs.insert(
+            chunk_end,
+            StagedRun {
+                meta: RunMeta {
+                    physical: old_run.physical + (chunk_end - old_logical),
+                    len: old_end - chunk_end,
+                    capacity: old_run.capacity.saturating_sub(chunk_end - old_logical),
+                    born: old_run.born,
+                },
+                private: old_private,
+            },
+        );
+    }
+    staged.runs.insert(
+        chunk_start,
+        StagedRun {
+            meta: fresh,
+            private: true,
+        },
+    );
 }
 
 /// Remap one COW'd chunk: split the covering run around it.
@@ -752,23 +1081,20 @@ pub(super) async fn resize_locked<S: crate::Storage>(
     }
 
     // Shrink: drop runs beyond the new size, trim the boundary run, refresh
-    // the boundary chunk's CRC + tail buffer.
+    // the boundary chunk's CRC + tail buffer. Dropped extents are
+    // capture-gated: the confirmed table may still reference them through
+    // this blob's cached committed entry.
     {
         let mut state = ready.state.lock();
         let mut inner = blob.inner.lock();
-        let seq = state.seq;
 
         let dropped: Vec<u64> = inner.runs.range(len..).map(|(&l, _)| l).collect();
         for l in dropped {
             let run = inner.runs.remove(&l).unwrap();
-            state.defer_free(
-                Extent {
-                    offset: run.physical,
-                    len: run.capacity,
-                },
-                seq,
-                None,
-            );
+            inner.pending_frees.push(Extent {
+                offset: run.physical,
+                len: run.capacity,
+            });
         }
         if let Some((l, _)) = inner.covering(len.saturating_sub(1)).filter(|_| len > 0) {
             let run = inner.runs.get_mut(&l).unwrap();
@@ -776,15 +1102,12 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                 run.len = len - l;
                 let keep = block_align(run.len);
                 if run.capacity > keep {
-                    state.defer_free(
-                        Extent {
-                            offset: run.physical + keep,
-                            len: run.capacity - keep,
-                        },
-                        seq,
-                        None,
-                    );
+                    let trimmed = Extent {
+                        offset: run.physical + keep,
+                        len: run.capacity - keep,
+                    };
                     run.capacity = keep;
+                    inner.pending_frees.push(trimmed);
                 }
             }
         }

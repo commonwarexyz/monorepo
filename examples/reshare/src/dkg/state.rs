@@ -27,7 +27,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage,
+    buffer::paged::CacheRef, Batchable, Buf, BufMut, BufferPooler, Clock, Metrics,
 };
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
@@ -179,7 +179,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// the position/epoch confusion that can occur with position-based journals.
 pub struct Storage<E, V, P>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: BufferPooler + Clock + Batchable + Metrics,
     V: Variant,
     P: PublicKey,
 {
@@ -193,7 +193,7 @@ where
 
 impl<E, V, P> Storage<E, V, P>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: BufferPooler + Clock + Batchable + Metrics,
     V: Variant,
     P: PublicKey,
 {
@@ -554,7 +554,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         ack: PlayerAck<C::PublicKey>,
     ) -> Verdict<()>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: BufferPooler + Clock + Batchable + Metrics,
     {
         if !self.unsent.contains_key(&player) {
             return Verdict::Skip;
@@ -636,7 +636,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         priv_msg: DealerPrivMsg,
     ) -> Verdict<PlayerAck<C::PublicKey>>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: BufferPooler + Clock + Batchable + Metrics,
         M: Faults,
     {
         // If we've already generated an ack, return the cached version.

@@ -486,6 +486,14 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
     }
 }
 
+impl<E: Storage + Clone + Send + Sync + 'static> crate::Batchable for DelayedSyncContext<E> {
+    type Batch = crate::storage::sequential::Batch<Self>;
+
+    async fn batch(&self) -> Result<Self::Batch, Error> {
+        Ok(crate::storage::sequential::Batch::new(self.clone()))
+    }
+}
+
 impl<E: Storage> Storage for DelayedSyncContext<E> {
     type Blob = DelayedSyncBlob<E::Blob>;
 
@@ -713,6 +721,14 @@ pub struct SyncFaultContext<E> {
 }
 
 forward_context!(SyncFaultContext, fail_partition);
+
+impl<E: Storage + Clone + Send + Sync + 'static> crate::Batchable for SyncFaultContext<E> {
+    type Batch = crate::storage::sequential::Batch<Self>;
+
+    async fn batch(&self) -> Result<Self::Batch, Error> {
+        Ok(crate::storage::sequential::Batch::new(self.clone()))
+    }
+}
 
 impl<E: Storage> Storage for SyncFaultContext<E> {
     type Blob = SyncFaultBlob<E::Blob>;

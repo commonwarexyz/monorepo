@@ -796,6 +796,14 @@ impl TryRng for Context {
 
 impl TryCryptoRng for Context {}
 
+impl crate::Batchable for Context {
+    type Batch = <Storage as crate::Batchable>::Batch;
+
+    async fn batch(&self) -> Result<Self::Batch, Error> {
+        self.storage.batch().await
+    }
+}
+
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
 

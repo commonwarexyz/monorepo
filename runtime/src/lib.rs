@@ -765,6 +765,97 @@ stability_scope!(BETA {
         fn storage_buffer_pool(&self) -> &BufferPool;
     }
 });
+stability_scope!(BETA {
+    /// A [Storage] that can stage operations spanning multiple blobs and
+    /// apply them as one unit.
+    ///
+    /// This is a capability trait every runtime storage implements, but the
+    /// STRENGTH of the unit is backend-defined:
+    ///
+    /// - The volume backend applies and commits a batch ATOMICALLY: after a
+    ///   crash, either every staged operation is visible or none is, and
+    ///   [WriteBatch::apply_sync] is one commit with one fsync.
+    /// - Plain per-blob backends fall back to a sequential batch that
+    ///   replays the staged operations in order at apply — exactly the
+    ///   behavior of issuing them unbatched, with no cross-blob atomicity.
+    ///
+    /// Structures use ONE code path against this trait: their recovery
+    /// logic must stay correct under the sequential fallback, while the
+    /// volume collapses every crash window between the staged operations.
+    pub trait Batchable: Storage {
+        /// The staged-batch type.
+        type Batch: WriteBatch<Blob = Self::Blob>;
+
+        /// Start an empty batch.
+        fn batch(&self) -> impl Future<Output = Result<Self::Batch, Error>> + Send;
+    }
+
+    /// A set of storage operations staged across blobs and applied as one
+    /// unit (see [Batchable] for the per-backend strength of "one unit").
+    ///
+    /// # Writer exclusivity
+    ///
+    /// A blob with staged batch content has ONE writer — the batch — until
+    /// the batch is applied or dropped. Mutating such a blob outside the
+    /// batch is undefined behavior, exactly like two concurrent writers on
+    /// one blob.
+    ///
+    /// # Dropping
+    ///
+    /// A batch dropped without [WriteBatch::apply] stages nothing: backends
+    /// discard staged state wholesale.
+    pub trait WriteBatch: Send + Sized {
+        /// The blob type operations are staged against.
+        type Blob: Blob;
+
+        /// Stage a write of `bufs` to `blob` at `offset`.
+        ///
+        /// When the bytes reach storage is backend-defined (the volume
+        /// writes through immediately; the sequential fallback writes at
+        /// apply). They are never observable through the blob before
+        /// [Self::apply] and never durable before [Self::apply_sync].
+        fn write_at(
+            &mut self,
+            blob: &Self::Blob,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Stage a resize of `blob` to `len`.
+        fn resize(
+            &mut self,
+            blob: &Self::Blob,
+            len: u64,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Include `blob` in the batch without staging bytes: its
+        /// previously written (unsynced) state becomes durable with
+        /// [Self::apply_sync] — on atomic backends, atomically with the
+        /// rest of the batch. Blobs with staged writes are always included.
+        fn sync(&mut self, blob: &Self::Blob);
+
+        /// Stage a namespace removal (a blob, or a whole partition when
+        /// `name` is `None`), validated when the batch is applied.
+        ///
+        /// Staged removals require [Self::apply_sync]: an un-synced apply
+        /// would let an unrelated commit persist the removal while the
+        /// batch's writes stay uncommitted.
+        fn remove(&mut self, partition: &str, name: Option<&[u8]>);
+
+        /// Apply the staged operations (atomically on atomic backends; in
+        /// staging order otherwise) WITHOUT making them durable.
+        ///
+        /// # Panics
+        ///
+        /// Panics if removals were staged (they require [Self::apply_sync]).
+        fn apply(self) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Apply the staged operations and make every staged blob durable:
+        /// one atomic commit on atomic backends, a sync per staged blob (in
+        /// staging order, possibly more than once) on the fallback.
+        fn apply_sync(self) -> impl Future<Output = Result<(), Error>> + Send;
+    }
+});
 stability_scope!(BETA, cfg(feature = "external") {
     /// Interface that runtimes can implement to constrain the execution latency of a future.
     pub trait Pacer: Clock + Send + Sync + 'static {

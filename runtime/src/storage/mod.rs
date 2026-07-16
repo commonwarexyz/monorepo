@@ -98,6 +98,9 @@ stability_scope!(ALPHA {
     pub mod switch;
     pub mod volume;
 });
+stability_scope!(BETA {
+    pub mod sequential;
+});
 stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
     pub mod iouring;
 });

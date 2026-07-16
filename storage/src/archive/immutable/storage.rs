@@ -10,10 +10,9 @@ use commonware_codec::{
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
-    Blob, Buf, BufferPooler,
+    Blob, Buf, BufferPooler, WriteBatch as _,
 };
 use commonware_utils::{bitmap::BitMap, Array};
-use futures::join;
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -225,20 +224,22 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
     async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
-        // Sync journal and ordinal
-        let (freezer_result, ordinal_result) = join!(self.freezer.sync(), self.ordinal.sync());
-        let checkpoint = freezer_result?;
-        ordinal_result?;
+        // ONE batch stages everything: freezer table writes and journal
+        // appends, ordinal writes, and the commit record. On atomic
+        // backends the whole sync is a single commit with a single fsync;
+        // on the sequential fallback the apply syncs in staging order, so
+        // the record still lands last (the pre-batch ordering).
+        let mut batch = self.context.batch().await?;
+        let checkpoint = self.freezer.sync_into(&mut batch).await?;
+        self.ordinal.sync_into(&mut batch).await?;
 
-        // Publish the commit record with a single sync after the freezer and ordinal
-        // state are durable
         let size = Checkpoint::SIZE + self.sections.encode_size();
         let mut buf = self.context.storage_buffer_pool().alloc(size);
         checkpoint.write(&mut buf);
         self.sections.write(&mut buf);
-        self.commit.write_at(0, buf.freeze()).await?;
-        self.commit.resize(size as u64).await?;
-        self.commit.sync().await?;
+        batch.write_at(&self.commit, 0, buf.freeze()).await?;
+        batch.resize(&self.commit, size as u64).await?;
+        batch.apply_sync().await?;
 
         Ok(())
     }

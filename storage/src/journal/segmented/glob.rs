@@ -131,6 +131,15 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         self.manager.sync(sections).await
     }
 
+    /// Stage the durability of the given `sections` with `batch`.
+    pub async fn sync_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        sections: impl crate::Sections,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.manager.sync_into(sections, batch).await
+    }
+
     /// Start syncing the given `sections` to disk.
     pub async fn start_sync(
         &mut self,

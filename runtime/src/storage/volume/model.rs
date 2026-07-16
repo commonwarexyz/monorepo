@@ -42,6 +42,47 @@
 //! also forbids the in-place tail append after a rewind below a committed
 //! boundary — a hazard found while writing this model.
 //!
+//! # Selective commit
+//!
+//! [`Action::Snapshot`] takes a blob subset: the commit captures only the
+//! dirty blobs in that subset and serves every other blob's table entry
+//! verbatim from its last confirmed capture. Uncaptured dirty state stays
+//! pending (dirty marks, manifest blocks, and content frees are all
+//! deferred to a later commit that captures the blob). Two rules keep this
+//! sound:
+//!
+//! - Content frees are CAPTURE-GATED: an extent dropped by a blob's
+//!   uncommitted state change (overwrite COW, rewind) is released only once
+//!   a commit that CAPTURES the blob confirms. Freeing at the next commit —
+//!   sound under group commit, where every commit captures every dirty
+//!   blob — recycles an extent the confirmed table still references (see
+//!   `mutation_capture_gated_frees_detected`).
+//! - The NEVER-SPLIT rule: a commit that captures one blob of an applied
+//!   batch must capture every blob of it. Applied batches form pending
+//!   atomic groups (merged when they share blobs, cleared when committed)
+//!   and capture sets are expanded across them. A group holding a removed
+//!   blob is captured by every commit, because every commit drops the
+//!   removed entry.
+//!
+//! # Batches
+//!
+//! A batch stages writes across blobs, then publishes them atomically.
+//! Staging writes through to disk immediately, but staged bytes stay
+//! INVISIBLE to snapshots until [`Action::BatchApply`] publishes them:
+//! staged placement lands in place only in space no snapshot can capture
+//! (batch-private extents, or cells at or beyond BOTH the blob's published
+//! size and its freeze boundary — the shared tail block's committed cell
+//! stays shadow-protected exactly as for unbatched appends); staged
+//! overwrites of published cells relocate to fresh extents that no table
+//! references until apply. A batch dropped without apply (or lost to a
+//! crash) leaves only writes to unreferenced space. Apply is blocked while
+//! a commit is in flight (the commit lock), so a snapshot can never observe
+//! a half-applied batch. A blob with staged batch content has ONE writer —
+//! the batch — until apply/drop: a direct write into the staged region
+//! would rewrite bytes whose staged expected content the batch already
+//! recorded (found by this model; it is the Blob contract's writer
+//! exclusivity applied to the batch as a deferred writer).
+//!
 //! # Invariants
 //!
 //! - I1/I2 (durability + snapshot consistency): every recovery adopts a state
@@ -54,6 +95,10 @@
 //!   sync confirms until crash + recovery.
 //! - I5 (re-crash safety): crashes during recovery re-recover to a state
 //!   satisfying I1-I3 against the original baseline.
+//! - I6 (never-split): every attempted commit resolves each applied batch
+//!   entirely or not at all — no snapshot captures one blob of an applied
+//!   batch while leaving another blob's part uncommitted. Combined with I2,
+//!   no recovered state can hold a partial batch.
 //!
 //! Each protocol safeguard can be individually disabled via [`Rules`]; tests
 //! assert the checker FINDS a violation for every disabled safeguard
@@ -240,9 +285,41 @@ struct BlobState {
     shadow: Option<usize>,
     /// Per-cell version counters (deterministic, replay-identical values).
     vers: BTreeMap<u8, u8>,
-    /// Blocks with content changes since the last snapshot.
+    /// Blocks with content changes since the last capture of this blob.
     dirty_blocks: Vec<u8>,
     dirty: bool,
+    /// The entry written by the last confirmed commit that resolved this
+    /// blob, served verbatim when a selective commit does not capture it.
+    committed: Option<Entry>,
+    /// Publish counter, bumped when a batch publishes into this blob.
+    pubseq: u64,
+    /// `pubseq` as of the last confirmed capture (never-split bookkeeping).
+    committed_pubseq: u64,
+    /// Blocks dropped by uncommitted state changes (COW, rewind), released
+    /// once a commit capturing this blob confirms.
+    pending_frees: Vec<usize>,
+}
+
+/// One staged run in a batch overlay.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StagedRun {
+    run: Run,
+    /// The backing block was allocated by the batch (invisible to every
+    /// snapshot and table): always writable in place.
+    private: bool,
+}
+
+/// One blob's staged overlay in an unapplied batch.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StagedSlot {
+    /// Staged logical size (starts at the published size).
+    size: u8,
+    /// Staged run overlay: replaces the published run at the same block.
+    runs: BTreeMap<u8, StagedRun>,
+    /// Blocks allocated by the batch (freed if it is dropped unapplied).
+    fresh: Vec<usize>,
+    /// Published blocks replaced by staged COW (pending-freed at apply).
+    replaced: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -264,6 +341,9 @@ struct InFlight {
     shadows: Vec<(usize, Cell)>,
     /// Blocks this commit stops referencing (freed on confirmation).
     frees: Vec<usize>,
+    /// (slot, pubseq at snapshot) for every slot this commit resolves:
+    /// captured live blobs and dropped (removed) blobs.
+    resolved: Vec<(u8, u64)>,
 }
 
 /// The volume's RAM state (dies with the process).
@@ -282,6 +362,15 @@ struct Volume {
     last_table: usize,
     in_flight: Option<InFlight>,
     poisoned: bool,
+    /// The staged (unapplied) batch, if any. At most one at a time.
+    batch: Option<BTreeMap<u8, StagedSlot>>,
+    /// Applied-but-uncommitted atomic groups: disjoint slot sets, merged
+    /// when batches share slots, cleared when a commit resolves them.
+    groups: Vec<Vec<u8>>,
+    /// Applied-but-uncommitted batches: slot -> Some(pubseq at apply), or
+    /// None once the slot was resolved by removal. Checked at every
+    /// snapshot for the never-split invariant (I6).
+    pending_batches: Vec<BTreeMap<u8, Option<u64>>>,
 }
 
 /// A pure logical view: per slot, (generation, committed cells). Holes and
@@ -314,6 +403,18 @@ struct Rules {
     /// Bind each superblock to the exact table bytes it wrote (the stored
     /// table CRC). Disabling reintroduces recycled-table-block aliasing.
     bind_table: bool,
+    /// Expand every capture set across applied-batch groups (never-split).
+    /// Disabling lets a selective commit persist a partial batch (I6).
+    respect_groups: bool,
+    /// Keep staged batch bytes invisible to snapshots until apply.
+    /// Disabling models a capture that reads staged state: the recorded
+    /// table vouches for bytes the API never published (I2/I3).
+    stage_invisible: bool,
+    /// Gate content frees on a commit that captures the owning blob.
+    /// Disabling frees at the next commit even when that commit did not
+    /// write the blob's new entry, recycling extents the confirmed table
+    /// still references.
+    capture_gated_frees: bool,
 }
 
 const SPEC: Rules = Rules {
@@ -323,7 +424,13 @@ const SPEC: Rules = Rules {
     deferred_frees: true,
     latch_on_failure: true,
     bind_table: true,
+    respect_groups: true,
+    stage_invisible: true,
+    capture_gated_frees: true,
 };
+
+/// Capture mask covering every blob (group-commit behavior).
+const ALL: u8 = (1 << BLOBS) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
@@ -336,11 +443,21 @@ enum Action {
     ResizeUp(u8),
     Remove(u8),
     Recreate(u8),
-    Snapshot,
+    /// Begin a commit capturing the dirty blobs in the mask (expanded
+    /// across applied-batch groups).
+    Snapshot(u8),
     WriteMeta,
     FsyncOk,
     FsyncFail,
     Crash,
+    /// Stage one append into the current batch (starting one if needed).
+    BatchAppend(u8),
+    /// Stage an overwrite of cell 0 into the current batch.
+    BatchOverwrite(u8),
+    /// Atomically publish the staged batch.
+    BatchApply,
+    /// Drop the staged batch without applying it.
+    BatchDrop,
 }
 
 /// Committed-cell coverage of logical block `lblock` for a blob of `size`.
@@ -365,6 +482,9 @@ impl Volume {
             last_table: usize::MAX,
             in_flight: None,
             poisoned: false,
+            batch: None,
+            groups: Vec::new(),
+            pending_batches: Vec::new(),
         }
     }
 
@@ -380,6 +500,34 @@ impl Volume {
             self.free.push(block);
             self.free.sort_unstable();
         }
+    }
+
+    /// Release a block dropped by a blob's uncommitted state change:
+    /// capture-gated (held until a commit capturing `slot` confirms), so a
+    /// confirmed table that still serves the blob's old entry keeps its
+    /// backing allocated. Meaningful only on top of deferred frees.
+    fn release_content(&mut self, slot: u8, block: usize, rules: &Rules) {
+        if rules.capture_gated_frees && rules.deferred_frees {
+            self.blobs[slot as usize].pending_frees.push(block);
+        } else {
+            self.release(block, rules);
+        }
+    }
+
+    /// Merge `slots` into the applied-batch groups (shared slots coalesce).
+    fn merge_group(&mut self, slots: &[u8]) {
+        let mut merged: Vec<u8> = slots.to_vec();
+        self.groups.retain(|group| {
+            if group.iter().any(|slot| merged.contains(slot)) {
+                merged.extend_from_slice(group);
+                false
+            } else {
+                true
+            }
+        });
+        merged.sort_unstable();
+        merged.dedup();
+        self.groups.push(merged);
     }
 
     fn next_val(&mut self, slot: u8, cell: u8) -> Cell {
@@ -468,7 +616,7 @@ impl Volume {
                 } else {
                     let phys = self.allocate();
                     disk.write(phys, Block::Data(cells.0, cells.1));
-                    self.release(run.phys, rules);
+                    self.release_content(slot, run.phys, rules);
                     self.blobs[slot as usize].runs.insert(
                         lblock,
                         Run {
@@ -482,6 +630,166 @@ impl Volume {
         }
         self.mark_dirty(slot, Some(lblock));
     }
+
+    /// Stage `val` at `cell` into the current batch's overlay for `slot`.
+    ///
+    /// Placement mirrors the implementation's batch rule: batch-private
+    /// blocks are written in place; a published block is written in place
+    /// only for cells at or beyond BOTH the published size and the block's
+    /// frozen coverage (unpublished cells no snapshot can capture);
+    /// anything else relocates to a fresh private block seeded with the
+    /// published content.
+    fn stage_cell(&mut self, disk: &mut Disk, slot: u8, cell: u8, val: Cell) {
+        let lblock = cell / CELLS_PER_BLOCK;
+        let idx = cell % CELLS_PER_BLOCK;
+        let published = self.blobs[slot as usize].size;
+        let base = self.blobs[slot as usize].runs.get(&lblock).cloned();
+        let mut batch = self.batch.take().expect("staging requires a batch");
+        {
+            let staged = batch.get_mut(&slot).expect("staged slot exists");
+            let merge = |cells: (Cell, Cell)| {
+                if idx == 0 {
+                    (val, cells.1)
+                } else {
+                    (cells.0, val)
+                }
+            };
+            match staged.runs.get(&lblock).cloned() {
+                Some(sr) => {
+                    let writable = sr.private || (cell >= published && idx >= sr.run.frozen);
+                    if writable {
+                        let cells = merge(sr.run.cells);
+                        disk.write(sr.run.phys, Block::Data(cells.0, cells.1));
+                        staged.runs.insert(
+                            lblock,
+                            StagedRun {
+                                run: Run { cells, ..sr.run },
+                                private: sr.private,
+                            },
+                        );
+                    } else {
+                        // Staged COW of a base-shared overlay block: the
+                        // fresh block carries the overlay content and the
+                        // published block is replaced at apply.
+                        let phys = self.allocate();
+                        let cells = merge(sr.run.cells);
+                        disk.write(phys, Block::Data(cells.0, cells.1));
+                        staged.replaced.push(sr.run.phys);
+                        staged.fresh.push(phys);
+                        staged.runs.insert(
+                            lblock,
+                            StagedRun {
+                                run: Run {
+                                    phys,
+                                    cells,
+                                    frozen: 0,
+                                },
+                                private: true,
+                            },
+                        );
+                    }
+                }
+                None => match base {
+                    Some(run) if cell >= published && idx >= run.frozen => {
+                        // In-place into the published run's block, beyond
+                        // everything a snapshot can capture.
+                        let cells = merge(run.cells);
+                        disk.write(run.phys, Block::Data(cells.0, cells.1));
+                        staged.runs.insert(
+                            lblock,
+                            StagedRun {
+                                run: Run { cells, ..run },
+                                private: false,
+                            },
+                        );
+                    }
+                    Some(run) => {
+                        // Staged COW of a published block.
+                        let phys = self.allocate();
+                        let cells = merge(run.cells);
+                        disk.write(phys, Block::Data(cells.0, cells.1));
+                        staged.replaced.push(run.phys);
+                        staged.fresh.push(phys);
+                        staged.runs.insert(
+                            lblock,
+                            StagedRun {
+                                run: Run {
+                                    phys,
+                                    cells,
+                                    frozen: 0,
+                                },
+                                private: true,
+                            },
+                        );
+                    }
+                    None => {
+                        // Unbacked block: fresh private block.
+                        let phys = self.allocate();
+                        let cells = if idx == 0 {
+                            (val, Cell::Zero)
+                        } else {
+                            (Cell::Zero, val)
+                        };
+                        disk.write(phys, Block::Data(cells.0, cells.1));
+                        staged.fresh.push(phys);
+                        staged.runs.insert(
+                            lblock,
+                            StagedRun {
+                                run: Run {
+                                    phys,
+                                    cells,
+                                    frozen: 0,
+                                },
+                                private: true,
+                            },
+                        );
+                    }
+                },
+            }
+        }
+        self.batch = Some(batch);
+    }
+
+    /// The logical state a commit capturing exactly `captured` records:
+    /// captured blobs contribute their live (published) state, everything
+    /// else its last confirmed capture. This is spec-derived — independent
+    /// of the (possibly rule-disabled) table assembly — so a visibility
+    /// leak surfaces as an I2 mismatch.
+    fn selective_logical(&self, captured: &HashSet<u8>) -> Logical {
+        let live = self.logical();
+        let mut blobs = Vec::new();
+        for (slot, b) in self.blobs.iter().enumerate() {
+            if !b.live {
+                blobs.push(None);
+            } else if captured.contains(&(slot as u8)) {
+                blobs.push(live.blobs[slot].clone());
+            } else {
+                blobs.push(Some(b.committed.as_ref().map_or_else(
+                    || (b.gen, Vec::new()),
+                    |entry| (entry.gen, entry_cells(entry)),
+                )));
+            }
+        }
+        Logical { blobs }
+    }
+}
+
+/// The committed cells an entry describes (holes read as zeros).
+fn entry_cells(entry: &Entry) -> Vec<Cell> {
+    (0..entry.size)
+        .map(|i| {
+            entry
+                .runs
+                .get(&(i / CELLS_PER_BLOCK))
+                .map_or(Cell::Zero, |&(_, c0, c1)| {
+                    if i.is_multiple_of(CELLS_PER_BLOCK) {
+                        c0
+                    } else {
+                        c1
+                    }
+                })
+        })
+        .collect()
 }
 
 /// Verify a candidate's delta manifest against the disk, using shadows as the
@@ -664,6 +972,10 @@ fn rebuild(adopted: &Adopted) -> Volume {
                 vers,
                 dirty_blocks: Vec::new(),
                 dirty: false,
+                committed: Some(e.clone()),
+                pubseq: 0,
+                committed_pubseq: 0,
+                pending_frees: Vec::new(),
             }
         })
         .collect();
@@ -749,6 +1061,9 @@ fn initial_state(actions: u8, crashes: u8) -> State {
     let mut volume = Volume::fresh();
     volume.free.retain(|&b| b != RESERVED);
     volume.last_table = RESERVED;
+    for blob in &mut volume.blobs {
+        blob.committed = Some(Entry::default());
+    }
     let baseline = volume.logical();
     State {
         disk,
@@ -879,10 +1194,23 @@ fn step(
         false
     };
 
+    // A blob with staged batch content has ONE writer — the batch: direct
+    // mutations are excluded until apply/drop (the Blob contract's writer
+    // exclusivity). A direct write into the staged region would rewrite
+    // bytes whose staged expected content the batch already recorded,
+    // letting apply publish an entry that vouches for overwritten bytes —
+    // found by this model.
+    let batch_staged = |s: &State, slot: u8| {
+        s.volume
+            .batch
+            .as_ref()
+            .is_some_and(|batch| batch.contains_key(&slot))
+    };
+
     match action {
         Action::Append(slot) => {
             let b = &s.volume.blobs[slot as usize];
-            if mutations_blocked || !b.live || b.size >= MAX_CELLS {
+            if mutations_blocked || batch_staged(&s, slot) || !b.live || b.size >= MAX_CELLS {
                 return Ok(None);
             }
             let cell = b.size;
@@ -893,7 +1221,7 @@ fn step(
         }
         Action::Overwrite(slot) => {
             let b = &s.volume.blobs[slot as usize];
-            if mutations_blocked || !b.live || b.size == 0 {
+            if mutations_blocked || batch_staged(&s, slot) || !b.live || b.size == 0 {
                 return Ok(None);
             }
             let val = s.volume.next_val(slot, 0);
@@ -902,6 +1230,7 @@ fn step(
         }
         Action::ResizeDown(slot) => {
             if mutations_blocked
+                || batch_staged(&s, slot)
                 || !s.volume.blobs[slot as usize].live
                 || s.volume.blobs[slot as usize].size == 0
             {
@@ -918,7 +1247,7 @@ fn step(
                 .collect();
             for l in dropped {
                 let run = s.volume.blobs[slot as usize].runs.remove(&l).unwrap();
-                s.volume.release(run.phys, rules);
+                s.volume.release_content(slot, run.phys, rules);
             }
             // The (possibly newly partial) tail must re-commit: its shadow
             // and manifest entry change even though its bytes do not.
@@ -932,7 +1261,7 @@ fn step(
         }
         Action::ResizeUp(slot) => {
             let b = &s.volume.blobs[slot as usize];
-            if mutations_blocked || !b.live || b.size + 2 > MAX_CELLS {
+            if mutations_blocked || batch_staged(&s, slot) || !b.live || b.size + 2 > MAX_CELLS {
                 return Ok(None);
             }
             let old_size = b.size;
@@ -963,13 +1292,28 @@ fn step(
             }
             s.volume.blobs[slot as usize].live = false;
             s.volume.blobs[slot as usize].dirty = true;
+            s.volume.blobs[slot as usize].pubseq += 1;
             let runs = std::mem::take(&mut s.volume.blobs[slot as usize].runs);
             let shadow = s.volume.blobs[slot as usize].shadow.take();
+            let pending = std::mem::take(&mut s.volume.blobs[slot as usize].pending_frees);
             for run in runs.into_values() {
                 s.volume.release(run.phys, rules);
             }
             if let Some(sh) = shadow {
                 s.volume.release(sh, rules);
+            }
+            // Every commit drops the entry, so capture-gated frees resolve
+            // at the next commit.
+            for block in pending {
+                s.volume.release(block, rules);
+            }
+            // The removal resolves the blob's part of every applied batch:
+            // its staged data can never be observed again, so only its
+            // siblings' capture state matters (I6).
+            for pb in &mut s.volume.pending_batches {
+                if let Some(entry) = pb.get_mut(&slot) {
+                    *entry = None;
+                }
             }
             Ok(Some(vec![s]))
         }
@@ -987,30 +1331,139 @@ fn step(
             };
             Ok(Some(vec![s]))
         }
-        Action::Snapshot => {
-            if syncs_blocked
-                || s.volume.in_flight.is_some()
-                || !s.volume.blobs.iter().any(|b| b.dirty)
-            {
+        Action::Snapshot(mask) => {
+            if syncs_blocked || s.volume.in_flight.is_some() {
                 return Ok(None);
             }
+            // The capture set: requested dirty live blobs, expanded across
+            // applied-batch groups (never-split). Groups holding a removed
+            // blob are captured by every commit — every commit drops the
+            // removed entry, so its siblings' batch parts must land with it.
+            let mut captured: HashSet<u8> = (0..BLOBS)
+                .filter(|&slot| {
+                    let b = &s.volume.blobs[slot as usize];
+                    mask & (1 << slot) != 0 && b.dirty && b.live
+                })
+                .collect();
+            if rules.respect_groups {
+                for group in &s.volume.groups {
+                    let touches = group.iter().any(|&slot| captured.contains(&slot))
+                        || group
+                            .iter()
+                            .any(|&slot| !s.volume.blobs[slot as usize].live);
+                    if touches {
+                        captured.extend(
+                            group
+                                .iter()
+                                .filter(|&&slot| s.volume.blobs[slot as usize].live),
+                        );
+                    }
+                }
+            }
+            // Enabled only when the commit changes the table: a captured
+            // dirty blob or a pending removal.
+            let removal_pending = s.volume.blobs.iter().any(|b| !b.live && b.dirty);
+            if captured.is_empty() && !removal_pending {
+                return Ok(None);
+            }
+
+            // I6 (never-split): each applied batch must resolve entirely or
+            // not at all. A slot is resolved if this commit captures it, an
+            // earlier commit did (committed_pubseq), or a removal made its
+            // part unobservable.
+            for pb in &s.volume.pending_batches {
+                let resolved = |slot: u8, bp: &Option<u64>| match bp {
+                    None => true,
+                    Some(bp) => {
+                        captured.contains(&slot)
+                            || !s.volume.blobs[slot as usize].live
+                            || s.volume.blobs[slot as usize].committed_pubseq >= *bp
+                    }
+                };
+                let included = pb.iter().filter(|(&sl, bp)| resolved(sl, bp)).count();
+                if included > 0 && included < pb.len() {
+                    return Err(Violation {
+                        trace: trace.to_vec(),
+                        reason: format!(
+                            "I6: commit captures a partial batch: capture {captured:?}, \
+                             batch {pb:?}"
+                        ),
+                    });
+                }
+            }
+
             let seq = s.volume.seq;
             s.volume.seq += 1;
             let table_block = s.volume.allocate();
             let mut table = Table::default();
             let mut shadows = Vec::new();
             let mut frees = Vec::new();
+            let mut resolved = Vec::new();
             if s.volume.last_table != usize::MAX {
                 frees.push(s.volume.last_table);
             }
             for slot in 0..BLOBS {
+                if !s.volume.blobs[slot as usize].live {
+                    // The entry is dropped by every commit; the removal is
+                    // resolved when this commit confirms.
+                    if s.volume.blobs[slot as usize].dirty {
+                        s.volume.blobs[slot as usize].dirty = false;
+                        s.volume.blobs[slot as usize].dirty_blocks.clear();
+                        resolved.push((slot, s.volume.blobs[slot as usize].pubseq));
+                    }
+                    continue;
+                }
+                if !captured.contains(&slot) {
+                    // Served verbatim from the last confirmed capture; dirty
+                    // state (marks, manifest blocks, content frees) stays
+                    // pending for a later capturing commit.
+                    let b = &s.volume.blobs[slot as usize];
+                    let mut entry = b.committed.clone().unwrap_or(Entry {
+                        gen: b.gen,
+                        ..Default::default()
+                    });
+                    // Visibility-leak mutation: the capture reads staged
+                    // batch state, vouching for bytes the API never
+                    // published (and that no manifest verifies).
+                    if !rules.stage_invisible {
+                        if let Some(staged) = s.volume.batch.as_ref().and_then(|b| b.get(&slot)) {
+                            entry = Entry {
+                                gen: b.gen,
+                                size: staged.size,
+                                runs: {
+                                    let mut runs: BTreeMap<u8, (usize, Cell, Cell)> = b
+                                        .runs
+                                        .iter()
+                                        .map(|(&l, r)| (l, (r.phys, r.cells.0, r.cells.1)))
+                                        .collect();
+                                    for (&l, sr) in &staged.runs {
+                                        runs.insert(
+                                            l,
+                                            (sr.run.phys, sr.run.cells.0, sr.run.cells.1),
+                                        );
+                                    }
+                                    runs
+                                },
+                                shadow: b.shadow,
+                            };
+                        }
+                    }
+                    table.blobs.insert(slot, entry);
+                    continue;
+                }
                 let dirty_blocks = std::mem::take(&mut s.volume.blobs[slot as usize].dirty_blocks);
                 let was_dirty = s.volume.blobs[slot as usize].dirty;
                 s.volume.blobs[slot as usize].dirty = false;
-                if !s.volume.blobs[slot as usize].live {
-                    continue;
+                resolved.push((slot, s.volume.blobs[slot as usize].pubseq));
+                // Content frees of a captured blob resolve when this commit
+                // confirms (the new entry stops referencing them).
+                let pending = std::mem::take(&mut s.volume.blobs[slot as usize].pending_frees);
+                for block in pending {
+                    s.volume.pending_free.push((block, seq));
                 }
-                // Freeze everything this snapshot captures.
+                // Freeze everything this snapshot captures. Uncaptured dirty
+                // blobs keep their frozen coverage: their entries reference
+                // only already-frozen extents.
                 let size = s.volume.blobs[slot as usize].size;
                 if rules.freeze_at_snapshot {
                     for (&l, run) in s.volume.blobs[slot as usize].runs.iter_mut() {
@@ -1051,7 +1504,7 @@ fn step(
                 table.blobs.insert(slot, entry);
             }
             table.manifest.sort_unstable();
-            let logical = s.volume.logical();
+            let logical = s.volume.selective_logical(&captured);
             s.attempts.push(logical.clone());
             s.volume.in_flight = Some(InFlight {
                 seq,
@@ -1061,6 +1514,7 @@ fn step(
                 table_block,
                 shadows,
                 frees,
+                resolved,
             });
             Ok(Some(vec![s]))
         }
@@ -1126,6 +1580,26 @@ fn step(
                     };
                 }
             }
+            // Publish the confirmed entries and resolve batch bookkeeping.
+            for slot in 0..BLOBS {
+                s.volume.blobs[slot as usize].committed = inf.table.blobs.get(&slot).cloned();
+            }
+            for &(slot, pubseq) in &inf.resolved {
+                let b = &mut s.volume.blobs[slot as usize];
+                b.committed_pubseq = b.committed_pubseq.max(pubseq);
+            }
+            let blobs = &s.volume.blobs;
+            s.volume.pending_batches.retain(|pb| {
+                pb.iter().any(|(&slot, bp)| {
+                    bp.is_some_and(|bp| {
+                        blobs[slot as usize].live && blobs[slot as usize].committed_pubseq < bp
+                    })
+                })
+            });
+            let resolved_slots: Vec<u8> = inf.resolved.iter().map(|&(slot, _)| slot).collect();
+            s.volume
+                .groups
+                .retain(|group| !group.iter().all(|slot| resolved_slots.contains(slot)));
             s.volume.in_flight = None;
             // Confirmed: this snapshot becomes the observed baseline.
             s.baseline = inf.logical;
@@ -1182,6 +1656,104 @@ fn step(
                 out.push(succ);
             }
             Ok(Some(out))
+        }
+        Action::BatchAppend(slot) => {
+            if mutations_blocked || !s.volume.blobs[slot as usize].live {
+                return Ok(None);
+            }
+            let published = s.volume.blobs[slot as usize].size;
+            let batch = s.volume.batch.get_or_insert_with(BTreeMap::new);
+            let staged = batch.entry(slot).or_insert_with(|| StagedSlot {
+                size: published,
+                runs: BTreeMap::new(),
+                fresh: Vec::new(),
+                replaced: Vec::new(),
+            });
+            if staged.size >= MAX_CELLS {
+                return Ok(None);
+            }
+            let cell = staged.size;
+            staged.size += 1;
+            let val = s.volume.next_val(slot, cell);
+            s.volume.stage_cell(&mut s.disk, slot, cell, val);
+            Ok(Some(vec![s]))
+        }
+        Action::BatchOverwrite(slot) => {
+            if mutations_blocked || !s.volume.blobs[slot as usize].live {
+                return Ok(None);
+            }
+            let published = s.volume.blobs[slot as usize].size;
+            let batch = s.volume.batch.get_or_insert_with(BTreeMap::new);
+            let staged = batch.entry(slot).or_insert_with(|| StagedSlot {
+                size: published,
+                runs: BTreeMap::new(),
+                fresh: Vec::new(),
+                replaced: Vec::new(),
+            });
+            if staged.size == 0 {
+                return Ok(None);
+            }
+            let val = s.volume.next_val(slot, 0);
+            s.volume.stage_cell(&mut s.disk, slot, 0, val);
+            Ok(Some(vec![s]))
+        }
+        Action::BatchApply => {
+            // Apply publishes under the commit lock: it never interleaves
+            // with an in-flight commit's phases.
+            if mutations_blocked || s.volume.in_flight.is_some() {
+                return Ok(None);
+            }
+            let Some(batch) = s.volume.batch.take() else {
+                return Ok(None);
+            };
+            let mut record = BTreeMap::new();
+            let mut members = Vec::new();
+            for (slot, staged) in batch {
+                let b = &mut s.volume.blobs[slot as usize];
+                if !b.live {
+                    // Removed mid-batch: its staged blocks are unreferenced.
+                    for block in staged.fresh {
+                        s.volume.release(block, rules);
+                    }
+                    continue;
+                }
+                let touched: Vec<u8> = staged.runs.keys().copied().collect();
+                for (l, sr) in staged.runs {
+                    b.runs.insert(l, sr.run);
+                }
+                b.size = staged.size;
+                b.pubseq += 1;
+                record.insert(slot, Some(b.pubseq));
+                members.push(slot);
+                for block in staged.replaced {
+                    s.volume.release_content(slot, block, rules);
+                }
+                s.volume.mark_dirty(slot, None);
+                for l in touched {
+                    s.volume.mark_dirty(slot, Some(l));
+                }
+            }
+            if !record.is_empty() {
+                s.volume.merge_group(&members);
+                s.volume.pending_batches.push(record);
+            }
+            Ok(Some(vec![s]))
+        }
+        Action::BatchDrop => {
+            if mutations_blocked {
+                return Ok(None);
+            }
+            let Some(batch) = s.volume.batch.take() else {
+                return Ok(None);
+            };
+            // Staged blocks were never referenced: return them through the
+            // ordinary deferred-free path.
+            for staged in batch.into_values() {
+                for block in staged.fresh {
+                    s.volume.release(block, rules);
+                }
+            }
+            Ok(Some(vec![s]))
         }
         Action::Crash => {
             if s.crashes_left == 0 {
@@ -1245,7 +1817,7 @@ mod tests {
         Action::Append(0),
         Action::Append(1),
         Action::Overwrite(0),
-        Action::Snapshot,
+        Action::Snapshot(ALL),
         Action::WriteMeta,
         Action::FsyncOk,
         Action::Crash,
@@ -1260,7 +1832,7 @@ mod tests {
         Action::ResizeUp(0),
         Action::Remove(0),
         Action::Recreate(0),
-        Action::Snapshot,
+        Action::Snapshot(ALL),
         Action::WriteMeta,
         Action::FsyncOk,
         Action::Crash,
@@ -1272,7 +1844,7 @@ mod tests {
         Action::Append(0),
         Action::Append(1),
         Action::ResizeDown(0),
-        Action::Snapshot,
+        Action::Snapshot(ALL),
         Action::WriteMeta,
         Action::FsyncOk,
         Action::Crash,
@@ -1282,10 +1854,55 @@ mod tests {
     const LATCH: &[Action] = &[
         Action::Append(0),
         Action::Append(1),
-        Action::Snapshot,
+        Action::Snapshot(ALL),
         Action::WriteMeta,
         Action::FsyncOk,
         Action::FsyncFail,
+        Action::Crash,
+    ];
+
+    /// Selective workload: per-blob commits with dirty state left pending on
+    /// the uncaptured blob (served-verbatim entries, deferred manifests,
+    /// capture-gated frees, shared-tail writes racing foreign commits).
+    const SELECTIVE: &[Action] = &[
+        Action::Append(0),
+        Action::Append(1),
+        Action::Overwrite(0),
+        Action::Snapshot(0b01),
+        Action::Snapshot(0b10),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
+    /// Batch workload: cross-blob staging (fresh blocks and in-place
+    /// shared-tail appends), publish, drop, and selective commits that must
+    /// respect batch groups.
+    const BATCH: &[Action] = &[
+        Action::Append(0),
+        Action::BatchAppend(0),
+        Action::BatchAppend(1),
+        Action::BatchApply,
+        Action::Snapshot(0b01),
+        Action::Snapshot(ALL),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
+    /// Batch overwrite workload: staged COW of committed cells plus batch
+    /// drop (staged extents returned through deferred frees).
+    const BATCH_COW: &[Action] = &[
+        Action::Append(0),
+        Action::Append(1),
+        Action::BatchOverwrite(0),
+        Action::BatchAppend(0),
+        Action::BatchApply,
+        Action::BatchDrop,
+        Action::Snapshot(0b10),
+        Action::Snapshot(ALL),
+        Action::WriteMeta,
+        Action::FsyncOk,
         Action::Crash,
     ];
 
@@ -1334,6 +1951,110 @@ mod tests {
     #[test]
     fn spec_holds_latch() {
         assert_holds(LATCH, 8, 2, 1_000);
+    }
+
+    #[test]
+    fn spec_holds_selective() {
+        assert_holds(SELECTIVE, 8, 2, 10_000);
+    }
+
+    #[test]
+    fn spec_holds_batch() {
+        assert_holds(BATCH, 8, 2, 10_000);
+    }
+
+    #[test]
+    fn spec_holds_batch_cow() {
+        assert_holds(BATCH_COW, 7, 2, 10_000);
+    }
+
+    /// Disabling the never-split group expansion must let a selective commit
+    /// capture one blob of an applied batch while leaving the other's part
+    /// uncommitted (I6).
+    #[test]
+    fn mutation_batch_split_detected() {
+        let rules = Rules {
+            respect_groups: false,
+            ..SPEC
+        };
+        assert!(
+            check(BATCH, 8, 2, &rules).is_err(),
+            "checker missed a split batch"
+        );
+    }
+
+    /// Disabling staged-write invisibility must let a snapshot capture
+    /// staged-but-unpublished bytes: the recorded table vouches for state
+    /// the API never published (and that no manifest verifies), surfacing
+    /// as an I2 mismatch or a verification failure after recovery.
+    #[test]
+    fn mutation_stage_visibility_detected() {
+        let rules = Rules {
+            stage_invisible: false,
+            ..SPEC
+        };
+        assert!(
+            check(BATCH, 8, 2, &rules).is_err(),
+            "checker missed the staged-visibility leak"
+        );
+    }
+
+    /// Run a fixed action sequence under `rules`, asserting it stays legal
+    /// until its end. Crash steps explore every outcome; other steps must be
+    /// enabled and deterministic.
+    fn run_trace(trace: &[Action], rules: &Rules) -> Result<(), Violation> {
+        let mut states = vec![initial_state(trace.len() as u8, 1)];
+        for (i, &action) in trace.iter().enumerate() {
+            let mut next = Vec::new();
+            for state in &states {
+                match step(state, action, rules, &trace[..=i])? {
+                    Some(successors) => next.extend(successors),
+                    None => panic!("action {action:?} disabled at step {i}"),
+                }
+            }
+            states = next;
+        }
+        Ok(())
+    }
+
+    /// Freeing an overwrite's dropped extent at the NEXT commit (instead of
+    /// gating it on a commit that captures the blob) recycles a block the
+    /// confirmed table still references: the next table write lands in it
+    /// and a crash exposes the clobber. The violating interleaving sits
+    /// deeper than the BFS budgets, so it is pinned as a directed trace.
+    /// Blob 0 commits a FULL block first — a partial (shadowed) tail block
+    /// would be healed by the shadow splice.
+    #[test]
+    fn mutation_capture_gated_frees_detected() {
+        let trace: &[Action] = &[
+            // Commit a full block for blob 0 so its content has no shadow.
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            // COW blob 0's committed block (dropping the old block), then
+            // confirm a commit that does NOT capture blob 0.
+            Action::Overwrite(0),
+            Action::Append(1),
+            Action::Snapshot(0b10),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            // The next commit allocates the (wrongly freed) block for its
+            // table and a crash exposes the clobbered fallback.
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            capture_gated_frees: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed the capture-gated free"
+        );
     }
 
     /// Disabling snapshot-time freezing must reintroduce the panel's fatal
@@ -1396,16 +2117,39 @@ mod tests {
         );
     }
 
-    /// Disabling the failure latch must surface a durability lie: a sync
-    /// confirms after the fsync that covered its data failed.
+    /// Disabling the failure latch must surface a durability lie: a later
+    /// successful commit re-captures the blob and vouches (via its entry's
+    /// expected content) for a block whose write the failed fsync silently
+    /// lost. Committed-entry serving heals the shallow variants (a clean
+    /// blob's entry no longer re-references live state, and rewrites of the
+    /// lost block re-materialize it), so the surviving lie needs a deeper
+    /// interleaving than the BFS budget: the blob re-dirties in a DIFFERENT
+    /// block and is re-captured, carrying the lost block's entry along.
+    /// Pinned as a directed trace. Under SPEC the latch blocks the trace at
+    /// the post-failure append, which is exactly the protection.
     #[test]
     fn mutation_latch_detected() {
+        let trace: &[Action] = &[
+            // Fill blob 0's first block and lose it to fsyncgate.
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(ALL),
+            Action::WriteMeta,
+            Action::FsyncFail,
+            // Re-dirty blob 0 in its second block; the next commit's entry
+            // vouches for the lost first block without rewriting it.
+            Action::Append(0),
+            Action::Snapshot(ALL),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Crash,
+        ];
         let rules = Rules {
             latch_on_failure: false,
             ..SPEC
         };
         assert!(
-            check(LATCH, 8, 2, &rules).is_err(),
+            run_trace(trace, &rules).is_err(),
             "checker missed the latch leak"
         );
     }

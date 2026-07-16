@@ -440,6 +440,29 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
+    /// Write all pending entries and stage the modified [Blob]s' durability
+    /// with `batch`.
+    pub async fn sync_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.syncs.inc();
+
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let pending = &self.pending;
+        for (_, blob) in self
+            .blobs
+            .iter_mut()
+            .filter(|(section, _)| pending.contains(section))
+        {
+            blob.sync_into(batch).await?;
+        }
+        self.pending.clear();
+        Ok(())
+    }
+
     /// Destroy [Ordinal] and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {

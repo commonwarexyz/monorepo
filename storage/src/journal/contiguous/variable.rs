@@ -29,7 +29,7 @@ use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
 use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
-    Blob as RBlob, Buf, IoBuf,
+    Blob as RBlob, Buf, IoBuf, WriteBatch as _,
 };
 use futures::{future::try_join_all, Stream};
 use std::{
@@ -997,10 +997,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let data_partition = cfg.data_partition();
         let data_context = context.child("data");
 
-        // If a prior `init_at_size`/`clear_to_size` crashed mid-reset, the offsets journal
-        // carries a staged clear. `init_cleared` discards the data partition before finishing
-        // that reset so stale data is never replayed past the reset size.
-        let mut offsets = fixed::Journal::<E, u64>::init_cleared(
+        let mut offsets = fixed::Journal::<E, u64>::init(
             context.child("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
@@ -1008,7 +1005,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
             },
-            || Partition::<E>::remove_all(&data_context, &data_partition),
         )
         .await?;
 
@@ -1046,67 +1042,48 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Initialize an empty [Journal] at the given logical `size`.
     ///
-    /// This discards any existing data and offsets. The offsets reset intent is staged before the
-    /// data partition is cleared so recovery can complete the requested reset if a crash
-    /// interrupts the operation.
+    /// This discards any existing data and offsets: the data partition removal, the offsets
+    /// blob removals, and the offsets boundary record land in ONE batch, so on atomic backends
+    /// the reset is old-state-or-new-state.
     ///
     /// Returns a journal with journal.bounds() == Range{start: size, end: size}
     /// and next append at position `size`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        let items_per_blob = cfg.items_per_section.get();
+        // A journal sized at `u64::MAX` can never accept an append, matching the fixed journal.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
         let data_partition = cfg.data_partition();
         let data_context = context.child("data");
         let offsets_partition = cfg.offsets_partition();
         let offsets_context = context.child("offsets");
 
-        // Fail before writing intent if the offsets blob partitions are already inconsistent.
+        // Fail before mutating if the offsets blob partitions are already inconsistent.
         Partition::select(&offsets_context, &offsets_partition).await?;
 
-        // `init_at_size_cleared` durably stages the offsets reset, clears the data partition,
-        // then completes the reset. A crash at any point leaves a staged clear that the next
-        // `init` (via `init_cleared`) finishes, so stale data can never outlive the reset.
-        let offsets = fixed::Journal::<E, u64>::init_at_size_cleared(
-            offsets_context,
-            fixed::Config {
-                partition: offsets_partition,
-                items_per_blob: cfg.items_per_section,
-                page_cache: cfg.page_cache.clone(),
-                write_buffer: cfg.write_buffer,
-            },
+        // One batch resets everything; `init` then recovers the cleared journal.
+        let mut checkpoint =
+            super::checkpoint::Checkpoint::open(offsets_context.child("meta"), &offsets_partition)
+                .await?;
+        let mut batch = context.batch().await.map_err(Error::Runtime)?;
+        fixed::Journal::<E, u64>::stage_reset(
+            &offsets_context,
+            &offsets_partition,
+            &mut checkpoint,
             size,
-            || Partition::<E>::remove_all(&data_context, &data_partition),
+            &mut batch,
         )
         .await?;
+        match data_context.scan(&data_partition).await {
+            Ok(_) => batch.remove(&data_partition, None),
+            Err(commonware_runtime::Error::PartitionMissing(_)) => {}
+            Err(err) => return Err(Error::Runtime(err)),
+        }
+        batch.apply_sync().await.map_err(Error::Runtime)?;
+        drop(checkpoint);
 
-        let partition = Partition::new(
-            data_context,
-            data_partition,
-            cfg.page_cache,
-            cfg.write_buffer,
-        );
-        let blobs = Writable::recover(
-            partition,
-            BTreeMap::new(),
-            position_to_blob(size, items_per_blob),
-        )
-        .await?;
-
-        let metrics = Metrics::new(context);
-        metrics.update(size, size, items_per_blob);
-
-        Ok(Self {
-            blobs,
-            offsets,
-            bounds: size..size,
-            dirty_from_blob: None,
-            #[cfg(test)]
-            halt_before_offsets_prune: false,
-            items_per_blob: cfg.items_per_section,
-            compression: cfg.compression,
-            codec_config: cfg.codec_config,
-            metrics: Arc::new(metrics),
-        })
+        Self::init(context, cfg).await
     }
 
     /// Initialize a [Journal] for use in state sync.
@@ -1501,11 +1478,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // journal whose surviving items no longer justify its boundary. Offsets entries for
         // retained items must survive the same crash: init treats offsets ending behind the
         // oldest retained data as corruption because the data needed to reconstruct the
-        // missing entries is about to be removed. Data is flushed first, matching the ordering
-        // every other durability path maintains.
-        self.flush_dirty_data().await?;
-        self.dirty_from_blob = None;
-        self.offsets.commit().await?;
+        // missing entries is about to be removed. One batch stages data before offsets,
+        // matching the ordering every other durability path maintains on the fallback.
+        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
+        self.commit_into(&mut batch).await?;
+        batch.apply_sync().await.map_err(Error::Runtime)?;
 
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
@@ -1535,26 +1512,42 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.blobs.sync_from(start_blob).await
     }
 
-    /// Durably persist the journal: dirty data blobs first, then the offsets journal.
-    ///
-    /// Syncing data before offsets keeps every crash state reconcilable: a crash between the
-    /// two leaves durable offsets at or behind the durable data, which init repairs by
-    /// truncating the unindexed data suffix.
+    /// Stage the durability of dirty data blobs and the offsets journal
+    /// with `batch`. Data is staged before offsets: the sequential fallback
+    /// syncs in staging order, preserving the data-then-offsets ordering
+    /// that keeps durable offsets at or behind durable data (which init
+    /// repairs by truncating the unindexed data suffix). On the volume the
+    /// whole batch commits atomically and no crash can separate them.
+    async fn commit_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
+        if let Some(start_blob) = self.dirty_from_blob {
+            self.blobs.sync_from_into(start_blob, batch).await?;
+            self.dirty_from_blob = None;
+        }
+        self.offsets.commit_into(batch).await
+    }
+
+    /// Durably persist the journal: dirty data blobs and the offsets
+    /// journal, one batch, one commit on atomic backends.
     pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
-        self.flush_dirty_data().await?;
-        self.dirty_from_blob = None;
-        self.offsets.commit().await
+        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
+        self.commit_into(&mut batch).await?;
+        batch.apply_sync().await.map_err(Error::Runtime)
     }
 
-    /// Like [Self::commit], but also persists the offsets journal's checkpoint.
+    /// Like [Self::commit], but also persists the offsets journal's checkpoint (in the same
+    /// batch).
     pub async fn sync(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        self.flush_dirty_data().await?;
-        self.dirty_from_blob = None;
-        self.offsets.sync().await
+        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
+        if let Some(start_blob) = self.dirty_from_blob {
+            self.blobs.sync_from_into(start_blob, &mut batch).await?;
+            self.dirty_from_blob = None;
+        }
+        self.offsets.sync_into(&mut batch).await?;
+        batch.apply_sync().await.map_err(Error::Runtime)
     }
 
     /// Remove any underlying blobs created by the journal.
@@ -1575,18 +1568,25 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
-    /// The offsets reset intent is staged before the data blobs are cleared so recovery can
-    /// complete the requested reset if a crash interrupts the operation.
+    /// The data blob removals, the offsets blob removals, and the offsets boundary record land
+    /// in ONE batch, so on atomic backends a crash leaves the journal either in its prior
+    /// state or fully cleared.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
-        // Stage in offsets first so a crash mid-clear leaves an intent that recovery completes.
-        // `clear_to_size` re-stages the same target idempotently before completing.
-        self.offsets.stage_clear_intent(new_size).await?;
-        self.blobs
-            .clear(position_to_blob(new_size, self.items_per_blob.get()))
-            .await?;
-        self.offsets.clear_to_size(new_size).await?;
+        // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
+        if new_size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
 
+        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
+        self.blobs.stage_clear(&mut batch);
+        self.offsets.stage_clear(new_size, &mut batch).await?;
+        batch.apply_sync().await.map_err(Error::Runtime)?;
+
+        self.blobs
+            .finish_clear(position_to_blob(new_size, self.items_per_blob.get()))
+            .await?;
+        self.offsets.finish_clear(new_size).await?;
         self.bounds = new_size..new_size;
         self.dirty_from_blob = None;
         self.metrics.update(
@@ -1605,6 +1605,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// describe prefixes of one shared history (see the type docs), so reconciliation is a
     /// bounded comparison of sizes: no frame is ever scanned or decoded.
     ///
+    /// On the volume backend the tail repair is unreachable: data and offsets commit in ONE
+    /// batch, so their durable frontiers can never diverge. It is kept for per-blob backends
+    /// (MemStorage and the sequential batch fallback), whose apply syncs data before offsets
+    /// and can crash between the two.
+    ///
     /// Returns the recovered bounds (`pruning_boundary..size`).
     async fn align(
         partition: &Partition<E>,
@@ -1615,8 +1620,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let offsets_bounds = offsets.pruning_boundary()..offsets.size();
 
         // With no data blobs the offsets journal must be empty: entries become durable only
-        // after the data blob they describe exists, and no crash path removes a retained data
-        // blob without the staged-clear intent (already honored by `init_cleared`).
+        // after the data blob they describe exists, and the only path that removes every
+        // retained data blob (a clear) rewinds the offsets journal in the same batch.
         let Some(&oldest_blob) = pending.keys().next() else {
             if !offsets_bounds.is_empty() {
                 return Err(Error::Corruption(format!(
@@ -4364,129 +4369,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_clear_to_size_stages_reset_before_clearing_data() {
-        let partition = "clear-to-size-stage-before-clear-failure".to_string();
-        let executor = deterministic::Runner::default();
-        let ((), checkpoint) = executor.start_and_recover({
-            let partition = partition.clone();
-            |context| async move {
-                let cfg = Config {
-                    partition,
-                    items_per_section: NZU64!(5),
-                    compression: None,
-                    codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                    write_buffer: NZUsize!(1024),
-                };
-
-                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                    .await
-                    .unwrap();
-                for i in 0..12u64 {
-                    journal.append(&(100 + i)).await.unwrap();
-                }
-                journal.sync().await.unwrap();
-
-                // Fail the offsets metadata sync inside `stage_clear_intent` so `clear_to_size`
-                // aborts before any data is cleared. The reset intent never becomes durable.
-                *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    sync_rate: Some(1.0),
-                    ..Default::default()
-                };
-                assert!(journal.clear_to_size(7).await.is_err());
-            }
-        });
-
-        deterministic::Runner::from(checkpoint).start(move |context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let cfg = Config {
-                partition,
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 0..12);
-            for i in 0..12u64 {
-                assert_eq!(journal.read(i).await.unwrap(), 100 + i);
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_clear_to_size_crash_after_staging_completes_on_init() {
-        let partition = "clear-to-size-crash-after-staging".to_string();
-        let executor = deterministic::Runner::default();
-        let ((), checkpoint) = executor.start_and_recover({
-            let partition = partition.clone();
-            |context| async move {
-                let cfg = Config {
-                    partition,
-                    items_per_section: NZU64!(5),
-                    compression: None,
-                    codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                    write_buffer: NZUsize!(1024),
-                };
-
-                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                    .await
-                    .unwrap();
-                for i in 0..12u64 {
-                    journal.append(&(100 + i)).await.unwrap();
-                }
-                journal.sync().await.unwrap();
-
-                // Let `stage_clear_intent` (a metadata sync) persist the reset intent, but fail the
-                // subsequent `data.clear()` (a blob remove) so `clear_to_size` aborts after the
-                // intent is durable but before the data is cleared.
-                *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    remove_rate: Some(1.0),
-                    ..Default::default()
-                };
-                assert!(journal.clear_to_size(7).await.is_err());
-            }
-        });
-
-        deterministic::Runner::from(checkpoint).start(move |context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let cfg = Config {
-                partition,
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // `init` finds the staged intent, discards the stale data, and completes the reset.
-            let mut journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 7..7);
-            assert_eq!(journal.append(&700).await.unwrap(), 7);
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Reopen: the completed reset persists and no stale data was replayed.
-            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 7..8);
-            assert_eq!(journal.read(7).await.unwrap(), 700);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_init_at_size_recovers_staged_reset_crash_points() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -4518,25 +4400,38 @@ mod tests {
                     page_cache: cfg.page_cache.clone(),
                     write_buffer: cfg.write_buffer,
                 };
-                // Simulate a crash mid-`init_at_size`: stage a clear intent in the offsets
-                // checkpoint but leave data untouched (clear_data=false) or also clear data
-                // (clear_data=true) so we cover both crash points.
+                // Simulate a crash right after `init_at_size(7)`'s batch landed: both blob
+                // partitions removed and the offsets boundary recorded, before any tail blob
+                // was recreated (with_tail=false) or after the empty offsets tail was
+                // recreated (with_tail=true).
                 let intent_ctx = context.child("intent").with_attribute("index", index);
-                fixed::Journal::<_, u64>::test_stage_clear(
+                let mut checkpoint = super::super::checkpoint::Checkpoint::open(
                     intent_ctx.child("meta"),
                     &offsets_cfg.partition,
-                    7,
                 )
                 .await
                 .unwrap();
-
-                if clear_data {
-                    Partition::<deterministic::Context>::remove_all(
-                        &context,
-                        &cfg.data_partition(),
-                    )
+                checkpoint.set_boundary_hint(7).await.unwrap();
+                drop(checkpoint);
+                Partition::<deterministic::Context>::remove_all(&context, &cfg.data_partition())
                     .await
                     .unwrap();
+                Partition::<deterministic::Context>::remove_all(
+                    &context,
+                    &format!("{}-blobs", offsets_cfg.partition),
+                )
+                .await
+                .unwrap();
+                if clear_data {
+                    let (blob, _) = context
+                        .open(
+                            &format!("{}-blobs", offsets_cfg.partition),
+                            &1u64.to_be_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    blob.sync().await.unwrap();
+                    drop(blob);
                 }
 
                 let mut journal = Journal::<_, u64>::init(
@@ -4586,8 +4481,8 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Simulate a prior `clear_to_size(5)` that crashed after staging its intent: the offsets
-            // checkpoint carries a clear target of 5 while the data blobs still holds all 12 items.
+            // Plant a stale mid-blob boundary record (behind the live blob state): the reset
+            // must overwrite it along with everything else.
             let offsets_cfg = fixed::Config {
                 partition: cfg.offsets_partition(),
                 items_per_blob: cfg.items_per_section,
@@ -4595,15 +4490,16 @@ mod tests {
                 write_buffer: cfg.write_buffer,
             };
             let stale_ctx = context.child("stale");
-            fixed::Journal::<_, u64>::test_stage_clear(
+            let mut checkpoint = super::super::checkpoint::Checkpoint::open(
                 stale_ctx.child("meta"),
                 &offsets_cfg.partition,
-                5,
             )
             .await
             .unwrap();
+            checkpoint.set_boundary_hint(3).await.unwrap();
+            drop(checkpoint);
 
-            // init_at_size(10) overwrites the pending target of 5 and resets to 10.
+            // init_at_size(10) overwrites the stale record and resets to 10.
             let mut journal =
                 Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 10)
                     .await

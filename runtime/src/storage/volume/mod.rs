@@ -1,4 +1,4 @@
-//! A single-file storage backend with atomic group commit.
+//! A single-file storage backend with atomic commit.
 //!
 //! `volume` packs every blob of a [`crate::Storage`] workload into ONE inner
 //! blob (the "volume file") and provides a strictly stronger crash contract
@@ -7,31 +7,50 @@
 //! > After a crash and reopen, every blob's readable state is exactly the
 //! > state captured by one commit: the last confirmed commit (whose sync
 //! > returned), or a newer fully-landed one (legal roll-forward). A commit
-//! > happens on any [`crate::Blob::sync`] / [`crate::Blob::write_at_sync`]
-//! > and on blob creation/removal, and atomically covers ALL dirty state
-//! > across ALL blobs of the volume (group commit). Every read verifies a
-//! > CRC32C; a mismatch is loud corruption, never silent truncation.
+//! > happens on any [`crate::Blob::sync`] / [`crate::Blob::write_at_sync`],
+//! > on blob creation/removal, and on [`Batch::apply_sync`]. It atomically
+//! > covers the CAPTURED blobs: the synced blob (or the applying batch's
+//! > blobs), expanded across applied-batch groups so an applied [`Batch`]
+//! > is never split across commits. Every read verifies a CRC32C; a
+//! > mismatch is loud corruption, never silent truncation.
 //!
 //! Storage structures above a volume can therefore delete their own
-//! torn-write detection and recovery machinery: torn tails, partial frames,
-//! and cross-blob ordering skew are impossible by construction, and the
-//! deterministic runtime's crash model becomes the production model.
+//! torn-write detection, recovery machinery, and cross-blob sync-ordering
+//! discipline: torn tails, partial frames, and (through [`Batch`]) cross-
+//! blob skew are impossible by construction, and the deterministic
+//! runtime's crash model becomes the production model.
 //!
-//! Group commit may make MORE data durable than a caller explicitly synced
-//! (equivalent to the OS persisting write-back cache early, which is always
-//! permitted). A failed commit permanently poisons the volume: a failed
-//! fsync leaves the page cache undefined, so no later commit may vouch for
+//! A commit may make MORE data durable than a caller explicitly synced (the
+//! single inner fsync covers every pending write of the volume file, which
+//! is equivalent to the OS persisting write-back cache early — always
+//! permitted). It never makes UNCAPTURED state readable after a crash:
+//! blobs outside the capture set keep their last-captured table entry. A
+//! failed commit permanently poisons the volume — every blob, captured or
+//! not: a failed fsync leaves the page cache of the shared volume file
+//! undefined (fsyncgate is physical), so no later commit may vouch for
 //! bytes it can no longer prove will land.
+//!
+//! # Batches
+//!
+//! [`Storage::batch`] stages writes across MULTIPLE blobs and publishes
+//! them atomically: staging writes through to disk immediately (same I/O
+//! profile as unbatched writes), placed so that no snapshot can capture
+//! staged bytes; [`Batch::apply`] publishes in RAM under the commit lock,
+//! and [`Batch::apply_sync`] additionally commits. A batch dropped without
+//! apply (or lost to a crash) never happened.
 //!
 //! # Formal model
 //!
-//! The commit protocol (freeze-rule copy-on-write, deferred frees, sacred
-//! superblock slot, shadowed frontier chunks, content-bound tables, poison
-//! latch) is specified and exhaustively model-checked under crash and power
-//! loss in [`model`]; the implementation follows the model's decisions
-//! exactly. Read the model docs before changing anything here.
+//! The commit protocol (freeze-rule copy-on-write, capture-gated deferred
+//! frees, sacred superblock slot, shadowed frontier chunks, content-bound
+//! tables, poison latch, selective capture, and batch staging/publish with
+//! the never-split rule) is specified and exhaustively model-checked under
+//! crash and power loss in [`model`]; the implementation follows the
+//! model's decisions exactly. Read the model docs before changing anything
+//! here.
 
 mod alloc;
+mod batch;
 mod commit;
 mod core;
 mod layout;
@@ -43,6 +62,7 @@ mod tests;
 
 use crate::{BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use alloc::{block_align, Extent};
+pub use batch::Batch;
 use commonware_formatting::hex;
 use commonware_utils::sync::AsyncMutex;
 use core::{BlobCore, Ready};
@@ -141,6 +161,14 @@ impl<S: crate::Storage> Storage<S> {
         &self.shared.cfg
     }
 
+    /// Start a [`Batch`]: cross-blob writes staged now, published (and
+    /// optionally committed) atomically later.
+    pub async fn batch(&self) -> Result<Batch<S>, Error> {
+        let ready = self.ensure().await?;
+        ready.check_poisoned()?;
+        Ok(Batch::new(self.shared.clone(), ready))
+    }
+
     /// Recovery, single-flight, before any operation.
     async fn ensure(&self) -> Result<Arc<Ready<S>>, Error> {
         if let Some(ready) = self.shared.ready.get() {
@@ -203,6 +231,47 @@ impl<S: crate::Storage> Clone for Blob<S> {
     }
 }
 
+impl<S: crate::Storage> crate::Batchable for Storage<S> {
+    type Batch = Batch<S>;
+
+    async fn batch(&self) -> Result<Batch<S>, Error> {
+        Self::batch(self).await
+    }
+}
+
+impl<S: crate::Storage> crate::WriteBatch for Batch<S> {
+    type Blob = Blob<S>;
+
+    async fn write_at(
+        &mut self,
+        blob: &Blob<S>,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        Self::write_at(self, blob, offset, bufs).await
+    }
+
+    async fn resize(&mut self, blob: &Blob<S>, len: u64) -> Result<(), Error> {
+        Self::resize(self, blob, len).await
+    }
+
+    fn sync(&mut self, blob: &Blob<S>) {
+        Self::sync(self, blob);
+    }
+
+    fn remove(&mut self, partition: &str, name: Option<&[u8]>) {
+        Self::remove(self, partition, name);
+    }
+
+    async fn apply(self) -> Result<(), Error> {
+        Self::apply(self).await
+    }
+
+    async fn apply_sync(self) -> Result<(), Error> {
+        Self::apply_sync(self).await
+    }
+}
+
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S>;
 
@@ -234,7 +303,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
                 if state.open.contains_key(&id) {
                     None
                 } else {
-                    Some(state.dormant.get(&id).cloned().expect("known blob"))
+                    Some(state.dormant.get(&id).cloned().expect("known blob").1)
                 }
             };
             if let Some(entry) = hydrated {
@@ -305,6 +374,9 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
                     ..Default::default()
                 }),
             });
+            if !state.partitions.contains_key(partition) {
+                state.partition_epoch += 1;
+            }
             state
                 .partitions
                 .entry(partition.into())
@@ -315,8 +387,10 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             state.meta_dirty = true;
             (id, core)
         };
-        // "An Ok result indicates the blob is durably created."
-        commit::commit(&ready).await?;
+        // "An Ok result indicates the blob is durably created." The new
+        // blob is clean (its empty entry is served by assembly), so the
+        // commit captures just the namespace change.
+        commit::commit(&ready, &[id]).await?;
         let tracker = Arc::new(HandleTracker {
             ready: ready.clone(),
             id,
@@ -338,7 +412,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         let _ns = self.shared.ns_lock.lock().await;
         ready.check_poisoned()?;
 
-        {
+        let removed = {
             let mut state = ready.state.lock();
             let Some(blobs) = state.partitions.get(partition) else {
                 return Err(Error::PartitionMissing(partition.into()));
@@ -353,7 +427,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
                 None => blobs.values().copied().collect(),
             };
 
-            for id in ids {
+            for &id in &ids {
                 unlink(&mut state, id);
             }
             match name {
@@ -366,12 +440,16 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
                 }
                 None => {
                     state.partitions.remove(partition);
+                    state.partition_epoch += 1;
                 }
             }
             state.meta_dirty = true;
-        }
-        // "An Ok result indicates the blob is durably removed."
-        commit::commit(&ready).await
+            ids
+        };
+        // "An Ok result indicates the blob is durably removed." The removed
+        // ids root the commit so their applied-batch groups (if any) are
+        // captured with the removal (never-split).
+        commit::commit(&ready, &removed).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -388,9 +466,14 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
 /// Unlink one blob id: mark removed, queue every extent it references for
 /// reuse once the removal commits (and its last handle drops).
+///
+/// The very next commit — whatever it captures — drops the entry from the
+/// table, so removal frees gate only on that commit's seq (plus the handle
+/// gate for extents still readable through open handles).
 fn unlink(state: &mut core::State, id: u64) {
     let seq = state.seq;
     let gate = Some(id);
+    state.encoded.remove(&id);
     if let Some(core) = state.open.get(&id).cloned() {
         let mut inner = core.inner.lock();
         inner.removed = true;
@@ -405,6 +488,11 @@ fn unlink(state: &mut core::State, id: u64) {
                 gate,
             ));
         }
+        // Capture-gated frees resolve with the removal commit: the entry
+        // that referenced them is dropped (never readable via handles).
+        for extent in std::mem::take(&mut inner.pending_frees) {
+            state.pending_free.push((extent, seq, None));
+        }
         state.dirty.remove(&id);
         // Committed metadata extents (checksums + shadow).
         if let Some(meta) = state.committed_meta.remove(&id) {
@@ -417,7 +505,7 @@ fn unlink(state: &mut core::State, id: u64) {
             drop(inner);
             state.open.remove(&id);
         }
-    } else if let Some(entry) = state.dormant.remove(&id) {
+    } else if let Some((_, entry)) = state.dormant.remove(&id) {
         for r in &entry.runs {
             state.pending_free.push((
                 Extent {
@@ -481,7 +569,7 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        commit::commit(&self.ready).await
+        commit::commit(&self.ready, &[self.core.id]).await
     }
 
     async fn start_sync(&self) -> Handle<()> {

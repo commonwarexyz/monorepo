@@ -273,10 +273,38 @@ impl crate::Blob for TearingBlob {
 /// arbitrary subset of unsynced volume-file writes, torn at block
 /// granularity), reopen, and assert every blob reads back exactly its
 /// last-committed content.
+///
+/// Commits are SELECTIVE: a sync commits only the synced blob plus its
+/// applied-batch group (never split), so the ledger tracks committed
+/// content per blob and pending groups explicitly. Batches interleave with
+/// direct writes, syncs, and crashes; a batch dropped (or crashed) before
+/// apply must be fully invisible.
 #[tokio::test]
 async fn test_volume_power_loss_soak() {
     for seed in 0..32u64 {
         power_loss_round(seed).await;
+    }
+}
+
+/// Commit `name` plus the transitive closure of pending groups touching it
+/// in the soak's ledger (mirrors the never-split rule).
+fn ledger_commit(
+    name: &'static str,
+    committed: &mut BTreeMap<&'static str, Vec<u8>>,
+    current: &BTreeMap<&'static str, Vec<u8>>,
+    groups: &mut Vec<std::collections::BTreeSet<&'static str>>,
+) {
+    let mut capture: std::collections::BTreeSet<&'static str> = [name].into();
+    groups.retain(|group| {
+        if group.contains(name) {
+            capture.extend(group.iter().copied());
+            false
+        } else {
+            true
+        }
+    });
+    for member in capture {
+        committed.insert(member, current[member].clone());
     }
 }
 
@@ -286,10 +314,12 @@ async fn power_loss_round(seed: u64) {
     let mut tearing = Tearing::new(pool.clone());
     let mut volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
 
-    // The ledger: exactly-committed content per blob name, plus the current
-    // (possibly uncommitted) content.
+    // The ledger: exactly-committed content per blob name, the current
+    // (possibly uncommitted) content, and applied-but-uncommitted batch
+    // groups.
     let mut committed: BTreeMap<&'static str, Vec<u8>> = BTreeMap::new();
     let mut current: BTreeMap<&'static str, Vec<u8>> = BTreeMap::new();
+    let mut groups: Vec<std::collections::BTreeSet<&'static str>> = Vec::new();
     const NAMES: [&str; 3] = ["alpha", "beta", "gamma"];
 
     // Open all blobs (creation commits them empty).
@@ -304,7 +334,7 @@ async fn power_loss_round(seed: u64) {
 
     for step in 0..200u32 {
         let name = NAMES[rng.random_range(0..NAMES.len())];
-        match rng.random_range(0..10u8) {
+        match rng.random_range(0..13u8) {
             // Append a random amount (small through multi-block).
             0..=4 => {
                 let len = match rng.random_range(0..3u8) {
@@ -355,10 +385,81 @@ async fn power_loss_round(seed: u64) {
                 blobs[name].resize((cur.len() + grow) as u64).await.unwrap();
                 cur.resize(cur.len() + grow, 0);
             }
-            // Sync: everything current becomes committed (group commit).
+            // Sync: the synced blob (plus its applied-batch group) becomes
+            // committed; other blobs' dirty state stays pending.
             8 => {
                 blobs[name].sync().await.unwrap();
-                committed.clone_from(&current);
+                ledger_commit(name, &mut committed, &current, &mut groups);
+            }
+            // Batch: stage appends on two blobs, then apply / apply_sync /
+            // drop / crash mid-stage. Staged state must be invisible until
+            // apply, and applied state must commit all-or-nothing.
+            9..=11 => {
+                let other = NAMES[rng.random_range(0..NAMES.len())];
+                let mut batch = volume.batch().await.unwrap();
+                let mut ends: BTreeMap<&'static str, u64> = NAMES
+                    .iter()
+                    .map(|&n| (n, current[n].len() as u64))
+                    .collect();
+                let mut staged: Vec<(&'static str, Vec<u8>)> = Vec::new();
+                for pick in [name, other] {
+                    let len = rng.random_range(1..2 * BLOCK as usize);
+                    let mut data = vec![0u8; len];
+                    rng.fill_bytes(&mut data);
+                    batch
+                        .write_at(&blobs[pick], ends[pick], IoBuf::copy_from_slice(&data))
+                        .await
+                        .unwrap();
+                    *ends.get_mut(pick).unwrap() += len as u64;
+                    staged.push((pick, data));
+                }
+                match rng.random_range(0..3u8) {
+                    // Publish; the two blobs form one atomic group.
+                    0 => {
+                        batch.apply().await.unwrap();
+                        for (pick, data) in staged {
+                            current.get_mut(pick).unwrap().extend_from_slice(&data);
+                        }
+                        let mut group: std::collections::BTreeSet<&'static str> =
+                            [name, other].into();
+                        groups.retain(|g| {
+                            if g.iter().any(|m| group.contains(m)) {
+                                group.extend(g.iter().copied());
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        groups.push(group);
+                    }
+                    // Publish and commit in one shot.
+                    1 => {
+                        batch.apply_sync().await.unwrap();
+                        for (pick, data) in staged {
+                            current.get_mut(pick).unwrap().extend_from_slice(&data);
+                        }
+                        ledger_commit(name, &mut committed, &current, &mut groups);
+                        ledger_commit(other, &mut committed, &current, &mut groups);
+                    }
+                    // Dropped without apply: the batch never happened.
+                    _ => drop(batch),
+                }
+            }
+            // Record rewrite through a batch: staged resize + staged write,
+            // committed atomically (the wholesale-rewrite shape).
+            12 => {
+                let len = rng.random_range(1..2 * BLOCK as usize);
+                let mut data = vec![0u8; len];
+                rng.fill_bytes(&mut data);
+                let mut batch = volume.batch().await.unwrap();
+                batch.resize(&blobs[name], len as u64).await.unwrap();
+                batch
+                    .write_at(&blobs[name], 0, IoBuf::copy_from_slice(&data))
+                    .await
+                    .unwrap();
+                batch.apply_sync().await.unwrap();
+                current.insert(name, data);
+                ledger_commit(name, &mut committed, &current, &mut groups);
             }
             // Crash + recover.
             _ => {
@@ -395,8 +496,147 @@ async fn power_loss_round(seed: u64) {
                     blobs.insert(name, blob);
                 }
                 current.clone_from(&committed);
+                groups.clear();
             }
         }
+    }
+}
+
+/// A crash while a batch is still STAGED (never applied) must leave the
+/// batch fully invisible: both the in-place shared-tail staging and the
+/// fresh-extent staging die with the crash, whatever lands or tears.
+#[tokio::test]
+async fn test_volume_batch_crash_mid_stage() {
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+
+    // Commit a partial-tail baseline on `a` (staging appends into its
+    // shared tail block) and an empty baseline on `b` (staging allocates a
+    // fresh extent).
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(b"base"))
+        .await
+        .unwrap();
+    a.sync().await.unwrap();
+
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&a, 4, IoBuf::copy_from_slice(&vec![7u8; 6000]))
+        .await
+        .unwrap();
+    batch
+        .write_at(&b, 0, IoBuf::copy_from_slice(&vec![9u8; 5000]))
+        .await
+        .unwrap();
+
+    for seed in 0..8u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let (a, size) = recovered.open("p", b"a").await.unwrap();
+        assert_eq!(size, 4, "seed {seed}: staged append leaked into a");
+        let got = a.read_at(0, 4).await.unwrap().coalesce();
+        assert_eq!(got.as_ref(), b"base", "seed {seed}");
+        let (_, size) = recovered.open("p", b"b").await.unwrap();
+        assert_eq!(size, 0, "seed {seed}: staged fresh extent leaked into b");
+    }
+    drop(batch);
+}
+
+/// An applied-but-uncommitted batch either vanishes wholesale (a crash, or
+/// a commit rooted at an UNRELATED blob) or commits wholesale (a commit
+/// rooted at any group member) — never partially.
+#[tokio::test]
+async fn test_volume_batch_never_split() {
+    for commit_member in [false, true] {
+        let pool = test_pool();
+        let tearing = Tearing::new(pool.clone());
+        let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+
+        let (a, _) = volume.open("p", b"a").await.unwrap();
+        let (b, _) = volume.open("p", b"b").await.unwrap();
+        let (c, _) = volume.open("p", b"c").await.unwrap();
+
+        let mut batch = volume.batch().await.unwrap();
+        batch
+            .write_at(&a, 0, IoBuf::copy_from_slice(b"batch-a"))
+            .await
+            .unwrap();
+        batch
+            .write_at(&b, 0, IoBuf::copy_from_slice(b"batch-b"))
+            .await
+            .unwrap();
+        batch.apply().await.unwrap();
+
+        // Dirty an unrelated blob and sync either it (must NOT commit the
+        // batch) or a group member (must commit the WHOLE batch).
+        c.write_at(0, IoBuf::copy_from_slice(b"c")).await.unwrap();
+        if commit_member {
+            a.sync().await.unwrap();
+        } else {
+            c.sync().await.unwrap();
+        }
+
+        for seed in 0..8u64 {
+            let mut rng = TestRng::new(seed);
+            let image = tearing.crash(&mut rng);
+            let post = Tearing::from_image(pool.clone(), image).await;
+            let recovered = Volume::new(post, pool.clone(), Config::default());
+            let (a, a_size) = recovered.open("p", b"a").await.unwrap();
+            let (b, b_size) = recovered.open("p", b"b").await.unwrap();
+            if commit_member {
+                assert_eq!((a_size, b_size), (7, 7), "seed {seed}: batch must commit");
+                let got = a.read_at(0, 7).await.unwrap().coalesce();
+                assert_eq!(got.as_ref(), b"batch-a", "seed {seed}");
+                let got = b.read_at(0, 7).await.unwrap().coalesce();
+                assert_eq!(got.as_ref(), b"batch-b", "seed {seed}");
+            } else {
+                assert_eq!(
+                    (a_size, b_size),
+                    (0, 0),
+                    "seed {seed}: batch must vanish wholesale"
+                );
+                // The unrelated sync itself must be durable.
+                let (_, c_size) = recovered.open("p", b"c").await.unwrap();
+                assert_eq!(c_size, 1, "seed {seed}: synced blob must survive");
+            }
+        }
+    }
+}
+
+/// A selective commit persists exactly the synced blob: an unrelated dirty
+/// blob's unsynced data vanishes with the crash, and a later sync of that
+/// blob commits everything it accumulated.
+#[tokio::test]
+async fn test_volume_selective_commit_crash() {
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(b"a-data"))
+        .await
+        .unwrap();
+    b.write_at(0, IoBuf::copy_from_slice(&vec![3u8; 9000]))
+        .await
+        .unwrap();
+    a.sync().await.unwrap();
+
+    for seed in 0..8u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let (a, a_size) = recovered.open("p", b"a").await.unwrap();
+        assert_eq!(a_size, 6, "seed {seed}: synced blob durable exactly");
+        let got = a.read_at(0, 6).await.unwrap().coalesce();
+        assert_eq!(got.as_ref(), b"a-data", "seed {seed}");
+        let (_, b_size) = recovered.open("p", b"b").await.unwrap();
+        assert_eq!(b_size, 0, "seed {seed}: unsynced blob data must vanish");
     }
 }
 

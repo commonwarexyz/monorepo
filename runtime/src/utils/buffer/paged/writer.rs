@@ -513,6 +513,20 @@ impl<B: Blob> Writer<B> {
         self.sync_state.sync(&self.blob).await
     }
 
+    /// Flushes buffered data to the blob and stages the blob's durability
+    /// with `batch`: the flushed (and any earlier unsynced) bytes become
+    /// durable when the batch is applied with
+    /// [`crate::WriteBatch::apply_sync`] — on atomic backends, atomically
+    /// with everything else the batch stages.
+    pub async fn sync_into<T: crate::WriteBatch<Blob = B>>(
+        &mut self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.flush_internal(true, false).await?;
+        batch.sync(&self.blob);
+        Ok(())
+    }
+
     /// Flushes buffered data and begins making all pending mutations durable, returning a
     /// completion handle.
     ///
