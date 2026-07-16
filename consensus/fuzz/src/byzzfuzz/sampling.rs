@@ -22,7 +22,7 @@ use commonware_consensus::types::View;
 use commonware_cryptography::PublicKey;
 use rand::{seq::SliceRandom, Rng, RngExt as _};
 
-fn receiver_candidates<P: PublicKey>(participants: &[P]) -> Vec<P> {
+pub(crate) fn receiver_candidates<P: PublicKey>(participants: &[P]) -> Vec<P> {
     participants
         .iter()
         .enumerate()
@@ -31,13 +31,21 @@ fn receiver_candidates<P: PublicKey>(participants: &[P]) -> Vec<P> {
         .collect()
 }
 
-fn sample_receivers<P: PublicKey>(candidates: &[P], rng: &mut impl Rng) -> Vec<P> {
+pub(crate) fn sample_receivers<P: PublicKey>(candidates: &[P], rng: &mut impl Rng) -> Vec<P> {
     let nonempty_subsets = (1u32 << candidates.len()) - 1;
     let mask = rng.random_range(1..=nonempty_subsets);
     (0..candidates.len())
         .filter(|i| (mask >> i) & 1 == 1)
         .map(|i| candidates[i].clone())
         .collect()
+}
+
+/// Sample one of the 14 non-trivial set partitions of `{0,1,2,3}`. They live at
+/// `N4[1..15]`; index 0 is the trivial single-block partition (equals a fully
+/// connected network) and is excluded. Used by [`ByzzFuzz::network_faults`] to
+/// build a [`super::fault::NetworkFault`].
+pub(crate) fn sample_partition(rng: &mut impl Rng) -> SetPartition {
+    SetPartition::n4(rng.random_range(1..15))
 }
 
 fn sample_action(scope: MessageScope, rng: &mut impl Rng) -> ProcessAction {
@@ -79,13 +87,9 @@ impl ByzzFuzz {
         views
             .into_iter()
             .take(take)
-            .map(|view| {
-                // 14 non-trivial partitions live at N4[1..15].
-                let idx = rng.random_range(1..15);
-                NetworkFault {
-                    view: View::new(view),
-                    partition: SetPartition::n4(idx),
-                }
+            .map(|view| NetworkFault {
+                view: View::new(view),
+                partition: sample_partition(rng),
             })
             .collect()
     }

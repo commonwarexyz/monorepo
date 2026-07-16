@@ -187,7 +187,7 @@ where
 /// the campaign lights a previously-zero counter and the input is retained. Sized
 /// well above the number of structurally-distinct tokens a small Simplex run
 /// produces, to keep hash collisions (two states sharing a counter) rare.
-const STATE_COUNTERS: usize = 1 << 16;
+pub(crate) const STATE_COUNTERS: usize = 1 << 16;
 
 static COUNTERS: Counters<STATE_COUNTERS> = Counters::new();
 
@@ -232,7 +232,7 @@ pub fn observe_trace_events(events: &[RecordedEvent]) {
     observe_tokens(trace_event_tokens(events));
 }
 
-fn observe_tokens(tokens: impl IntoIterator<Item = String>) {
+pub fn observe_tokens(tokens: impl IntoIterator<Item = String>) {
     for token in tokens {
         let idx = (fnv1a_hash(token.as_bytes()) % STATE_COUNTERS as u64) as usize;
         // SAFETY: see `table`; `idx < STATE_COUNTERS` by construction.

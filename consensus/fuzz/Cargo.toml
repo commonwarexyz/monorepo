@@ -351,6 +351,34 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_hb"
+path = "fuzz_targets/simplex_id_hb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_hb_state_cov"
+path = "fuzz_targets/simplex_id_hb_state_cov.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_twins_mutator_hb"
+path = "fuzz_targets/simplex_id_twins_mutator_hb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_twins_campaign_hb"
+path = "fuzz_targets/simplex_id_twins_campaign_hb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_cert_mock_state_cov"
 path = "fuzz_targets/simplex_cert_mock_state_cov.rs"
 test = false
@@ -402,6 +430,20 @@ bench = false
 [[bin]]
 name = "simplex_id_byzzfuzz"
 path = "fuzz_targets/simplex_id_byzzfuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_mallory"
+path = "fuzz_targets/simplex_id_mallory.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_mallory"
+path = "fuzz_targets/simplex_cert_mock_mallory.rs"
 test = false
 doc = false
 bench = false

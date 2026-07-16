@@ -16,11 +16,12 @@ use crate::{
         observed::ObservedState,
         ByzzFuzz,
     },
-    invariants,
+    happens_before, invariants,
     simplex::Simplex,
-    spawn_honest_validator,
+    sniff_sink, spawn_honest_validator,
     utils::Partition,
-    CertifyChoice, PublicKeyOf, EPOCH, FAULT_INJECTION_RATIO, FAULT_PHASE, N4F0C4, POST_GST_WINDOW,
+    CertifyChoice, PublicKeyOf, SniffChannel, SniffingReceiver, EPOCH, FAULT_INJECTION_RATIO,
+    FAULT_PHASE, N4F0C4, POST_GST_WINDOW,
 };
 use bytes::Bytes;
 use commonware_codec::Encode;
@@ -38,6 +39,7 @@ use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, sync::Mutex, Fuz
 use futures::future::join_all;
 use rand::RngExt as _;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
+use tracing::{dispatcher, Dispatch};
 
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
@@ -75,14 +77,23 @@ fn genesis_payload() -> Sha256Digest {
 }
 
 /// Sample `(c, d, r)` from `context` and build the per-validator
-/// forwarder/receiver/injector wiring used by [`run`]. The returned reporters
-/// are already running; `gate` lets [`run`] reach GST after the fault phase.
-/// Byzantine process faults are not gated by GST.
+/// forwarder/receiver/injector wiring used by [`run`]. The
+/// returned reporters are already running; `gate` lets the caller reach GST
+/// after the fault phase. Byzantine process faults are not gated by GST.
+///
+/// When `hb_log` is `Some`, honest receivers are additionally wrapped in a
+/// [`SniffingReceiver`] and each honest engine is spawned under a per-node
+/// [`happens_before::capture::NodeSubscriber`], so the log accumulates an
+/// honest-only happens-before history (the Byzantine identity at
+/// [`BYZANTINE_IDX`] is excluded and marked ambiguous, since its mutated wire
+/// output diverges from its tracing). `None` leaves capture off (the [`run`]
+/// path) as a zero-decode pass-through.
 async fn setup_engines<P: Simplex>(
     context: &mut deterministic::Context,
     input: &mut crate::FuzzInput,
     gate: FaultGate,
     log_label: &'static str,
+    hb_log: Option<happens_before::capture::EventLog>,
 ) -> EngineSetup<P>
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
@@ -140,10 +151,17 @@ where
     ));
 
     let participants_arc: Arc<[PublicKeyOf<P>]> = Arc::from(participants.clone());
-    let network_schedule = Arc::new(network_schedule_vec);
+    // Shared (read-only after setup) by every forwarder, which consults the
+    // sampled network-fault schedule per message.
+    let network_schedule = Arc::new(Mutex::new(network_schedule_vec));
     let proc_schedule_arc = Arc::new(Mutex::new(proc_faults));
     let empty_proc_schedule: Arc<Mutex<Vec<ProcessFault<PublicKeyOf<P>>>>> =
         Arc::new(Mutex::new(Vec::new()));
+
+    // Honest-only happens-before capture: the Byzantine identity is excluded
+    // from sender resolution, so honest receives from it merge no history.
+    let none_hb: Option<happens_before::capture::EventLog> = None;
+    let ambiguous: Arc<[u32]> = vec![BYZANTINE_IDX as u32].into();
 
     // Intercept queue. Forwarders push (sync); injector consumes (async).
     let (intercept_tx, intercept_rx) = intercept::channel::<PublicKeyOf<P>>();
@@ -242,31 +260,73 @@ where
         let resolver_receiver = intercept::RoundTrackingReceiver::new(
             resolver_receiver,
             sender_view,
-            intercept::resolver_view_extractor::<P::Scheme>(cert_codec, pool.clone()),
+            intercept::resolver_view_extractor::<P::Scheme>(cert_codec.clone(), pool.clone()),
+        );
+
+        // Wrap each round-tracking receiver in a happens-before sniffer. Honest
+        // nodes record wire arrivals; the Byzantine node (and the `None`-capture
+        // `run` path) get a pass-through sink.
+        let node_hb = if i == BYZANTINE_IDX {
+            &none_hb
+        } else {
+            &hb_log
+        };
+        let vote_receiver = SniffingReceiver::<P, _>::new(
+            vote_receiver,
+            SniffChannel::Vote,
+            cert_codec.clone(),
+            sniff_sink::<P>(node_hb, i as u32, &participants_arc, &ambiguous),
+        );
+        let cert_receiver = SniffingReceiver::<P, _>::new(
+            cert_receiver,
+            SniffChannel::Certificate,
+            cert_codec.clone(),
+            sniff_sink::<P>(node_hb, i as u32, &participants_arc, &ambiguous),
+        );
+        let resolver_receiver = SniffingReceiver::<P, _>::new(
+            resolver_receiver,
+            SniffChannel::Resolver,
+            cert_codec.clone(),
+            sniff_sink::<P>(node_hb, i as u32, &participants_arc, &ambiguous),
         );
 
         let ctx = context
             .child("validator")
             .with_attribute("public_key", &validator);
-        let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-            ctx,
-            &oracle,
-            &participants,
-            schemes[i].clone(),
-            validator,
-            P::Elector::default(),
-            relay.clone(),
-            Duration::from_secs(1),
-            Duration::from_secs(2),
-            input.mailbox_size,
-            input.fetch_concurrent,
-            input.forwarding,
-            (vote_primary, vote_receiver),
-            (cert_primary, cert_receiver),
-            (resolver_primary, resolver_receiver),
-            input.certify,
-            input.reporting,
-        );
+        let spawn = || {
+            spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                ctx,
+                &oracle,
+                &participants,
+                schemes[i].clone(),
+                validator,
+                P::Elector::default(),
+                relay.clone(),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                input.mailbox_size,
+                input.fetch_concurrent,
+                input.forwarding,
+                (vote_primary, vote_receiver),
+                (cert_primary, cert_receiver),
+                (resolver_primary, resolver_receiver),
+                input.certify,
+                input.reporting,
+            )
+        };
+        // Dispatch propagation: each honest engine's tracing is attributed to
+        // node `i`. The Byzantine node and the `run` path (`hb_log == None`)
+        // spawn under the ambient dispatch.
+        let reporter = match node_hb {
+            Some(log) => {
+                let dispatch = Dispatch::new(happens_before::capture::NodeSubscriber::new(
+                    i as u32,
+                    log.clone(),
+                ));
+                dispatcher::with_default(&dispatch, spawn)
+            }
+            None => spawn(),
+        };
         reporters.push(reporter);
     }
 
@@ -298,6 +358,113 @@ where
     }
 }
 
+/// Reach GST and require post-GST honest liveness, used by [`run`] when the
+/// fault phase did not already finish. Prunes process faults past the byzantine's current round, then
+/// appends a fresh post-GST omit/mutate budget so the byzantine stays
+/// adversarial after the network heals. GST disables partition drops (network
+/// faults), so any partition-wedged honest node recovers; process faults never
+/// wedge the honest quorum (three honest nodes meet quorum without the
+/// byzantine). Each non-byzantine reporter must reach its recorded target, or
+/// this panics with a liveness violation.
+#[allow(clippy::too_many_arguments)]
+async fn reach_gst_and_check_liveness<P: Simplex>(
+    context: &mut deterministic::Context,
+    reporters: &mut [ByzzReporter<P>],
+    non_byzantine: &[usize],
+    required_containers: u64,
+    byzantine_view: &SenderViewCell,
+    proc_schedule: &Arc<Mutex<Vec<ProcessFault<PublicKeyOf<P>>>>>,
+    participants: &[PublicKeyOf<P>],
+    post_gst_fault_views: u64,
+    gate: &FaultGate,
+) {
+    // Phase 2 targets are recorded before GST for stable diagnostics.
+    let mut watch_targets: Vec<(usize, u64, u64)> = Vec::with_capacity(non_byzantine.len());
+    let mut watcher_inputs = Vec::with_capacity(non_byzantine.len());
+    for &i in non_byzantine {
+        let (latest, monitor): (View, ViewReceiver<View>) = reporters[i].subscribe().await;
+        let baseline = latest.get();
+        let target = if baseline < required_containers {
+            required_containers
+        } else {
+            baseline
+                .checked_add(1)
+                .expect("finalized view reached u64::MAX")
+        };
+        watch_targets.push((i, baseline, target));
+        watcher_inputs.push((i, target, latest, monitor));
+    }
+
+    // GST disables partition drops. Keep already-reachable process
+    // faults, then append future faults so the byzantine sender
+    // remains adversarial after GST.
+    let byzantine_rnd = byzantine_view.get();
+    let pruned_pre_gst_proc_faults = {
+        let mut schedule = proc_schedule.lock();
+        let before = schedule.len();
+        schedule.retain(|f| f.view <= byzantine_rnd);
+        before - schedule.len()
+    };
+    let first_post_gst_view = byzantine_rnd.saturating_add(1).max(1);
+    let last_post_gst_view =
+        first_post_gst_view.saturating_add(post_gst_fault_views.saturating_sub(1));
+    let post_gst_faults = ByzzFuzz::post_gst_process_faults(
+        first_post_gst_view..=last_post_gst_view,
+        participants,
+        context,
+    );
+    {
+        let mut schedule = proc_schedule.lock();
+        schedule.extend(post_gst_faults.clone());
+    }
+    log::push(format!(
+        "byzzfuzz: gst_reached byzantine_rnd={byzantine_rnd} pruned_pre_gst_proc_faults={pruned_pre_gst_proc_faults} post_gst_fault_views={post_gst_fault_views} appended_post_gst_proc_faults={post_gst_faults:?}",
+    ));
+    gate.reach_gst();
+
+    // Phase 2 watchers return true once their reporter reaches target.
+    let mut watchers = Vec::new();
+    for (i, target, mut latest, mut monitor) in watcher_inputs {
+        watchers.push(
+            context
+                .child("byzzfuzz_post_gst_watcher")
+                .with_attribute("index", i)
+                .spawn(move |_| async move {
+                    while latest.get() < target {
+                        let Some(next) = monitor.recv().await else {
+                            return false;
+                        };
+                        latest = next;
+                    }
+                    true
+                }),
+        );
+    }
+
+    let phase2_complete = select! {
+        results = join_all(watchers) => {
+            results.iter().all(|r| matches!(r, Ok(true)))
+        },
+        _ = context.sleep(POST_GST_WINDOW) => false,
+    };
+
+    if !phase2_complete {
+        let mut diag = String::new();
+        for &(i, baseline, target) in &watch_targets {
+            let (latest, _): (View, ViewReceiver<View>) = reporters[i].subscribe().await;
+            let current = latest.get();
+            let _ = write!(
+                diag,
+                " node{i}={{baseline={baseline} target={target} current={current}}}"
+            );
+        }
+        panic!(
+            "byzzfuzz: no post-GST progress within {:?};{diag}",
+            POST_GST_WINDOW,
+        );
+    }
+}
+
 /// Run a single ByzzFuzz iteration.
 pub fn run<P: Simplex>(mut input: crate::FuzzInput)
 where
@@ -316,7 +483,8 @@ where
 
     executor.start(|mut context| async move {
         let gate = FaultGate::new();
-        let setup = setup_engines::<P>(&mut context, &mut input, gate.clone(), "byzzfuzz").await;
+        let setup =
+            setup_engines::<P>(&mut context, &mut input, gate.clone(), "byzzfuzz", None).await;
         crate::print_fuzz_input(crate::Mode::Byzzfuzz, &input);
         let mut reporters = setup.reporters;
         let byzantine_view = setup.byzantine_view;
@@ -363,92 +531,18 @@ where
         };
 
         if !phase1_early_complete {
-            // Phase 2 targets are recorded before GST for stable diagnostics.
-            let mut watch_targets: Vec<(usize, u64, u64)> =
-                Vec::with_capacity(non_byzantine.len());
-            let mut watcher_inputs = Vec::with_capacity(non_byzantine.len());
-            for &i in &non_byzantine {
-                let (latest, monitor): (View, ViewReceiver<View>) = reporters[i].subscribe().await;
-                let baseline = latest.get();
-                let target = if baseline < required_containers {
-                    required_containers
-                } else {
-                    baseline
-                        .checked_add(1)
-                        .expect("finalized view reached u64::MAX")
-                };
-                watch_targets.push((i, baseline, target));
-                watcher_inputs.push((i, target, latest, monitor));
-            }
-
-            // GST disables partition drops. Keep already-reachable process
-            // faults, then append future faults so the byzantine sender
-            // remains adversarial after GST.
-            let byzantine_rnd = byzantine_view.get();
-            let pruned_pre_gst_proc_faults = {
-                let mut schedule = proc_schedule.lock();
-                let before = schedule.len();
-                schedule.retain(|f| f.view <= byzantine_rnd);
-                before - schedule.len()
-            };
-            let first_post_gst_view = byzantine_rnd.saturating_add(1).max(1);
-            let last_post_gst_view = first_post_gst_view
-                .saturating_add(post_gst_fault_views.saturating_sub(1));
-            let post_gst_faults = ByzzFuzz::post_gst_process_faults(
-                first_post_gst_view..=last_post_gst_view,
-                &participants,
+            reach_gst_and_check_liveness::<P>(
                 &mut context,
-            );
-            {
-                let mut schedule = proc_schedule.lock();
-                schedule.extend(post_gst_faults.clone());
-            }
-            log::push(format!(
-                "byzzfuzz: gst_reached byzantine_rnd={byzantine_rnd} pruned_pre_gst_proc_faults={pruned_pre_gst_proc_faults} post_gst_fault_views={post_gst_fault_views} appended_post_gst_proc_faults={post_gst_faults:?}",
-            ));
-            gate.reach_gst();
-
-            // Phase 2 watchers return true once their reporter reaches target.
-            let mut watchers = Vec::new();
-            for (i, target, mut latest, mut monitor) in watcher_inputs {
-                watchers.push(
-                    context
-                        .child("byzzfuzz_post_gst_watcher")
-                        .with_attribute("index", i)
-                        .spawn(move |_| async move {
-                            while latest.get() < target {
-                                let Some(next) = monitor.recv().await else {
-                                    return false;
-                                };
-                                latest = next;
-                            }
-                            true
-                        }),
-                );
-            }
-
-            let phase2_complete = select! {
-                results = join_all(watchers) => {
-                    results.iter().all(|r| matches!(r, Ok(true)))
-                },
-                _ = context.sleep(POST_GST_WINDOW) => false,
-            };
-
-            if !phase2_complete {
-                let mut diag = String::new();
-                for &(i, baseline, target) in &watch_targets {
-                    let (latest, _): (View, ViewReceiver<View>) = reporters[i].subscribe().await;
-                    let current = latest.get();
-                    let _ = write!(
-                        diag,
-                        " node{i}={{baseline={baseline} target={target} current={current}}}"
-                    );
-                }
-                panic!(
-                    "byzzfuzz: no post-GST progress within {:?};{diag}",
-                    POST_GST_WINDOW,
-                );
-            }
+                &mut reporters,
+                &non_byzantine,
+                required_containers,
+                &byzantine_view,
+                &proc_schedule,
+                &participants,
+                post_gst_fault_views,
+                &gate,
+            )
+            .await;
         }
 
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
@@ -466,4 +560,67 @@ where
         let states = invariants::extract(correct_reporters, config.n as usize);
         invariants::check::<P>(config.n, states);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        simplex::SimplexId, strategy::StrategyChoice, utils::Partition, CertifyChoice, FuzzInput,
+        ReporterWiring, N4F0C4,
+    };
+    use commonware_consensus::simplex::ForwardingPolicy;
+    use std::num::NonZeroUsize;
+
+    fn baseline_input(seed: u64) -> FuzzInput {
+        let mut raw_bytes = seed.to_le_bytes().to_vec();
+        raw_bytes.extend_from_slice(&[0x5au8; 96]);
+        FuzzInput {
+            raw_bytes,
+            required_containers: 2,
+            degraded_network: false,
+            configuration: N4F0C4,
+            partition: Partition::Connected,
+            strategy: StrategyChoice::AnyScope,
+            messaging_faults: Vec::new(),
+            mailbox_size: NonZeroUsize::new(1024).unwrap(),
+            fetch_concurrent: NonZeroUsize::new(1).unwrap(),
+            forwarding: ForwardingPolicy::Disabled,
+            certify: CertifyChoice::Always,
+            reporting: ReporterWiring::Solo,
+        }
+    }
+
+    /// Run the plain ByzzFuzz baseline and drain its decision log, tolerating a
+    /// panic so a same-seed liveness violation is still captured identically.
+    fn baseline_trace(input: FuzzInput) -> (bool, Vec<String>) {
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run::<SimplexId>(input);
+        }))
+        .is_ok();
+        (ok, log::take())
+    }
+
+    // Same-seed determinism regression: the i.i.d. baseline draws only from the
+    // input-seeded `FuzzRng`, so two runs of one fixed input must produce a
+    // byte-identical decision log (the full sampled process/network schedule)
+    // and the same completion outcome. This fixed input finalizes in the fault
+    // phase, so it stays within the fast-test budget.
+    #[test]
+    fn run_baseline_is_deterministic_for_fixed_input() {
+        let (ok_first, first) = baseline_trace(baseline_input(7));
+        let (ok_second, second) = baseline_trace(baseline_input(7));
+        assert_eq!(
+            ok_first, ok_second,
+            "same seed must reach the same completion outcome"
+        );
+        assert_eq!(
+            first, second,
+            "same seed must produce a byte-identical ByzzFuzz schedule"
+        );
+        assert!(
+            !first.is_empty(),
+            "the decision log must record the schedule"
+        );
+    }
 }

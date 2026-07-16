@@ -7,8 +7,10 @@ pub mod aggregation_decode;
 pub mod bounds;
 pub mod byzzfuzz;
 pub mod disrupter;
+pub mod happens_before;
 pub mod id_mock;
 pub mod invariants;
+pub(crate) mod mallory;
 #[cfg(feature = "mocks")]
 pub mod marshal;
 pub mod network;
@@ -58,7 +60,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     deterministic,
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
-    Clock, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
+    Clock, Handle, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
 };
 use commonware_utils::{
     channel::mpsc::{self, Receiver},
@@ -461,10 +463,20 @@ impl Arbitrary<'_> for FuzzInput {
             _ => ForwardingPolicy::SilentLeader,
         };
 
-        // Single-target certify variants are not sampled here because standard
-        // N4F1C3 modes have only three honest certifiers; disabling one drops
-        // below the quorum of three.
-        let certify = CertifyChoice::Always;
+        // Single-target certify variants stall N4F1C3: its three honest
+        // certifiers are exactly the finalize quorum, so disabling one halts
+        // finalization for the rest of the run. Sample them only when every
+        // validator is honest and the quorum keeps one certifier of slack.
+        let certify = if configuration == N4F0C4 {
+            let target_idx = u.int_in_range(0..=configuration.n as u8 - 1)?;
+            match u.int_in_range(0..=3)? {
+                0 => CertifyChoice::SingleCancel { target_idx },
+                1 => CertifyChoice::SinglePending { target_idx },
+                _ => CertifyChoice::Always,
+            }
+        } else {
+            CertifyChoice::Always
+        };
 
         let reporting = ReporterWiring::arbitrary(u)?;
 
@@ -497,6 +509,37 @@ impl Arbitrary<'_> for FuzzInput {
 }
 
 pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Verifier>::PublicKey;
+pub(crate) type CertCfgOf<P> =
+    <<<P as simplex::Simplex>::Scheme as Verifier>::Certificate as commonware_codec::Read>::Cfg;
+/// Happens-before sink for a [`SniffingReceiver`].
+pub(crate) struct Sniff<P: simplex::Simplex> {
+    /// Receiving node id events are attributed to.
+    node: u32,
+    /// Shared event log.
+    log: happens_before::capture::EventLog,
+    /// Participant set used to resolve wire senders to node ids.
+    peers: Arc<[PublicKeyOf<P>]>,
+    /// Participant indices whose identity is ambiguous (a twin pair runs two
+    /// engines under one key): a receive from them resolves to no sender, so
+    /// neither half's history can be merged.
+    ambiguous: Arc<[u32]>,
+}
+
+pub(crate) type SniffSink<P> = Option<Sniff<P>>;
+
+pub(crate) fn sniff_sink<P: simplex::Simplex>(
+    hb_log: &Option<happens_before::capture::EventLog>,
+    node: u32,
+    peers: &Arc<[PublicKeyOf<P>]>,
+    ambiguous: &Arc<[u32]>,
+) -> SniffSink<P> {
+    hb_log.as_ref().map(|log| Sniff {
+        node,
+        log: log.clone(),
+        peers: peers.clone(),
+        ambiguous: ambiguous.clone(),
+    })
+}
 
 type ReporterOf<P> = reporter::Reporter<
     deterministic::Context,
@@ -511,6 +554,7 @@ type ReporterEntry<P> = (PublicKeyOf<P>, ReporterOf<P>);
 struct RunAudit {
     auditor_state: String,
     reporter_states: BTreeMap<String, types::ReporterReplicaStateData>,
+    happens_before: Option<happens_before::Summary>,
 }
 
 type NetworkChannels<P> = (
@@ -692,7 +736,154 @@ fn spawn_disrupter<P: simplex::Simplex>(
     );
 }
 
-/// Spawn an honest validator with application, reporter, and engine.
+/// Whether a [`ManagedValidator`]'s engine is running, has been crash-stopped, or
+/// was restarted with empty storage.
+/// A crash-stop is permanent for the crashed INCARNATION but not terminal for the
+/// run: after [`Running`](Self::Running) transitions to [`Crashed`](Self::Crashed)
+/// the old engine/application tasks are aborted and never resurrected, yet the
+/// episode continues over the surviving quorum (the crashed node is dropped from the
+/// liveness watch; its retained reporter stays in the safety set). A durable restart
+/// is a separate fault that rebuilds fresh tasks and returns to `Running` in one
+/// step, so it never leaves the node in `Crashed` (see `crate::mallory::lifecycle`).
+/// An [`Amnesiac`](Self::Amnesiac) node has a LIVE engine but was rebuilt on a fresh
+/// (empty) storage partition, so it has forgotten its durable state (including signed
+/// votes) and may equivocate: it is treated as Byzantine for the rest of the episode
+/// (excluded from the honest safety and liveness sets), not terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ValidatorLifecycle {
+    /// The engine and application tasks are live.
+    Running,
+    /// The engine and application tasks were aborted and awaited to termination.
+    Crashed,
+    /// The engine was rebuilt on a fresh (empty) storage partition: it has forgotten
+    /// its durable state and is treated as Byzantine for the rest of the episode.
+    Amnesiac,
+}
+
+/// An honest validator whose engine/application task handles are RETAINED (not
+/// dropped) so its lifecycle can be managed at runtime: crash-stopped or durably
+/// restarted (Mallory mode, PR5+). The reporter is Arc-backed, so its safety
+/// history survives a crash and a clone reflects the live engine's state.
+///
+/// `EC` defaults to the backend's own elector so most callers write
+/// `ManagedValidator<P>`; the generic form exists only so the general
+/// [`build_validator`] can carry whatever elector its caller passed.
+pub(crate) struct ManagedValidator<P, EC = <P as simplex::Simplex>::Elector>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    /// Index of this validator in the participant set (its faultable identity).
+    idx: usize,
+    /// This validator's public key; re-registration and rebuild target it.
+    validator: PublicKeyOf<P>,
+    /// This validator's signing scheme, retained so a rebuild reuses it.
+    scheme: P::Scheme,
+    /// Durable storage partition; a durable restart replays it, so it is kept
+    /// stable across incarnations.
+    partition: String,
+    /// Incarnation counter (0 at first build), bumped on each restart. The seam a
+    /// later amnesia restart uses to derive a fresh partition.
+    generation: u32,
+    /// Arc-backed reporter; a restart reuses this instance to retain pre-crash
+    /// safety history.
+    reporter: reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
+    /// Application actor handle, retained so a crash can abort it. `None` once
+    /// taken by a crash/restart.
+    app_handle: Option<Handle<()>>,
+    /// Engine handle, retained so a crash can abort it (aborting cascades to every
+    /// engine sub-task). `None` once taken by a crash/restart.
+    engine_handle: Option<Handle<()>>,
+    /// Whether the engine is currently running or has been crash-stopped.
+    lifecycle: ValidatorLifecycle,
+}
+
+impl<P, EC> ManagedValidator<P, EC>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    /// A clone of the Arc-backed reporter (shares live state with this validator).
+    pub(crate) fn reporter(
+        &self,
+    ) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest> {
+        self.reporter.clone()
+    }
+
+    /// This validator's index in the participant set.
+    pub(crate) fn idx(&self) -> usize {
+        self.idx
+    }
+
+    /// This validator's public key.
+    pub(crate) fn validator(&self) -> &PublicKeyOf<P> {
+        &self.validator
+    }
+
+    /// This validator's signing scheme.
+    pub(crate) fn scheme(&self) -> &P::Scheme {
+        &self.scheme
+    }
+
+    /// The durable storage partition (stable across incarnations).
+    pub(crate) fn partition(&self) -> &str {
+        &self.partition
+    }
+
+    /// The current lifecycle state.
+    pub(crate) fn lifecycle(&self) -> ValidatorLifecycle {
+        self.lifecycle
+    }
+
+    /// Take the engine handle for a crash/restart abort, leaving `None`.
+    pub(crate) fn take_engine_handle(&mut self) -> Option<Handle<()>> {
+        self.engine_handle.take()
+    }
+
+    /// Take the application handle for a crash/restart abort, leaving `None`.
+    pub(crate) fn take_app_handle(&mut self) -> Option<Handle<()>> {
+        self.app_handle.take()
+    }
+
+    /// Mark the engine crash-stopped after both handles were aborted and awaited.
+    pub(crate) fn mark_crashed(&mut self) {
+        self.lifecycle = ValidatorLifecycle::Crashed;
+    }
+
+    /// Adopt a freshly rebuilt incarnation: take over its engine/application
+    /// handles, bump the generation, and return to `Running`. The reporter is
+    /// unchanged (a durable restart reuses the same instance).
+    pub(crate) fn adopt(&mut self, rebuilt: ManagedValidator<P, EC>) {
+        self.app_handle = rebuilt.app_handle;
+        self.engine_handle = rebuilt.engine_handle;
+        self.generation = self.generation.wrapping_add(1);
+        self.lifecycle = ValidatorLifecycle::Running;
+    }
+
+    /// Adopt an amnesia-restarted incarnation: take over its engine/application
+    /// handles and its FRESH storage partition and reporter (the rebuild used an
+    /// empty partition and a clean-slate reporter), bump the generation, and mark
+    /// the node [`Amnesiac`](ValidatorLifecycle::Amnesiac). Unlike [`adopt`](Self::adopt)
+    /// this replaces the partition and reporter, because the node forgot its durable
+    /// state and its new incarnation owns a distinct storage and history.
+    pub(crate) fn adopt_amnesiac(&mut self, rebuilt: ManagedValidator<P, EC>) {
+        self.app_handle = rebuilt.app_handle;
+        self.engine_handle = rebuilt.engine_handle;
+        self.partition = rebuilt.partition;
+        self.reporter = rebuilt.reporter;
+        self.generation = self.generation.wrapping_add(1);
+        self.lifecycle = ValidatorLifecycle::Amnesiac;
+    }
+
+    /// This validator's current incarnation counter.
+    pub(crate) fn generation(&self) -> u32 {
+        self.generation
+    }
+}
+
+/// Spawn an honest validator with application, reporter, and engine, returning
+/// only its reporter. A thin wrapper over [`build_validator`] preserved so its
+/// many existing callers compile unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_honest_validator<
     P,
@@ -732,12 +923,153 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
 {
-    let reporter_cfg = reporter::Config {
-        participants: participants.try_into().expect("public keys are unique"),
-        scheme: scheme.clone(),
-        elector: elector.clone(),
+    build_validator::<P, EC, _, _, _, _, _, _>(
+        context,
+        oracle,
+        participants,
+        scheme,
+        validator,
+        elector,
+        relay,
+        leader_timeout,
+        certification_timeout,
+        mailbox_size,
+        fetch_concurrent,
+        forwarding,
+        pending,
+        recovered,
+        resolver,
+        certify,
+        wiring,
+    )
+    .reporter
+}
+
+/// Build an honest validator (application, reporter, engine) and RETAIN its task
+/// handles in a [`ManagedValidator`], instead of dropping them like
+/// [`spawn_honest_validator`]. The storage partition is `validator.to_string()`,
+/// matching the historical behavior of the dropped-handle path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_validator<
+    P,
+    EC,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    elector: EC,
+    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    fetch_concurrent: NonZeroUsize,
+    forwarding: ForwardingPolicy,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+    certify: CertifyChoice,
+    wiring: ReporterWiring,
+) -> ManagedValidator<P, EC>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    let partition = validator.to_string();
+    build_validator_with_reporter::<P, EC, _, _, _, _, _, _>(
+        None,
+        context,
+        oracle,
+        participants,
+        scheme,
+        validator,
+        elector,
+        relay,
+        leader_timeout,
+        certification_timeout,
+        mailbox_size,
+        fetch_concurrent,
+        forwarding,
+        partition,
+        pending,
+        recovered,
+        resolver,
+        certify,
+        wiring,
+    )
+}
+
+/// [`build_validator`] with an explicit reporter and storage partition. When
+/// `existing` is `Some`, that reporter instance is reused (rather than a fresh
+/// one created) so a durable restart RETAINS the pre-crash safety history whose
+/// Arc-backed maps survived the abort. The public build paths pass `None` and the
+/// default `validator.to_string()` partition; a durable restart passes the
+/// crashed validator's reporter and its unchanged partition.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_validator_with_reporter<
+    P,
+    EC,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
+    existing: Option<reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>>,
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    elector: EC,
+    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    fetch_concurrent: NonZeroUsize,
+    forwarding: ForwardingPolicy,
+    partition: String,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+    certify: CertifyChoice,
+    wiring: ReporterWiring,
+) -> ManagedValidator<P, EC>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    let reporter = match existing {
+        Some(reporter) => reporter,
+        None => {
+            let reporter_cfg = reporter::Config {
+                participants: participants.try_into().expect("public keys are unique"),
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            };
+            reporter::Reporter::new(context.child("reporter"), reporter_cfg)
+        }
     };
-    let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
     let (vote_sender, vote_receiver) = pending;
     let (certificate_sender, certificate_receiver) = recovered;
@@ -757,9 +1089,10 @@ where
         should_certify: certify.into_certifier(validator_idx),
     };
     let (actor, application) = application::Application::new(context.child("application"), app_cfg);
-    actor.start();
+    let app_handle = actor.start();
 
     let blocker = oracle.control(validator.clone());
+    let stored_scheme = scheme.clone();
     let engine_cfg = config::Config {
         blocker,
         scheme,
@@ -767,7 +1100,7 @@ where
         automaton: application.clone(),
         relay: application.clone(),
         reporter: wiring.wire(reporter.clone()),
-        partition: validator.to_string(),
+        partition: partition.clone(),
         mailbox_size,
         epoch: Epoch::new(EPOCH),
         floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
@@ -785,13 +1118,23 @@ where
         forwarding,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
-    engine.start(
+    let engine_handle = engine.start(
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
         (resolver_sender, resolver_receiver),
     );
 
-    reporter
+    ManagedValidator {
+        idx: validator_idx,
+        validator,
+        scheme: stored_scheme,
+        partition,
+        generation: 0,
+        reporter,
+        app_handle: Some(app_handle),
+        engine_handle: Some(engine_handle),
+        lifecycle: ValidatorLifecycle::Running,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1081,6 +1424,27 @@ fn messaging_faults(
     }
 }
 
+/// The trace-collection stack: a shared registry with a filtered
+/// [CollectingLayer] over the given storage.
+fn warn_trace_dispatch(trace_store: TraceStorage) -> Dispatch {
+    let collecting_layer = CollectingLayer::new(trace_store).with_filter(filter_fn(|metadata| {
+        (metadata.is_span()
+            && metadata
+                .target()
+                .contains("commonware_consensus::simplex::actors::"))
+            || (metadata.is_event() && *metadata.level() == Level::WARN)
+            || (metadata.is_event()
+                && *metadata.level() == Level::DEBUG
+                && (metadata
+                    .target()
+                    .contains("commonware_consensus::simplex::actors::resolver")
+                    || metadata
+                        .target()
+                        .contains("commonware_consensus::simplex::actors::voter")))
+    }));
+    Dispatch::new(tracing_subscriber::registry().with(collecting_layer))
+}
+
 /// Collect WARN events from the whole protocol run and feed bounded tokens into
 /// state coverage.
 ///
@@ -1089,44 +1453,158 @@ fn messaging_faults(
 /// whole-network: tracing events do not carry the emitting validator identity
 /// without adding protocol instrumentation, and adversarial twin engines hitting
 /// rejection paths is useful reachability feedback.
-fn run_with_warn_trace_collection<T>(run: impl FnOnce() -> T) -> T {
+///
+/// The collector dispatch is passed to `run` so paths that install per-node
+/// subscribers (happens-before) can tee validator-task traces back into it.
+fn run_with_warn_trace_collection<T>(run: impl FnOnce(&Dispatch) -> T) -> T {
     let trace_store = TraceStorage::default();
-    let collecting_layer =
-        CollectingLayer::new(trace_store.clone()).with_filter(filter_fn(|metadata| {
-            (metadata.is_span()
-                && metadata
-                    .target()
-                    .contains("commonware_consensus::simplex::actors::"))
-                || (metadata.is_event() && *metadata.level() == Level::WARN)
-                || (metadata.is_event()
-                    && *metadata.level() == Level::DEBUG
-                    && (metadata
-                        .target()
-                        .contains("commonware_consensus::simplex::actors::resolver")
-                        || metadata
-                            .target()
-                            .contains("commonware_consensus::simplex::actors::voter")))
-        }));
-    let subscriber = tracing_subscriber::registry().with(collecting_layer);
-    let dispatch = Dispatch::new(subscriber);
+    let dispatch = warn_trace_dispatch(trace_store.clone());
 
-    let output = dispatcher::with_default(&dispatch, run);
+    let output = dispatcher::with_default(&dispatch, || run(&dispatch));
 
     let events = trace_store.get_all();
     state_cov::observe_trace_events(&events);
     output
 }
 
+/// The consensus channel a [`SniffingReceiver`] decodes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SniffChannel {
+    Vote,
+    Certificate,
+    Resolver,
+}
+
+/// Decode a sniffed payload into its wire-arrival event (view, kind). Vote and
+/// certificate channels carry the message directly; the resolver channel frames
+/// it, with backfill responses delivering certificates (requests and errors
+/// carry none and record nothing). `None` when the payload does not decode.
+fn sniff_event<P: simplex::Simplex>(
+    channel: SniffChannel,
+    payload: &IoBuf,
+    cert_cfg: &CertCfgOf<P>,
+) -> Option<(u64, happens_before::EventKind)> {
+    let cert_event = |cert: Certificate<P::Scheme, Sha256Digest>| {
+        let kind = match &cert {
+            Certificate::Notarization(_) => happens_before::EventKind::ReceiveNotarization,
+            Certificate::Nullification(_) => happens_before::EventKind::ReceiveNullification,
+            Certificate::Finalization(_) => happens_before::EventKind::ReceiveFinalization,
+        };
+        (cert.view().get(), kind)
+    };
+    match channel {
+        SniffChannel::Vote => Vote::<P::Scheme, Sha256Digest>::decode(payload.clone())
+            .ok()
+            .map(|vote| {
+                let kind = match &vote {
+                    Vote::Notarize(_) => happens_before::EventKind::ReceiveNotarize,
+                    Vote::Nullify(_) => happens_before::EventKind::ReceiveNullify,
+                    Vote::Finalize(_) => happens_before::EventKind::ReceiveFinalize,
+                };
+                (vote.view().get(), kind)
+            }),
+        SniffChannel::Certificate => {
+            Certificate::<P::Scheme, Sha256Digest>::decode_cfg(payload.clone(), cert_cfg)
+                .ok()
+                .map(cert_event)
+        }
+        SniffChannel::Resolver => match ResolverMessage::<U64>::decode(payload.clone())
+            .ok()?
+            .payload
+        {
+            ResolverPayload::Response(bytes) => {
+                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(bytes, cert_cfg)
+                    .ok()
+                    .map(cert_event)
+            }
+            ResolverPayload::Request(_) | ResolverPayload::Error => None,
+        },
+    }
+}
+
+/// p2p-boundary capture: wraps a validator's vote, certificate, or resolver
+/// receiver, decodes each incoming message and records the wire RECEIVE into the
+/// happens-before log, attributed to the receiving node and tagged with the
+/// real sender's node id (resolved against the participant set, so the
+/// send-before-receive merge uses that exact sender's history). This is the
+/// arrival of a message, distinct from the node later PROCESSING it (a separate
+/// tracing event): a message can arrive and be dropped without being processed.
+/// Transparent (forwards the message unchanged); a `None` sink is a zero-decode
+/// pass-through for runs without happens-before capture.
+pub(crate) struct SniffingReceiver<P: simplex::Simplex, R> {
+    inner: R,
+    channel: SniffChannel,
+    cert_cfg: CertCfgOf<P>,
+    sink: SniffSink<P>,
+    _p: std::marker::PhantomData<fn() -> P>,
+}
+
+impl<P: simplex::Simplex, R> SniffingReceiver<P, R> {
+    pub(crate) fn new(
+        inner: R,
+        channel: SniffChannel,
+        cert_cfg: CertCfgOf<P>,
+        sink: SniffSink<P>,
+    ) -> Self {
+        Self {
+            inner,
+            channel,
+            cert_cfg,
+            sink,
+            _p: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<P: simplex::Simplex, R> fmt::Debug for SniffingReceiver<P, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SniffingReceiver").finish()
+    }
+}
+
+impl<P, R> commonware_p2p::Receiver for SniffingReceiver<P, R>
+where
+    P: simplex::Simplex,
+    R: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    type Error = R::Error;
+    type PublicKey = PublicKeyOf<P>;
+
+    async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
+        let (sender, payload) = self.inner.recv().await?;
+        if let Some(sniff) = &self.sink {
+            if let Some((view, kind)) = sniff_event::<P>(self.channel, &payload, &self.cert_cfg) {
+                let from = sniff
+                    .peers
+                    .iter()
+                    .position(|p| p == &sender)
+                    .map(|i| i as u32)
+                    .filter(|i| !sniff.ambiguous.contains(i));
+                sniff.log.record(happens_before::Event {
+                    node: sniff.node,
+                    view,
+                    kind,
+                    sender: from,
+                });
+            }
+        }
+        Ok((sender, payload))
+    }
+}
+
 fn run_standard_once<P: simplex::Simplex>(
     mut input: FuzzInput,
     state_coverage: bool,
     collect_audit: bool,
+    happens_before: bool,
+    warn_dispatch: Option<Dispatch>,
 ) -> Option<RunAudit> {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
+    let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
-    executor.start(|mut context| async move {
+    executor.start(move |mut context| async move {
         if matches!(input.partition, Partition::Adaptive(_)) {
             input.partition = Partition::Adaptive(network_faults(
                 input.strategy,
@@ -1163,31 +1641,92 @@ fn run_standard_once<P: simplex::Simplex>(
         }
 
         // Spawn honest validators
+        let peers: Arc<[PublicKeyOf<P>]> = participants.clone().into();
+        let ambiguous: Arc<[u32]> = Vec::new().into();
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
+            // p2p-boundary sniffing: capture wire arrivals of votes,
+            // certificates, and resolver backfill responses (distinct from the
+            // node processing them, which the tracing source records).
+            // Pass-through when not capturing.
+            let pending = {
+                let (vote_sender, vote_receiver) = pending;
+                let sink = sniff_sink(&hb_log, i as u32, &peers, &ambiguous);
+                let cfg = schemes[i].certificate_codec_config();
+                (
+                    vote_sender,
+                    SniffingReceiver::<P, _>::new(vote_receiver, SniffChannel::Vote, cfg, sink),
+                )
+            };
+            let recovered = {
+                let (cert_sender, cert_receiver) = recovered;
+                let sink = sniff_sink(&hb_log, i as u32, &peers, &ambiguous);
+                let cfg = schemes[i].certificate_codec_config();
+                (
+                    cert_sender,
+                    SniffingReceiver::<P, _>::new(
+                        cert_receiver,
+                        SniffChannel::Certificate,
+                        cfg,
+                        sink,
+                    ),
+                )
+            };
+            let resolver = {
+                let (backfill_sender, backfill_receiver) = resolver;
+                let sink = sniff_sink(&hb_log, i as u32, &peers, &ambiguous);
+                let cfg = schemes[i].certificate_codec_config();
+                (
+                    backfill_sender,
+                    SniffingReceiver::<P, _>::new(
+                        backfill_receiver,
+                        SniffChannel::Resolver,
+                        cfg,
+                        sink,
+                    ),
+                )
+            };
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-                ctx,
-                &oracle,
-                &participants,
-                schemes[i].clone(),
-                validator.clone(),
-                P::Elector::default(),
-                relay.clone(),
-                Duration::from_secs(1),
-                Duration::from_secs(2),
-                input.mailbox_size,
-                input.fetch_concurrent,
-                input.forwarding,
-                pending,
-                recovered,
-                resolver,
-                input.certify,
-                input.reporting,
-            );
+            let spawn = || {
+                spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                    ctx,
+                    &oracle,
+                    &participants,
+                    schemes[i].clone(),
+                    validator.clone(),
+                    P::Elector::default(),
+                    relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    input.mailbox_size,
+                    input.fetch_concurrent,
+                    input.forwarding,
+                    pending,
+                    recovered,
+                    resolver,
+                    input.certify,
+                    input.reporting,
+                )
+            };
+            // Dispatch propagation: every task the engine spawns inherits this
+            // per-node subscriber, so its tracing events are attributed to node
+            // `i`. The subscriber shadows the whole-run trace collector for
+            // those tasks, so tee it back in when one is installed.
+            let reporter = match &hb_log {
+                Some(log) => {
+                    let mut subscriber =
+                        happens_before::capture::NodeSubscriber::new(i as u32, log.clone());
+                    if let Some(inner) = &warn_dispatch {
+                        subscriber = subscriber.with_inner(inner.clone());
+                    }
+                    let dispatch = Dispatch::new(subscriber);
+                    dispatcher::with_default(&dispatch, spawn)
+                }
+                None => spawn(),
+            };
             reporters.push((validator, reporter));
         }
 
@@ -1224,6 +1763,18 @@ fn run_standard_once<P: simplex::Simplex>(
         }
 
         if config.is_valid() {
+            // Feedback stays behind the validity gate (like protocol-state
+            // coverage): invalid configurations never reach the invariant
+            // checks, so their interleavings must not be retained as novel.
+            let hb_summary = hb_log.as_ref().map(|log| log.summary());
+            if let Some(summary) = &hb_summary {
+                let mut tokens = summary.tokens();
+                if let Some(bucket) = summary.dispersion_bucket() {
+                    tokens.insert(format!("hb:dispersion={bucket}"));
+                }
+                tokens.extend(summary.lsh_tokens());
+                state_cov::observe_tokens(tokens);
+            }
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
@@ -1241,6 +1792,7 @@ fn run_standard_once<P: simplex::Simplex>(
             let audit = collect_audit.then(|| RunAudit {
                 auditor_state: context.auditor().state(),
                 reporter_states: reporter_states.unwrap_or_default(),
+                happens_before: hb_summary,
             });
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
@@ -1251,15 +1803,26 @@ fn run_standard_once<P: simplex::Simplex>(
     })
 }
 
-fn run<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool) {
-    if state_coverage {
+fn run<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool, happens_before: bool) {
+    if state_coverage || happens_before {
         state_cov::reset();
     }
-    let execute = || run_standard_once::<P>(input, state_coverage, false);
-    if state_coverage {
-        let _ = run_with_warn_trace_collection(execute);
+    if happens_before {
+        if state_coverage {
+            // Per-node subscribers shadow the collector for validator tasks, so
+            // its dispatch is teed through them to keep trace-event tokens fed.
+            let _ = run_with_warn_trace_collection(|dispatch| {
+                run_standard_once::<P>(input, true, false, true, Some(dispatch.clone()))
+            });
+        } else {
+            let _ = run_standard_once::<P>(input, false, false, true, None);
+        }
+    } else if state_coverage {
+        let _ = run_with_warn_trace_collection(|_| {
+            run_standard_once::<P>(input, true, false, false, None)
+        });
     } else {
-        let _ = execute();
+        let _ = run_standard_once::<P>(input, false, false, false, None);
     }
 }
 
@@ -1271,6 +1834,8 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
     input.partition = Partition::Connected;
     input.configuration = N4F1C3;
     input.degraded_network = false;
+    // Three honest certifiers are exactly the finalize quorum here.
+    input.certify = CertifyChoice::Always;
 
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
@@ -1401,12 +1966,20 @@ enum TwinsRole {
     Campaign,
 }
 
-fn run_with_twins_mutator<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool) {
-    run_twins::<P>(input, TwinsRole::Mutator, state_coverage);
+fn run_with_twins_mutator<P: simplex::Simplex>(
+    input: FuzzInput,
+    state_coverage: bool,
+    happens_before: bool,
+) {
+    let _ = run_twins::<P>(input, TwinsRole::Mutator, state_coverage, happens_before);
 }
 
-fn run_with_twins_campaign<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool) {
-    run_twins::<P>(input, TwinsRole::Campaign, state_coverage);
+fn run_with_twins_campaign<P: simplex::Simplex>(
+    input: FuzzInput,
+    state_coverage: bool,
+    happens_before: bool,
+) {
+    let _ = run_twins::<P>(input, TwinsRole::Campaign, state_coverage, happens_before);
 }
 
 fn twins_resolver_view<P: simplex::Simplex>(
@@ -1432,19 +2005,35 @@ fn twins_resolver_view<P: simplex::Simplex>(
 /// Only the secondary half (Disrupter vs full engine) and the liveness wait
 /// shape (absolute view vs prefix-trailing count) differ; both are keyed on
 /// `role`. Invariants and liveness always run over honest reporters only.
-fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_coverage: bool) {
-    if state_coverage {
+///
+/// Happens-before capture covers honest validators only: twin halves share
+/// one identity across two engines, so neither tracing attribution nor
+/// sender-resolved merges are sound for them; honest receives from a twin
+/// resolve to no sender. Returns the summary when capture is enabled.
+fn run_twins<P: simplex::Simplex>(
+    mut input: FuzzInput,
+    role: TwinsRole,
+    state_coverage: bool,
+    happens_before: bool,
+) -> Option<happens_before::Summary> {
+    if state_coverage || happens_before {
         state_cov::reset();
     }
     input.partition = Partition::Connected;
     input.configuration = N4F1C3;
+    // Twins reuse the standard input; a certify variant sampled for an
+    // all-honest configuration would stall this quorum-tight one.
+    input.certify = CertifyChoice::Always;
 
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
+    let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
-    let execute = || {
+    let hb_log_run = hb_log.clone();
+    let execute = |warn_dispatch: Option<Dispatch>| {
         executor.start(|mut context| async move {
+            let hb_log = hb_log_run;
             let (mut oracle, participants, schemes, mut registrations) =
                 setup_network::<P>(&mut context, &input).await;
             let participants: Arc<[_]> = participants.into();
@@ -1501,7 +2090,8 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
             let twin_elector = twins::Elector::new(P::Elector::default(), &scenario, n);
 
             // Spawn Byzantine twins (indices from `case.compromised`):
-            // primary (legitimate engine) + secondary (Disrupter).
+            // primary (legitimate engine) + secondary (Disrupter). Twin halves
+            // are never happens-before captured (no subscriber, no sniffing).
             for idx in case.compromised.iter().copied() {
                 let validator = participants[idx].clone();
                 let context = context.child("twin").with_attribute("index", idx);
@@ -1773,6 +2363,11 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
             // Spawn honest validators (every index NOT in `case.compromised`).
             // They share the twins-aware elector so leaders agree across twin and
             // honest engines for the scripted prefix.
+            let ambiguous: Arc<[u32]> = compromised
+                .iter()
+                .map(|&i| i as u32)
+                .collect::<Vec<_>>()
+                .into();
             for (idx, validator) in participants.iter().enumerate() {
                 if compromised.contains(&idx) {
                     continue;
@@ -1781,25 +2376,76 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-                    ctx,
-                    &oracle,
-                    participants.as_ref(),
-                    schemes[idx].clone(),
-                    validator.clone(),
-                    twin_elector.clone(),
-                    relay.clone(),
-                    Duration::from_secs(1),
-                    Duration::from_millis(1_500),
-                    input.mailbox_size,
-                    input.fetch_concurrent,
-                    input.forwarding,
-                    pending,
-                    recovered,
-                    resolver,
-                    input.certify,
-                    input.reporting,
-                );
+                let pending = {
+                    let (vote_sender, vote_receiver) = pending;
+                    let sink = sniff_sink(&hb_log, idx as u32, &participants, &ambiguous);
+                    let cfg = schemes[idx].certificate_codec_config();
+                    (
+                        vote_sender,
+                        SniffingReceiver::<P, _>::new(vote_receiver, SniffChannel::Vote, cfg, sink),
+                    )
+                };
+                let recovered = {
+                    let (cert_sender, cert_receiver) = recovered;
+                    let sink = sniff_sink(&hb_log, idx as u32, &participants, &ambiguous);
+                    let cfg = schemes[idx].certificate_codec_config();
+                    (
+                        cert_sender,
+                        SniffingReceiver::<P, _>::new(
+                            cert_receiver,
+                            SniffChannel::Certificate,
+                            cfg,
+                            sink,
+                        ),
+                    )
+                };
+                let resolver = {
+                    let (backfill_sender, backfill_receiver) = resolver;
+                    let sink = sniff_sink(&hb_log, idx as u32, &participants, &ambiguous);
+                    let cfg = schemes[idx].certificate_codec_config();
+                    (
+                        backfill_sender,
+                        SniffingReceiver::<P, _>::new(
+                            backfill_receiver,
+                            SniffChannel::Resolver,
+                            cfg,
+                            sink,
+                        ),
+                    )
+                };
+                let spawn = || {
+                    spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                        ctx,
+                        &oracle,
+                        participants.as_ref(),
+                        schemes[idx].clone(),
+                        validator.clone(),
+                        twin_elector.clone(),
+                        relay.clone(),
+                        Duration::from_secs(1),
+                        Duration::from_millis(1_500),
+                        input.mailbox_size,
+                        input.fetch_concurrent,
+                        input.forwarding,
+                        pending,
+                        recovered,
+                        resolver,
+                        input.certify,
+                        input.reporting,
+                    )
+                };
+                let reporter = match &hb_log {
+                    Some(log) => {
+                        let mut subscriber =
+                            happens_before::capture::NodeSubscriber::new(idx as u32, log.clone());
+                        if let Some(inner) = &warn_dispatch {
+                            subscriber = subscriber.with_inner(inner.clone());
+                        }
+                        let dispatch = Dispatch::new(subscriber);
+                        dispatcher::with_default(&dispatch, spawn)
+                    }
+                    None => spawn(),
+                };
                 reporters.push(reporter);
             }
 
@@ -1853,6 +2499,19 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
             // global-agreement / equivocation invariants would reject valid Twins
             // configurations.
             if config.is_valid() {
+                // Observe the happens-before interleaving BEFORE the invariant checks,
+                // so a run that panics in an invariant still credits the interleaving
+                // that found the bug (matching the standard path). Twins force a valid
+                // configuration, so this gate always holds here.
+                if let Some(log) = &hb_log {
+                    let summary = log.summary();
+                    let mut tokens = summary.tokens();
+                    if let Some(bucket) = summary.dispersion_bucket() {
+                        tokens.insert(format!("hb:dispersion={bucket}"));
+                    }
+                    tokens.extend(summary.lsh_tokens());
+                    state_cov::observe_tokens(tokens);
+                }
                 let honest_reporters = &reporters[honest_start..];
                 invariants::check_vote_invariants_with_byzantine(&compromised, honest_reporters);
                 if state_coverage {
@@ -1870,11 +2529,24 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
         });
     };
 
-    if state_coverage {
-        run_with_warn_trace_collection(execute);
+    if happens_before {
+        if state_coverage {
+            // Per-node subscribers shadow the collector for validator tasks, so
+            // its dispatch is teed through them to keep trace-event tokens fed.
+            run_with_warn_trace_collection(|dispatch| execute(Some(dispatch.clone())));
+        } else {
+            execute(None);
+        }
+    } else if state_coverage {
+        run_with_warn_trace_collection(|_| execute(None));
     } else {
-        execute();
+        execute(None);
     }
+
+    // Tokens are observed inside `execute` (before the invariant checks) so a
+    // bug-finding panic still credits its interleaving. Here we only surface the
+    // summary for the return value.
+    hb_log.as_ref().map(|log| log.summary())
 }
 
 fn run_fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput)
@@ -1924,6 +2596,7 @@ pub enum Mode {
     FaultyMessaging,
     FaultyNet,
     Byzzfuzz,
+    MalloryContainer,
 }
 
 pub trait FuzzMode {
@@ -1938,6 +2611,9 @@ pub trait Coverage {
     /// When `true`, the run projects its honest reporters through
     /// [`state_cov::observe_with_metrics`] so libFuzzer also tracks protocol-state novelty.
     const STATE: bool;
+    /// When `true`, per-node subscribers capture a happens-before summary of the run
+    /// (see [`happens_before`]) and fold its causal-pair tokens into the same table.
+    const HAPPENS_BEFORE: bool = false;
 }
 
 /// Only libFuzzer's default code-edge coverage; no protocol-state feedback (the
@@ -1951,6 +2627,23 @@ impl Coverage for CodeCoverage {
 pub struct StateCoverage;
 impl Coverage for StateCoverage {
     const STATE: bool = true;
+}
+
+/// Happens-before coverage only: per-node causal-interleaving novelty without the
+/// protocol-state signal (see [`happens_before`]). The baseline HB target.
+pub struct HappensBeforeCoverage;
+impl Coverage for HappensBeforeCoverage {
+    const STATE: bool = false;
+    const HAPPENS_BEFORE: bool = true;
+}
+
+/// Happens-before coverage layered on top of the protocol-state signal: both feed
+/// the same table so their contributions combine (see [`happens_before`] and
+/// [`state_cov`]).
+pub struct HappensBeforeStateCoverage;
+impl Coverage for HappensBeforeStateCoverage {
+    const STATE: bool = true;
+    const HAPPENS_BEFORE: bool = true;
 }
 
 /// **Standard mode** - the baseline harness.
@@ -2066,6 +2759,41 @@ impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
 }
 
+/// **Mallory** - the dedicated adaptive-adversary runner over its own fault catalog,
+/// bounded by a whole-episode CONTAINER (distinct-finalization) budget.
+///
+/// Each episode selects one adversary environment for the faultable identity
+/// (node 0): honest, or one of six Byzantine profiles (Disrupter, Conflicter,
+/// Nuller, Equivocator, Impersonator, Outdated). It then drives a reactive loop of
+/// observe-orient-decide-act steps. Each step observes the honest happens-before
+/// fingerprint (the Q-state) and protocol-state descriptor, then selects a fault
+/// from the stable catalog (`mallory::fault`) under a legal mask. The fault is a
+/// network (isolation, partition), packet (delay/loss/corrupt/duplicate/reorder), or
+/// lifecycle (crash-stop, durable restart, amnesia restart) fault. It applies the
+/// fault, then reacts: the step ends on the first new honest finalization past its
+/// baseline, or a deterministic per-action timeout if the fault suppressed progress.
+/// The fault heals and (for the learned chooser) a temporal-difference update rewards
+/// novel state and happens-before fingerprints (the pre-heal fault effect) via the
+/// backend-agnostic Q-core in `mallory::policy`. The whole episode stops once it has
+/// observed the input's `required_containers` distinct finalization boundaries (each
+/// step counts at most one; view jumps and duplicate reports count once), or when it
+/// hits the `max(MALLORY_EPISODE_STEPS, required_containers)` truncation cap. A
+/// crash-stop is permanent but does NOT end the episode: the loop continues over the
+/// surviving quorum. Mallory does not reuse the ByzzFuzz fault machinery: it builds
+/// its own setup from the shared harness helpers and never samples ByzzFuzz
+/// `(c, d, r)`.
+///
+/// The episode-end oracle checks liveness (each live correct node must finalize past
+/// its pre-heal frontier) and the vote / state-extraction safety invariants. It runs
+/// over the episode's honest reporter set, excluding an unmanaged Byzantine node 0, a
+/// crash-stopped node from liveness, and an amnesiac node from the honest set. The
+/// name is kept as `MalloryContainer` to avoid target / API churn. See
+/// `mallory::runner::run`.
+pub struct MalloryContainer;
+impl FuzzMode for MalloryContainer {
+    const MODE: Mode = Mode::MalloryContainer;
+}
+
 /// Install (once per process) a panic-hook chain that drains and prints the
 /// ByzzFuzz decision log when the `CONSENSUS_FUZZ_LOG` environment variable is
 /// set (any value). Off by default to keep the libfuzzer crash output
@@ -2097,9 +2825,36 @@ fn install_byzzfuzz_panic_hook() {
     });
 }
 
+/// Install (once per process) a panic-hook chain that drains and prints the
+/// Mallory decision log when `CONSENSUS_FUZZ_LOG` is set (any value). Mirrors
+/// [`install_byzzfuzz_panic_hook`] over the separate Mallory log; the same
+/// ordering (log -> default message -> libfuzzer trace) applies.
+fn install_mallory_panic_hook() {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let dump = std::env::var_os(FUZZ_LOG_ENV).is_some();
+        let prev = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if dump {
+                let log = mallory::log::take();
+                if !log.is_empty() {
+                    eprintln!("---- Mallory decision log ({} entries) ----", log.len());
+                    for line in &log {
+                        eprintln!("{line}");
+                    }
+                    eprintln!("---- end of Mallory decision log ----");
+                }
+            }
+            prev(info);
+        }));
+    });
+}
+
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput) {
     if matches!(M::MODE, Mode::Byzzfuzz) {
         install_byzzfuzz_panic_hook();
+    } else if matches!(M::MODE, Mode::MalloryContainer) {
+        install_mallory_panic_hook();
     } else {
         if matches!(M::MODE, Mode::FaultyNet) {
             // We run only fuzzing with network faults, populated later by the
@@ -2111,24 +2866,27 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
 
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
-        Mode::Standard => {
-            panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, C::STATE)))
-        }
+        Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run::<P>(input, C::STATE, C::HAPPENS_BEFORE)
+        })),
         Mode::FaultyMessaging => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_faulty_messaging::<P>(input)
         })),
-        Mode::FaultyNet => {
-            panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, C::STATE)))
-        }
+        Mode::FaultyNet => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run::<P>(input, C::STATE, C::HAPPENS_BEFORE)
+        })),
         Mode::TwinsMutator => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_twins_mutator::<P>(input, C::STATE)
+            run_with_twins_mutator::<P>(input, C::STATE, C::HAPPENS_BEFORE)
         })),
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_twins_campaign::<P>(input, C::STATE)
+            run_with_twins_campaign::<P>(input, C::STATE, C::HAPPENS_BEFORE)
         })),
         Mode::Byzzfuzz => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
         }
+        Mode::MalloryContainer => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            mallory::runner::run::<P>(input, mallory::runner::Chooser::Learned)
+        })),
     };
     match run_result {
         Ok(()) => {
@@ -2136,6 +2894,10 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
             // or otherwise) starts clean. This is cheap when the log is empty.
             if matches!(M::MODE, Mode::Byzzfuzz) {
                 let _ = byzzfuzz::log::take();
+            }
+            // Same for the separate Mallory log.
+            if matches!(M::MODE, Mode::MalloryContainer) {
+                let _ = mallory::log::take();
             }
         }
         Err(payload) => {
@@ -2185,14 +2947,172 @@ mod tests {
     fn warn_trace_collection_does_not_perturb_standard_run() {
         let input = audit_input();
 
-        let unwrapped = run_standard_once::<simplex::SimplexId>(input.clone(), false, true)
-            .expect("valid connected run should produce audit data");
-        let wrapped = run_with_warn_trace_collection(|| {
-            run_standard_once::<simplex::SimplexId>(input, false, true)
+        let unwrapped =
+            run_standard_once::<simplex::SimplexId>(input.clone(), false, true, false, None)
+                .expect("valid connected run should produce audit data");
+        let wrapped = run_with_warn_trace_collection(|_| {
+            run_standard_once::<simplex::SimplexId>(input, false, true, false, None)
         })
         .expect("valid connected run should produce audit data");
 
         assert_eq!(unwrapped.auditor_state, wrapped.auditor_state);
         assert_eq!(unwrapped.reporter_states, wrapped.reporter_states);
+    }
+
+    #[test]
+    fn single_target_certify_preserves_liveness_with_full_honesty() {
+        // With four honest validators, disabling one certifier leaves exactly
+        // the finalize quorum: the run must still finalize (the liveness wait
+        // completes) and pass invariants. This is the configuration under
+        // which `FuzzInput::arbitrary` samples certify variants.
+        for certify in [
+            CertifyChoice::SingleCancel { target_idx: 0 },
+            CertifyChoice::SinglePending { target_idx: 0 },
+        ] {
+            let mut input = audit_input();
+            input.certify = certify;
+            let audit = run_standard_once::<simplex::SimplexId>(input, false, true, false, None);
+            assert!(audit.is_some(), "run with {certify:?} produced no audit");
+        }
+    }
+
+    #[test]
+    fn twins_happens_before_traces_honest_validators_only() {
+        // N4F1C3 twins compromise one identity (two engines, one key): the
+        // three honest validators are captured, twin halves contribute no
+        // attributed events, and receives from the twin merge nothing.
+        let summary =
+            run_twins::<simplex::SimplexId>(audit_input(), TwinsRole::Campaign, false, true)
+                .expect("happens-before summary");
+        assert_eq!(summary.node_count(), 3, "only honest validators tracked");
+        assert!(!summary.tokens().is_empty());
+    }
+
+    #[test]
+    fn resolver_sniff_decodes_backfill_responses() {
+        use commonware_codec::Encode;
+        use commonware_consensus::{
+            simplex::types::{Notarization, Notarize, Proposal},
+            types::Round,
+        };
+
+        let executor = deterministic::Runner::seeded(7);
+        executor.start(|mut context| async move {
+            let (_, schemes) =
+                <simplex::SimplexId as simplex::Simplex>::setup(&mut context, NAMESPACE, 4);
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(EPOCH), View::new(3)),
+                View::new(2),
+                Sha256Digest::from([7u8; 32]),
+            );
+            let votes: Vec<_> = schemes[..3]
+                .iter()
+                .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
+                .collect();
+            let cert = Certificate::Notarization(
+                Notarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap(),
+            );
+            let cfg = schemes[0].certificate_codec_config();
+
+            let response = ResolverMessage::<U64> {
+                id: 9,
+                payload: ResolverPayload::Response(cert.encode()),
+            };
+            assert_eq!(
+                sniff_event::<simplex::SimplexId>(
+                    SniffChannel::Resolver,
+                    &IoBuf::from(response.encode()),
+                    &cfg,
+                ),
+                Some((3, happens_before::EventKind::ReceiveNotarization)),
+            );
+
+            // Requests deliver no certificate; nothing is recorded.
+            let request = ResolverMessage::<U64> {
+                id: 9,
+                payload: ResolverPayload::Request(U64::from(3u64)),
+            };
+            assert_eq!(
+                sniff_event::<simplex::SimplexId>(
+                    SniffChannel::Resolver,
+                    &IoBuf::from(request.encode()),
+                    &cfg,
+                ),
+                None,
+            );
+        });
+    }
+
+    #[test]
+    fn happens_before_capture_is_node_attributed_and_deterministic() {
+        let input = audit_input();
+
+        let a = run_standard_once::<simplex::SimplexId>(input.clone(), false, true, true, None)
+            .expect("valid connected run should produce audit data");
+        let b = run_standard_once::<simplex::SimplexId>(input, false, true, true, None)
+            .expect("valid connected run should produce audit data");
+
+        let summary = a.happens_before.as_ref().expect("hb capture requested");
+        // Dispatch propagation attributed events to each honest validator, and each
+        // recorded real causal history over a live run.
+        assert!(
+            summary.node_count() >= 2,
+            "expected multiple attributed nodes, got {}",
+            summary.node_count()
+        );
+        assert!(
+            !summary.tokens().is_empty(),
+            "expected non-empty happens-before token set"
+        );
+        // p2p-boundary sniffing captured wire arrivals of votes (which tracing
+        // cannot observe): notarize votes are exchanged on the way to finalization.
+        assert!(
+            summary.tokens().iter().any(|t| t.contains("recv_notarize")),
+            "expected p2p-sniffed vote-arrival tokens"
+        );
+        // Certificate arrival (p2p) and certificate processing (tracing) are
+        // captured as distinct events.
+        let toks = summary.tokens();
+        assert!(
+            toks.iter().any(|t| t.contains("recv_notarization")),
+            "expected p2p-sniffed certificate-arrival tokens"
+        );
+        assert!(
+            toks.iter().any(|t| t.contains("proc_")),
+            "expected tracing certificate-processing tokens"
+        );
+        // Same seed and inputs must yield an identical summary.
+        assert_eq!(a.happens_before, b.happens_before);
+    }
+
+    #[test]
+    fn happens_before_tee_preserves_warn_trace_collection() {
+        let input = audit_input();
+        let collect = |happens_before: bool| {
+            let store = TraceStorage::default();
+            let dispatch = warn_trace_dispatch(store.clone());
+            let warn_dispatch = happens_before.then(|| dispatch.clone());
+            let audit = dispatcher::with_default(&dispatch, || {
+                run_standard_once::<simplex::SimplexId>(
+                    input.clone(),
+                    false,
+                    true,
+                    happens_before,
+                    warn_dispatch,
+                )
+            })
+            .expect("valid connected run should produce audit data");
+            let events: Vec<_> = store.get_all().iter().map(|e| format!("{e:?}")).collect();
+            (audit, events)
+        };
+
+        let (_, plain) = collect(false);
+        let (audit, teed) = collect(true);
+        // Both signals coexist: the per-node subscribers captured happens-before
+        // events while the shadowed collector still received the identical
+        // trace-event stream (spans included) through the tee.
+        assert!(audit.happens_before.is_some());
+        assert!(!plain.is_empty(), "expected collected trace events");
+        assert_eq!(plain, teed);
     }
 }
