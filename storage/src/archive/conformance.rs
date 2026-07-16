@@ -1,17 +1,17 @@
 //! Archive conformance tests
 
 use crate::{
-    archive::{immutable, prunable, Archive as _, Error},
+    archive::{Archive as _, Error, immutable, prunable},
     translator::TwoCap,
 };
 use commonware_codec::DecodeExt;
 use commonware_conformance::conformance_tests;
 use commonware_runtime::{
+    Supervisor as _,
     buffer::paged::CacheRef,
     conformance::{StorageConformance, StorageWorkload},
-    Supervisor as _,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::RngExt as _;
 

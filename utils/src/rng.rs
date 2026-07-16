@@ -4,9 +4,9 @@ use commonware_macros::stability;
 #[stability(ALPHA)]
 use core::{convert::Infallible, mem::size_of};
 #[stability(BETA)]
-use rand::{rand_core::UnwrapErr, rngs::SysRng, CryptoRng};
+use rand::{CryptoRng, rand_core::UnwrapErr, rngs::SysRng};
 #[stability(ALPHA)]
-use rand::{rngs::StdRng, SeedableRng, TryCryptoRng, TryRng};
+use rand::{SeedableRng, TryCryptoRng, TryRng, rngs::StdRng};
 
 /// Returns an infallible handle to the operating system's entropy source.
 ///

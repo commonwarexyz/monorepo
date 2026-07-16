@@ -94,7 +94,7 @@ pub enum Action<P: PublicKey> {
 #[cfg(test)]
 mod tests {
     use super::{Action, Schedule};
-    use commonware_cryptography::{ed25519, Signer as _};
+    use commonware_cryptography::{Signer as _, ed25519};
     use std::time::Duration;
 
     #[test]

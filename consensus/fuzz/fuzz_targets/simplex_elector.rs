@@ -9,13 +9,13 @@ use commonware_consensus::{
     types::{Round, View},
 };
 use commonware_cryptography::{
+    Sha256, Signer,
     bls12381::primitives::variant::{MinPk, MinSig},
     certificate::Scheme,
     ed25519::{PrivateKey, PublicKey},
-    Sha256, Signer,
 };
 use commonware_math::algebra::Random as _;
-use commonware_utils::{ordered::Set, TestRng, TryCollect};
+use commonware_utils::{TestRng, TryCollect, ordered::Set};
 use libfuzzer_sys::fuzz_target;
 
 #[allow(clippy::large_enum_variant)]

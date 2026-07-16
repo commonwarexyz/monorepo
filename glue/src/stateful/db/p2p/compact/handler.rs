@@ -4,9 +4,9 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{self as resolver, p2p::Producer, Delivery};
+use commonware_resolver::{self as resolver, Delivery, p2p::Producer};
 use commonware_storage::{merkle::Family, qmdb::sync::compact};
-use commonware_utils::{channel::oneshot, Span};
+use commonware_utils::{Span, channel::oneshot};
 use std::{
     collections::VecDeque,
     fmt,

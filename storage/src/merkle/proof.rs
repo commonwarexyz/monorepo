@@ -4,14 +4,14 @@
 //! family (MMR, MMB, etc.) reuses the shared verification and reconstruction logic in this module,
 //! while retaining any family-specific proof helpers in its submodule.
 
-use crate::merkle::{hasher::Hasher, Bagging, Error, Family, Location, Position};
+use crate::merkle::{Bagging, Error, Family, Location, Position, hasher::Hasher};
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec,
     vec::Vec,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -1121,16 +1121,16 @@ where
 mod tests {
     use super::*;
     use crate::merkle::{
+        Bagging::{BackwardFold, ForwardFold},
+        Family, Location, LocationRangeExt as _,
         hasher::Standard,
         mem::Mem,
         mmb, mmr,
-        proof::{nodes_required_for_multi_proof, Blueprint, Proof},
-        Bagging::{BackwardFold, ForwardFold},
-        Family, Location, LocationRangeExt as _,
+        proof::{Blueprint, Proof, nodes_required_for_multi_proof},
     };
     use alloc::vec;
     use commonware_codec::{Decode, Encode, EncodeSize};
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
 
     type D = sha256::Digest;

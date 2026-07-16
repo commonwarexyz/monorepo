@@ -24,13 +24,13 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Replay},
     Blob, Buf, Handle, Metrics, Storage,
+    buffer::paged::{CacheRef, Replay},
 };
 use commonware_utils::NZUsize;
 use futures::{
-    stream::{self, Stream},
     StreamExt,
+    stream::{self, Stream},
 };
 use std::{marker::PhantomData, num::NonZeroUsize};
 use tracing::{trace, warn};
@@ -431,20 +431,20 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
+        BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{fail_pending_syncs, release_pending_syncs, DelayedSyncContext, PendingSyncs},
-        BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
+        mocks::{DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_pending_syncs},
     };
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{NZU16, NZUsize};
     use core::num::NonZeroU16;
-    use futures::{pin_mut, StreamExt};
+    use futures::{StreamExt, pin_mut};
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);

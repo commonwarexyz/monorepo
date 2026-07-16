@@ -26,20 +26,22 @@
 //! height.
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, fixed, variable},
     },
     merkle::{
-        full::{self, Merkle},
         Graftable, Location,
+        full::{self, Merkle},
     },
     qmdb::{
         self,
         any::{
+            FixedValue, VariableValue,
             db::Db as AnyDb,
-            operation::{update::Update, Operation},
+            operation::{Operation, update::Update},
             ordered::{
                 fixed::{Operation as OrderedFixedOp, Update as OrderedFixedUpdate},
                 variable::{Operation as OrderedVariableOp, Update as OrderedVariableUpdate},
@@ -48,30 +50,27 @@ use crate::{
                 fixed::{Operation as UnorderedFixedOp, Update as UnorderedFixedUpdate},
                 variable::{Operation as UnorderedVariableOp, Update as UnorderedVariableUpdate},
             },
-            FixedValue, VariableValue,
         },
         bitmap::Shared,
         current::{
-            db, grafting,
+            FixedConfig, VariableConfig, db, grafting,
             ordered::{
                 fixed::Db as CurrentOrderedFixedDb, variable::Db as CurrentOrderedVariableDb,
             },
             unordered::{
                 fixed::Db as CurrentUnorderedFixedDb, variable::Db as CurrentUnorderedVariableDb,
             },
-            FixedConfig, VariableConfig,
         },
         metrics::Metrics as AnyMetrics,
         operation::{Committable, Key, Operation as _},
-        sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
+        sync::{Database, DatabaseConfig as Config, resolver::fetch_operations},
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
+use commonware_utils::{Array, bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 

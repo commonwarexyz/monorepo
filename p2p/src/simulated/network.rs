@@ -1,37 +1,36 @@
 //! Implementation of a simulated p2p network.
 
 use super::{
+    Error,
     ingress::{self, Oracle},
     metrics,
     transmitter::{self, Completion},
-    Error,
 };
 use crate::{
-    utils::{
-        limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
-        PeerSetsAtIndex as PeerSetsAtIndexBase,
-    },
     Channel, Message as NetworkMessage, PeerSetUpdate, Recipients, TrackedPeers,
     UnlimitedSender as _,
+    utils::{
+        PeerSetsAtIndex as PeerSetsAtIndexBase,
+        limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
+    },
 };
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{CounterFamily, MetricsExt as _},
     Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota,
-    Spawner,
+    Spawner, spawn_cell,
+    telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
+    NZUsize, TryCollect,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Set,
-    NZUsize, TryCollect,
 };
 use either::Either;
-use futures::{future, Sink};
+use futures::{Sink, future};
 use rand::{Rng, RngExt as _};
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -41,8 +40,8 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -274,15 +273,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.peer_sets.last_key_value() {
-            if id <= *last {
-                warn!(
-                    new_id = id,
-                    old_id = last,
-                    "attempted to register peer set with non-monotonically increasing ID"
-                );
-                return false;
-            }
+        if let Some((last, _)) = self.peer_sets.last_key_value()
+            && id <= *last
+        {
+            warn!(
+                new_id = id,
+                old_id = last,
+                "attempted to register peer set with non-monotonically increasing ID"
+            );
+            return false;
         }
 
         // Create and store new primary peer set.
@@ -1462,9 +1461,9 @@ mod tests {
         CheckedSender as _, LimitedSender as _, Manager as _, Provider, Receiver as _, Recipients,
         Sender as _, TrackedPeers,
     };
-    use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_runtime::{deterministic, Quota, Runner as _, Supervisor as _};
-    use commonware_utils::{ordered::Set, NZUsize};
+    use commonware_cryptography::{Signer as _, ed25519};
+    use commonware_runtime::{Quota, Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::{NZUsize, ordered::Set};
     use futures::FutureExt;
     use std::num::NonZeroU32;
 

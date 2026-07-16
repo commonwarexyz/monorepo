@@ -163,14 +163,13 @@ impl SyncState {
 mod tests {
     use super::*;
     use crate::{
-        deterministic,
-        mocks::{next_pending_sync, DelayedSyncBlob},
-        telemetry::metrics::Registry,
         Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
-        Runner, Storage,
+        Runner, Storage, deterministic,
+        mocks::{DelayedSyncBlob, next_pending_sync},
+        telemetry::metrics::Registry,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{sync::Mutex, NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use futures::FutureExt;
     use std::sync::Arc;
 
@@ -1482,7 +1481,7 @@ mod tests {
 
             // Append at the new (resized) size
             writer.write_at(writer.size(), b"XXXXX").await.unwrap(); // 5 bytes
-                                                                     // inner.buffer = "XXXXX", inner.position = 5
+            // inner.buffer = "XXXXX", inner.position = 5
             assert_eq!(writer.size(), 10); // 5 (resized) + 5 (XXXXX)
             writer.sync().await.unwrap();
             assert_eq!(writer.size(), 10);

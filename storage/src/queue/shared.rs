@@ -247,10 +247,10 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Runner, Spawner,
-        Supervisor as _,
+        BufferPooler, Clock, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);

@@ -2,17 +2,17 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{
+            VariableValue,
             operation::{
-                update, Operation, OperationCodec, Update, COMMIT_CONTEXT, DELETE_CONTEXT,
-                UPDATE_CONTEXT,
+                COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
+                update,
             },
             value::VariableEncoding,
-            VariableValue,
         },
         operation::Key,
     },
 };
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write, varint::UInt};
 use commonware_runtime::{Buf, BufMut};
 
 impl<F, V, S> OperationCodec<F, S> for VariableEncoding<V>

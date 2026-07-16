@@ -626,7 +626,9 @@ impl Freelist {
             if #[cfg(not(feature = "loom"))] {
                 ptr::NonNull::new(cell.get()).expect("slot pointers are non-null")
             } else {
-                cell.with(|ptr| ptr::NonNull::new(ptr.cast_mut()).expect("slot pointers are non-null"))
+                cell.with(|ptr| {
+                    ptr::NonNull::new(ptr.cast_mut()).expect("slot pointers are non-null")
+                })
             }
         }
     }
@@ -787,10 +789,10 @@ impl SlotBitmapProbe {
 #[cfg(all(test, not(feature = "loom")))]
 pub(super) mod tests {
     use super::*;
-    use commonware_utils::{NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize};
     use std::sync::{
-        atomic::{AtomicUsize as StdAtomicUsize, Ordering as AtomicOrdering},
         Arc, Barrier,
+        atomic::{AtomicUsize as StdAtomicUsize, Ordering as AtomicOrdering},
     };
 
     pub fn created(freelist: &Freelist) -> usize {
@@ -1327,11 +1329,11 @@ pub(super) mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
-    use commonware_utils::{sync::Mutex, NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use loom::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         thread,
     };

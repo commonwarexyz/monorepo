@@ -3,8 +3,8 @@ use crate::Scheme;
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinSig, Variant},
     Digest,
+    bls12381::primitives::variant::{MinSig, Variant},
 };
 use commonware_runtime::{Buf, BufMut};
 

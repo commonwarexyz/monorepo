@@ -1,8 +1,8 @@
 use crate::{
-    config::{tracked_labels, Benchmark, Gate},
+    config::{Benchmark, Gate, tracked_labels},
     render::render_report,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},

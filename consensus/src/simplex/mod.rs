@@ -429,6 +429,7 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
+        Monitor, Viewable,
         simplex::{
             elector::{Config as Elector, Elector as ElectorTrait, Random, RoundRobin},
             mocks::{
@@ -437,12 +438,12 @@ mod tests {
                 wrapped,
             },
             scheme::{
-                bls12381_multisig,
+                Scheme, bls12381_multisig,
                 bls12381_threshold::{
                     standard as bls12381_threshold_std,
                     vrf::{self as bls12381_threshold_vrf, Seedable},
                 },
-                ed25519, secp256r1, Scheme,
+                ed25519, secp256r1,
             },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
@@ -451,33 +452,32 @@ mod tests {
             },
         },
         types::{Epoch, Participant, Round},
-        Monitor, Viewable,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
+        Hasher as _, Sha256, Signer as _,
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
-        Hasher as _, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
+        Manager as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
-        Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
-        IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _, Supervisor as _,
+        Clock, IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, TestRng, NZU16,
+        Faults, N3f1, NZU16, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
-    use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+    use rand::{RngExt as _, SeedableRng, rngs::StdRng};
     use rand_core::CryptoRng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -772,10 +772,10 @@ mod tests {
                 }
 
                 // Restrict to certain connections
-                if let Some(f) = restrict_to {
-                    if !f(validators.len(), i1, i2) {
-                        continue;
-                    }
+                if let Some(f) = restrict_to
+                    && !f(validators.len(), i1, i2)
+                {
+                    continue;
                 }
 
                 // Do any unlinking first
@@ -2422,9 +2422,11 @@ mod tests {
                 // Ensure every reporter observes finalization progress to at least the target view.
                 {
                     let finalizations = reporter.finalizations.lock();
-                    assert!(finalizations
-                        .keys()
-                        .any(|view| *view >= required_containers));
+                    assert!(
+                        finalizations
+                            .keys()
+                            .any(|view| *view >= required_containers)
+                    );
                 }
             }
 

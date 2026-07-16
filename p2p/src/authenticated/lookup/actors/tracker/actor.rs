@@ -1,17 +1,17 @@
 use super::{
+    Config,
     directory::{self, Directory},
     ingress::{Mailbox, Message, Oracle},
-    Config,
 };
 use crate::{
-    authenticated::lookup::actors::{listener, peer, tracker::ingress::Releaser},
     PeerSetUpdate,
+    authenticated::lookup::actors::{listener, peer, tracker::ingress::Releaser},
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
 };
 use commonware_utils::channel::{fallible::FallibleExt, mpsc};
 use rand_core::Rng;
@@ -237,20 +237,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 mod tests {
     use super::*;
     use crate::{
-        authenticated::lookup::actors::peer, AddressableManager, AddressableTrackedPeers, Ingress,
-        Provider,
+        AddressableManager, AddressableTrackedPeers, Ingress, Provider,
+        authenticated::lookup::actors::peer,
     };
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        deterministic::{self},
         Clock, Runner, Supervisor as _,
+        deterministic::{self},
     };
     use commonware_utils::{
-        ordered::{Map, Set},
         NZUsize,
+        ordered::{Map, Set},
     };
     use futures::{FutureExt, StreamExt};
     use std::{

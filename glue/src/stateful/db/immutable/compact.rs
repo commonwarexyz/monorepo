@@ -12,20 +12,20 @@ use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_storage::{
+    Context,
     merkle::{Family, Location},
     qmdb::{
+        Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
-            fixed, initial_root, variable, CompactDb, CompactMerkleizedBatch,
-            CompactUnmerkleizedBatch, Operation,
+            CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
+            initial_root, variable,
         },
         operation::Key,
         sync::{self},
-        Error,
     },
-    Context,
 };
-use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, Array};
+use commonware_utils::{Array, channel::mpsc, sync::TracedAsyncRwLock};
 use std::{ops::Deref, sync::Arc};
 
 type ImmutableUnjournaledDbHandle<F, E, K, V, H, C, S> =
@@ -341,10 +341,10 @@ where
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
     R: sync::compact::Resolver<
-        Family = F,
-        Op = Operation<F, K, FixedEncoding<V>>,
-        Digest = H::Digest,
-    >,
+            Family = F,
+            Op = Operation<F, K, FixedEncoding<V>>,
+            Digest = H::Digest,
+        >,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -382,10 +382,10 @@ where
     C: Clone + Send + Sync + 'static,
     S: Strategy,
     R: sync::compact::Resolver<
-        Family = F,
-        Op = Operation<F, K, VariableEncoding<V>>,
-        Digest = H::Digest,
-    >,
+            Family = F,
+            Op = Operation<F, K, VariableEncoding<V>>,
+            Digest = H::Digest,
+        >,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -415,19 +415,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Clock as _, Metrics as _,
-        Runner as _, Spawner as _, Supervisor as _,
+        BufferPooler, Clock as _, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::{full::Config as MerkleConfig, mmr},
         translator::TwoCap,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use futures::pin_mut;
     use std::time::Duration;
 

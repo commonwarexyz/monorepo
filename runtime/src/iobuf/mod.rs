@@ -72,14 +72,14 @@ mod owner;
 mod pool;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
-use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
+use commonware_codec::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
 use crossbeam_utils::CachePadded;
 use owner::{HeapOwner, OwnerRef, PooledBuffer};
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
 use std::{
     collections::VecDeque,
     io::IoSlice,
-    mem::{align_of, ManuallyDrop},
+    mem::{ManuallyDrop, align_of},
     num::NonZeroUsize,
     ops::{Bound, RangeBounds},
     ptr::NonNull,
@@ -2365,25 +2365,27 @@ unsafe impl BufMut for IoBufsMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        // On failure, every writable byte was consumed before the chunks ran
-        // out, so the advanced amount (`cnt - remaining`) is exactly what was
-        // available.
-        let mut remaining = cnt;
-        let advanced = match &mut self.inner {
-            IoBufsMutInner::Single(buf) => {
-                buf.advance_mut(cnt);
-                return;
+        unsafe {
+            // On failure, every writable byte was consumed before the chunks ran
+            // out, so the advanced amount (`cnt - remaining`) is exactly what was
+            // available.
+            let mut remaining = cnt;
+            let advanced = match &mut self.inner {
+                IoBufsMutInner::Single(buf) => {
+                    buf.advance_mut(cnt);
+                    return;
+                }
+                IoBufsMutInner::Pair(pair) => advance_mut_in_chunks(pair, &mut remaining),
+                IoBufsMutInner::Triple(triple) => advance_mut_in_chunks(triple, &mut remaining),
+                IoBufsMutInner::Chunked(bufs) => {
+                    let (first, second) = bufs.as_mut_slices();
+                    advance_mut_in_chunks(first, &mut remaining)
+                        || advance_mut_in_chunks(second, &mut remaining)
+                }
+            };
+            if !advanced {
+                panic_advance(cnt, cnt - remaining);
             }
-            IoBufsMutInner::Pair(pair) => advance_mut_in_chunks(pair, &mut remaining),
-            IoBufsMutInner::Triple(triple) => advance_mut_in_chunks(triple, &mut remaining),
-            IoBufsMutInner::Chunked(bufs) => {
-                let (first, second) = bufs.as_mut_slices();
-                advance_mut_in_chunks(first, &mut remaining)
-                    || advance_mut_in_chunks(second, &mut remaining)
-            }
-        };
-        if !advanced {
-            panic_advance(cnt, cnt - remaining);
         }
     }
 
@@ -2753,7 +2755,9 @@ unsafe impl BufMut for Builder {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        self.buf.advance_mut(cnt);
+        unsafe {
+            self.buf.advance_mut(cnt);
+        }
     }
 
     #[inline]
@@ -2826,7 +2830,7 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
-    use commonware_codec::{types::lazy::Lazy, Decode, Encode, RangeCfg};
+    use commonware_codec::{Decode, Encode, RangeCfg, types::lazy::Lazy};
     use core::ops::{Bound, Range, RangeFrom, RangeInclusive, RangeToInclusive};
     use std::{
         collections::{BTreeMap, HashMap},

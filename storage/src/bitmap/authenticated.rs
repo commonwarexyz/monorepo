@@ -11,18 +11,18 @@
 //! over elements whose activity state is reflected by the bitmap.
 
 use crate::{
+    Context,
     merkle::{
+        Family as _,
         hasher::Hasher,
         mmr::{
-            self,
+            self, Error, Location, Position, Proof,
             mem::{Config, Mmr},
-            verification, Error, Location, Position, Proof,
+            verification,
         },
         storage::Storage,
-        Family as _,
     },
     metadata::{Config as MConfig, Metadata},
-    Context,
 };
 use ahash::AHashSet;
 use commonware_codec::DecodeExt;
@@ -639,10 +639,10 @@ mod tests {
     use super::*;
     use crate::merkle::Bagging::ForwardFold;
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{sha256, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use mmr::StandardHasher;
 
     const SHA256_SIZE: usize = sha256::Digest::SIZE;

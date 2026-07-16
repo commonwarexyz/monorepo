@@ -1,7 +1,7 @@
 use crate::reed_solomon::{
+    DecoderResult, EncoderResult, Error,
     engine::{self, Engine, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
-    DecoderResult, EncoderResult, Error,
 };
 use core::marker::PhantomData;
 
@@ -508,21 +508,17 @@ mod tests {
 
     mod low_rate {
         use crate::reed_solomon::{
+            Error, SHARD_CHUNK_BYTES,
             engine::NoSimd,
             rate::{LowRate, Rate},
-            Error, SHARD_CHUNK_BYTES,
         };
 
         #[test]
         fn decoder() {
-            assert!(LowRate::<NoSimd>::decoder(
-                4096,
-                61440,
-                SHARD_CHUNK_BYTES,
-                NoSimd::new(),
-                None
-            )
-            .is_ok());
+            assert!(
+                LowRate::<NoSimd>::decoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                    .is_ok()
+            );
 
             assert_eq!(
                 LowRate::<NoSimd>::decoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
@@ -536,14 +532,10 @@ mod tests {
 
         #[test]
         fn encoder() {
-            assert!(LowRate::<NoSimd>::encoder(
-                4096,
-                61440,
-                SHARD_CHUNK_BYTES,
-                NoSimd::new(),
-                None
-            )
-            .is_ok());
+            assert!(
+                LowRate::<NoSimd>::encoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                    .is_ok()
+            );
 
             assert_eq!(
                 LowRate::<NoSimd>::encoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
@@ -593,9 +585,9 @@ mod tests {
 
     mod low_rate_encoder {
         use crate::reed_solomon::{
+            Error, SHARD_CHUNK_BYTES,
             engine::NoSimd,
             rate::{LowRateEncoder, RateEncoder},
-            Error, SHARD_CHUNK_BYTES,
         };
 
         // ==================================================
@@ -651,9 +643,9 @@ mod tests {
 
     mod low_rate_decoder {
         use crate::reed_solomon::{
+            Error, SHARD_CHUNK_BYTES,
             engine::NoSimd,
             rate::{LowRateDecoder, RateDecoder},
-            Error, SHARD_CHUNK_BYTES,
         };
 
         // ==================================================

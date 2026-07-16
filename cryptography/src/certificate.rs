@@ -59,19 +59,19 @@
 
 #[commonware_macros::stability(ALPHA)]
 pub use crate::secp256r1::certificate as secp256r1;
+use crate::{Digest, PublicKey};
 pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
 };
-use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    types::lazy::Lazy, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write,
+    Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write, types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
+use commonware_utils::{Faults, Participant, bitmap::BitMap, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -635,11 +635,11 @@ pub mod mocks;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519::PrivateKey, sha256::Digest as Sha256Digest, Signer as _};
+    use crate::{Signer as _, ed25519::PrivateKey, sha256::Digest as Sha256Digest};
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect};
+    use commonware_utils::{N3f1, TryCollect, ordered::Set, test_rng};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
 
     #[test]

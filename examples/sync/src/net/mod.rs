@@ -119,7 +119,7 @@ impl Read for ErrorResponse {
 mod tests {
     use crate::{
         keyless_compact,
-        net::{request_id::Generator, wire, wire::GetOperationsRequest, ErrorCode},
+        net::{ErrorCode, request_id::Generator, wire, wire::GetOperationsRequest},
     };
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::sha256;

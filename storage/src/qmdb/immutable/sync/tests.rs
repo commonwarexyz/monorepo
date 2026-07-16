@@ -7,27 +7,26 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    merkle::{self, full::Config as MerkleConfig, Location},
+    merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
         self,
         immutable::{self, variable::Operation},
         sync::{
-            self,
+            self, Engine, Target,
             engine::{Config, NextStep},
             resolver::Resolver,
-            Engine, Target,
         },
     },
     translator::TwoCap,
 };
 use commonware_codec::Encode;
-use commonware_cryptography::{sha256, Sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_macros::boxed;
 use commonware_math::algebra::Random;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
+    BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_range};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
@@ -856,7 +855,7 @@ where
 
 pub(crate) mod harnesses {
     use super::*;
-    use crate::merkle::{mmb, mmr, Family};
+    use crate::merkle::{Family, mmb, mmr};
     use commonware_parallel::Sequential;
 
     type VariableDb<F> = immutable::variable::Db<
@@ -1171,29 +1170,33 @@ fn test_immutable_local_boundary_nodes_rejects_target_before_local_lower_bound()
             root: sync_root,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
-        assert!(<DbOf<H> as qmdb::sync::Database>::local_boundary_nodes(
-            context.child("probe_stale"),
-            &config,
-            &stale_target,
-            &db.journal.journal,
-        )
-        .await
-        .unwrap()
-        .is_none());
+        assert!(
+            <DbOf<H> as qmdb::sync::Database>::local_boundary_nodes(
+                context.child("probe_stale"),
+                &config,
+                &stale_target,
+                &db.journal.journal,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
 
         let matching_target = Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
-        assert!(<DbOf<H> as qmdb::sync::Database>::local_boundary_nodes(
-            context.child("probe_matching"),
-            &config,
-            &matching_target,
-            &db.journal.journal,
-        )
-        .await
-        .unwrap()
-        .is_some());
+        assert!(
+            <DbOf<H> as qmdb::sync::Database>::local_boundary_nodes(
+                context.child("probe_matching"),
+                &config,
+                &matching_target,
+                &db.journal.journal,
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
 
         H::destroy(db).await;
     });

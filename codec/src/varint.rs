@@ -426,7 +426,7 @@ fn size_signed<S: SPrim>(value: S) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{error::Error, DecodeExt, Encode};
+    use crate::{DecodeExt, Encode, error::Error};
     use bytes::Bytes;
 
     #[test]

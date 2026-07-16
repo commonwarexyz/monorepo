@@ -6,22 +6,22 @@
 
 use crate::{
     index::{
-        storage::{push_displaced, Cursor as CursorImpl, IndexEntry, Overflow, Values},
         Cursor as CursorTrait, Ordered, Unordered,
+        storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
     translator::Translator,
 };
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
     Metrics,
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
 use std::{
     collections::{
+        BTreeMap, HashMap,
         btree_map::{
             Entry as BTreeEntry, OccupiedEntry as BTreeOccupiedEntry,
             VacantEntry as BTreeVacantEntry,
         },
-        BTreeMap, HashMap,
     },
     ops::Bound::{Excluded, Unbounded},
 };
@@ -328,11 +328,11 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
             self.keys.dec();
             self.items.dec();
             self.pruned.inc();
-            if !self.overflow.is_empty() {
-                if let Some(chain) = self.overflow.remove(&k) {
-                    self.items.dec_by(chain.len() as i64);
-                    self.pruned.inc_by(chain.len() as u64);
-                }
+            if !self.overflow.is_empty()
+                && let Some(chain) = self.overflow.remove(&k)
+            {
+                self.items.dec_by(chain.len() as i64);
+                self.pruned.inc_by(chain.len() as u64);
             }
         }
     }
@@ -359,7 +359,7 @@ mod tests {
     use crate::translator::OneCap;
     use commonware_formatting::hex;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     #[test_traced]
     fn test_ordered_empty_index() {

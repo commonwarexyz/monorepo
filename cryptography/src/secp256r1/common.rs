@@ -97,7 +97,7 @@ impl Display for PrivateKeyInner {
 impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         Ok(Self::random(&mut rand))
@@ -197,7 +197,7 @@ impl Display for PublicKeyInner {
 impl arbitrary::Arbitrary<'_> for PublicKeyInner {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKeyInner::random(&mut rand);
@@ -719,8 +719,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_10_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_10_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "224a4d65b958f6d6afb2904863efd2a734b31798884801fcab5a590f4d6da9de",
             "178d51fddada62806f097aa615d33b8f2404e6b1479f5fd4859d595734d6d2b9",
@@ -733,8 +733,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_11_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_11_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "43691c7795a57ead8c5c68536fe934538d46f12889680a9cb6d055a066228369",
             "f8790110b3c3b281aa1eae037d4f1234aff587d903d93ba3af225c27ddc9ccac",
@@ -747,8 +747,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_12_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_12_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "9157dbfcf8cf385f5bb1568ad5c6e2a8652ba6dfc63bc1753edf5268cb7eb596",
             "972570f4313d47fc96f7c02d5594d77d46f91e949808825b3d31f029e8296405",
@@ -761,8 +761,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_13_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_13_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "072b10c081a4c1713a294f248aef850e297991aca47fa96a7470abe3b8acfdda",
             "9581145cca04a0fb94cedce752c8f0370861916d2a94e7c647c5373ce6a4c8f5",
@@ -775,8 +775,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_14_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_14_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "09308ea5bfad6e5adf408634b3d5ce9240d35442f7fe116452aaec0d25be8c24",
             "f40c93e023ef494b1c3079b2d10ef67f3170740495ce2cc57f8ee4b0618b8ee5",
@@ -789,8 +789,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_15_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_15_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "2d98ea01f754d34bbc3003df5050200abf445ec728556d7ed7d5c54c55552b6d",
             "9b52672742d637a32add056dfd6d8792f2a33c2e69dafabea09b960bc61e230a",

@@ -6,15 +6,15 @@
 //! journal at a specific location.
 
 use crate::{
+    Context,
     journal::{
-        contiguous::{fixed, variable, Contiguous, Many, Mutable},
         Error as JournalError,
+        contiguous::{Contiguous, Many, Mutable, fixed, variable},
     },
     merkle::{
-        self, batch, full::Merkle, hasher::Standard as StandardHasher, mem::Mem, Bagging, Family,
-        Location, Position, Proof, Readable,
+        self, Bagging, Family, Location, Position, Proof, Readable, batch, full::Merkle,
+        hasher::Standard as StandardHasher, mem::Mem,
     },
-    Context,
 };
 use alloc::{
     sync::{Arc, Weak},
@@ -28,7 +28,7 @@ use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
-use futures::{try_join, Stream, TryFutureExt as _};
+use futures::{Stream, TryFutureExt as _, try_join};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -989,28 +989,28 @@ mod tests {
     use crate::{
         journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
         merkle::{
+            Bagging::{BackwardFold, ForwardFold},
             full::{Config as MerkleConfig, Merkle},
             mmb, mmr,
-            Bagging::{BackwardFold, ForwardFold},
         },
         qmdb::{
             any::{
-                operation::{update::Unordered as Update, Unordered as Op},
+                operation::{Unordered as Op, update::Unordered as Update},
                 value::FixedEncoding,
             },
             operation::Committable,
         },
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{
+        BufferPooler, Runner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Strategizer as _, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use futures::StreamExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -1169,10 +1169,12 @@ mod tests {
             }
 
             // An empty batch is a no-op, even with a multi-threaded strategy.
-            assert!(Contiguous::read_many(&journal, &[])
-                .await
-                .unwrap()
-                .is_empty());
+            assert!(
+                Contiguous::read_many(&journal, &[])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         });
     }
 

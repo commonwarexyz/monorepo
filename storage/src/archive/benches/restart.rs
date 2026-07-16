@@ -1,11 +1,11 @@
-use super::utils::{append_random, Archive, Variant};
+use super::utils::{Archive, Variant, append_random};
 use commonware_runtime::{
+    Runner, Supervisor as _,
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner, Supervisor as _,
 };
 use commonware_storage::archive::Archive as _;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
 #[cfg(not(full_bench))]

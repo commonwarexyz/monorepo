@@ -49,12 +49,12 @@
 //! first try to re-enter the dropping thread's local cache, spilling a bounded
 //! batch back to the global freelist if needed.
 
-use super::{freelist::Freelist, page_size, IoBufMut};
+use super::{IoBufMut, freelist::Freelist, page_size};
 use crate::{
     iobuf::owner::{PooledBuffer, PooledOwner},
-    telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
+    telemetry::metrics::{Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register, raw},
 };
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{NZU32, NZUsize};
 use std::{
     cell::{Cell, UnsafeCell},
     mem::MaybeUninit,
@@ -1784,14 +1784,14 @@ impl BufferPool {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::{cache_line_size, freelist, IoBuf},
+        iobuf::{IoBuf, cache_line_size, freelist},
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut};
     use commonware_utils::NZU32;
     use std::{
         cell::Cell,
-        sync::{mpsc, Arc},
+        sync::{Arc, mpsc},
         thread,
     };
 

@@ -1,4 +1,5 @@
 use super::{
+    Buffer, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
@@ -8,46 +9,44 @@ use super::{
     stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
     variant::NoBuffer,
-    Buffer, Variant,
 };
 use crate::{
+    Block, Epochable, Heightable, Reporter,
     marshal::{
+        Config, Identifier as BlockID, Start, Update,
         resolver::handler::{self, Annotation, Key, Request},
         store::{Blocks, Certificates},
-        Config, Identifier as BlockID, Start, Update,
     },
     simplex::{
         scheme::Scheme,
-        types::{verify_certificates, Finalization, Notarization, Subject},
+        types::{Finalization, Notarization, Subject, verify_certificates},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{Provider, Verifier},
     Digestible,
+    certificate::{Provider, Verifier},
 };
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
-    spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
     telemetry::{
         metrics::{Gauge, GaugeExt, MetricsExt as _},
         traces::TracedExt as _,
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
+    Acknowledgement, BoxedError,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Pool},
-    Acknowledgement, BoxedError,
 };
 use futures::{
     future::{join, join_all},
@@ -55,7 +54,7 @@ use futures::{
 };
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
-use tracing::{debug, info_span, warn, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, info_span, warn};
 
 // Resolver request keys are expressed in the variant commitment type, which
 // may differ from the block digest for coded variants.
@@ -97,10 +96,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-        BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
-    >,
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -163,10 +162,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-        BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
-    >,
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -320,10 +319,10 @@ where
     ) -> Handle<()>
     where
         R: TargetedResolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as Verifier>::PublicKey,
-        >,
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                PublicKey = <P::Scheme as Verifier>::PublicKey,
+            >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver))
@@ -337,10 +336,10 @@ where
     ) -> Handle<()>
     where
         R: TargetedResolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as Verifier>::PublicKey,
-        >,
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                PublicKey = <P::Scheme as Verifier>::PublicKey,
+            >,
     {
         self.start(
             application,
@@ -357,10 +356,10 @@ where
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
         R: TargetedResolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as Verifier>::PublicKey,
-        >,
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                PublicKey = <P::Scheme as Verifier>::PublicKey,
+            >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         // Create a local pool for waiter futures.
@@ -567,10 +566,10 @@ where
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: TargetedResolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as Verifier>::PublicKey,
-        >,
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                PublicKey = <P::Scheme as Verifier>::PublicKey,
+            >,
     {
         if message.response_closed() {
             return;
@@ -1414,17 +1413,16 @@ where
                     .iter()
                     .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
                     && height > self.floor.processed_height()
+                    && let Some(bounds) = self.epocher.containing(height)
                 {
-                    if let Some(bounds) = self.epocher.containing(height) {
-                        self.cache
-                            .put_certified(
-                                bounds.epoch(),
-                                height,
-                                digest,
-                                Arc::unwrap_or_clone(block).into(),
-                            )
-                            .await;
-                    }
+                    self.cache
+                        .put_certified(
+                            bounds.epoch(),
+                            height,
+                            digest,
+                            Arc::unwrap_or_clone(block).into(),
+                        )
+                        .await;
                 }
                 debug!(?digest, %height, "received block");
                 response.send_lossy(true);

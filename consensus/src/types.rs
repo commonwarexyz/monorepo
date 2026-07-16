@@ -36,7 +36,7 @@
 
 use crate::{Epochable, Viewable};
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::telemetry::traces::TracedExt;
 use commonware_utils::sequence::U64;
@@ -724,7 +724,7 @@ commonware_macros::stability_scope!(ALPHA {
         use commonware_coding::Config as CodingConfig;
         use commonware_cryptography::Digest;
         use commonware_math::algebra::Random;
-        use commonware_utils::{Array, Span, NZU16};
+        use commonware_utils::{Array, NZU16, Span};
         use core::{
             num::NonZeroU16,
             ops::{Deref, Range},
@@ -941,7 +941,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize};
     use commonware_coding::Config as CodingConfig;
     use commonware_math::algebra::Random;
-    use commonware_utils::{test_rng, Array, Span, NZU16, NZU64};
+    use commonware_utils::{Array, NZU16, NZU64, Span, test_rng};
     use std::ops::Deref;
 
     #[test]

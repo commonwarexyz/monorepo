@@ -47,16 +47,16 @@
 mod application;
 mod gui;
 
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_consensus::{
     simplex::{self, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{ed25519, Sha256, Signer as _};
-use commonware_p2p::{authenticated::discovery, Manager as _};
+use commonware_cryptography::{Sha256, Signer as _, ed25519};
+use commonware_p2p::{Manager as _, authenticated::discovery};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, tokio, Quota, Runner, Supervisor as _};
-use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
+use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
+use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,

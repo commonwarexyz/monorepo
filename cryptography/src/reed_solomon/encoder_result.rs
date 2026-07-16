@@ -110,7 +110,7 @@ impl<'a> Recovery<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{test_util, Encoder};
+    use crate::reed_solomon::{Encoder, test_util};
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
 

@@ -164,10 +164,10 @@ mod tests {
     use commonware_cryptography::sha256::Digest;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob, BufferPooler, Runner, Storage,
-        Supervisor as _,
+        Blob, BufferPooler, Runner, Storage, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
-    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
 
     type FixedJournal = fixed::Journal<deterministic::Context, Digest>;
     type F = crate::merkle::mmr::Family;

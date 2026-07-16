@@ -1,13 +1,13 @@
-use crate::{append_fixed_random_data, get_fixed_journal, ITEMS_PER_BLOB, ITEM_SIZE};
+use crate::{ITEM_SIZE, ITEMS_PER_BLOB, append_fixed_random_data, get_fixed_journal};
 use commonware_runtime::{
+    Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
-    Runner as _, Supervisor as _,
 };
-use commonware_storage::journal::contiguous::{fixed::Journal, Contiguous as _};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
-use criterion::{criterion_group, Criterion};
-use futures::{pin_mut, StreamExt};
+use commonware_storage::journal::contiguous::{Contiguous as _, fixed::Journal};
+use commonware_utils::{NZUsize, sequence::FixedBytes};
+use criterion::{Criterion, criterion_group};
+use futures::{StreamExt, pin_mut};
 use std::{
     hint::black_box,
     time::{Duration, Instant},

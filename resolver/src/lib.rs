@@ -8,7 +8,7 @@
 commonware_macros::stability_scope!(BETA {
     use commonware_actor::Feedback;
     use commonware_cryptography::PublicKey;
-    use commonware_utils::{channel::oneshot, vec::NonEmptyVec, Span};
+    use commonware_utils::{Span, channel::oneshot, vec::NonEmptyVec};
     use core::cmp::Ordering;
 
     pub mod delivery;

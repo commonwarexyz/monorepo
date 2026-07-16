@@ -1,10 +1,10 @@
 use super::{Config, Error};
 use crate::Context;
 use commonware_codec::{Codec, FixedSize, ReadExt};
-use commonware_cryptography::{crc32, Crc32};
+use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Blob, BufMut, Error as RError, IoBufMut,
+    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
 use futures::future::try_join_all;

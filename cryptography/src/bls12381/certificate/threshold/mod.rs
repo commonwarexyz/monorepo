@@ -12,6 +12,7 @@
 pub mod mocks;
 
 use crate::{
+    Digest, PublicKey,
     bls12381::primitives::{
         group::Share,
         ops::{self, batch, threshold},
@@ -19,14 +20,13 @@ use crate::{
         variant::{PartialSignature, Variant},
     },
     certificate::{Attestation, Namespace, Scheme, Subject, Verification},
-    Digest, PublicKey,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{types::lazy::Lazy, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Set, Faults, Participant};
+use commonware_utils::{Faults, Participant, ordered::Set};
 use core::fmt::Debug;
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -721,6 +721,7 @@ macro_rules! impl_certificate_bls12381_threshold {
 mod tests {
     use super::*;
     use crate::{
+        Signer as _,
         bls12381::{
             dkg::feldman_desmedt as dkg,
             primitives::{
@@ -731,13 +732,12 @@ mod tests {
         certificate::{Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
-        Signer as _,
     };
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, Faults, N3f1, TryCollect, NZU32};
+    use commonware_utils::{Faults, N3f1, NZU32, TryCollect, ordered::Set, test_rng};
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -827,11 +827,13 @@ mod tests {
     fn test_verifier_cannot_sign<V: Variant>() {
         let mut rng = test_rng();
         let (_, verifier, _) = setup_signers::<V>(&mut rng, 4);
-        assert!(verifier
-            .sign::<Sha256Digest>(TestSubject {
-                message: Bytes::from_static(MESSAGE),
-            })
-            .is_none());
+        assert!(
+            verifier
+                .sign::<Sha256Digest>(TestSubject {
+                    message: Bytes::from_static(MESSAGE),
+                })
+                .is_none()
+        );
     }
 
     #[test]
@@ -1069,9 +1071,11 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .is_none());
+        assert!(
+            schemes[0]
+                .assemble::<_, N3f1>(attestations, &Sequential)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1219,11 +1223,13 @@ mod tests {
         ));
 
         // Should not be able to sign
-        assert!(cert_verifier
-            .sign::<Sha256Digest>(TestSubject {
-                message: Bytes::from_static(MESSAGE),
-            })
-            .is_none());
+        assert!(
+            cert_verifier
+                .sign::<Sha256Digest>(TestSubject {
+                    message: Bytes::from_static(MESSAGE),
+                })
+                .is_none()
+        );
     }
 
     #[test]

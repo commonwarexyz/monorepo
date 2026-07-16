@@ -66,12 +66,12 @@
 //!   uncertified blocks from the network.
 
 use crate::{
-    types::{Height, Round},
     Block,
+    types::{Height, Round},
 };
 use commonware_cryptography::Digest;
 use commonware_storage::archive;
-use commonware_utils::{acknowledgement::Exact, Acknowledgement};
+use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 use std::sync::Arc;
 
 mod config;

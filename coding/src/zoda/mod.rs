@@ -118,8 +118,8 @@ use crate::{Config, PhasedScheme, ValidatingScheme};
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
-    transcript::{Summary, Transcript},
     Digest, Hasher,
+    transcript::{Summary, Transcript},
 };
 use commonware_math::{
     fields::goldilocks::F,

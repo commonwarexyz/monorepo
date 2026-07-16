@@ -14,15 +14,17 @@ use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_storage::{
+    Context,
     index::{
-        ordered::Index as OrderedIdx, unordered::Index as UnorderedIdx, Ordered as OrderedIndex,
-        Unordered as UnorderedIndex,
+        Ordered as OrderedIndex, Unordered as UnorderedIndex, ordered::Index as OrderedIdx,
+        unordered::Index as UnorderedIdx,
     },
     journal::contiguous::{
-        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Contiguous, Mutable,
+        Contiguous, Mutable, fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
     },
     merkle::{Graftable, Location},
     qmdb::{
+        Error,
         any::{
             initial_root,
             operation::{Operation, Update},
@@ -30,18 +32,16 @@ use commonware_storage::{
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         current::{
+            FixedConfig, VariableConfig,
             batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
             db::Db,
-            FixedConfig, VariableConfig,
         },
         operation::Key,
-        sync::{self, resolver::Resolver, Target as CurrentSyncTarget},
-        Error,
+        sync::{self, Target as CurrentSyncTarget, resolver::Resolver},
     },
     translator::Translator,
-    Context,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
+use commonware_utils::{Array, channel::mpsc, non_empty_range, sync::TracedAsyncRwLock};
 use std::{
     ops::{Deref, Range},
     sync::Arc,
@@ -679,19 +679,19 @@ mod open {
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
     use commonware_storage::{
+        Context,
         merkle::Graftable,
         qmdb::{
+            Error,
             any::{
                 operation::Operation,
                 ordered, unordered,
                 value::{VariableEncoding, VariableValue},
             },
             current::{
-                ordered::variable::Db as OrderedVariableDb, unordered::variable::Db, VariableConfig,
+                VariableConfig, ordered::variable::Db as OrderedVariableDb, unordered::variable::Db,
             },
-            Error,
         },
-        Context,
     };
     use commonware_utils::Array;
 
@@ -971,10 +971,10 @@ where
     T: Translator,
     S: Strategy,
     R: Resolver<
-        Family = F,
-        Op = Operation<F, unordered::Update<K, FixedEncoding<V>>>,
-        Digest = H::Digest,
-    >,
+            Family = F,
+            Op = Operation<F, unordered::Update<K, FixedEncoding<V>>>,
+            Digest = H::Digest,
+        >,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1026,10 +1026,10 @@ where
     T: Translator,
     S: Strategy,
     R: Resolver<
-        Family = F,
-        Op = Operation<F, ordered::Update<K, FixedEncoding<V>>>,
-        Digest = H::Digest,
-    >,
+            Family = F,
+            Op = Operation<F, ordered::Update<K, FixedEncoding<V>>>,
+            Digest = H::Digest,
+        >,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1082,10 +1082,10 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     R: Resolver<
-        Family = F,
-        Op = Operation<F, unordered::Update<K, VariableEncoding<V>>>,
-        Digest = H::Digest,
-    >,
+            Family = F,
+            Op = Operation<F, unordered::Update<K, VariableEncoding<V>>>,
+            Digest = H::Digest,
+        >,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1138,10 +1138,10 @@ where
     S: Strategy,
     Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
     R: Resolver<
-        Family = F,
-        Op = Operation<F, ordered::Update<K, VariableEncoding<V>>>,
-        Digest = H::Digest,
-    >,
+            Family = F,
+            Op = Operation<F, ordered::Update<K, VariableEncoding<V>>>,
+            Digest = H::Digest,
+        >,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1175,10 +1175,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::{
@@ -1191,7 +1191,7 @@ mod tests {
         },
         translator::TwoCap,
     };
-    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type FixedDb = fixed::Db<

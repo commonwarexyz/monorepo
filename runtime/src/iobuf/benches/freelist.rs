@@ -19,7 +19,7 @@
 //! benchmark slots, keeping the baseline container shape close to the real
 //! freelist.
 
-use super::utils::{measure, Threading};
+use super::utils::{Threading, measure};
 use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer, PooledOwner};
 use commonware_utils::sync::Mutex;
 use criterion::Criterion;

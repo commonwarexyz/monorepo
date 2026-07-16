@@ -2,20 +2,21 @@
 use crate::dkg::MAX_SUPPORTED_MODE;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
+    Signer,
     bls12381::{
-        dkg::feldman_desmedt::{deal, Output},
+        dkg::feldman_desmedt::{Output, deal},
         primitives::{group::Share, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},
-    Signer,
 };
 use commonware_formatting::{from_hex, hex};
 use commonware_math::algebra::Random;
 use commonware_utils::{
+    Faults, N3f1, NZU32, TryCollect,
     ordered::{Map, Set},
-    sys_rng, Faults, N3f1, TryCollect, NZU32,
+    sys_rng,
 };
-use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -158,7 +159,9 @@ pub fn run(args: super::SetupArgs) {
         let mprocs_dkg_cmd = mprocs_validator_cmd.replace("validator", "dkg");
         println!("\nTo start the DKG process, run the following command:");
         println!("\n{mprocs_dkg_cmd}");
-        println!("\nOnce the DKG process completes, exit the DKG processes and start the validators with the following command:");
+        println!(
+            "\nOnce the DKG process completes, exit the DKG processes and start the validators with the following command:"
+        );
     } else {
         println!("\nThe network is configured with a trusted threshold setup.");
         println!("\nTo start the validators, run the following command:");
@@ -314,8 +317,8 @@ mod serde_hex_ordered {
     use commonware_formatting::from_hex;
     use core::fmt;
     use serde::{
-        de::{SeqAccess, Visitor},
         Deserializer, Serializer,
+        de::{SeqAccess, Visitor},
     };
 
     pub fn serialize<T, S>(value: &Set<T>, serializer: S) -> Result<S::Ok, S::Error>

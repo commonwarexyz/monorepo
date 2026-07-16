@@ -145,17 +145,17 @@
 use crate::iobuf::pool::{BufferPoolThreadCache, SizeClassLease};
 use bytes::Bytes;
 use std::{
-    alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
-    mem::{align_of, offset_of, size_of, ManuallyDrop, MaybeUninit},
-    ptr::{self, addr_of_mut, NonNull},
+    alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
+    mem::{ManuallyDrop, MaybeUninit, align_of, offset_of, size_of},
+    ptr::{self, NonNull, addr_of_mut},
     sync::atomic::Ordering,
 };
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
-        use loom::sync::atomic::{fence, AtomicUsize};
+        use loom::sync::atomic::{AtomicUsize, fence};
     } else {
-        use std::sync::atomic::{fence, AtomicUsize};
+        use std::sync::atomic::{AtomicUsize, fence};
     }
 }
 
@@ -1667,7 +1667,7 @@ mod loom_tests {
     use super::*;
     use loom::{
         cell::UnsafeCell,
-        sync::{atomic::AtomicUsize, Arc},
+        sync::{Arc, atomic::AtomicUsize},
         thread,
     };
 

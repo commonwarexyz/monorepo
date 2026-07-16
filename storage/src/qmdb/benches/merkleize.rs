@@ -9,16 +9,16 @@
 //!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
 //!   optimizes for.
 
-use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
+use crate::common::{CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, seed_db, write_random_updates};
 use commonware_bench::{Benchmark, Metric, Workload};
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
+    BufferPooler, Metrics as _, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Metrics as _, Strategizer, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -26,8 +26,8 @@ use commonware_storage::{
     qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
-use criterion::{criterion_group, Criterion};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     marker::PhantomData,
@@ -748,11 +748,7 @@ cfg_if::cfg_if! {
 }
 
 const fn main_num_keys(seed_sync: bool) -> &'static [u64] {
-    if seed_sync {
-        SYNC_NUM_KEYS
-    } else {
-        NUM_KEYS
-    }
+    if seed_sync { SYNC_NUM_KEYS } else { NUM_KEYS }
 }
 
 fn bench_merkleize(c: &mut Criterion) {

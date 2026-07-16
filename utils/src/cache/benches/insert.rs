@@ -1,5 +1,5 @@
-use commonware_utils::{cache::Clock, TestRng};
-use criterion::{criterion_group, Criterion};
+use commonware_utils::{TestRng, cache::Clock};
+use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
 use std::{hint::black_box, num::NonZeroUsize};
 

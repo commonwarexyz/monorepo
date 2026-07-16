@@ -3,10 +3,10 @@
 use crate::ordinal::{Config, Error, Ordinal};
 use commonware_conformance::conformance_tests;
 use commonware_runtime::{
-    conformance::{StorageConformance, StorageWorkload},
     Supervisor as _,
+    conformance::{StorageConformance, StorageWorkload},
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use rand::RngExt as _;
 
 struct OrdinalWorkload;

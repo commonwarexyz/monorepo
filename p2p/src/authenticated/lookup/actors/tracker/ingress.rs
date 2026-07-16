@@ -1,15 +1,15 @@
 use super::Reservation;
 use crate::{
+    AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
     authenticated::{
         dialing::Dialable,
         lookup::actors::{peer, tracker::Metadata},
     },
     types::Address,
-    AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
 };
 use commonware_actor::{
-    mailbox::{self, Policy},
     Feedback,
+    mailbox::{self, Policy},
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{

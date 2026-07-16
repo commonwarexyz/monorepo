@@ -2,20 +2,20 @@
 
 use super::relay::Relay;
 use crate::{
+    Viewable,
     simplex::{
         elector::{Config as ElectorConfig, Elector},
         scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
     types::{Epoch, Participant, Round, View},
-    Viewable,
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{certificate, Hasher};
+use commonware_cryptography::{Hasher, certificate};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use commonware_utils::ordered::Quorum;
-use rand::{seq::IteratorRandom, Rng, RngExt as _};
+use rand::{Rng, RngExt as _, seq::IteratorRandom};
 use std::{collections::HashSet, sync::Arc};
 
 pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {

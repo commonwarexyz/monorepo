@@ -1,6 +1,6 @@
 use crate::{
-    ed25519::core::{self as ed_core, VerificationKey},
     BatchVerifier, Secret,
+    ed25519::core::{self as ed_core, VerificationKey},
 };
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};
@@ -9,7 +9,7 @@ use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use commonware_utils::{union_unique, Array, Span};
+use commonware_utils::{Array, Span, union_unique};
 use core::{
     fmt::{Debug, Display},
     hash::Hash,
@@ -106,7 +106,7 @@ impl Display for PrivateKey {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for PrivateKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         Ok(Self::random(&mut rand))
@@ -217,7 +217,7 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKey::random(&mut rand);
@@ -303,7 +303,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKey::random(&mut rand);
@@ -369,7 +369,7 @@ impl Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519, Signer as _};
+    use crate::{Signer as _, ed25519};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;

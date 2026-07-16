@@ -23,27 +23,27 @@ pub mod tests {
         journal::contiguous::{Contiguous as _, Mutable},
         merkle::{Graftable, Location, Proof},
         qmdb::{
+            Error,
             any::{
+                ValueEncoding,
                 operation::update::Unordered as UnorderedUpdate,
                 traits::{DbAny, UnmerkleizedBatch as _},
                 unordered::Operation,
-                ValueEncoding,
             },
-            current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
+            current::{BitmapPrunedBits, proof::RangeProof, tests::apply_random_ops},
             store::tests::{TestKey, TestValue},
-            Error,
         },
         translator::TwoCap,
     };
     use commonware_codec::Codec;
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
+    use commonware_cryptography::{Digest as _, Hasher as _, Sha256, sha256::Digest};
     use commonware_runtime::{
-        deterministic::{self, Context},
         Runner as _, Supervisor as _,
+        deterministic::{self, Context},
     };
     use commonware_utils::{
-        bitmap::{Prunable as BitMap, Readable as _},
         NZU64,
+        bitmap::{Prunable as BitMap, Readable as _},
     };
     use core::future::Future;
     use rand::Rng;

@@ -2,20 +2,19 @@
 //!
 //! The impl blocks in this file define shared functionality across all Any QMDB variants.
 
-use super::operation::{update::Update, Operation};
+use super::operation::{Operation, update::Update};
 use crate::{
+    Context,
     index::Unordered as UnorderedIndex,
     journal::{
-        authenticated,
+        Error as JournalError, authenticated,
         contiguous::{Contiguous, Mutable},
-        Error as JournalError,
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        bitmap::Shared, build_snapshot_from_log, delete_known_loc, metrics::Metrics,
-        operation::Operation as OperationTrait, update_known_loc, Error,
+        Error, bitmap::Shared, build_snapshot_from_log, delete_known_loc, metrics::Metrics,
+        operation::Operation as OperationTrait, update_known_loc,
     },
-    Context,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
@@ -593,14 +592,14 @@ where
                     Operation::Delete(key) => {
                         let previous_loc = prior_state_by_key.get(&key).copied().flatten();
 
-                        if loc >= rewind_size {
-                            if let Some(previous_loc) = previous_loc {
-                                active_keys_delta += 1;
-                                undos.push(SnapshotUndo::Insert {
-                                    key: key.clone(),
-                                    new_loc: previous_loc,
-                                });
-                            }
+                        if loc >= rewind_size
+                            && let Some(previous_loc) = previous_loc
+                        {
+                            active_keys_delta += 1;
+                            undos.push(SnapshotUndo::Insert {
+                                key: key.clone(),
+                                new_loc: previous_loc,
+                            });
                         }
 
                         prior_state_by_key.insert(key, None);

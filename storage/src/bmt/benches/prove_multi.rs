@@ -1,8 +1,8 @@
-use commonware_cryptography::{sha256, Hasher, Sha256};
+use commonware_cryptography::{Hasher, Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use commonware_utils::test_rng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::seq::IndexedRandom;
 
 const SAMPLE_SIZE: usize = 100;
@@ -37,9 +37,11 @@ fn bench_prove_multi(c: &mut Criterion) {
                         let mut hasher = Sha256::new();
                         let elements: Vec<_> =
                             samples.iter().map(|(pos, elem)| (*elem, *pos)).collect();
-                        assert!(proof
-                            .verify_multi_inclusion(&mut hasher, &elements, &root)
-                            .is_ok());
+                        assert!(
+                            proof
+                                .verify_multi_inclusion(&mut hasher, &elements, &root)
+                                .is_ok()
+                        );
                     },
                     criterion::BatchSize::SmallInput,
                 )

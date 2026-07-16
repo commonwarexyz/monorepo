@@ -9,35 +9,34 @@ pub mod utils;
 use crate::{
     disrupter::Disrupter,
     strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
-    utils::{link_peers, register, Action, Partition},
+    utils::{Action, Partition, link_peers, register},
 };
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
+    Monitor, Viewable,
     simplex::{
-        config,
+        Engine, Floor, ForwardingPolicy, config,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
-        Engine, Floor, ForwardingPolicy,
     },
     types::{Delta, Epoch, View},
-    Monitor, Viewable,
 };
 use commonware_cryptography::{
-    certificate::{mocks::Fixture, Verifier as _},
+    Sha256,
+    certificate::{Verifier as _, mocks::Fixture},
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
-    Sha256,
 };
 use commonware_p2p::{
-    simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
     Recipients,
+    simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Runner, Spawner, Supervisor as _,
+    Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
+use commonware_utils::{FuzzRng, NZU16, NZUsize, channel::mpsc::Receiver};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,

@@ -6,15 +6,15 @@ use commonware_utils::{channel::mpsc, sync::Mutex};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Text},
     widgets::{Block, Borders, Paragraph},
-    Terminal,
 };
 use std::{io::stdout, str::FromStr, sync::Arc, time::Duration};
 use tracing::{debug, warn};
@@ -67,10 +67,10 @@ pub async fn run(
                 Ok(e) => e,
                 Err(_) => break,
             };
-            if let CEvent::Key(key) = e {
-                if tx.send(Event::Input(key)).await.is_err() {
-                    break;
-                }
+            if let CEvent::Key(key) = e
+                && tx.send(Event::Input(key)).await.is_err()
+            {
+                break;
             }
         }
     });

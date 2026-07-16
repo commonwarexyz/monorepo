@@ -1,11 +1,11 @@
-use super::{actors::Messenger, Error};
+use super::{Error, actors::Messenger};
 use crate::{
-    utils::limited::{CheckedSender, LimitedSender},
     Channel, Message as NetworkMessage, Recipients,
+    utils::limited::{CheckedSender, LimitedSender},
 };
 use commonware_actor::{
-    mailbox::{self, UnreliablePolicy},
     Feedback, Unreliable,
+    mailbox::{self, UnreliablePolicy},
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Metrics, Quota};

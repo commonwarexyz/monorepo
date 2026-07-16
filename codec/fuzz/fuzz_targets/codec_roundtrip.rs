@@ -3,8 +3,8 @@
 use arbitrary::Arbitrary;
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    varint::{SInt, UInt},
     Decode, DecodeExt, Encode, EncodeSize, Error, IsUnit, RangeCfg, Read, Write,
+    varint::{SInt, UInt},
 };
 use libfuzzer_sys::fuzz_target;
 use std::{

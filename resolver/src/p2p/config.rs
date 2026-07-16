@@ -1,4 +1,4 @@
-use crate::{p2p::Producer, Consumer};
+use crate::{Consumer, p2p::Producer};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Blocker, Provider};

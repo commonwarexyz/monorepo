@@ -1,9 +1,9 @@
 use crate::{
+    Viewable,
     simplex::types::{Certificate, Notarization},
     types::View,
-    Viewable,
 };
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     num::NonZeroUsize,
@@ -141,11 +141,11 @@ impl<S: Scheme, D: Digest> State<S, D> {
             //
             // This may occur before or after a nullification for the same view (and should always be favored).
             // Finalization remains the stronger proof and can later supersede this floor at the same or higher view.
-            if let Some(notarization) = self.notarizations.remove(&view) {
-                if view > self.floor_view() {
-                    self.floor = Some(Certificate::Notarization(notarization));
-                    effects.push(self.prune());
-                }
+            if let Some(notarization) = self.notarizations.remove(&view)
+                && view > self.floor_view()
+            {
+                self.floor = Some(Certificate::Notarization(notarization));
+                effects.push(self.prune());
             }
 
             // Clean up satisfaction tracking
@@ -184,10 +184,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// if the view is below the floor).
     pub fn get(&self, view: View) -> Option<&Certificate<S, D>> {
         // If view is <= floor, return the floor
-        if let Some(floor) = &self.floor {
-            if view <= floor.view() {
-                return Some(floor);
-            }
+        if let Some(floor) = &self.floor
+            && view <= floor.view()
+        {
+            return Some(floor);
         }
 
         // Otherwise, return the nullification for the view if it exists
@@ -271,7 +271,7 @@ mod tests {
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, NZUsize};
+    use commonware_utils::{NZUsize, test_rng};
 
     const NAMESPACE: &[u8] = b"resolver-state";
     const EPOCH: Epoch = Epoch::new(9);

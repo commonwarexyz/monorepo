@@ -10,10 +10,10 @@
 
 use super::{
     super::{
+        Error,
         group::Share,
         sharing::Sharing,
         variant::{PartialSignature, Variant},
-        Error,
     },
     batch,
 };
@@ -21,7 +21,7 @@ use super::{
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Map, union_unique, Faults, Participant};
+use commonware_utils::{Faults, Participant, ordered::Map, union_unique};
 use rand_core::CryptoRng;
 
 /// Prepares partial signature evaluations for threshold recovery.
@@ -349,7 +349,7 @@ mod tests {
     use crate::bls12381::{
         dkg::feldman_desmedt as dkg,
         primitives::{
-            group::{Private, Scalar, G1_MESSAGE, G2_MESSAGE},
+            group::{G1_MESSAGE, G2_MESSAGE, Private, Scalar},
             ops::{self, hash_with_namespace},
             variant::{MinPk, MinSig},
         },
@@ -358,7 +358,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, union_unique, Faults, N3f1, NZUsize, NZU32};
+    use commonware_utils::{Faults, N3f1, NZU32, NZUsize, test_rng, union_unique};
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,

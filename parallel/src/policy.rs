@@ -280,7 +280,7 @@ const fn len_bucket(len: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Entry, Execution, Policy, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, RESAMPLE_INTERVAL,
+        Entry, Execution, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Policy, RESAMPLE_INTERVAL,
     };
     use std::{panic::Location, time::Duration};
 

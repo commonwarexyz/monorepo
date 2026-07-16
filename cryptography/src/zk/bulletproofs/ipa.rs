@@ -133,7 +133,7 @@ use crate::transcript::{Summary, Transcript};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
-    algebra::{powers, CryptoGroup, Field, Random, Space},
+    algebra::{CryptoGroup, Field, Random, Space, powers},
     synthetic::Synthetic,
 };
 use commonware_parallel::{Sequential, Strategy};

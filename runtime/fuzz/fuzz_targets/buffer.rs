@@ -2,13 +2,14 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
+    Blob, BufferPooler, Runner, Storage,
     buffer::{
-        paged::{CacheRef, Writer},
         Read, Write,
+        paged::{CacheRef, Writer},
     },
-    deterministic, Blob, BufferPooler, Runner, Storage,
+    deterministic,
 };
-use commonware_utils::{NZUsize, NZU16};
+use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 1024 * 1024;

@@ -1125,7 +1125,7 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use commonware_codec::{conformance::CodecConformance, Decode, Encode};
+        use commonware_codec::{Decode, Encode, conformance::CodecConformance};
         use commonware_conformance::Conformance;
 
         struct ContainerTransitionsConformance;

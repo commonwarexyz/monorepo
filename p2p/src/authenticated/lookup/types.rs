@@ -1,6 +1,6 @@
 use crate::{
-    authenticated::data::{Data, EncodedData},
     Channel,
+    authenticated::data::{Data, EncodedData},
 };
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBufs};

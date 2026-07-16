@@ -26,8 +26,8 @@ use io_uring::squeue::SubmissionQueue;
 use io_uring::{opcode::PollAdd, types::Fd};
 #[cfg(feature = "loom")]
 use loom::sync::{
-    atomic::{AtomicU32, AtomicU64, Ordering},
     Arc, Condvar, Mutex,
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 #[cfg(not(feature = "loom"))]
@@ -35,8 +35,8 @@ use std::{
     mem::size_of,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicU32, Ordering},
     },
 };
 #[cfg(not(feature = "loom"))]
@@ -1141,8 +1141,8 @@ mod loom_tests {
     use commonware_utils::TestRng;
     use loom::{
         sync::{
-            atomic::{AtomicU32, Ordering},
             Arc,
+            atomic::{AtomicU32, Ordering},
         },
         thread,
     };
