@@ -58,6 +58,11 @@ pub(super) async fn commit<S: crate::Storage>(ready: &Ready<S>) -> Result<(), Er
     };
 
     for write in &snapshot.writes {
+        let end = write.physical + write.bytes.len() as u64;
+        if let Err(e) = super::core::ensure_provisioned(ready, end).await {
+            let _ = ready.poisoned.set(e.clone());
+            return Err(e);
+        }
         if let Err(e) = ready
             .file
             .write_at(write.physical, IoBuf::copy_from_slice(&write.bytes))

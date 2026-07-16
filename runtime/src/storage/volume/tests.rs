@@ -27,6 +27,50 @@ async fn test_volume_storage_contract() {
     run_storage_tests(volume_over_memory()).await;
 }
 
+/// A growth quantum provisions the volume file in coarse steps; growth stays
+/// automatic and unbounded, and provisioning survives reopen.
+#[tokio::test]
+async fn test_volume_growth_quantum() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let quantum = 16 * BLOCK;
+    let cfg = Config {
+        growth_quantum: quantum,
+        ..Config::default()
+    };
+    let volume = Volume::new(inner.clone(), pool.clone(), cfg.clone());
+
+    // One tiny write provisions a whole quantum (growth is physical: the
+    // file grows with allocated extents, not logical offsets).
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(b"x"))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    let (_, len) = inner.open(&cfg.partition, &cfg.name).await.unwrap();
+    assert_eq!(len, quantum);
+
+    // Exceeding a quantum of physical data provisions the next one.
+    blob.write_at(1, IoBuf::copy_from_slice(&vec![7u8; quantum as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    let (_, len) = inner.open(&cfg.partition, &cfg.name).await.unwrap();
+    assert_eq!(len, 2 * quantum);
+    drop(blob);
+    drop(volume);
+
+    // Reopen: the provisioned tail is not mistaken for data, and content
+    // survives.
+    let volume = Volume::new(inner, pool, cfg);
+    let (blob, size) = volume.open("p", b"b").await.unwrap();
+    assert_eq!(size, quantum + 1);
+    let got = blob.read_at(0, 2).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[b'x', 7]);
+    let got = blob.read_at(quantum, 1).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[7]);
+}
+
 /// Eager init runs recovery up front and round-trips across reopen.
 #[tokio::test]
 async fn test_volume_eager_init() {

@@ -152,6 +152,8 @@ pub(super) struct State {
     pub dirty: BTreeSet<u64>,
     /// Namespace changed (create/remove) since the last commit.
     pub meta_dirty: bool,
+    /// Bytes of the volume file known to exist (growth high-water mark).
+    pub provisioned: u64,
 }
 
 impl State {
@@ -192,12 +194,36 @@ pub(super) struct Ready<S: crate::Storage> {
     /// that never land. Every subsequent operation fails.
     pub poisoned: OnceLock<Error>,
     pub pool: BufferPool,
+    /// Grow the volume file in steps of this many bytes (0 = grow on write).
+    pub growth_quantum: u64,
+    /// Serializes file growth (rare: once per quantum).
+    pub provision_lock: AsyncMutex<()>,
 }
 
 impl<S: crate::Storage> Ready<S> {
     pub fn check_poisoned(&self) -> Result<(), Error> {
         self.poisoned.get().map_or(Ok(()), |e| Err(e.clone()))
     }
+}
+
+/// Grow the volume file (zero extension) so `end` is provisioned, in whole
+/// growth quanta. Growth is monotonic: the file is never shrunk, and space
+/// freed by the allocator is reused rather than returned.
+pub(super) async fn ensure_provisioned<S: crate::Storage>(
+    ready: &Ready<S>,
+    end: u64,
+) -> Result<(), Error> {
+    if ready.growth_quantum == 0 || end <= ready.state.lock().provisioned {
+        return Ok(());
+    }
+    let _guard = ready.provision_lock.lock().await;
+    if end <= ready.state.lock().provisioned {
+        return Ok(());
+    }
+    let target = end.div_ceil(ready.growth_quantum) * ready.growth_quantum;
+    ready.file.resize(target).await?;
+    ready.state.lock().provisioned = target;
+    Ok(())
 }
 
 /// One planned stretch: a single inner write plus its state updates,
@@ -238,6 +264,7 @@ pub(super) async fn write_locked<S: crate::Storage>(
     let mut cursor = offset;
     while cursor < end {
         let stretch = plan_stretch(ready, blob, cursor, end, &data, offset).await?;
+        ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
         ready
             .file
             .write_at(stretch.physical, IoBuf::copy_from_slice(&stretch.bytes))

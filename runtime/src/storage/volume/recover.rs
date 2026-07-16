@@ -345,6 +345,7 @@ pub(super) async fn recover<S: crate::Storage>(
         next_id: table.next_id,
         dirty: Default::default(),
         meta_dirty: false,
+        provisioned: len,
     };
 
     Ok(Ready {
@@ -353,6 +354,8 @@ pub(super) async fn recover<S: crate::Storage>(
         commit_lock: AsyncMutex::new(()),
         poisoned: Default::default(),
         pool: pool.clone(),
+        growth_quantum: cfg.growth_quantum,
+        provision_lock: AsyncMutex::new(()),
     })
 }
 
@@ -405,6 +408,7 @@ async fn init_fresh<S: crate::Storage>(
         next_id: 0,
         dirty: Default::default(),
         meta_dirty: false,
+        provisioned: 2 * BLOCK + block_align(bytes.len() as u64),
     };
     Ok(Ready {
         file,
@@ -412,6 +416,8 @@ async fn init_fresh<S: crate::Storage>(
         commit_lock: AsyncMutex::new(()),
         poisoned: Default::default(),
         pool: pool.clone(),
+        growth_quantum: cfg.growth_quantum,
+        provision_lock: AsyncMutex::new(()),
     })
 }
 

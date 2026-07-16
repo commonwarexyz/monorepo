@@ -55,13 +55,24 @@ use std::{
 /// granularity, and every read is verified per this granularity.
 pub(crate) const BLOCK: u64 = 4096;
 
-/// Location of the volume file within the inner storage.
+/// Location and growth policy of the volume file within the inner storage.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Inner partition holding the volume file.
     pub partition: String,
     /// Inner blob name of the volume file.
     pub name: Vec<u8>,
+    /// Grow the volume file in steps of this many bytes (rounded up to a
+    /// whole number of blocks) instead of implicitly on every write.
+    ///
+    /// Zero disables provisioning: the file grows exactly as written. On
+    /// file-backed storage a coarse quantum (tens of MiB) avoids extending
+    /// the file a few blocks at a time, which churns filesystem extent
+    /// metadata and fragments the file. Growth is always automatic; this
+    /// only sets the step size. Shrinking is never performed — space freed
+    /// by removed blobs is reused for new extents, not returned to the
+    /// filesystem.
+    pub growth_quantum: u64,
 }
 
 impl Default for Config {
@@ -69,6 +80,7 @@ impl Default for Config {
         Self {
             partition: "volume".into(),
             name: b"volume".to_vec(),
+            growth_quantum: 0,
         }
     }
 }
