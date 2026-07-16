@@ -21,14 +21,12 @@ use super::{
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
     BLOCK,
 };
-use crate::{Blob as _, Error};
+use crate::{Blob as _, Error, IoBuf};
 use bytes::Bytes;
 use commonware_cryptography::Crc32;
 use std::{collections::BTreeSet, sync::Arc};
 
-/// A planned write for the commit's WRITE phase. `bytes` are exact; the
-/// write phase zero-pads them to whole blocks (block-aligned extents leave
-/// the padding unreferenced).
+/// A planned write for the commit's WRITE phase.
 struct MetaWrite {
     physical: u64,
     bytes: Vec<u8>,
@@ -86,13 +84,15 @@ pub(super) async fn commit_locked<S: crate::Storage>(
     };
 
     for write in &snapshot.writes {
-        let end = write.physical + block_align(write.bytes.len() as u64);
+        let end = write.physical + write.bytes.len() as u64;
         if let Err(e) = super::core::ensure_provisioned(ready, end).await {
             let _ = ready.poisoned.set(e.clone());
             return Err(e);
         }
-        if let Err(e) =
-            super::core::write_blocks(&ready.file, &ready.pool, write.physical, &write.bytes).await
+        if let Err(e) = ready
+            .file
+            .write_at(write.physical, IoBuf::copy_from_slice(&write.bytes))
+            .await
         {
             let _ = ready.poisoned.set(e.clone());
             return Err(e);

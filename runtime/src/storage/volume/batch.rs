@@ -44,13 +44,10 @@
 use super::{
     alloc::Extent,
     commit,
-    core::{
-        chunk_of, read_blocks, stage_write, BlobCore, BlobInner, Ready, RunMeta, StagedBlob,
-        StagedRun,
-    },
+    core::{chunk_of, stage_write, BlobCore, BlobInner, Ready, RunMeta, StagedBlob, StagedRun},
     unlink, Blob, Shared, BLOCK,
 };
-use crate::{Error, IoBuf, IoBufs};
+use crate::{Blob as _, Error, IoBuf, IoBufs};
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
 use std::{
@@ -222,7 +219,11 @@ impl<S: crate::Storage> Batch<S> {
                 staged.overlay.chunk_span(&inner, boundary)
             };
             if let Some((phys, span_len)) = span {
-                let bytes = read_blocks(&ready.file, phys, span_len as usize).await?;
+                let bytes = ready
+                    .file
+                    .read_at(phys, span_len as usize)
+                    .await?
+                    .coalesce();
                 staged
                     .overlay
                     .crcs

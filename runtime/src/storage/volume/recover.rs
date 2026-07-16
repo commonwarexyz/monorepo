@@ -25,11 +25,11 @@
 
 use super::{
     alloc::{block_align, Allocator, Extent},
-    core::{chunk_of, read_blocks, write_blocks, BlobInner, Ready, RunMeta, State},
+    core::{chunk_of, BlobInner, Ready, RunMeta, State},
     layout::{Entry, Superblock, Table},
     Config, BLOCK,
 };
-use crate::{Blob as _, BufferPool, Error};
+use crate::{Blob as _, BufferPool, Error, IoBuf};
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::{AsyncMutex, Mutex};
 use std::collections::BTreeMap;
@@ -41,10 +41,10 @@ async fn read_slot<B: crate::Blob>(
     slot: u8,
 ) -> Result<Option<Superblock>, Error> {
     let offset = Superblock::slot_offset(slot);
-    if offset + BLOCK > len {
+    if offset + Superblock::SIZE as u64 > len {
         return Ok(None);
     }
-    let bytes = read_blocks(file, offset, Superblock::SIZE).await?;
+    let bytes = file.read_at(offset, Superblock::SIZE).await?.coalesce();
     Ok(Superblock::decode(bytes.as_ref()))
 }
 
@@ -54,19 +54,15 @@ async fn read_table<B: crate::Blob>(
     len: u64,
     sb: &Superblock,
 ) -> Result<Option<Table>, Error> {
-    // Table extents are block-aligned allocations; an unaligned offset is
-    // as invalid as an unbound one.
-    if !sb.table_offset.is_multiple_of(BLOCK) {
-        return Ok(None);
-    }
-    let end = sb
-        .table_offset
-        .checked_add(block_align(sb.table_len as u64));
+    let end = sb.table_offset.checked_add(sb.table_len as u64);
     match end {
         Some(end) if end <= len => {}
         _ => return Ok(None),
     }
-    let bytes = read_blocks(file, sb.table_offset, sb.table_len as usize).await?;
+    let bytes = file
+        .read_at(sb.table_offset, sb.table_len as usize)
+        .await?
+        .coalesce();
     if Crc32::checksum(bytes.as_ref()) != sb.table_crc {
         return Ok(None);
     }
@@ -99,9 +95,9 @@ struct ChecksumIndex {
 }
 
 impl ChecksumIndex {
-    /// `len` bounds candidate verification: an extent that is unaligned or
-    /// reaches past the file end never landed (`Ok(None)`). Pass `u64::MAX`
-    /// for committed entries, whose extents are known in bounds.
+    /// `len` bounds candidate verification: an extent that reaches past the
+    /// file end never landed (`Ok(None)`). Pass `u64::MAX` for committed
+    /// entries, whose extents are known in bounds.
     async fn load<B: crate::Blob>(
         file: &B,
         entry: &Entry,
@@ -109,15 +105,15 @@ impl ChecksumIndex {
     ) -> Result<Option<Self>, Error> {
         let mut loaded = Vec::new();
         for r in &entry.checksums {
-            let end = r
-                .offset
-                .checked_add(block_align(r.count as u64 * 4))
-                .filter(|_| r.offset.is_multiple_of(BLOCK));
+            let end = r.offset.checked_add(r.count as u64 * 4);
             match end {
                 Some(end) if end <= len => {}
                 _ => return Ok(None),
             }
-            let bytes = read_blocks(file, r.offset, r.count as usize * 4).await?;
+            let bytes = file
+                .read_at(r.offset, r.count as usize * 4)
+                .await?
+                .coalesce();
             if Crc32::checksum(bytes.as_ref()) != r.crc {
                 return Ok(None);
             }
@@ -165,8 +161,8 @@ async fn verify_manifest<B: crate::Blob>(file: &B, len: u64, table: &Table) -> R
         let Some((phys, span)) = entry_chunk_span(entry, chunk) else {
             continue; // became a hole
         };
-        if !phys.is_multiple_of(BLOCK) || phys + BLOCK > len {
-            return Ok(false); // backing never landed (or is unaligned)
+        if phys + span > len {
+            return Ok(false); // backing never landed
         }
         let frontier = entry_last_chunk(entry) == Some(chunk) && span < BLOCK;
 
@@ -186,10 +182,10 @@ async fn verify_manifest<B: crate::Blob>(file: &B, len: u64, table: &Table) -> R
         // appends; recovery splices it afterwards).
         if frontier {
             if let Some(shadow) = entry.shadow {
-                if !shadow.is_multiple_of(BLOCK) || shadow + BLOCK > len {
+                if shadow + span > len {
                     return Ok(false);
                 }
-                let bytes = read_blocks(file, shadow, span as usize).await?;
+                let bytes = file.read_at(shadow, span as usize).await?.coalesce();
                 if Crc32::checksum(bytes.as_ref()) != expected {
                     return Ok(false);
                 }
@@ -197,7 +193,7 @@ async fn verify_manifest<B: crate::Blob>(file: &B, len: u64, table: &Table) -> R
             }
         }
 
-        let bytes = read_blocks(file, phys, span as usize).await?;
+        let bytes = file.read_at(phys, span as usize).await?.coalesce();
         if Crc32::checksum(bytes.as_ref()) != expected {
             return Ok(false);
         }
@@ -285,11 +281,9 @@ pub(super) async fn recover<S: crate::Storage>(
             adopted_seq = sb.seq,
             "newest volume commit failed verification: falling back one commit"
         );
-        write_blocks(
-            &file,
-            pool,
+        file.write_at(
             Superblock::slot_offset(losing),
-            &[0u8; Superblock::SIZE],
+            IoBuf::copy_from_slice(&[0u8; Superblock::SIZE]),
         )
         .await?;
         repaired = true;
@@ -305,10 +299,10 @@ pub(super) async fn recover<S: crate::Storage>(
         if span == BLOCK {
             continue;
         }
-        let bytes = read_blocks(&file, shadow, span as usize).await?;
-        write_blocks(&file, pool, phys, bytes.as_ref()).await?;
+        let bytes = file.read_at(shadow, span as usize).await?.coalesce();
+        file.write_at(phys, bytes).await?;
         repaired = true;
-        len = len.max(phys + BLOCK);
+        len = len.max(phys + span);
     }
     if repaired {
         file.sync().await?;
@@ -413,7 +407,8 @@ async fn init_fresh<S: crate::Storage>(
     let table = Table::default();
     let bytes = table.encode();
     let table_offset = 2 * BLOCK;
-    write_blocks(&file, pool, table_offset, &bytes).await?;
+    file.write_at(table_offset, IoBuf::copy_from_slice(&bytes))
+        .await?;
     file.sync().await?;
     let sb = Superblock {
         seq: 0,
@@ -421,7 +416,11 @@ async fn init_fresh<S: crate::Storage>(
         table_len: bytes.len() as u32,
         table_crc: Crc32::checksum(&bytes),
     };
-    write_blocks(&file, pool, Superblock::slot_offset(0), &sb.encode()).await?;
+    file.write_at(
+        Superblock::slot_offset(0),
+        IoBuf::copy_from_slice(&sb.encode()),
+    )
+    .await?;
     file.sync().await?;
 
     let table_extent = Extent {
@@ -516,7 +515,7 @@ pub(super) async fn hydrate<S: crate::Storage>(
         }
         // Load + verify the frontier span into the tail buffer.
         let (phys, span) = entry_chunk_span(entry, last).unwrap();
-        let bytes = read_blocks(&ready.file, phys, span as usize).await?;
+        let bytes = ready.file.read_at(phys, span as usize).await?.coalesce();
         let expected = inner.crcs.get(&last).copied().unwrap();
         if Crc32::checksum(bytes.as_ref()) != expected {
             return Err(Error::BlobCorrupt(

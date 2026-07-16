@@ -44,69 +44,6 @@ pub(super) const fn chunk_of(offset: u64) -> u64 {
     offset / BLOCK
 }
 
-/// Write `bytes` at block-aligned `offset`, zero-padded to a whole number of
-/// blocks in a pool-allocated (alignment-honoring) buffer.
-///
-/// Every inner write the volume issues goes through here so the inner file
-/// can run direct I/O: whole blocks, block-aligned offsets, aligned buffer
-/// memory. Padding bytes land only inside the target extent, beyond any
-/// referenced span, so they are never read back.
-pub(super) async fn write_blocks<B: crate::Blob>(
-    file: &B,
-    pool: &BufferPool,
-    offset: u64,
-    bytes: &[u8],
-) -> Result<(), Error> {
-    debug_assert!(
-        offset.is_multiple_of(BLOCK),
-        "unaligned volume write at {offset}"
-    );
-    debug_assert!(!bytes.is_empty(), "empty volume write at {offset}");
-    let padded = block_align(bytes.len() as u64) as usize;
-    let mut buf = pool.alloc(padded);
-    buf.put_slice(bytes);
-    buf.put_bytes(0, padded - bytes.len());
-    file.write_at(offset, buf.freeze()).await
-}
-
-/// Read exactly `len` bytes at block-aligned `offset`, rounding the inner
-/// read up to whole blocks (bytes beyond `len` in the final block are
-/// discarded).
-///
-/// Every inner read the volume issues goes through here so the inner file
-/// can run direct I/O. Rounding never reads past the file end: every write
-/// lands whole blocks, so any block holding referenced bytes exists in full.
-pub(super) async fn read_blocks<B: crate::Blob>(
-    file: &B,
-    offset: u64,
-    len: usize,
-) -> Result<IoBuf, Error> {
-    debug_assert!(
-        offset.is_multiple_of(BLOCK),
-        "unaligned volume read at {offset}"
-    );
-    let rounded = block_align(len as u64) as usize;
-    let buf = file.read_at(offset, rounded).await?.coalesce();
-    Ok(buf.freeze().slice(0..len))
-}
-
-/// Issue a stretch's pre-assembled buffer at block-aligned `offset`.
-///
-/// The buffer comes from [`plan_stretch`] already zero-padded to whole
-/// blocks in pool-allocated memory, so it satisfies the same direct-I/O
-/// alignment contract as [`write_blocks`] without another copy.
-async fn write_stretch<B: crate::Blob>(file: &B, offset: u64, buf: IoBuf) -> Result<(), Error> {
-    debug_assert!(
-        offset.is_multiple_of(BLOCK),
-        "unaligned volume write at {offset}"
-    );
-    debug_assert!(
-        !buf.is_empty() && (buf.len() as u64).is_multiple_of(BLOCK),
-        "stretch write at {offset} not whole blocks"
-    );
-    file.write_at(offset, buf).await
-}
-
 /// A run in RAM: logical bytes `[logical, logical + len)` live at
 /// `[physical, physical + len)`. Starts are BLOCK-aligned; `len` is exact
 /// (a run's final block may be partially written). `capacity` is the
@@ -335,7 +272,7 @@ pub(super) async fn ensure_provisioned<S: crate::Storage>(
     if end <= ready.state.lock().provisioned {
         return Ok(());
     }
-    let target = block_align(end.div_ceil(ready.growth_quantum) * ready.growth_quantum);
+    let target = end.div_ceil(ready.growth_quantum) * ready.growth_quantum;
     ready.file.resize(target).await?;
     ready.state.lock().provisioned = target;
     Ok(())
@@ -436,11 +373,10 @@ impl StagedBlob {
 struct Stretch {
     /// First logical byte NOT covered by this stretch.
     end: u64,
-    /// Block-aligned physical write position.
+    /// Physical write position.
     physical: u64,
-    /// Write payload covering whole affected chunks from their block base,
-    /// assembled zero-padded to whole blocks in a pool-allocated
-    /// (alignment-honoring) buffer, ready to issue without another copy.
+    /// Write payload, assembled in a pool-allocated buffer and issued
+    /// verbatim at `physical` (no copy at the write site).
     bytes: IoBuf,
     /// Run insert/replace: (logical start, run).
     run: (u64, RunMeta),
@@ -477,9 +413,11 @@ pub(super) async fn write_locked<S: crate::Storage>(
     let mut cursor = offset;
     while cursor < end {
         let stretch = plan_stretch(ready, blob, None, cursor, end, &data, offset).await?;
-        let write_end = stretch.physical + stretch.bytes.len() as u64;
-        ensure_provisioned(ready, write_end).await?;
-        write_stretch(&ready.file, stretch.physical, stretch.bytes.clone()).await?;
+        ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
+        ready
+            .file
+            .write_at(stretch.physical, stretch.bytes.clone())
+            .await?;
         cursor = stretch.end;
         publish_stretch(ready, blob, stretch);
     }
@@ -516,9 +454,11 @@ pub(super) async fn stage_write<S: crate::Storage>(
     let mut cursor = offset;
     while cursor < end {
         let stretch = plan_stretch(ready, blob, Some(staged), cursor, end, &data, offset).await?;
-        let write_end = stretch.physical + stretch.bytes.len() as u64;
-        ensure_provisioned(ready, write_end).await?;
-        write_stretch(&ready.file, stretch.physical, stretch.bytes.clone()).await?;
+        ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
+        ready
+            .file
+            .write_at(stretch.physical, stretch.bytes.clone())
+            .await?;
         cursor = stretch.end;
         let inner = blob.inner.lock();
         publish_staged(&inner, staged, stretch);
@@ -666,41 +606,38 @@ async fn plan_stretch<S: crate::Storage>(
             fill_from,
             private,
         } => {
-            // Assemble the full written span of every affected chunk,
-            // [base, suffix_end): the first chunk's existing prefix, zeros
-            // over the gap, the data slice, and the final chunk's existing
-            // suffix — directly into the pool-allocated write buffer. The
-            // whole assembly is the write — the first chunk's committed
-            // prefix is rewritten in place with identical bytes so the
-            // write starts at a block boundary (the shadow block covers the
-            // shared tail chunk's frozen prefix against tearing; every
-            // other in-place chunk holds only uncommitted bytes).
+            // CRC recomputation needs the full written span of each affected
+            // chunk, assembled into a pool-allocated buffer: the first chunk
+            // may have a prefix below `fill_from`, and the last chunk may
+            // have a suffix beyond `stretch_end` (an in-place overwrite
+            // inside a longer span). Only `[fill_from, stretch_end)` — the
+            // gap zero-fill and the new data — is written back, at its exact
+            // offset.
             let d0 = (cursor - data_base) as usize;
             let d1 = (stretch_end - data_base) as usize;
             let first_chunk = chunk_of(fill_from);
             let last_chunk = chunk_of(stretch_end - 1);
             let base = first_chunk * BLOCK;
 
-            // The final chunk may have existing bytes beyond the write (an
-            // in-place overwrite inside a longer span): source them from the
-            // chunk's block.
             let span_end = (run_logical + run.len).max(stretch_end);
             let chunk_cap = (last_chunk + 1) * BLOCK;
             let suffix_end = span_end.min(chunk_cap);
 
-            let exact = (suffix_end.max(stretch_end) - base) as usize;
-            let mut buf = ready.pool.alloc(block_align(exact as u64) as usize);
+            let exact = (suffix_end - base) as usize;
+            let mut buf = ready.pool.alloc(exact);
             let prefix =
                 read_span_prefix(ready, blob, staged, &run, run_logical, base, fill_from).await?;
             buf.put_slice(&prefix);
             buf.put_bytes(0, (cursor - base) as usize - prefix.len());
             buf.put_slice(data.slice(d0..d1).as_ref());
             if suffix_end > stretch_end {
-                let last_base = last_chunk * BLOCK;
-                let phys = run.physical + (last_base - run_logical);
-                let span =
-                    read_blocks(&ready.file, phys, (suffix_end - last_base) as usize).await?;
-                buf.put_slice(&span.as_ref()[(stretch_end - last_base) as usize..]);
+                let phys = run.physical + (stretch_end - run_logical);
+                let suffix = ready
+                    .file
+                    .read_at(phys, (suffix_end - stretch_end) as usize)
+                    .await?
+                    .coalesce();
+                buf.put_slice(suffix.as_ref());
             }
             debug_assert_eq!(buf.len(), exact);
 
@@ -715,13 +652,14 @@ async fn plan_stretch<S: crate::Storage>(
                     last_span = (chunk, assembled[s..e].to_vec());
                 }
             }
-            buf.put_bytes(0, block_align(exact as u64) as usize - exact);
 
             let new_len = (stretch_end - run_logical).max(run.len);
             Ok(Stretch {
                 end: stretch_end,
-                physical: run.physical + (base - run_logical),
-                bytes: buf.freeze(),
+                physical: run.physical + (fill_from - run_logical),
+                bytes: buf
+                    .freeze()
+                    .slice((fill_from - base) as usize..(stretch_end - base) as usize),
                 run: (
                     run_logical,
                     RunMeta {
@@ -745,7 +683,7 @@ async fn plan_stretch<S: crate::Storage>(
             let d0 = (cursor - data_base) as usize;
             let d1 = (stretch_end - data_base) as usize;
             let exact = (stretch_end - chunk_base) as usize;
-            let mut buf = ready.pool.alloc(block_align(exact as u64) as usize);
+            let mut buf = ready.pool.alloc(exact);
             buf.put_bytes(0, (cursor - chunk_base) as usize);
             buf.put_slice(data.slice(d0..d1).as_ref());
             debug_assert_eq!(buf.len(), exact);
@@ -763,7 +701,6 @@ async fn plan_stretch<S: crate::Storage>(
                     last_span = (chunk, bytes[s..e].to_vec());
                 }
             }
-            buf.put_bytes(0, block_align(exact as u64) as usize - exact);
 
             Ok(Stretch {
                 end: stretch_end,
@@ -797,20 +734,23 @@ async fn plan_stretch<S: crate::Storage>(
             // Read the old span (stable: frozen extents are never rewritten,
             // and deferred frees keep them allocated until the next commit
             // confirms).
-            let old = read_blocks(&ready.file, span_physical, span_len as usize).await?;
+            let old = ready
+                .file
+                .read_at(span_physical, span_len as usize)
+                .await?
+                .coalesce();
             let w0 = (cursor - chunk_start) as usize;
             let w1 = (stretch_end - chunk_start) as usize;
             let d0 = (cursor - data_base) as usize;
             let d1 = (stretch_end - data_base) as usize;
             let exact = (span_len as usize).max(w1);
-            let mut buf = ready.pool.alloc(block_align(exact as u64) as usize);
+            let mut buf = ready.pool.alloc(exact);
             buf.put_slice(old.as_ref());
             buf.put_bytes(0, exact - span_len as usize);
             buf.as_mut()[w0..w1].copy_from_slice(data.slice(d0..d1).as_ref());
 
             let crc = Crc32::checksum(buf.as_ref());
             let last_span = (chunk, buf.as_ref().to_vec());
-            buf.put_bytes(0, block_align(exact as u64) as usize - exact);
 
             Ok(Stretch {
                 end: stretch_end,
@@ -881,8 +821,11 @@ async fn read_span_prefix<S: crate::Storage>(
         }
     }
     let phys = run.physical + (base - run_logical);
-    Ok(read_blocks(&ready.file, phys, prefix_len)
+    Ok(ready
+        .file
+        .read_at(phys, prefix_len)
         .await?
+        .coalesce()
         .as_ref()
         .to_vec())
 }
@@ -1106,7 +1049,12 @@ pub(super) async fn read_verified<S: crate::Storage>(
         for group in &groups {
             let (_, last_span, _) = *group.chunks.last().expect("group is nonempty");
             let read_len = (group.chunks.len() as u64 - 1) * BLOCK + last_span;
-            let bytes = read_blocks(&ready.file, group.physical, read_len as usize).await?;
+            let bytes = ready
+                .file
+                .read_at(group.physical, read_len as usize)
+                .await?
+                .coalesce()
+                .freeze();
             for (i, &(chunk_start, span, crc)) in group.chunks.iter().enumerate() {
                 let s = i * BLOCK as usize;
                 let mut chunk_bytes = bytes.slice(s..s + span as usize);
@@ -1142,7 +1090,12 @@ pub(super) async fn read_verified<S: crate::Storage>(
                     let Some((phys, stable_span, stable_crc)) = source else {
                         continue 'retry;
                     };
-                    let reread = read_blocks(&ready.file, phys, stable_span as usize).await?;
+                    let reread = ready
+                        .file
+                        .read_at(phys, stable_span as usize)
+                        .await?
+                        .coalesce()
+                        .freeze();
                     if Crc32::checksum(reread.as_ref()) != stable_crc {
                         return Err(Error::BlobCorrupt(
                             blob.partition.clone(),
@@ -1257,7 +1210,11 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             inner.chunk_span(boundary)
         };
         if let Some((phys, span_len)) = span {
-            let bytes = read_blocks(&ready.file, phys, span_len as usize).await?;
+            let bytes = ready
+                .file
+                .read_at(phys, span_len as usize)
+                .await?
+                .coalesce();
             let mut inner = blob.inner.lock();
             inner.crcs.insert(boundary, Crc32::checksum(bytes.as_ref()));
             inner.tail_chunk = boundary;

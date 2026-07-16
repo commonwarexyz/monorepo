@@ -170,20 +170,6 @@ pub struct Config {
     /// Tokio sets the default value to 2MB.
     maximum_buffer_size: usize,
 
-    /// Whether the volume file bypasses the kernel page cache.
-    ///
-    /// The volume issues only whole-block, block-aligned I/O and keeps its
-    /// own cache, so buffered I/O underneath it is double work: with direct
-    /// I/O, commit fsyncs stop scanning dirty pages and data is cached once.
-    /// On Linux the volume file is opened with `O_DIRECT`; on macOS,
-    /// `F_NOCACHE` is applied (best-effort). See
-    /// `crate::storage::tokio::Config::direct_io` for the platform
-    /// asymmetry and on-disk layout implications. The io_uring storage
-    /// backend does not support direct I/O yet and ignores this flag.
-    ///
-    /// Defaults to true on Linux and false elsewhere.
-    storage_direct_io: bool,
-
     /// Network configuration.
     network_cfg: NetworkConfig,
 
@@ -211,7 +197,6 @@ impl Config {
                 ..VolumeConfig::default()
             },
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
-            storage_direct_io: cfg!(target_os = "linux"),
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
             storage_buffer_pool_cfg: None,
@@ -270,11 +255,6 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_direct_io(mut self, direct_io: bool) -> Self {
-        self.storage_direct_io = direct_io;
-        self
-    }
-    /// See [Config]
     pub const fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
         self
@@ -330,10 +310,6 @@ impl Config {
     /// See [Config]
     pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
-    }
-    /// See [Config]
-    pub const fn direct_io(&self) -> bool {
-        self.storage_direct_io
     }
 
     /// Returns the network buffer pool config, deriving pool parallelism from
@@ -446,8 +422,6 @@ impl crate::Runner for Runner {
         // lazily on the first storage operation.
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
-                // The io_uring backend does not support direct I/O yet;
-                // `storage_direct_io` is ignored.
                 let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
                 let inner = IoUringStorage::start(
                     IoUringConfig {
@@ -463,8 +437,7 @@ impl crate::Runner for Runner {
                     TokioStorageConfig::new(
                         self.cfg.storage_directory.clone(),
                         self.cfg.maximum_buffer_size,
-                    )
-                    .with_direct_io(self.cfg.storage_direct_io),
+                    ),
                     storage_buffer_pool.clone(),
                 );
             }

@@ -182,9 +182,8 @@ impl BufferPoolConfig {
             max_size: NZUsize!(8 * 1024 * 1024),
             max_per_class: NZU32!(64),
             prefill: false,
-            // Page-aligned so storage buffers satisfy direct I/O (O_DIRECT)
-            // address-alignment requirements (#2960).
-            alignment: page,
+            // TODO (#2960): this needs to be page/block aligned for O_DIRECT
+            alignment: NZUsize!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
         }
@@ -2047,7 +2046,7 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(None)
         );
         assert!(!config.prefill);
-        assert_eq!(config.alignment.get(), page_size());
+        assert_eq!(config.alignment.get(), 1);
     }
 
     #[test]
@@ -2082,7 +2081,7 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(Some(NZUsize!(8)))
         );
         assert!(config.prefill);
-        assert_eq!(config.alignment.get(), page_size());
+        assert_eq!(config.alignment.get(), 1);
 
         // Alignment can be tuned explicitly as long as min_size is also adjusted.
         let aligned = BufferPoolConfig::for_network()

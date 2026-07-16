@@ -85,11 +85,6 @@ use std::{
 
 /// Alignment unit and checksum granularity: writes tear at (at most) this
 /// granularity, and every read is verified per this granularity.
-///
-/// The volume also issues every inner write and read as whole blocks at
-/// block-aligned offsets (see `core::write_blocks` / `core::read_blocks`),
-/// so an inner file opened with direct I/O (page-cache bypass) satisfies its
-/// alignment contract by construction.
 pub(crate) const BLOCK: u64 = 4096;
 
 /// Location and growth policy of the volume file within the inner storage.

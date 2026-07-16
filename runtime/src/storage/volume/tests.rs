@@ -126,110 +126,36 @@ impl crate::Blob for RecordingBlob {
     }
 }
 
-/// Every inner write and read the volume issues — plain writes, batch
-/// staging, commit metadata (checksums, shadows, table, superblock),
-/// recovery reads, and recovery repairs — must be a whole number of blocks
-/// at a block-aligned offset, so a direct-I/O inner file's alignment
-/// contract holds by construction.
+/// A physically contiguous committed span is served by ONE coalesced inner
+/// read of exactly the requested bytes, not one read per chunk.
 #[tokio::test]
-async fn test_volume_inner_io_block_aligned() {
+async fn test_volume_read_coalescing() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
     let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
 
-    let (blob, _) = volume.open("p", b"a").await.unwrap();
-    let (other, _) = volume.open("p", b"b").await.unwrap();
-    // Sub-block appends into the shared tail block, each committed
-    // (whole-tail-block rewrites + shadow/table/superblock writes).
-    for i in 0..4u64 {
-        blob.write_at(i * 100, IoBuf::copy_from_slice(&[7u8; 100]))
-            .await
-            .unwrap();
-        blob.sync().await.unwrap();
-    }
-    // Multi-block append (run of blocks) and a mid-write gap (zero fill).
-    blob.write_at(500, IoBuf::copy_from_slice(&[8u8; 3 * BLOCK as usize]))
-        .await
-        .unwrap();
-    blob.sync().await.unwrap();
-    // Committed overwrite (COW read-back + relocation).
-    blob.write_at(10, IoBuf::copy_from_slice(&[9u8; 100]))
-        .await
-        .unwrap();
-    // Resize down (boundary chunk CRC read-back) and back up (zero
-    // extension), then commit.
-    blob.resize(BLOCK + 7).await.unwrap();
-    blob.resize(2 * BLOCK + 9).await.unwrap();
-    blob.sync().await.unwrap();
-    // Batch: staged tail append + fresh-extent staging, published and
-    // committed as one group.
-    let mut batch = volume.batch().await.unwrap();
-    batch
-        .write_at(&blob, 2 * BLOCK + 9, IoBuf::copy_from_slice(&[1u8; 300]))
-        .await
-        .unwrap();
-    batch
-        .write_at(&other, 0, IoBuf::copy_from_slice(&[2u8; 300]))
-        .await
-        .unwrap();
-    batch.apply_sync().await.unwrap();
-    // Verified reads.
-    let got = blob.read_at(0, 2 * BLOCK as usize).await.unwrap();
-    assert_eq!(got.coalesce().len(), 2 * BLOCK as usize);
-    drop(blob);
-    drop(other);
-    drop(volume);
-
-    // Reopen: recovery (slots, table, manifest verification, shadow splice
-    // repair of the partial tails) and hydration read back through the log.
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
-    let (blob, size) = volume.open("p", b"a").await.unwrap();
-    assert_eq!(size, 2 * BLOCK + 9 + 300);
-    let got = blob.read_at(0, size as usize).await.unwrap();
-    assert_eq!(got.coalesce().len(), size as usize);
-
-    // Coalescing: a physically contiguous 64 KiB span is served by ONE
-    // inner read, not one per chunk.
     let span = 16 * BLOCK as usize;
     let (big, _) = volume.open("p", b"big").await.unwrap();
     big.write_at(0, IoBuf::copy_from_slice(&vec![3u8; span]))
         .await
         .unwrap();
     big.sync().await.unwrap();
+
     let reads_before = recording.log.lock().iter().filter(|(w, _, _)| !*w).count();
     let got = big.read_at(0, span).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &vec![3u8; span][..]);
-    {
-        let log = recording.log.lock();
-        let new_reads: Vec<_> = log
-            .iter()
-            .filter(|(w, _, _)| !*w)
-            .skip(reads_before)
-            .collect();
-        assert_eq!(
-            new_reads.len(),
-            1,
-            "contiguous chunks must coalesce into one inner read: {new_reads:?}"
-        );
-        assert_eq!(new_reads[0].2, span, "coalesced read length");
-    }
-
     let log = recording.log.lock();
-    let writes = log.iter().filter(|(w, _, _)| *w).count();
-    let reads = log.iter().filter(|(w, _, _)| !*w).count();
-    assert!(writes >= 20, "workload too small: {writes} writes");
-    assert!(reads >= 10, "workload too small: {reads} reads");
-    for &(write, offset, len) in log.iter() {
-        let op = if write { "write" } else { "read" };
-        assert!(
-            offset.is_multiple_of(BLOCK),
-            "unaligned {op} offset {offset} (len {len})"
-        );
-        assert!(
-            (len as u64).is_multiple_of(BLOCK),
-            "{op} at {offset} not whole blocks (len {len})"
-        );
-    }
+    let new_reads: Vec<_> = log
+        .iter()
+        .filter(|(w, _, _)| !*w)
+        .skip(reads_before)
+        .collect();
+    assert_eq!(
+        new_reads.len(),
+        1,
+        "contiguous chunks must coalesce into one inner read: {new_reads:?}"
+    );
+    assert_eq!(new_reads[0].2, span, "coalesced read length");
 }
 
 /// A growth quantum provisions the volume file in coarse steps; growth stays
@@ -306,13 +232,6 @@ type Unsynced = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
 /// and can materialize power-loss outcomes: each unsynced BLOCK-granular
 /// piece independently lands, vanishes, or tears (block filled with
 /// garbage).
-///
-/// The volume issues only whole-block writes, so the tail block's committed
-/// prefix is rewritten (with identical bytes) by every append that lands in
-/// it — at a crash, the whole tail block is pending, not just the appended
-/// suffix. Tearing it destroys committed bytes on disk, which the shadow
-/// splice restores at recovery (tail-block tearing was always in the
-/// model).
 #[derive(Clone)]
 struct Tearing {
     inner: memory::Storage,

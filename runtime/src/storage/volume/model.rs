@@ -29,14 +29,6 @@
 //! - Extent recycling through deferred frees, hole runs from resize-up, and
 //!   the sacred-slot rule for superblock writes.
 //!
-//! NOT modeled (no protocol impact): the implementation issues every inner
-//! write and read as whole blocks at block-aligned offsets so the inner file
-//! can run direct I/O. This is below the model's granularity — writes were
-//! always assumed to tear per block — and changes no protocol decision: the
-//! whole-tail-block rewrite it introduces is exactly the modeled in-place
-//! write into the shared tail block, whose frozen cell stays
-//! shadow-protected.
-//!
 //! # The freeze rule
 //!
 //! Every run tracks how many of its cells are FROZEN: covered by the last
