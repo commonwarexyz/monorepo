@@ -49,8 +49,7 @@ use crate::{
         application::gates::{self, Gates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
-            Standard,
-        relay,
+            Standard, relay,
             validation::{
                 Decision, ParentCheck, await_and_validate_parent, precheck_epoch_and_reproposal,
                 run_app_verify,

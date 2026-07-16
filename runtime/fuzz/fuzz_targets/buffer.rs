@@ -2,10 +2,11 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
-    Blob, BufferPoolConfig, BufferPooler, Runner, Storage, buffer::{
-    Read, Write,
-    paged::{CacheRef, Writer},
-},
+    Blob, BufferPoolConfig, BufferPooler, Runner, Storage,
+    buffer::{
+        Read, Write,
+        paged::{CacheRef, Writer},
+    },
     deterministic,
 };
 use commonware_utils::{NZU16, NZU32, NZUsize};

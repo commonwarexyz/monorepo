@@ -49,7 +49,9 @@ mod tests {
             ancestry::BlockProvider,
             application::gates::Gates,
             config::{Config, Start},
-            core::{Actor, CommitmentFallback, DigestFallback, Mailbox, cache, durability::Durable as _, },
+            core::{
+                Actor, CommitmentFallback, DigestFallback, Mailbox, cache, durability::Durable as _,
+            },
             mocks::{
                 application::Application,
                 harness::{
@@ -88,7 +90,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Quota, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic, Spawner,
+        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
     use commonware_storage::{
         archive::{Archive as _, immutable, prunable},

@@ -80,8 +80,7 @@ use crate::{
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
-            Standard,
-        relay,
+            Standard, relay,
             validation::{
                 Decision, ParentCheck, await_and_validate_parent, precheck_epoch_and_reproposal,
                 run_app_verify,
@@ -884,13 +883,14 @@ where
 mod tests {
     use super::Deferred;
     use crate::{
-        Automaton, CertifiableAutomaton, Relay, marshal::mocks::{
-        harness::{
-            B, BLOCKS_PER_EPOCH, Ctx, NAMESPACE, NUM_VALIDATORS, S, StandardHarness,
-            TestHarness, V, default_leader, make_raw_block, setup_network_with_participants,
+        Automaton, CertifiableAutomaton, Relay,
+        marshal::mocks::{
+            harness::{
+                B, BLOCKS_PER_EPOCH, Ctx, NAMESPACE, NUM_VALIDATORS, S, StandardHarness,
+                TestHarness, V, default_leader, make_raw_block, setup_network_with_participants,
+            },
+            verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
-        verifying::{GatedVerifyingApp, MockVerifyingApp},
-    },
         simplex::{Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf},
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
     };

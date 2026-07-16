@@ -64,26 +64,27 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Relay, marshal::{
-        ancestry::BlockProvider,
-        coding::{
-            Coding, Marshaled, MarshaledConfig, shards,
-            types::{CodedBlock, coding_config_for_participants, hash_context},
-        },
-        config::{Config, Start},
-        core,
-        mocks::{
-            application::Application,
-            harness::{
-                self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
-                LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
-                UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
-                setup_network_links, setup_network_with_participants,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Relay,
+        marshal::{
+            ancestry::BlockProvider,
+            coding::{
+                Coding, Marshaled, MarshaledConfig, shards,
+                types::{CodedBlock, coding_config_for_participants, hash_context},
             },
-            verifying::{GatedVerifyingApp, MockVerifyingApp},
+            config::{Config, Start},
+            core,
+            mocks::{
+                application::Application,
+                harness::{
+                    self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
+                    LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
+                    UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
+                    setup_network_links, setup_network_with_participants,
+                },
+                verifying::{GatedVerifyingApp, MockVerifyingApp},
+            },
+            resolver::handler,
         },
-        resolver::handler,
-    },
         simplex::{
             Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal,
         },
