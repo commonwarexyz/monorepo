@@ -197,10 +197,8 @@ fn fuzz(input: FuzzInput) {
                     let cache_slot_size = context
                         .storage_buffer_pool()
                         .config()
-                        .size_classes()
-                        .map(|class| class.size.get())
-                        .find(|&size| size >= cache_page_size as usize)
-                        .unwrap_or(cache_page_size as usize);
+                        .class_for(cache_page_size as usize)
+                        .map_or(cache_page_size as usize, |class| class.size.get());
                     let max_cache_capacity = (MAX_CACHE_BYTES / cache_slot_size).max(1);
                     let cache_capacity =
                         NZUsize!((cache_capacity as usize).clamp(1, max_cache_capacity));

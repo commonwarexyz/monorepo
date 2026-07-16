@@ -438,7 +438,8 @@ impl BufferPoolConfig {
     /// include allocator metadata, alignment overhead, or pool bookkeeping.
     ///
     /// This is a one-shot transformation, not a stored policy. Later builder
-    /// calls may change the resulting total.
+    /// calls may change the resulting total, and calling this again rescales
+    /// the already scaled limits rather than the shape they were derived from.
     ///
     /// # Panics
     ///
@@ -531,6 +532,18 @@ impl BufferPoolConfig {
         self.class_limits
             .iter()
             .map(|(&size, &max_buffers)| BufferPoolClassConfig { size, max_buffers })
+    }
+
+    /// Returns the enabled class that serves a pooled request of `size` bytes,
+    /// or `None` if `size` exceeds the largest enabled class.
+    ///
+    /// Requests route to the smallest enabled class that fits, so in sparse
+    /// layouts the returned class may be much larger than the request. This
+    /// reports class routing only: requests below [`Self::pool_min_size`]
+    /// bypass the pool, and oversized requests fall back to untracked
+    /// allocations of their exact size.
+    pub fn class_for(&self, size: usize) -> Option<BufferPoolClassConfig> {
+        self.size_classes().find(|class| class.size.get() >= size)
     }
 
     /// Returns the minimum request size that uses pooled allocation.
@@ -2315,6 +2328,25 @@ mod tests {
     }
 
     #[test]
+    fn test_class_for_routes_to_smallest_fitting_class() {
+        let config = BufferPoolConfig::for_network()
+            .with_size_classes([(NZUsize!(4096), NZU32!(4)), (NZUsize!(32768), NZU32!(2))]);
+
+        // Requests at or below the smallest class route to it.
+        assert_eq!(config.class_for(0).unwrap().size.get(), 4096);
+        assert_eq!(config.class_for(4096).unwrap().size.get(), 4096);
+
+        // Requests in the gap route to the next enabled class, even when
+        // their natural power-of-two exponent is disabled.
+        assert_eq!(config.class_for(4097).unwrap().size.get(), 32768);
+        assert_eq!(config.class_for(16384).unwrap().size.get(), 32768);
+        assert_eq!(config.class_for(32768).unwrap().size.get(), 32768);
+
+        // Requests above the largest class have no serving class.
+        assert_eq!(config.class_for(32769), None);
+    }
+
+    #[test]
     fn test_sparse_routing_allocates_next_enabled_class() {
         // Classes `page` and `8 * page` with the two exponents between them
         // disabled: requests in the gap route forward to the larger class.
@@ -2954,6 +2986,16 @@ mod tests {
 
         let upserted = config.with_size_class(NZUsize!(32), NZU32!(100));
         assert_eq!(upserted.max_tracked_bytes(), 280 + 32 * 100);
+
+        // Rescaling applies to the already scaled limits, not the shape they
+        // were derived from, so repeating a budget can compound the rounding
+        // floors into a slightly different shape.
+        let base = BufferPoolConfig::for_network()
+            .with_size_classes([(NZUsize!(1), NZU32!(3)), (NZUsize!(8), NZU32!(2))]);
+        let once = base.with_budget_bytes(NZUsize!(21));
+        assert_eq!(classes_of(&once), vec![(1, 4), (8, 2)]);
+        let twice = once.with_budget_bytes(NZUsize!(21));
+        assert_eq!(classes_of(&twice), vec![(1, 5), (8, 2)]);
     }
 
     #[test]
@@ -3018,7 +3060,7 @@ mod tests {
         let mut candidates: Vec<(u128, u128)> = vec![(0, 1)];
         for &(size, limit) in shape {
             let max_count = (budget / size as u128).min(u32::MAX as u128);
-            for k in 1..=max_count.min(4_000_000) {
+            for k in 1..=max_count {
                 candidates.push((k, limit as u128));
             }
         }
