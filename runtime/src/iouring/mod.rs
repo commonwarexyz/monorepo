@@ -169,19 +169,19 @@
 //!   later queued requests, otherwise the loop can deadlock.
 
 use crate::{
-    telemetry::metrics::{raw, Gauge, Register},
     Error, IoBufMut, IoBufs,
+    telemetry::metrics::{Gauge, Register, raw},
 };
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
 };
 use io_uring::{
+    IoUring,
     cqueue::Entry as CqueueEntry,
     opcode::AsyncCancel,
     squeue::SubmissionQueue,
     types::{SubmitArgs, Timespec},
-    IoUring,
 };
 pub(crate) use request::RawSocketAddr;
 use request::{
@@ -205,7 +205,7 @@ use timeout::{Tick, TimeoutWheel};
 mod waiter;
 use waiter::{CompletionOutcome, StageOutcome, WaiterId, Waiters};
 mod waker;
-use waker::{Waker, HALF_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
+use waker::{HALF_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA, Waker};
 mod spinner;
 pub use spinner::Config as SpinnerConfig;
 use spinner::Spinner;
@@ -815,9 +815,7 @@ impl IoUringLoop {
                 // Producer disconnect is handled by the executor's teardown
                 // (which drains the ring directly), so all remaining outcomes
                 // fall through to the flush below.
-                FillResult::Disconnected
-                | FillResult::AtWaiterCapacity
-                | FillResult::Drained => {}
+                FillResult::Disconnected | FillResult::AtWaiterCapacity | FillResult::Drained => {}
             }
 
             // Without active waiters there is nothing to flush or reap: staged
@@ -1369,7 +1367,7 @@ pub(crate) fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{telemetry::metrics::Registry, IoBuf, IoBufMut};
+    use crate::{IoBuf, IoBufMut, telemetry::metrics::Registry};
     use commonware_utils::channel::oneshot;
     use futures::future::{join, join_all};
     use request::{RecvRequest, SendRequest, SyncRequest};

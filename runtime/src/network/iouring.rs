@@ -22,8 +22,8 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use crate::{
-    iouring::{self, RawSocketAddr},
     Buf, BufferPool, Error, IoBufMut, IoBufs,
+    iouring::{self, RawSocketAddr},
 };
 use commonware_utils::channel::oneshot;
 use std::{
@@ -174,9 +174,7 @@ fn local_addr(fd: &OwnedFd) -> Result<SocketAddr, std::io::Error> {
     let mut raw = RawSocketAddr::new_zeroed();
     // SAFETY: `fd` owns a live descriptor and the pointers reference scratch
     // sized for any socket address (with `len` set to its capacity).
-    let rc = unsafe {
-        libc::getsockname(fd.as_raw_fd(), raw.as_sockaddr_mut_ptr(), raw.len_mut())
-    };
+    let rc = unsafe { libc::getsockname(fd.as_raw_fd(), raw.as_sockaddr_mut_ptr(), raw.len_mut()) };
     if rc == -1 {
         return Err(std::io::Error::last_os_error());
     }
@@ -187,17 +185,15 @@ fn local_addr(fd: &OwnedFd) -> Result<SocketAddr, std::io::Error> {
 /// Apply configured per-connection socket options, logging failures.
 fn configure_socket(fd: &OwnedFd, tcp_nodelay: Option<bool>, zero_linger: bool) {
     // Set TCP_NODELAY if configured
-    if let Some(tcp_nodelay) = tcp_nodelay {
-        if let Err(err) = set_tcp_nodelay(fd, tcp_nodelay) {
-            warn!(?err, "failed to set TCP_NODELAY");
-        }
+    if let Some(tcp_nodelay) = tcp_nodelay
+        && let Err(err) = set_tcp_nodelay(fd, tcp_nodelay)
+    {
+        warn!(?err, "failed to set TCP_NODELAY");
     }
 
     // Set SO_LINGER to zero if configured
-    if zero_linger {
-        if let Err(err) = set_zero_linger(fd) {
-            warn!(?err, "failed to set SO_LINGER");
-        }
+    if zero_linger && let Err(err) = set_zero_linger(fd) {
+        warn!(?err, "failed to set SO_LINGER");
     }
 }
 
@@ -657,14 +653,14 @@ impl crate::Stream for Stream {
 mod tests {
     use super::{RawSocketAddr, Sink, Stream, local_addr, new_socket};
     use crate::{
-        iouring,
+        BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
+        Sink as _, Stream as _, iouring,
         network::{
             iouring::{Config, Network},
             tests,
         },
         telemetry::metrics::{Register, Registry},
-        thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
-        Network as _, Sink as _, Stream as _,
+        thread,
     };
     use commonware_macros::{select, test_group};
     use std::{

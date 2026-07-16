@@ -22,8 +22,8 @@
 
 use super::Header;
 use crate::{
-    iouring::{self},
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
+    iouring::{self},
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
@@ -397,10 +397,10 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
+        Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
         storage::tests::run_storage_tests,
         telemetry::metrics::{Register, Registry},
         utils::thread,
-        Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
     };
     use std::{
         env,
@@ -580,9 +580,10 @@ mod tests {
             .await
             .err()
             .expect("bad magic should fail");
-        assert!(err
-            .to_string()
-            .starts_with("blob corrupt: partition/6261645f6d61676963 reason: invalid magic"));
+        assert!(
+            err.to_string()
+                .starts_with("blob corrupt: partition/6261645f6d61676963 reason: invalid magic")
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -862,9 +863,10 @@ mod tests {
             .await
             .err()
             .expect("opening a directory as a blob should fail");
-        assert!(err
-            .to_string()
-            .starts_with(&format!("blob open failed: partition/{blob_name} error:")));
+        assert!(
+            err.to_string()
+                .starts_with(&format!("blob open failed: partition/{blob_name} error:"))
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

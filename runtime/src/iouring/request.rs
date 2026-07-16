@@ -721,8 +721,7 @@ impl RawSocketAddr {
                 }
                 // SAFETY: the family and length checks above guarantee the
                 // storage holds an initialized `sockaddr_in`.
-                let sin =
-                    unsafe { &*(&raw const self.storage).cast::<libc::sockaddr_in>() };
+                let sin = unsafe { &*(&raw const self.storage).cast::<libc::sockaddr_in>() };
                 Some(SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()),
                     u16::from_be(sin.sin_port),
@@ -734,8 +733,7 @@ impl RawSocketAddr {
                 }
                 // SAFETY: the family and length checks above guarantee the
                 // storage holds an initialized `sockaddr_in6`.
-                let sin6 =
-                    unsafe { &*(&raw const self.storage).cast::<libc::sockaddr_in6>() };
+                let sin6 = unsafe { &*(&raw const self.storage).cast::<libc::sockaddr_in6>() };
                 Some(SocketAddr::V6(SocketAddrV6::new(
                     Ipv6Addr::from(sin6.sin6_addr.s6_addr),
                     u16::from_be(sin6.sin6_port),
@@ -1876,7 +1874,10 @@ mod tests {
         assert!(!accept.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Hard errors are terminal connection failures.
-        assert!(accept.on_cqe(WaiterState::Active { target_tick: None }, -libc::ECONNABORTED));
+        assert!(accept.on_cqe(
+            WaiterState::Active { target_tick: None },
+            -libc::ECONNABORTED
+        ));
         assert!(matches!(accept.result, Some(Err(Error::ConnectionFailed))));
 
         // Cancellation after a timeout maps to a logical timeout.
@@ -1949,7 +1950,10 @@ mod tests {
 
         // Refused connections are terminal failures.
         let mut connect = make_connect();
-        assert!(connect.on_cqe(WaiterState::Active { target_tick: None }, -libc::ECONNREFUSED));
+        assert!(connect.on_cqe(
+            WaiterState::Active { target_tick: None },
+            -libc::ECONNREFUSED
+        ));
         assert!(matches!(connect.result, Some(Err(Error::ConnectionFailed))));
 
         // Cancellation after a timeout maps to a logical timeout.

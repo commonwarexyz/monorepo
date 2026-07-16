@@ -18,11 +18,12 @@
 //! are aborted), so a task that blocks its thread indefinitely without
 //! reaching an await point prevents [crate::Runner::start] from returning.
 
+use super::{IoUringLoop, RingConfig, new_ring, waker::Waker as RingWaker};
 #[cfg(feature = "external")]
 use crate::Pacer;
-use super::{new_ring, waker::Waker as RingWaker, IoUringLoop, RingConfig};
 use crate::{
-    child_label,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
+    Spawner as _, StreamOf, Supervisor as _, child_label,
     network::{
         iouring::{Config as NetworkConfig, Network as IoUringNetwork},
         metered::Network as MeteredNetwork,
@@ -32,18 +33,16 @@ use crate::{
     signal::Signal,
     storage::{iouring::Storage as IoUringStorage, metered::Storage as MeteredStorage},
     telemetry::metrics::{
-        add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
-        Register, Registered, Registry,
+        CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
+        task::Label, validate_label,
     },
-    utils::{self, signal::Stopper, supervision::Tree, Panicker},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Name, SinkOf, Spawner as _,
-    StreamOf, Supervisor as _, METRICS_PREFIX,
+    utils::{self, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
 use commonware_utils::{channel::oneshot, sync::Mutex, sys_rng};
-use futures::task::{waker, ArcWake};
+use futures::task::{ArcWake, waker};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
@@ -56,7 +55,7 @@ use std::{
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
-    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     pin::Pin,
     sync::{Arc, Weak},
@@ -468,72 +467,74 @@ impl crate::Runner for Runner {
 
         // Process tasks until the root task completes.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
-        let result = catch_unwind(AssertUnwindSafe(|| loop {
-            // Drain all ready tasks. Wakes that arrive while this snapshot is
-            // being polled land in the next snapshot.
-            let queue = executor.tasks.drain();
-            let mut output = None;
-            for id in queue {
-                // Lookup the task (it may have completed already)
-                let Some(t) = executor.tasks.get(id) else {
-                    continue;
-                };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            loop {
+                // Drain all ready tasks. Wakes that arrive while this snapshot is
+                // being polled land in the next snapshot.
+                let queue = executor.tasks.drain();
+                let mut output = None;
+                for id in queue {
+                    // Lookup the task (it may have completed already)
+                    let Some(t) = executor.tasks.get(id) else {
+                        continue;
+                    };
 
-                // Prepare task for polling
-                let waker = waker(Arc::new(TaskWaker {
-                    id,
-                    tasks: Arc::downgrade(&executor.tasks),
-                }));
-                let mut cx = task::Context::from_waker(&waker);
+                    // Prepare task for polling
+                    let waker = waker(Arc::new(TaskWaker {
+                        id,
+                        tasks: Arc::downgrade(&executor.tasks),
+                    }));
+                    let mut cx = task::Context::from_waker(&waker);
 
-                // Poll the task
-                match &t.mode {
-                    Mode::Root => {
-                        if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
-                            output = Some(result);
-                            break;
+                    // Poll the task
+                    match &t.mode {
+                        Mode::Root => {
+                            if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
+                                output = Some(result);
+                                break;
+                            }
                         }
-                    }
-                    Mode::Work(future) => {
-                        // Get the future (if it still exists)
-                        let mut fut_opt = future.lock();
-                        let Some(fut) = fut_opt.as_mut() else {
-                            executor.tasks.remove(id);
-                            continue;
-                        };
+                        Mode::Work(future) => {
+                            // Get the future (if it still exists)
+                            let mut fut_opt = future.lock();
+                            let Some(fut) = fut_opt.as_mut() else {
+                                executor.tasks.remove(id);
+                                continue;
+                            };
 
-                        // Poll the task
-                        if fut.as_mut().poll(&mut cx).is_ready() {
-                            executor.tasks.remove(id);
-                            *fut_opt = None;
+                            // Poll the task
+                            if fut.as_mut().poll(&mut cx).is_ready() {
+                                executor.tasks.remove(id);
+                                *fut_opt = None;
+                            }
                         }
                     }
                 }
+
+                // If the root task has completed, exit as soon as possible
+                if let Some(output) = output {
+                    break output;
+                }
+
+                // Service the ring: completions wake tasks and staged submissions
+                // reach the kernel before the executor considers parking.
+                ioloop.turn(&mut ring);
+
+                // Wake sleepers whose deadlines have elapsed.
+                executor.wake_ready_sleepers(Instant::now());
+
+                // If any task became ready, keep polling instead of parking.
+                if executor.tasks.ready() != 0 {
+                    continue;
+                }
+
+                // Park until a completion arrives, a wake is published, or the
+                // next timer (ring timeout wheel or sleeper alarm) is due.
+                ioloop.park(&mut ring, executor.next_alarm());
+
+                // Fire any sleepers that became due while parked.
+                executor.wake_ready_sleepers(Instant::now());
             }
-
-            // If the root task has completed, exit as soon as possible
-            if let Some(output) = output {
-                break output;
-            }
-
-            // Service the ring: completions wake tasks and staged submissions
-            // reach the kernel before the executor considers parking.
-            ioloop.turn(&mut ring);
-
-            // Wake sleepers whose deadlines have elapsed.
-            executor.wake_ready_sleepers(Instant::now());
-
-            // If any task became ready, keep polling instead of parking.
-            if executor.tasks.ready() != 0 {
-                continue;
-            }
-
-            // Park until a completion arrives, a wake is published, or the
-            // next timer (ring timeout wheel or sleeper alarm) is due.
-            ioloop.park(&mut ring, executor.next_alarm());
-
-            // Fire any sleepers that became due while parked.
-            executor.wake_ready_sleepers(Instant::now());
         }));
 
         // Abort every task spawned under the root context. This wakes tasks
