@@ -1,38 +1,17 @@
-use super::Checksum;
 use crate::{Blob, Buf, Error, IoBuf};
-use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
-use tracing::error;
 
-/// State for a single buffer of pages read from the blob.
+/// Async I/O component that prefetches batches of pages.
 ///
-/// Each fill produces one `BufferState` containing all pages read in that batch.
-/// Navigation skips CRCs by computing offsets rather than creating separate
-/// `Bytes` slices per page.
-pub(super) struct BufferState {
-    /// The raw physical buffer containing pages with interleaved CRCs.
-    buffer: IoBuf,
-    /// Number of pages in this buffer.
-    num_pages: usize,
-    /// Logical length of the last page (may be partial).
-    last_page_len: usize,
-}
-
-/// Async I/O component that prefetches pages and validates CRCs.
-///
-/// This handles reading batches of pages from the blob, validating their
-/// checksums, and producing `BufferState` for the sync buffering layer.
+/// This reads batches of raw logical bytes from the blob in page-aligned
+/// chunks for the sync buffering layer.
 pub(super) struct PageReader<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
-    /// Physical page size (logical_page_size + CHECKSUM_SIZE).
+    /// Number of logical bytes per page.
     page_size: usize,
-    /// Logical page size (data bytes per page, not including CRC).
-    logical_page_size: usize,
-    /// The physical size of the blob.
-    physical_blob_size: u64,
     /// The size of the blob.
-    logical_blob_size: u64,
+    blob_size: u64,
     /// Next page index to read from the blob.
     blob_page: u64,
     /// Number of pages to prefetch at once.
@@ -40,38 +19,20 @@ pub(super) struct PageReader<B: Blob> {
 }
 
 impl<B: Blob> PageReader<B> {
-    /// Creates a new PageReader.
+    /// Creates a new PageReader over the first `blob_size` bytes of `blob`.
     ///
-    /// The `physical_blob_size` must already exclude any trailing invalid data
-    /// (e.g., junk pages from an interrupted write). Each physical page is the same
-    /// size on disk, but the CRC record indicates how much logical data it contains.
-    /// The last page may be logically partial (CRC length < logical page size), but
-    /// all preceding pages must be logically full. A logically partial non-last page
-    /// indicates corruption and will cause an `Error::InvalidChecksum`.
-    pub(super) fn new(
+    /// Bytes are stored raw, so a page's blob offset is its page index times `page_size` and
+    /// only the last page may be partial.
+    pub(super) const fn new(
         blob: B,
-        physical_blob_size: u64,
-        logical_blob_size: u64,
+        blob_size: u64,
         prefetch_count: usize,
-        logical_page_size: NonZeroU16,
+        page_size: NonZeroU16,
     ) -> Self {
-        let logical_page_size = logical_page_size.get() as usize;
-        let page_size = logical_page_size + Checksum::SIZE;
-        let physical_pages = physical_blob_size / page_size as u64;
-        let logical_pages = if logical_blob_size == 0 {
-            0
-        } else {
-            ((logical_blob_size - 1) / logical_page_size as u64) + 1
-        };
-        assert_eq!(physical_blob_size % page_size as u64, 0);
-        assert_eq!(physical_pages, logical_pages);
-
         Self {
             blob,
-            page_size,
-            logical_page_size,
-            physical_blob_size,
-            logical_blob_size,
+            page_size: page_size.get() as usize,
+            blob_size,
             blob_page: 0,
             prefetch_count,
         }
@@ -79,128 +40,58 @@ impl<B: Blob> PageReader<B> {
 
     /// Returns the size of the blob.
     pub(super) const fn blob_size(&self) -> u64 {
-        self.logical_blob_size
-    }
-
-    /// Returns the physical page size.
-    pub(super) const fn page_size(&self) -> usize {
-        self.page_size
-    }
-
-    /// Returns the logical page size.
-    pub(super) const fn logical_page_size(&self) -> usize {
-        self.logical_page_size
+        self.blob_size
     }
 
     /// Fills a buffer with the next batch of pages.
     ///
-    /// Returns `Some((BufferState, logical_bytes))` if data was loaded,
-    /// `None` if no more data available.
-    pub(super) async fn fill(&mut self) -> Result<Option<(BufferState, usize)>, Error> {
-        // Calculate physical read offset
-        let start_offset = match self.blob_page.checked_mul(self.page_size as u64) {
-            Some(o) => o,
-            None => return Err(Error::OffsetOverflow),
-        };
-        if start_offset >= self.physical_blob_size {
+    /// Returns `Some(bytes)` if data was loaded, `None` if no more data is available. All
+    /// returned batches start at a page boundary, and only the final batch may end off one.
+    pub(super) async fn fill(&mut self) -> Result<Option<IoBuf>, Error> {
+        let start_offset = self
+            .blob_page
+            .checked_mul(self.page_size as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        if start_offset >= self.blob_size {
             return Ok(None); // No more data
         }
 
-        // Calculate how many pages to read
-        let remaining_physical = (self.physical_blob_size - start_offset) as usize;
-        let max_pages = remaining_physical / self.page_size;
-        let pages_to_read = max_pages.min(self.prefetch_count);
-        if pages_to_read == 0 {
-            return Ok(None);
-        }
-        let bytes_to_read = pages_to_read * self.page_size;
-
-        // Read physical data
-        let physical_buf = self
+        // Read up to `prefetch_count` pages, capped at the end of the blob (the last page may
+        // be partial).
+        let remaining = self.blob_size - start_offset;
+        let bytes_to_read = remaining.min((self.prefetch_count * self.page_size) as u64) as usize;
+        let buf = self
             .blob
             .read_at(start_offset, bytes_to_read)
             .await?
             .coalesce()
             .freeze();
+        self.blob_page += bytes_to_read.div_ceil(self.page_size) as u64;
 
-        // Validate CRCs and compute total logical bytes
-        let mut total_logical = 0usize;
-        let mut last_len = 0usize;
-        let is_final_batch = pages_to_read == max_pages;
-        for page_idx in 0..pages_to_read {
-            let page_start = page_idx * self.page_size;
-            let page_slice = &physical_buf.as_ref()[page_start..page_start + self.page_size];
-            let Some(record) = Checksum::validate_page(page_slice) else {
-                error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
-                return Err(Error::InvalidChecksum);
-            };
-            let (len, _) = record.get_crc();
-            let len = len as usize;
-
-            // Only the final page in the blob may have partial length
-            let is_last_page_in_blob = is_final_batch && page_idx + 1 == pages_to_read;
-            if !is_last_page_in_blob && len != self.logical_page_size {
-                error!(
-                    page = self.blob_page + page_idx as u64,
-                    expected = self.logical_page_size,
-                    actual = len,
-                    "non-last page has partial length"
-                );
-                return Err(Error::InvalidChecksum);
-            }
-
-            let logical_start = (self.blob_page + page_idx as u64)
-                .checked_mul(self.logical_page_size as u64)
-                .ok_or(Error::OffsetOverflow)?;
-            let logical_remaining = self.logical_blob_size.saturating_sub(logical_start);
-            let logical_remaining_in_page =
-                logical_remaining.min(self.logical_page_size as u64) as usize;
-            let exposed_len = len.min(logical_remaining_in_page);
-
-            total_logical += exposed_len;
-            last_len = exposed_len;
-        }
-        self.blob_page += pages_to_read as u64;
-
-        let state = BufferState {
-            buffer: physical_buf,
-            num_pages: pages_to_read,
-            last_page_len: last_len,
-        };
-
-        Ok(Some((state, total_logical)))
+        Ok(Some(buf))
     }
 }
 
 /// Sync buffering component that implements the `Buf` trait.
 ///
-/// This accumulates `BufferState` from multiple fills and provides navigation
-/// across pages while skipping CRCs. Consumed buffers are cleaned up in
-/// `advance()`.
+/// This accumulates buffers from multiple fills and provides navigation across them. Consumed
+/// buffers are cleaned up in `advance()`.
 struct ReplayBuf {
-    /// Physical page size (logical_page_size + CHECKSUM_SIZE).
-    page_size: usize,
-    /// Logical page size (data bytes per page, not including CRC).
-    logical_page_size: usize,
     /// Accumulated buffers from fills.
-    buffers: VecDeque<BufferState>,
-    /// Current page index within the front buffer.
-    current_page: usize,
-    /// Current offset within the current page's logical data.
-    offset_in_page: usize,
-    /// Total remaining logical bytes across all buffers.
+    buffers: VecDeque<IoBuf>,
+    /// Offset of the next unread byte within the front buffer. When `buffers` is empty, holds
+    /// the number of bytes to skip from the next fill (set by a seek to mid-page).
+    offset: usize,
+    /// Total remaining unread bytes across all buffers.
     remaining: usize,
 }
 
 impl ReplayBuf {
     /// Creates a new ReplayBuf.
-    const fn new(page_size: usize, logical_page_size: usize) -> Self {
+    const fn new() -> Self {
         Self {
-            page_size,
-            logical_page_size,
             buffers: VecDeque::new(),
-            current_page: 0,
-            offset_in_page: 0,
+            offset: 0,
             remaining: 0,
         }
     }
@@ -208,31 +99,21 @@ impl ReplayBuf {
     /// Clears the buffer and resets the read offset to 0.
     fn clear(&mut self) {
         self.buffers.clear();
-        self.current_page = 0;
-        self.offset_in_page = 0;
+        self.offset = 0;
         self.remaining = 0;
     }
 
     /// Adds a buffer from a fill operation.
-    fn push(&mut self, state: BufferState, logical_bytes: usize) {
-        // If buffers is empty, this is the first fill after a seek.
-        // Skip bytes before the seek offset (offset_in_page).
+    fn push(&mut self, buf: IoBuf) {
+        // If buffers is empty, this is the first fill after a seek. Bytes before the seek
+        // offset (`offset`) stay unread.
         let skip = if self.buffers.is_empty() {
-            self.offset_in_page
+            self.offset
         } else {
             0
         };
-        self.buffers.push_back(state);
-        self.remaining += logical_bytes.saturating_sub(skip);
-    }
-
-    /// Returns the logical length of the given page in the given buffer.
-    const fn page_len(buf: &BufferState, page_idx: usize, logical_page_size: usize) -> usize {
-        if page_idx + 1 == buf.num_pages {
-            buf.last_page_len
-        } else {
-            logical_page_size
-        }
+        self.remaining += buf.len().saturating_sub(skip);
+        self.buffers.push_back(buf);
     }
 }
 
@@ -245,13 +126,7 @@ impl Buf for ReplayBuf {
         let Some(buf) = self.buffers.front() else {
             return &[];
         };
-        if self.current_page >= buf.num_pages {
-            return &[];
-        }
-        let page_len = Self::page_len(buf, self.current_page, self.logical_page_size);
-        let physical_start = self.current_page * self.page_size + self.offset_in_page;
-        let physical_end = self.current_page * self.page_size + page_len;
-        &buf.buffer.as_ref()[physical_start..physical_end]
+        &buf.as_ref()[self.offset..]
     }
 
     fn advance(&mut self, mut cnt: usize) {
@@ -261,31 +136,19 @@ impl Buf for ReplayBuf {
             let Some(buf) = self.buffers.front() else {
                 break;
             };
-
-            // Advance within current buffer
-            while cnt > 0 && self.current_page < buf.num_pages {
-                let page_len = Self::page_len(buf, self.current_page, self.logical_page_size);
-                let available = page_len - self.offset_in_page;
-                if cnt < available {
-                    self.offset_in_page += cnt;
-                    return;
-                }
-                cnt -= available;
-                self.current_page += 1;
-                self.offset_in_page = 0;
+            let available = buf.len() - self.offset;
+            if cnt < available {
+                self.offset += cnt;
+                return;
             }
-
-            // Current buffer exhausted, move to next
-            if self.current_page >= buf.num_pages {
-                self.buffers.pop_front();
-                self.current_page = 0;
-                self.offset_in_page = 0;
-            }
+            cnt -= available;
+            self.buffers.pop_front();
+            self.offset = 0;
         }
     }
 }
 
-/// Replays logical data from a blob containing pages with interleaved CRCs.
+/// Replays the logical bytes of a blob sequentially.
 ///
 /// This combines async I/O (`PageReader`) with sync buffering (`ReplayBuf`)
 /// to provide an `ensure(n)` + `Buf` interface for codec decoding.
@@ -301,11 +164,9 @@ pub struct Replay<B: Blob> {
 impl<B: Blob> Replay<B> {
     /// Creates a new Replay from a PageReader.
     pub(super) const fn new(reader: PageReader<B>) -> Self {
-        let page_size = reader.page_size();
-        let logical_page_size = reader.logical_page_size();
         Self {
             reader,
-            buffer: ReplayBuf::new(page_size, logical_page_size),
+            buffer: ReplayBuf::new(),
             exhausted: false,
         }
     }
@@ -336,8 +197,8 @@ impl<B: Blob> Replay<B> {
     pub async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.buffer.remaining < n && !self.exhausted {
             match self.reader.fill().await? {
-                Some((state, logical_bytes)) => {
-                    self.buffer.push(state, logical_bytes);
+                Some(buf) => {
+                    self.buffer.push(buf);
                 }
                 None => {
                     self.exhausted = true;
@@ -357,10 +218,10 @@ impl<B: Blob> Replay<B> {
         self.buffer.clear();
         self.exhausted = false;
 
-        let page_size = self.reader.logical_page_size as u64;
+        // Resume filling at the page containing `offset`, skipping the bytes before it.
+        let page_size = self.reader.page_size as u64;
         self.reader.blob_page = offset / page_size;
-        self.buffer.current_page = 0;
-        self.buffer.offset_in_page = (offset % page_size) as usize;
+        self.buffer.offset = (offset % page_size) as usize;
 
         Ok(())
     }
@@ -389,6 +250,7 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
     const BUFFER_PAGES: usize = 2;
+    const BUFFER_SIZE: usize = BUFFER_PAGES * PAGE_SIZE.get() as usize;
 
     #[test_traced("DEBUG")]
     fn test_replay_basic() {
@@ -399,7 +261,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -437,7 +299,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -457,8 +319,8 @@ mod tests {
 
     #[test_traced("DEBUG")]
     fn test_replay_cross_buffer_boundary() {
-        // Use prefetch_count=1 to force separate BufferStates per page.
-        // This tests navigation across multiple BufferStates in the VecDeque.
+        // Use prefetch_count=1 to force one fill (and one buffer) per page.
+        // This tests navigation across multiple buffers in the VecDeque.
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
@@ -466,7 +328,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -475,17 +337,17 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            // Create Replay with buffer size that results in prefetch_count=1.
-            // Physical page size = 103 + 12 = 115 bytes.
-            // Buffer size of 115 gives prefetch_pages = 115/115 = 1.
-            let mut replay = append.replay(NZUsize!(115)).await.unwrap();
+            // Create Replay with a buffer size of one page so prefetch_count=1.
+            let mut replay = append
+                .replay(NZUsize!(PAGE_SIZE.get() as usize))
+                .await
+                .unwrap();
 
             // Ensure all data - this requires 4 separate fill() calls (one per page).
-            // Each fill() creates a new BufferState, so we'll have 4 BufferStates.
             assert!(replay.ensure(400).await.unwrap());
             assert_eq!(replay.remaining(), 400);
 
-            // Read all data via Buf interface, verifying navigation across BufferStates.
+            // Read all data via Buf interface, verifying navigation across buffers.
             let mut collected = Vec::new();
             let mut chunks_read = 0;
             while replay.remaining() > 0 {
@@ -522,7 +384,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -561,7 +423,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 

@@ -1,7 +1,5 @@
-//! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
-//! physical page format used by the blob, which is left to the blob implementation.
+//! A page cache for caching pages of [Blob] data in memory.
 
-use super::get_page_from_blob;
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
 use ahash::AHashMap;
 use commonware_utils::{cache::Clock, sync::RwLock};
@@ -18,8 +16,8 @@ use std::{
 };
 use tracing::{error, trace};
 
-/// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
-/// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
+/// Shared future for one page fetch. The output uses `Arc<Error>` because `Shared`
+/// requires cloneable results. The `IoBuf` contains one full page of blob bytes.
 type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>> + Send>>>;
 
 /// Shared handle to one in-flight fetch generation. The cache keeps one copy in `page_fetches`,
@@ -90,7 +88,7 @@ impl Drop for PageFetchGuard {
     }
 }
 
-/// A [Cache] caches pages of [Blob] data in memory after verifying the integrity of each.
+/// A [Cache] caches pages of [Blob] data in memory.
 ///
 /// A single page cache can be used to cache data from multiple blobs by assigning a unique id to
 /// each.
@@ -135,12 +133,8 @@ struct Cache {
 /// thread-safe manner.
 #[derive(Clone)]
 pub struct CacheRef {
-    /// The size of each page in the underlying blobs managed by this page cache.
-    ///
-    /// # Warning
-    ///
-    /// You cannot change the page size once data has been written without invalidating it. (Reads
-    /// on blobs that were written with a different page size will fail their integrity check.)
+    /// The size of each page in the underlying blobs managed by this page cache. Pages are
+    /// purely a read-caching granularity over the blobs' raw logical bytes.
     page_size: u64,
 
     /// The next id to assign to a blob that will be managed by this cache.
@@ -353,7 +347,7 @@ impl CacheRef {
                 }
                 Entry::Vacant(v) => {
                     // Nobody is currently fetching this page, so create a future that will do the
-                    // work. get_page_from_blob handles CRC validation and returns only logical bytes.
+                    // work.
                     let blob = blob.clone();
                     let cache = Arc::clone(&self.cache);
                     let page_size = self.page_size;
@@ -547,42 +541,35 @@ impl Cache {
     }
 }
 
-/// Fetch one logical page for insertion into the page cache, rejecting partial pages because cache
-/// entries must always contain a full logical page.
+/// Fetch one page for insertion into the page cache.
+///
+/// Cache entries must always contain a full page, so exactly `page_size` bytes are read. A
+/// partial last page is never fetched here: readers serve it from the in-memory tail (the
+/// writer's tip buffer or a sealed handle's partial page), so a stale cached copy can never
+/// mask appended bytes. A read past the blob's end therefore surfaces as an error rather than
+/// caching a short page.
 async fn fetch_cacheable_page(
     blob: &impl Blob,
     page_num: u64,
     page_size: u64,
 ) -> Result<IoBuf, Arc<Error>> {
-    let page = get_page_from_blob(blob, page_num, page_size)
+    let offset = page_num
+        .checked_mul(page_size)
+        .ok_or_else(|| Arc::new(Error::OffsetOverflow))?;
+    let page = blob
+        .read_at(offset, page_size as usize)
         .await
         .map_err(Arc::new)?;
-
-    // We should never be fetching partial pages through the page cache. This can happen if a
-    // non-last page is corrupted and falls back to a partial CRC.
-    let len = page.len();
-    if len != page_size as usize {
-        error!(
-            page_num,
-            expected = page_size,
-            actual = len,
-            "attempted to fetch partial page from blob"
-        );
-        return Err(Arc::new(Error::InvalidChecksum));
-    }
-
-    Ok(page)
+    Ok(page.coalesce().freeze())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{super::Checksum, *};
+    use super::*;
     use crate::{
-        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
-        BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _, Spawner as _,
-        Storage as _, Supervisor as _,
+        deterministic, telemetry::metrics::Registry, Buf, BufferPool, BufferPoolConfig, Clock as _,
+        Handle, IoBufs, IoBufsMut, Runner as _, Spawner as _, Storage as _, Supervisor as _,
     };
-    use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16};
     use futures::future::pending;
@@ -682,7 +669,7 @@ mod tests {
         Error,
     }
 
-    /// A blob that blocks its first physical page read until released and counts total reads.
+    /// A blob that blocks its first page read until released and counts total reads.
     #[derive(Clone)]
     struct ControlledBlob {
         started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -858,25 +845,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         // Start the test within the executor
         executor.start(|context| async move {
-            // Physical page size = logical + CRC record.
-            let physical_page_size = PAGE_SIZE_U64 + CHECKSUM_SIZE;
-
-            // Populate a blob with 11 consecutive pages of CRC-protected data.
+            // Populate a blob with 11 consecutive pages of data.
             let (blob, size) = context
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 0);
             for i in 0..11 {
-                // Write logical data followed by Checksum.
-                let logical_data = vec![i as u8; PAGE_SIZE.get() as usize];
-                let crc = Crc32::checksum(&logical_data);
-                let record = Checksum::new(PAGE_SIZE.get(), crc);
-                let mut page_data = logical_data;
-                page_data.extend_from_slice(&record.to_bytes());
-                blob.write_at(i * physical_page_size, page_data)
-                    .await
-                    .unwrap();
+                let page_data = vec![i as u8; PAGE_SIZE.get() as usize];
+                blob.write_at(i * PAGE_SIZE_U64, page_data).await.unwrap();
             }
 
             // Fill the page cache with the blob's data via CacheRef::read.
@@ -884,7 +861,6 @@ mod tests {
             assert_eq!(cache_ref.next_id(), 0);
             assert_eq!(cache_ref.next_id(), 1);
             for i in 0..11 {
-                // Read expects logical bytes only (CRCs are stripped).
                 let mut buf = vec![0; PAGE_SIZE.get() as usize];
                 cache_ref
                     .read(&blob, 0, &mut buf, i * PAGE_SIZE_U64)
@@ -964,13 +940,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page = vec![7u8; PAGE_SIZE.get() as usize];
-            let crc = Crc32::checksum(&page);
-            let record = Checksum::new(PAGE_SIZE.get(), crc);
-            let mut physical_page = page.clone();
-            physical_page.extend_from_slice(&record.to_bytes());
             let blob = CountingBlob {
                 reads: Arc::new(AtomicUsize::new(0)),
-                page: Arc::new(physical_page),
+                page: Arc::new(page.clone()),
             };
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
 
@@ -1002,7 +974,6 @@ mod tests {
             // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
             let aligned_max_offset = u64::MAX - (u64::MAX % PAGE_SIZE_U64);
 
-            // CacheRef::cache expects only logical bytes (no CRC).
             let logical_data = vec![42u8; PAGE_SIZE.get() as usize];
 
             // Caching exactly one page at the maximum offset should succeed.
@@ -1022,13 +993,12 @@ mod tests {
     fn test_cache_at_high_offset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Use the minimum page size (CHECKSUM_SIZE + 1 = 13) with high offset.
-            const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
+            // Use a tiny page size with a high offset.
+            const MIN_PAGE_SIZE: u64 = 13;
             let cache_ref =
                 CacheRef::from_pooler(&context, NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
 
-            // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical
-            // only).
+            // Create two pages worth of data.
             let data = vec![1u8; MIN_PAGE_SIZE as usize * 2];
 
             // Cache pages at a high (but not max) aligned offset so we can verify both pages.
@@ -1106,11 +1076,8 @@ mod tests {
             let blob_id = 0;
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
 
-            // Return one valid full page, but hold the underlying read until the test releases it.
+            // Return one full page, but hold the underlying read until the test releases it.
             let logical_page = vec![7u8; PAGE_SIZE.get() as usize];
-            let crc = Crc32::checksum(&logical_page);
-            let mut physical_page = logical_page.clone();
-            physical_page.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             let reads = Arc::new(AtomicUsize::new(0));
@@ -1118,7 +1085,7 @@ mod tests {
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
                 reads: reads.clone(),
-                result: ControlledBlobResult::Success(Arc::new(physical_page)),
+                result: ControlledBlobResult::Success(Arc::new(logical_page.clone())),
             };
 
             // Start the fetch that installs the shared in-flight entry.

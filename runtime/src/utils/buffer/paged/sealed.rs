@@ -15,7 +15,7 @@
 //! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
 //! and the page cache.
 
-use super::{read::PageReader, view::View, CacheRef, Replay, CHECKSUM_SIZE};
+use super::{read::PageReader, view::View, CacheRef, Replay};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -185,27 +185,11 @@ impl<B: Blob> Sealed<B> {
         let logical_page_size = self.inner.cache_ref.page_size();
         let logical_page_size_nz =
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
-        let physical_page_size = logical_page_size
-            .checked_add(CHECKSUM_SIZE)
-            .ok_or(Error::OffsetOverflow)?;
-        let prefetch_pages = (buffer_size.get() / physical_page_size as usize).max(1);
-
-        let partial_len = self
-            .inner
-            .partial_page
-            .as_ref()
-            .map_or(0, |p| p.len() as u64);
-        let full_pages = (self.inner.size - partial_len) / logical_page_size;
-        let pages = full_pages + u64::from(partial_len > 0);
-        let physical_blob_size = physical_page_size
-            .checked_mul(pages)
-            .ok_or(Error::OffsetOverflow)?;
-        let logical_blob_size = self.inner.size;
+        let prefetch_pages = (buffer_size.get() / logical_page_size as usize).max(1);
 
         let reader = PageReader::new(
             self.inner.blob.clone(),
-            physical_blob_size,
-            logical_blob_size,
+            self.inner.size,
             prefetch_pages,
             logical_page_size_nz,
         );
