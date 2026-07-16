@@ -1,20 +1,20 @@
 use super::{
-    state::{Dealer, Epoch as EpochState, Player, Storage},
     Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
+    state::{Dealer, Epoch as EpochState, Player, Storage},
 };
 use crate::{
-    namespace,
+    BLOCKS_PER_EPOCH, namespace,
     orchestrator::{self, EpochTransition},
     setup::PeerConfig,
-    BLOCKS_PER_EPOCH,
 };
 use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
+    BatchVerifier, Hasher, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
-            observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck, Verdict,
+            DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck, Verdict, observe,
         },
         primitives::{
             group::Share,
@@ -24,21 +24,19 @@ use commonware_cryptography::{
     },
     ed25519::Batch,
     transcript::Summary,
-    BatchVerifier, Hasher, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
 use commonware_p2p::{
-    utils::mux::Muxer, Blocker, Manager, Receiver, Recipients, Sender, TrackedPeers,
+    Blocker, Manager, Receiver, Recipients, Sender, TrackedPeers, utils::mux::Muxer,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{Counter, EncodeStruct, GaugeExt, GaugeFamily, MetricsExt as _},
     Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
-    Storage as RuntimeStorage,
+    Storage as RuntimeStorage, spawn_cell,
+    telemetry::metrics::{Counter, EncodeStruct, GaugeExt, GaugeFamily, MetricsExt as _},
 };
-use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
+use commonware_utils::{Acknowledgement as _, N3f1, NZU32, ordered::Set};
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU32, NonZeroUsize},
@@ -505,48 +503,48 @@ where
 
                         let log = Arc::try_unwrap(block)
                             .map_or_else(|block| block.log.clone(), |block| block.log);
-                        if let Some(log) = log {
-                            if let Some((dealer, dealer_log)) = log.check(&round) {
-                                // `log.check` only authenticates the self-signature, not
-                                // dealer-set membership. A validly self-signed log from a
-                                // key outside the round's dealer set is never selected, so
-                                // skip it rather than persisting junk under that key.
-                                if dealers.position(&dealer).is_none() {
-                                    warn!(?epoch, "ignoring dealer log from non-dealer");
-                                } else {
-                                    // If we see our dealing outcome in a finalized block,
-                                    // make sure to take it, so that we don't post
-                                    // it in subsequent blocks
-                                    if dealer == self_pk {
-                                        if let Some(ref mut ds) = dealer_state {
-                                            ds.take_finalized();
-                                        }
-                                    }
-                                    storage.append_log(epoch, dealer, dealer_log).await;
+                        if let Some(log) = log
+                            && let Some((dealer, dealer_log)) = log.check(&round)
+                        {
+                            // `log.check` only authenticates the self-signature, not
+                            // dealer-set membership. A validly self-signed log from a
+                            // key outside the round's dealer set is never selected, so
+                            // skip it rather than persisting junk under that key.
+                            if dealers.position(&dealer).is_none() {
+                                warn!(?epoch, "ignoring dealer log from non-dealer");
+                            } else {
+                                // If we see our dealing outcome in a finalized block,
+                                // make sure to take it, so that we don't post
+                                // it in subsequent blocks
+                                if dealer == self_pk
+                                    && let Some(ref mut ds) = dealer_state
+                                {
+                                    ds.take_finalized();
                                 }
+                                storage.append_log(epoch, dealer, dealer_log).await;
                             }
                         }
 
                         // In the first half of the epoch, continuously distribute shares
-                        if phase == EpochPhase::Early {
-                            if let Some(ref mut ds) = dealer_state {
-                                Self::distribute_shares(
-                                    &self_pk,
-                                    &mut storage,
-                                    epoch,
-                                    ds,
-                                    player_state.as_mut(),
-                                    &mut round_sender,
-                                )
-                                .await;
-                            }
+                        if phase == EpochPhase::Early
+                            && let Some(ref mut ds) = dealer_state
+                        {
+                            Self::distribute_shares(
+                                &self_pk,
+                                &mut storage,
+                                epoch,
+                                ds,
+                                player_state.as_mut(),
+                                &mut round_sender,
+                            )
+                            .await;
                         }
 
                         // At or past the midpoint, finalize dealer if not already done.
-                        if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late) {
-                            if let Some(ref mut ds) = dealer_state {
-                                ds.finalize::<N3f1>();
-                            }
+                        if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late)
+                            && let Some(ref mut ds) = dealer_state
+                        {
+                            ds.finalize::<N3f1>();
                         }
 
                         // Continue if not the last block in the epoch
@@ -706,16 +704,16 @@ mod tests {
     use crate::{dkg::ContinueOnUpdate, orchestrator::Message, setup::PeerConfig};
     use commonware_actor::Feedback;
     use commonware_cryptography::{
+        Sha256, Signer,
         bls12381::{dkg::feldman_desmedt::deal, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
         transcript::Summary,
-        Sha256, Signer,
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_p2p::{utils::mocks::inert_channel, Blocker, PeerSetSubscription, Provider};
-    use commonware_runtime::{deterministic, Runner, Supervisor as _};
-    use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32};
+    use commonware_p2p::{Blocker, PeerSetSubscription, Provider, utils::mocks::inert_channel};
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_utils::{N3f1, NZU32, NZUsize, TryCollect, channel::mpsc};
     use core::marker::PhantomData;
     use std::collections::BTreeMap;
 

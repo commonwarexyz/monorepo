@@ -79,42 +79,42 @@
 //! ```
 
 use crate::{
-    marshal::{
-        application::{
-            gates::{self, Gates},
-            validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage},
-        },
-        coding::{
-            shards,
-            types::{coding_config_for_participants, hash_context, CodedBlock},
-            validation::{validate_block, validate_proposal, ProposalError},
-            Coding,
-        },
-        core, Update,
-    },
-    simplex::{scheme::Scheme, types::Context, Plan},
-    types::{coding::Commitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter,
+    marshal::{
+        Update,
+        application::{
+            gates::{self, Gates},
+            validation::{Stage, is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify},
+        },
+        coding::{
+            Coding, shards,
+            types::{CodedBlock, coding_config_for_participants, hash_context},
+            validation::{ProposalError, validate_block, validate_proposal},
+        },
+        core,
+    },
+    simplex::{Plan, scheme::Scheme, types::Context},
+    types::{Epoch, Epocher, Round, coding::Commitment},
 };
 use commonware_actor::Feedback;
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as _, Verifier},
     Committable, Digestible, Hasher,
+    certificate::{Provider, Scheme as _, Verifier},
 };
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
+    Clock, Metrics, Spawner, Storage,
     telemetry::{
         metrics::{
-            histogram::{Buckets, Timed},
             MetricsExt as _,
+            histogram::{Buckets, Timed},
         },
         traces::TracedExt as _,
     },
-    Clock, Metrics, Spawner, Storage,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -122,7 +122,7 @@ use commonware_utils::{
 };
 use rand_core::Rng;
 use std::sync::Arc;
-use tracing::{debug, info_span, warn, Instrument as _};
+use tracing::{Instrument as _, debug, info_span, warn};
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -216,11 +216,11 @@ impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<
-        E,
-        Block = B,
-        SigningScheme = Z::Scheme,
-        Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
-    >,
+            E,
+            Block = B,
+            SigningScheme = Z::Scheme,
+            Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+        >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
@@ -641,11 +641,11 @@ impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<
-        E,
-        Block = B,
-        SigningScheme = Z::Scheme,
-        Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
-    >,
+            E,
+            Block = B,
+            SigningScheme = Z::Scheme,
+            Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+        >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
@@ -1084,11 +1084,11 @@ impl<E, A, B, C, H, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, 
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<
-        E,
-        Block = B,
-        SigningScheme = Z::Scheme,
-        Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
-    >,
+            E,
+            Block = B,
+            SigningScheme = Z::Scheme,
+            Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+        >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,

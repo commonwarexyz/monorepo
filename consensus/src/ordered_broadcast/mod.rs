@@ -73,34 +73,33 @@ pub mod mocks;
 #[cfg(test)]
 mod tests {
     use super::{
-        mocks,
+        Config, Engine, mocks,
         types::{ChunkSigner, ChunkVerifier},
-        Config, Engine,
     };
     use crate::{
         ordered_broadcast::scheme::{
-            bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
+            Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1,
         },
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
+        Signer as _,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::{self, mocks::Fixture},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
+        Clock, Quota, Runner, Spawner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock, Quota, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{
+        NZU16, NZU64, NZUsize,
         channel::{fallible::OneshotExt, oneshot},
-        NZUsize, NZU16, NZU64,
     };
     use futures::future::join_all;
     use std::{
@@ -183,10 +182,10 @@ mod tests {
                 if v2 == v1 {
                     continue;
                 }
-                if let Some(f) = restrict_to {
-                    if !f(participants.len(), i1, i2) {
-                        continue;
-                    }
+                if let Some(f) = restrict_to
+                    && !f(participants.len(), i1, i2)
+                {
+                    continue;
                 }
                 if matches!(action, Action::Update(_) | Action::Unlink) {
                     oracle.remove_link(v1.clone(), v2.clone()).await.unwrap();
@@ -962,7 +961,7 @@ mod tests {
                         sequencer_signer: Some(ChunkSigner::new(namespace, sequencer.clone())),
                         chunk_verifier,
                         sequencers_provider: mocks::Sequencers::<PublicKey>::new(vec![
-                            sequencer.public_key()
+                            sequencer.public_key(),
                         ]),
                         validators_provider,
                         relay: automaton.clone(),

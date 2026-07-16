@@ -3,10 +3,10 @@ use super::{
     types::{Activity, Context, Finalization},
 };
 use crate::{
-    types::{Epoch, ViewDelta},
     CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
+    types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
@@ -183,15 +183,15 @@ where
 }
 
 impl<
-        S: Scheme,
-        L: Elector<S>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
-        R: Relay,
-        F: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
-    > Config<S, L, B, D, A, R, F, T>
+    S: Scheme,
+    L: Elector<S>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
+    R: Relay,
+    F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
+> Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.
     ///

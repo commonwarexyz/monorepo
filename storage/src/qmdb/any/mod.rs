@@ -64,21 +64,22 @@
 //! ```
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{full::Config as MerkleConfig, Family, Location},
+    merkle::{Family, Location, full::Config as MerkleConfig},
     qmdb::{
+        ROOT_BAGGING,
         any::operation::{Operation, Update},
         bitmap::Shared,
         metrics::Metrics,
         operation::Committable,
-        single_operation_root, ROOT_BAGGING,
+        single_operation_root,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{CodecShared, Encode};
 use commonware_cryptography::Hasher;
@@ -207,11 +208,11 @@ pub(crate) mod test {
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Supervisor as _,
+        BufferPooler, Supervisor as _, buffer::paged::CacheRef, deterministic::Context,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
     use std::{
         collections::HashMap,
@@ -298,7 +299,7 @@ pub(crate) mod test {
         merkle::mmr,
         qmdb::any::{
             db::Db as AnyDb,
-            operation::{update::Update as UpdateTrait, Operation as AnyOperation},
+            operation::{Operation as AnyOperation, update::Update as UpdateTrait},
             traits::{DbAny, Provable, UnmerkleizedBatch as _},
         },
     };
@@ -1220,7 +1221,7 @@ pub(crate) mod test {
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_parallel::{Sequential, Strategy};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
 
     // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
     type UnorderedFixed =
@@ -1318,9 +1319,9 @@ pub(crate) mod test {
         use crate::{
             index::{ordered::Index as OrderedIndex, unordered::Index as UnorderedIndex},
             journal::contiguous::{fixed::Journal as FJournal, variable::Journal as VJournal},
-            merkle::{mmb, Location},
+            merkle::{Location, mmb},
             qmdb::any::{
-                operation::{update, Operation},
+                operation::{Operation, update},
                 value::{FixedEncoding, VariableEncoding},
             },
         };
@@ -2694,13 +2695,13 @@ mod bitmap_tests {
     //! so one variant (`unordered::variable`) suffices as the test bed.
     use crate::{
         merkle::Location,
-        qmdb::any::unordered::variable::test::{create_test_config, AnyTest},
+        qmdb::any::unordered::variable::test::{AnyTest, create_test_config},
     };
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::{boxed, test_traced};
     use commonware_runtime::{
-        deterministic::{self, Context},
         Runner as _, Supervisor as _,
+        deterministic::{self, Context},
     };
     use commonware_utils::bitmap::Readable as _;
 

@@ -44,20 +44,20 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::{
-        contiguous::{Contiguous, Mutable},
         Error as JournalError,
+        contiguous::{Contiguous, Mutable},
     },
     merkle::{
-        hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
         Bagging, Family, Location,
+        hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
     qmdb::operation::Operation,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
-use commonware_utils::{cache::Clock, NZUsize};
+use commonware_utils::{NZUsize, cache::Clock};
 use core::num::NonZeroUsize;
-use futures::{pin_mut, StreamExt as _};
+use futures::{StreamExt as _, pin_mut};
 use thiserror::Error;
 
 pub mod any;

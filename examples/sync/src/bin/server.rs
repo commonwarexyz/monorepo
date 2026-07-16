@@ -8,27 +8,28 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::{boxed, select_loop};
 use commonware_runtime::{
+    BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf, Spawner, Storage, StreamOf,
+    Supervisor as _,
     telemetry::metrics::{Counter, MetricsExt as _},
-    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
-    Spawner, Storage, StreamOf, Supervisor as _,
+    tokio as tokio_runtime,
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{compact, Target},
+    qmdb::sync::{Target, compact},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    any, crate_version, current,
+    Error, Key, any, crate_version, current,
     databases::{CompactSyncable, DatabaseType, ExampleDatabase, StorageKind, SyncMode, Syncable},
     immutable, immutable_compact, keyless, keyless_compact,
-    net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
-    Error, Key,
+    net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE, wire},
 };
 use commonware_utils::{
+    DurationExt,
     channel::mpsc,
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
-    sys_rng, DurationExt,
+    sys_rng,
 };
 use rand_core::Rng;
 use std::{
@@ -341,11 +342,11 @@ async fn handle_get_compact_state<DB>(
 where
     DB: CompactSyncable<Family = mmr::Family>,
     Arc<AsyncRwLock<DB>>: compact::Resolver<
-        Family = mmr::Family,
-        Op = DB::Operation,
-        Digest = Key,
-        Error = compact::ServeError<mmr::Family, Key>,
-    >,
+            Family = mmr::Family,
+            Op = DB::Operation,
+            Digest = Key,
+            Error = compact::ServeError<mmr::Family, Key>,
+        >,
 {
     state.request_counter.inc();
 
@@ -406,11 +407,11 @@ where
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     Arc<AsyncRwLock<DB>>: compact::Resolver<
-        Family = mmr::Family,
-        Op = DB::Operation,
-        Digest = Key,
-        Error = compact::ServeError<mmr::Family, Key>,
-    >,
+            Family = mmr::Family,
+            Op = DB::Operation,
+            Digest = Key,
+            Error = compact::ServeError<mmr::Family, Key>,
+        >,
 {
     const LISTENING_MESSAGE: &'static str =
         "compact server listening and continuously adding operations";
@@ -681,11 +682,11 @@ where
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
     Arc<AsyncRwLock<DB>>: compact::Resolver<
-        Family = mmr::Family,
-        Op = DB::Operation,
-        Digest = Key,
-        Error = compact::ServeError<mmr::Family, Key>,
-    >,
+            Family = mmr::Family,
+            Op = DB::Operation,
+            Digest = Key,
+            Error = compact::ServeError<mmr::Family, Key>,
+        >,
 {
     let database = initialize_compact_database(database, &config, &mut context).await?;
     run_server::<DB, E, CompactMode>(context, config, database).await

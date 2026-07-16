@@ -1,16 +1,16 @@
 use crate::{
+    Epochable, Viewable,
     simplex::types::Certificate,
     types::{Round as Rnd, View},
-    Epochable, Viewable,
 };
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_resolver::{p2p::Producer, Consumer, Delivery};
+use commonware_cryptography::{Digest, certificate::Scheme};
+use commonware_resolver::{Consumer, Delivery, p2p::Producer};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
-use tracing::{info_span, Span};
+use tracing::{Span, info_span};
 
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {
@@ -81,11 +81,11 @@ impl<S: Scheme, D: Digest> Overflow<MailboxMessage<S, D>> for Pending<S, D> {
     where
         F: FnMut(MailboxMessage<S, D>) -> Option<MailboxMessage<S, D>>,
     {
-        if let Some(finalization) = self.finalization.take() {
-            if let Some(finalization) = push(finalization) {
-                self.finalization = Some(finalization);
-                return;
-            }
+        if let Some(finalization) = self.finalization.take()
+            && let Some(finalization) = push(finalization)
+        {
+            self.finalization = Some(finalization);
+            return;
         }
 
         while let Some(message) = self.messages.pop_front() {

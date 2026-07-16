@@ -187,19 +187,19 @@ mod tests {
         LimitedSender as _, Manager, Provider, Receiver, Recipients, Sender, TrackedPeers,
     };
     use commonware_cryptography::{
-        ed25519::{self, PrivateKey, PublicKey},
         Signer as _,
+        ed25519::{self, PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_group};
     use commonware_runtime::{
-        deterministic, reschedule, telemetry::metrics::count_running_tasks, Clock, IoBuf, Quota,
-        Runner, Spawner, Supervisor as _,
+        Clock, IoBuf, Quota, Runner, Spawner, Supervisor as _, deterministic, reschedule,
+        telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
+        NZU32, NZUsize,
         channel::mpsc,
         hostname, ordered,
         ordered::{Map, Set},
-        NZUsize, NZU32,
     };
     use rand::RngExt as _;
     use std::{
@@ -2772,11 +2772,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(sender
-                .check(Recipients::All)
-                .unwrap()
-                .recipients()
-                .is_empty());
+            assert!(
+                sender
+                    .check(Recipients::All)
+                    .unwrap()
+                    .recipients()
+                    .is_empty()
+            );
 
             let mut manager = oracle.manager();
             manager.track(1, Set::try_from([pk1, pk2.clone()]).unwrap());

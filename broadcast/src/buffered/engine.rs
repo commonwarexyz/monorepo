@@ -1,16 +1,15 @@
-use super::{metrics, Config, Mailbox, Message};
+use super::{Config, Mailbox, Message, metrics};
 use commonware_actor::mailbox;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Provider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{GaugeExt, status::Status},
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},

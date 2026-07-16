@@ -2,16 +2,16 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::journal::{
-    contiguous::{
-        fixed::{Config as JournalConfig, Journal},
-        Contiguous, Many, Mutable as _,
-    },
     Error,
+    contiguous::{
+        Contiguous, Many, Mutable as _,
+        fixed::{Config as JournalConfig, Journal},
+    },
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use futures::{pin_mut, StreamExt};
+use commonware_utils::{NZU16, NZU64, NZUsize};
+use futures::{StreamExt, pin_mut};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 

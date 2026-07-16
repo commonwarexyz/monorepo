@@ -32,7 +32,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
+    Hasher, PublicKey, Sha256, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
@@ -245,11 +245,11 @@ mod tests {
         types::{Epoch, View},
     };
     use commonware_cryptography::{
-        bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
-        sha256::Digest as Sha256Digest, Sha256,
+        Sha256, bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
+        sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, TryFromIterator};
+    use commonware_utils::{Faults, N3f1, TryFromIterator, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 

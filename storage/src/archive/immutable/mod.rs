@@ -141,9 +141,9 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
+    use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);

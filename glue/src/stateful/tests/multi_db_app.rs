@@ -5,18 +5,19 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        db::{
-            p2p::{compact as compact_resolver, standard as qmdb_resolver},
-            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
-        },
-        probe::{Config as ProbeConfig, Probe},
         Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
         SyncPlan,
+        db::{
+            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
+            p2p::{compact as compact_resolver, standard as qmdb_resolver},
+        },
+        probe::{Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
+    Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
         core::{Actor as MarshalActor, CommitmentFallback},
@@ -31,34 +32,34 @@ use commonware_consensus::{
         types::Context,
     },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
-    certificate::{mocks::Fixture, ConstantProvider},
-    ed25519, sha256, Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    certificate::{ConstantProvider, mocks::Fixture},
+    ed25519, sha256,
 };
 use commonware_p2p::utils::mux::Muxer;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Buf, BufMut, Handle, Quota, Spawner, Supervisor as _,
+    Buf, BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
+    Context as StorageContext,
     archive::prunable,
     journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
-    mmr::{self, full::Config as MmrJournalConfig, Location},
+    mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
-        any::{unordered::fixed, FixedConfig},
+        any::{FixedConfig, unordered::fixed},
         immutable,
-        sync::{compact as compact_sync, Target},
+        sync::{Target, compact as compact_sync},
     },
     translator::TwoCap,
-    Context as StorageContext,
 };
 use commonware_utils::{
-    non_empty_range,
+    NZDuration, NZU64, NZUsize, non_empty_range,
     range::NonEmptyRange,
     sync::{Mutex, TracedAsyncRwLock},
-    test_rng, NZDuration, NZUsize, NZU64,
+    test_rng,
 };
 use futures::{Stream, StreamExt};
 use rand_core::Rng;
@@ -656,8 +657,8 @@ impl EngineDefinition for MultiDbEngine {
             let mailbox = prune_observer.clone();
             Box::pin(async move {
                 let (a, _b) = mailbox.subscribe_databases().await;
-                let oldest_a = *a.read().await.bounds().start;
-                oldest_a
+
+                *a.read().await.bounds().start
             })
         });
 

@@ -3,18 +3,20 @@
 //! Wraps the [`any::batch`] API.
 
 use crate::{
+    Context,
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
-        storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
+        self, Graftable, Location, Position, Readable,
+        batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
+        storage::Storage as MerkleStorage,
     },
     qmdb::{
+        Error,
         any::{
-            self,
+            self, ValueEncoding,
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
-            operation::{update, Operation},
-            ValueEncoding,
+            operation::{Operation, update},
         },
         batch_chain::Bounds,
         bitmap::Shared,
@@ -23,9 +25,7 @@ use crate::{
             grafting,
         },
         operation::Key,
-        Error,
     },
-    Context,
 };
 use ahash::AHashMap;
 use commonware_codec::Codec;
@@ -130,12 +130,11 @@ pub(crate) fn next_candidate<F: Graftable, B: bitmap::Readable<N>, const N: usiz
     let floor = *floor;
     let bitmap_len = bitmap.len();
     let committed_end = bitmap_len.min(tip);
-    if floor < committed_end {
-        if let Some(idx) = bitmap.ones_iter_from(floor).next() {
-            if idx < committed_end {
-                return Some(Location::<F>::new(idx));
-            }
-        }
+    if floor < committed_end
+        && let Some(idx) = bitmap.ones_iter_from(floor).next()
+        && idx < committed_end
+    {
+        return Some(Location::<F>::new(idx));
     }
     let candidate = floor.max(bitmap_len);
     (candidate < tip).then(|| Location::<F>::new(candidate))
@@ -180,12 +179,12 @@ struct BatchStorageAdapter<
 }
 
 impl<
-        'a,
-        F: Graftable,
-        D: Digest,
-        R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
-        S: MerkleStorage<F, Digest = D>,
-    > BatchStorageAdapter<'a, F, D, R, S>
+    'a,
+    F: Graftable,
+    D: Digest,
+    R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
+    S: MerkleStorage<F, Digest = D>,
+> BatchStorageAdapter<'a, F, D, R, S>
 {
     const fn new(batch: &'a R, base: &'a S) -> Self {
         Self {
@@ -197,11 +196,11 @@ impl<
 }
 
 impl<
-        F: Graftable,
-        D: Digest,
-        R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
-        S: MerkleStorage<F, Digest = D>,
-    > MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
+    F: Graftable,
+    D: Digest,
+    R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
+    S: MerkleStorage<F, Digest = D>,
+> MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
 {
     type Digest = D;
 
@@ -722,10 +721,11 @@ where
     let mut ancestors = DiffCursors::new(ancestor_diffs.iter().map(|d| d.as_slice()));
     for (key, entry) in diff {
         // Set the active bit for this key's final location.
-        if let Some(loc) = entry.loc() {
-            if *loc >= batch_base && *loc < batch_base + batch_len as u64 {
-                overlay.set_bit(base, *loc);
-            }
+        if let Some(loc) = entry.loc()
+            && *loc >= batch_base
+            && *loc < batch_base + batch_len as u64
+        {
+            overlay.set_bit(base, *loc);
         }
 
         // Clear the most recent superseded location. Older locations were already cleared by the
@@ -805,7 +805,9 @@ where
     let graftable_parent = *grafted_parent.leaves() as usize;
     let pruned_chunks = bitmap_parent.pruned_chunks();
     assert!(
-        pruned_chunks <= graftable_parent && graftable_parent <= graftable_overlay && graftable_overlay <= new_complete_chunks,
+        pruned_chunks <= graftable_parent
+            && graftable_parent <= graftable_overlay
+            && graftable_overlay <= new_complete_chunks,
         "invariant violated: pruned={pruned_chunks} graftable_parent={graftable_parent} graftable_overlay={graftable_overlay} new_complete={new_complete_chunks}"
     );
 
@@ -817,7 +819,7 @@ where
     let mut chunk_indices_to_update: Vec<usize> = overlay
         .chunks
         .iter()
-        .filter(|(&idx, _)| idx < graftable_overlay && idx >= pruned_chunks)
+        .filter(|&(&idx, _)| idx < graftable_overlay && idx >= pruned_chunks)
         .map(|(&idx, _)| idx)
         .collect();
     chunk_indices_to_update.extend(graftable_parent..graftable_overlay);
@@ -1231,12 +1233,12 @@ mod trait_impls {
     }
 
     impl<
-            F: Graftable,
-            D: Digest,
-            U: update::Update + Send + Sync + 'static,
-            const N: usize,
-            S: Strategy,
-        > MerkleizedBatchTrait for Arc<MerkleizedBatch<F, D, U, N, S>>
+        F: Graftable,
+        D: Digest,
+        U: update::Update + Send + Sync + 'static,
+        const N: usize,
+        S: Strategy,
+    > MerkleizedBatchTrait for Arc<MerkleizedBatch<F, D, U, N, S>>
     where
         Operation<F, U>: Codec,
     {

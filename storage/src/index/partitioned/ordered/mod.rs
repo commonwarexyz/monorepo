@@ -45,17 +45,17 @@ pub use self::cursor::Cursor;
 use self::partition::Partition;
 use crate::{
     index::{
-        partitioned::partition_index_and_sub_key, Cursor as CursorTrait, Factory, Ordered,
-        Unordered,
+        Cursor as CursorTrait, Factory, Ordered, Unordered,
+        partitioned::partition_index_and_sub_key,
     },
     translator::Translator,
 };
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
     Metrics,
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
 use std::{
-    collections::{btree_map, hash_map, BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, btree_map, hash_map},
     ops::Bound,
 };
 
@@ -364,18 +364,18 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         }
 
         // Route into the spilled partition's `BTreeMap`.
-        if !self.spilled.is_empty() {
-            if let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i) {
-                match partition.get_mut().entry(k) {
-                    btree_map::Entry::Occupied(mut run) => run.get_mut().push(value),
-                    btree_map::Entry::Vacant(run) => {
-                        run.insert(vec![value]);
-                        self.keys.inc();
-                    }
+        if !self.spilled.is_empty()
+            && let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i)
+        {
+            match partition.get_mut().entry(k) {
+                btree_map::Entry::Occupied(mut run) => run.get_mut().push(value),
+                btree_map::Entry::Vacant(run) => {
+                    run.insert(vec![value]);
+                    self.keys.inc();
                 }
-                self.items.inc();
-                return;
             }
+            self.items.inc();
+            return;
         }
 
         // Genuinely empty partition: start a fresh sorted array.
@@ -421,17 +421,16 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         }
         // Partition i is empty here; if spilled, remove from its `BTreeMap` (and drop the
         // partition entry, reverting to an empty sorted array, once its last key is gone).
-        if !self.spilled.is_empty() {
-            if let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i) {
-                if let Some(vals) = partition.get_mut().remove(&k) {
-                    let n = vals.len();
-                    self.keys.dec();
-                    self.items.dec_by(n as i64);
-                    self.pruned.inc_by(n as u64);
-                    if partition.get().is_empty() {
-                        partition.remove();
-                    }
-                }
+        if !self.spilled.is_empty()
+            && let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i)
+            && let Some(vals) = partition.get_mut().remove(&k)
+        {
+            let n = vals.len();
+            self.keys.dec();
+            self.items.dec_by(n as i64);
+            self.pruned.inc_by(n as u64);
+            if partition.get().is_empty() {
+                partition.remove();
             }
         }
     }
@@ -560,7 +559,7 @@ mod tests {
     use crate::translator::OneCap;
     use commonware_formatting::hex;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     fn new_index(context: deterministic::Context) -> Index<OneCap, u64, 1> {
         Index::new(context, OneCap)

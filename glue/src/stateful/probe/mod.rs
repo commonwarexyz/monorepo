@@ -125,48 +125,47 @@ mod wire;
 
 #[cfg(test)]
 mod test {
-    use super::{wire, Config, Mailbox, Probe};
+    use super::{Config, Mailbox, Probe, wire};
     use bytes::{Buf, BufMut};
     use commonware_actor::Feedback;
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
+        Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
         marshal::{
-            self,
+            self, Start, Update,
             core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
             resolver::p2p as marshal_resolver,
             standard::Standard,
-            Start, Update,
         },
         simplex::{
             mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
             types::{Activity, Context as SimplexContext, Finalization, Finalize, Proposal},
         },
         types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
-        Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
     };
     use commonware_cryptography::{
+        Digest as _, Digestible, Signer as _,
         certificate::{
-            self, mocks::Fixture, Attestation, ConstantProvider, Provider, Scoped, Verification,
-            Verifier,
+            self, Attestation, ConstantProvider, Provider, Scoped, Verification, Verifier,
+            mocks::Fixture,
         },
         ed25519,
         sha256::Digest as Sha256Digest,
-        Digest as _, Digestible, Signer as _,
     };
     use commonware_macros::test_collect_traces;
     use commonware_p2p::{
-        simulated::{Config as SimConfig, Link, Network, Oracle, Sender},
         Recipients, Sender as _,
+        simulated::{Config as SimConfig, Link, Network, Oracle, Sender},
     };
     use commonware_parallel::{Sequential, Strategy as ParallelStrategy};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, telemetry::traces::collector::TraceStorage, Clock,
-        Handle, Metrics, Quota, Runner as _, Supervisor,
+        Clock, Handle, Metrics, Quota, Runner as _, Supervisor, buffer::paged::CacheRef,
+        deterministic, telemetry::traces::collector::TraceStorage,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        channel::oneshot, sync::Mutex, test_rng, Acknowledgement, NZDuration, NZUsize,
-        NonZeroDuration, NZU16, NZU64,
+        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, channel::oneshot,
+        sync::Mutex, test_rng,
     };
     use std::{
         collections::BTreeMap,
@@ -801,7 +800,7 @@ mod test {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::{wire, Scheme, Variant};
+        use super::{Scheme, Variant, wire};
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {

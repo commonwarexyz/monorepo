@@ -1,7 +1,7 @@
 use crate::types::Height;
 use commonware_storage::{
-    metadata::{self, Metadata},
     Context,
+    metadata::{self, Metadata},
 };
 use commonware_utils::sequence::U64;
 

@@ -226,12 +226,12 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
+        Metrics as _, Runner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         telemetry::metrics::has_metric_value,
-        Metrics as _, Runner, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
@@ -732,13 +732,13 @@ mod tests {
                 assert_eq!(start_next, next_actual_index);
 
                 // If there's a gap, check an index within the gap
-                if let Some(next_index) = next_actual_index {
-                    if next_index > block_end_index + 1 {
-                        let in_gap_index = block_end_index + 1;
-                        let (current_end, start_next) = archive.next_gap(in_gap_index);
-                        assert!(current_end.is_none());
-                        assert_eq!(start_next, Some(next_index));
-                    }
+                if let Some(next_index) = next_actual_index
+                    && next_index > block_end_index + 1
+                {
+                    let in_gap_index = block_end_index + 1;
+                    let (current_end, start_next) = archive.next_gap(in_gap_index);
+                    assert!(current_end.is_none());
+                    assert_eq!(start_next, Some(next_index));
                 }
                 i = j + 1;
             }

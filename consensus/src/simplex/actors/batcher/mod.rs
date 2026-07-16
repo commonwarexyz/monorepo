@@ -4,9 +4,9 @@ mod round;
 mod verifier;
 
 use crate::{
+    Relay, Reporter,
     simplex::config::ForwardingPolicy,
     types::{Epoch, ViewDelta},
-    Relay, Reporter,
 };
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
@@ -38,49 +38,49 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 mod tests {
     use super::*;
     use crate::{
+        Viewable,
         simplex::{
+            Plan,
             actors::voter,
             config::ForwardingPolicy,
             elector::RoundRobin,
             metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
-                bls12381_multisig,
+                Scheme, bls12381_multisig,
                 bls12381_threshold::{
                     standard as bls12381_threshold_std, vrf as bls12381_threshold_vrf,
                 },
-                ed25519, secp256r1, Scheme,
+                ed25519, secp256r1,
             },
             types::{
                 Activity, Certificate, Finalization, Finalize, Notarization, Notarize,
                 Nullification, Nullify, Proposal, Vote,
             },
-            Plan,
         },
         types::{Epoch, Participant, Round, View},
-        Viewable,
     };
-    use commonware_actor::{mailbox, Feedback};
+    use commonware_actor::{Feedback, mailbox};
     use commonware_codec::Encode;
     use commonware_cryptography::{
+        Hasher as _, Sha256, Signer,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        Hasher as _, Sha256, Signer,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::{
-        simulated::{Config as NConfig, Link, Network, Oracle},
         Manager as _, Recipients, Sender as _, TrackedPeers,
+        simulated::{Config as NConfig, Link, Network, Oracle},
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic,
-        telemetry::traces::{collector::TraceStorage, TracedExt as _},
-        tokio, Clock, Metrics as _, Quota, Runner, Strategizer as _, Supervisor as _,
+        Clock, Metrics as _, Quota, Runner, Strategizer as _, Supervisor as _, deterministic,
+        telemetry::traces::{TracedExt as _, collector::TraceStorage},
+        tokio,
     };
-    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, NZUsize, TestRng};
+    use commonware_utils::{NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng};
     use std::{marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration};
     use tracing::{Level, Span};
 

@@ -512,7 +512,7 @@ impl TimeoutWheel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     const TICK: Duration = Duration::from_millis(5);
 

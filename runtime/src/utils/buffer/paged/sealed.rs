@@ -15,7 +15,7 @@
 //! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
 //! and the page cache.
 
-use super::{read::PageReader, view::View, CacheRef, Replay, CHECKSUM_SIZE};
+use super::{CHECKSUM_SIZE, CacheRef, Replay, read::PageReader, view::View};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -224,11 +224,12 @@ impl<B: Blob> Sealed<B> {
 mod tests {
     use super::*;
     use crate::{
+        Buf, Runner as _, Storage as _,
         buffer::{paged::Writer, tests::SyncTrackingBlob},
-        deterministic, Buf, Runner as _, Storage as _,
+        deterministic,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{NZU16, NZUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky page size to test alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;

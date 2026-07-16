@@ -3,18 +3,18 @@
 //! For variable-size values, use [super::variable].
 
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
+        Error, ROOT_BAGGING,
         any::value::{FixedEncoding, FixedValue},
         keyless::operation::Operation as BaseOperation,
         operation::Committable,
-        Error, ROOT_BAGGING,
     },
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -73,10 +73,10 @@ mod test {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner as _,
-        Strategizer as _, Supervisor as _,
+        BufferPooler, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -952,7 +952,7 @@ mod test {
     fn test_keyless_fixed_sync() {
         use crate::{
             merkle::Location,
-            qmdb::sync::{self, engine::Config, Target},
+            qmdb::sync::{self, Target, engine::Config},
         };
         use commonware_utils::{non_empty_range, sequence::U64};
         use std::sync::Arc;

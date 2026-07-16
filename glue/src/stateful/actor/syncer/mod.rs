@@ -1,22 +1,22 @@
 use crate::stateful::{
-    db::{Anchor, DatabaseSet},
     Application,
+    db::{Anchor, DatabaseSet},
 };
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
+    CertifiableBlock, Heightable, Roundable,
     marshal::{
-        core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant},
         Identifier,
+        core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant},
     },
     simplex::types::Finalization,
     types::Height,
-    CertifiableBlock, Heightable, Roundable,
 };
-use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
+use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner};
 use commonware_storage::{
-    metadata::{self, Metadata},
     Context,
+    metadata::{self, Metadata},
 };
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use rand_core::Rng;

@@ -5,17 +5,19 @@
 //! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, fixed, variable},
     },
-    merkle::{self, full, Location},
+    merkle::{self, Location, full},
     qmdb::{
         self,
         any::{
+            FixedConfig, FixedValue, VariableConfig, VariableValue,
             db::Db,
-            operation::{update::Update, Operation},
+            operation::{Operation, update::Update},
             ordered::{
                 fixed::{
                     Db as OrderedFixedDb, Operation as OrderedFixedOp, Update as OrderedFixedUpdate,
@@ -35,18 +37,16 @@ use crate::{
                     Update as UnorderedVariableUpdate,
                 },
             },
-            FixedConfig, FixedValue, VariableConfig, VariableValue,
         },
         metrics::Metrics,
         operation::{Committable, Key},
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_utils::{range::NonEmptyRange, Array};
+use commonware_utils::{Array, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 
 #[cfg(test)]

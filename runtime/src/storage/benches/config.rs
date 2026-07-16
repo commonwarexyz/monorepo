@@ -1,6 +1,6 @@
 //! CLI and configuration types.
 
-use clap::{builder::Styles, error::ErrorKind, value_parser, CommandFactory, Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum, builder::Styles, error::ErrorKind, value_parser};
 use std::{env, fmt, path::PathBuf, time::Duration};
 
 /// Benchmark workload to execute.
@@ -375,7 +375,7 @@ fn parse_byte_size(value: &str) -> Result<u64, String> {
         suffix => {
             return Err(format!(
                 "invalid size suffix `{suffix}` in `{value}`; expected K, M, G, T, KB, MB, GB, TB, KiB, MiB, GiB, or TiB"
-            ))
+            ));
         }
     };
 

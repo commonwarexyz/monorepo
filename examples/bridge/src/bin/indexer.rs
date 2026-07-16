@@ -1,35 +1,36 @@
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
     types::{
         block::BlockFormat,
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
+    Viewable,
     simplex::{scheme::bls12381_threshold::standard as bls12381_threshold, types::Finalization},
     types::View,
-    Viewable,
 };
 use commonware_cryptography::{
+    Digest, Hasher, Sha256, Signer as _,
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
     },
     ed25519::{self, PublicKey},
     sha256::Digest as Sha256Digest,
-    Digest, Hasher, Sha256, Signer as _,
 };
 use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
-use commonware_runtime::{tokio, Listener, Network, Runner, Spawner, Supervisor as _};
-use commonware_stream::encrypted::{listen, Config as StreamConfig};
+use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
+use commonware_stream::encrypted::{Config as StreamConfig, listen};
 use commonware_utils::{
+    TryCollect,
     channel::{mpsc, oneshot},
     ordered::Set,
-    union, TryCollect,
+    union,
 };
 use std::{
     collections::{BTreeMap, HashMap},

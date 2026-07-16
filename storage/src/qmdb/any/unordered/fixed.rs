@@ -1,15 +1,15 @@
 //! An Any database implementation with an unordered key space and fixed-size values.
 
 use crate::{
+    Context,
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     merkle::{Family, Location},
     qmdb::{
-        any::{unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
         Error,
+        any::{FixedConfig as Config, FixedValue, unordered, value::FixedEncoding},
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -49,15 +49,15 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
+        Context,
         index::partitioned::unordered::Index,
         journal::contiguous::fixed::Journal,
         merkle::{Family, Location},
         qmdb::{
-            any::{FixedConfig as Config, FixedValue},
             Error,
+            any::{FixedConfig as Config, FixedValue},
         },
         translator::Translator,
-        Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
@@ -84,15 +84,15 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family,
-            E: Context,
-            K: Array,
-            V: FixedValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, S>
+        F: Family,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, S>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -121,27 +121,27 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         merkle::{
-            mmr::{self, Location},
             Location as GenericLocation,
+            mmr::{self, Location},
         },
         qmdb::{
             any::{
                 test::{fixed_db_config, fixed_db_config_with_strategy},
-                unordered::{fixed::Operation, Update},
+                unordered::{Update, fixed::Operation},
             },
             verify_proof,
         },
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
-        deterministic::{self, Context},
         Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
+        deterministic::{self, Context},
     };
-    use commonware_utils::{NZUsize, TestRng, NZU64};
+    use commonware_utils::{NZU64, NZUsize, TestRng};
     use core::num::NonZeroUsize;
     use futures::FutureExt as _;
     use rand::Rng;

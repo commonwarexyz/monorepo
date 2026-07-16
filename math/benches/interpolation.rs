@@ -1,7 +1,7 @@
 use commonware_math::{fields::goldilocks::F, poly::Interpolator};
-use commonware_utils::{ordered::BiMap, Faults, N3f1, TryFromIterator};
+use commonware_utils::{Faults, N3f1, TryFromIterator, ordered::BiMap};
 use core::num::NonZeroU32;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 fn bench_interpolator_creation(c: &mut Criterion) {
     for &n in &[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {

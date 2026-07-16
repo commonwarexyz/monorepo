@@ -5,6 +5,7 @@ use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::BufferPooler;
 use commonware_storage::{
+    Context,
     journal::contiguous::fixed::Config as FConfig,
     merkle::{
         full::Config as MmrConfig,
@@ -12,12 +13,11 @@ use commonware_storage::{
     },
     qmdb::{
         self,
-        immutable::{fixed, Config},
+        immutable::{Config, fixed},
         sync::compact,
     },
-    Context,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 

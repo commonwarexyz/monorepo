@@ -3,32 +3,32 @@
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, Strategizer};
+use commonware_runtime::{BufferPooler, Strategizer, buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{self, full::Config as MerkleConfig, Family},
+    merkle::{self, Family, full::Config as MerkleConfig},
     qmdb::{
         any::{
+            FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
             ordered::{
-                fixed::{partitioned::p256::Db as OFixP256, Db as OFixed},
+                fixed::{Db as OFixed, partitioned::p256::Db as OFixP256},
                 variable::Db as OVariable,
             },
             traits::{DbAny, UnmerkleizedBatch},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
-            FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
         },
         current::{
+            FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
             ordered::{fixed::Db as OCFixed, variable::Db as OCVariable},
             unordered::{fixed::Db as UCFixed, variable::Db as UCVariable},
-            FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
         },
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
-use rand::{distr::Distribution, Rng};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use rand::{Rng, distr::Distribution};
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
@@ -651,18 +651,18 @@ pub async fn gen_random_kv<F, M>(
                 continue;
             }
             batch = batch.write(rand_key, Some(make_value(&mut rng)));
-            if let Some(freq) = commit_frequency {
-                if rng.next_u32().is_multiple_of(freq) {
-                    let merkleized = batch.merkleize(db, None).await.unwrap();
-                    db.apply_batch(merkleized).await.unwrap();
-                    db.commit().await.unwrap();
-                    commits += 1;
-                    if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
-                        let boundary = db.sync_boundary();
-                        db.prune(boundary).await.unwrap();
-                    }
-                    batch = db.new_batch();
+            if let Some(freq) = commit_frequency
+                && rng.next_u32().is_multiple_of(freq)
+            {
+                let merkleized = batch.merkleize(db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+                commits += 1;
+                if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
+                    let boundary = db.sync_boundary();
+                    db.prune(boundary).await.unwrap();
                 }
+                batch = db.new_batch();
             }
         }
         let merkleized = batch.merkleize(db, None).await.unwrap();

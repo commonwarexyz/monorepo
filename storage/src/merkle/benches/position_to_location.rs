@@ -1,6 +1,6 @@
 use commonware_storage::merkle::{Family, Location, Position};
 use commonware_utils::test_rng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
 

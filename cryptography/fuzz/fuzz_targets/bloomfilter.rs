@@ -2,13 +2,13 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode, EncodeSize};
-use commonware_cryptography::{sha256::Sha256, BloomFilter};
+use commonware_cryptography::{BloomFilter, sha256::Sha256};
 use commonware_utils::rational::BigRationalExt;
 use libfuzzer_sys::fuzz_target;
 use num_rational::BigRational;
 use std::{
     collections::HashSet,
-    num::{NonZeroU16, NonZeroU8, NonZeroUsize},
+    num::{NonZeroU8, NonZeroU16, NonZeroUsize},
 };
 
 #[derive(Arbitrary, Debug)]

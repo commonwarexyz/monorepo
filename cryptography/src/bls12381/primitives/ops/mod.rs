@@ -23,9 +23,9 @@ pub mod batch;
 pub mod threshold;
 
 use super::{
-    group::{Private, DST},
-    variant::Variant,
     Error,
+    group::{DST, Private},
+    variant::Variant,
 };
 use commonware_codec::Encode;
 use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
@@ -576,14 +576,16 @@ mod tests {
         )
         .expect("batch verify of valid vectors should succeed");
 
-        assert!(MinPk::batch_verify(
-            &mut test_rng(),
-            &all_publics,
-            &all_hms,
-            &all_signatures,
-            &Sequential,
-        )
-        .is_err());
+        assert!(
+            MinPk::batch_verify(
+                &mut test_rng(),
+                &all_publics,
+                &all_hms,
+                &all_signatures,
+                &Sequential,
+            )
+            .is_err()
+        );
     }
 
     // sign_case_8cd3d4d0d9a5b265

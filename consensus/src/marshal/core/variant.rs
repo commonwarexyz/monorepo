@@ -12,7 +12,7 @@
 //! mechanisms, though it is required that the digest can be extracted from the commitment
 //! for lookup purposes.
 
-use crate::{simplex::scheme::Scheme, types::Round, Block};
+use crate::{Block, simplex::scheme::Scheme, types::Round};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;

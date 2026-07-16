@@ -41,71 +41,71 @@ pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
-    use super::{relay, Deferred, Inline, Standard};
+    use super::{Deferred, Inline, Standard, relay};
     use crate::{
+        Automaton, CertifiableAutomaton, Heightable, Reporter,
         marshal::{
+            Identifier, Update,
             ancestry::BlockProvider,
             application::gates::Gates,
             config::{Config, Start},
             core::{
-                cache, durability::Durable as _, Actor, CommitmentFallback, DigestFallback, Mailbox,
+                Actor, CommitmentFallback, DigestFallback, Mailbox, cache, durability::Durable as _,
             },
             mocks::{
                 application::Application,
                 harness::{
-                    self, default_leader, make_raw_block, setup_network_links,
-                    setup_network_with_participants, Ctx, DeferredHarness, EmptyProvider,
-                    InlineHarness, StandardHarness, TestHarness, ValidatorHandle, B,
-                    BLOCKS_PER_EPOCH, D, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE,
-                    PAGE_SIZE, QUORUM, S, UNRELIABLE_LINK, V,
+                    self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, EmptyProvider,
+                    InlineHarness, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE,
+                    QUORUM, S, StandardHarness, TestHarness, UNRELIABLE_LINK, V, ValidatorHandle,
+                    default_leader, make_raw_block, setup_network_links,
+                    setup_network_with_participants,
                 },
                 verifying::MockVerifyingApp,
             },
             resolver::handler,
-            Identifier, Update,
         },
         simplex::{
+            Plan,
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{Finalization, Proposal},
-            Plan,
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, CertifiableAutomaton, Heightable, Reporter,
     };
     use bytes::Bytes;
-    use commonware_actor::{mailbox, Feedback};
-    use commonware_broadcast::{buffered, Broadcaster as _};
+    use commonware_actor::{Feedback, mailbox};
+    use commonware_broadcast::{Broadcaster as _, buffered};
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Provider, Scoped, Verifier as _},
+        Digestible, Hasher as _,
+        certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
         ed25519::PublicKey,
         sha256::Sha256,
-        Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        simulated::{self, Network},
         Manager as _, Recipients,
+        simulated::{self, Network},
     };
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
-        Supervisor as _,
+        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
     use commonware_storage::{
-        archive::{immutable, prunable, Archive as _},
+        archive::{Archive as _, immutable, prunable},
         metadata::{self, Metadata},
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
+        Acknowledgement as _, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, oneshot, oneshot::error::TryRecvError},
         ordered::Set,
         sequence::U64,
         sync::Mutex,
         vec::NonEmptyVec,
-        Acknowledgement as _, NZUsize, NZU16, NZU64,
     };
     use std::{
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -1454,10 +1454,12 @@ mod tests {
 
             // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
             // recorded a pending anchor before the buffer delivers the block.
-            assert!(mailbox
-                .get_block(Identifier::Height(Height::new(ANCHOR_HEIGHT)))
-                .await
-                .is_none());
+            assert!(
+                mailbox
+                    .get_block(Identifier::Height(Height::new(ANCHOR_HEIGHT)))
+                    .await
+                    .is_none()
+            );
 
             // Deliver the anchor through the broadcast buffer, completing the waiter.
             let _ = buffer.broadcast(Recipients::All, anchor.clone());
@@ -1554,10 +1556,12 @@ mod tests {
 
             // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
             // recorded the pending anchor.
-            assert!(mailbox
-                .get_block(Identifier::Height(Height::new(ANCHOR_HEIGHT)))
-                .await
-                .is_none());
+            assert!(
+                mailbox
+                    .get_block(Identifier::Height(Height::new(ANCHOR_HEIGHT)))
+                    .await
+                    .is_none()
+            );
 
             // Links come up only now, so the anchor can only arrive through
             // the resolver fetch started by `set_floor`.
@@ -4042,19 +4046,21 @@ mod tests {
                 })
                 .expect("floor fetch missing");
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: floor_fetch.key,
-                        subscribers: NonEmptyVec::new((
-                            floor_fetch.subscriber,
-                            tracing::Span::none()
-                        )),
-                    },
-                    value: floor_block.encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: floor_fetch.key,
+                            subscribers: NonEmptyVec::new((
+                                floor_fetch.subscriber,
+                                tracing::Span::none()
+                            )),
+                        },
+                        value: floor_block.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 response_rx.await.expect("delivery response missing"),
                 "floor block delivery should validate"
@@ -4563,19 +4569,21 @@ mod tests {
                 })
                 .expect("old floor fetch missing");
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: old_floor_fetch.key,
-                        subscribers: NonEmptyVec::new((
-                            old_floor_fetch.subscriber,
-                            tracing::Span::none()
-                        )),
-                    },
-                    value: old_floor_block.encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: old_floor_fetch.key,
+                            subscribers: NonEmptyVec::new((
+                                old_floor_fetch.subscriber,
+                                tracing::Span::none()
+                            )),
+                        },
+                        value: old_floor_block.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 response_rx
                     .await
@@ -4597,19 +4605,21 @@ mod tests {
                 })
                 .expect("new floor fetch missing");
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: new_floor_fetch.key,
-                        subscribers: NonEmptyVec::new((
-                            new_floor_fetch.subscriber,
-                            tracing::Span::none()
-                        )),
-                    },
-                    value: new_floor_block.encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: new_floor_fetch.key,
+                            subscribers: NonEmptyVec::new((
+                                new_floor_fetch.subscriber,
+                                tracing::Span::none()
+                            )),
+                        },
+                        value: new_floor_block.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 response_rx
                     .await
@@ -5331,19 +5341,21 @@ mod tests {
             .await;
 
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Notarized { round },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Notarization { round },
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: (notarization, block.clone()).encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Notarized { round },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Notarization { round },
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (notarization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 response_rx.await.expect("delivery response missing"),
                 "notarized delivery should validate"
@@ -5389,23 +5401,25 @@ mod tests {
             .await;
 
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Notarized {
-                            round: requested_round,
-                        },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Notarization {
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Notarized {
                                 round: requested_round,
                             },
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: (notarization, block).encode(),
-                    response,
-                })
-                .accepted());
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Notarization {
+                                    round: requested_round,
+                                },
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (notarization, block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 !response_rx.await.expect("delivery response missing"),
                 "wrong-round notarized delivery must not satisfy the request"
@@ -5436,19 +5450,21 @@ mod tests {
             .await;
 
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Notarized { round },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Notarization { round },
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: (notarization, block).encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Notarized { round },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Notarization { round },
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (notarization, block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 response_rx.await.expect("delivery response missing"),
                 "stale notarized delivery should acknowledge without blaming the peer"
@@ -5480,19 +5496,23 @@ mod tests {
             .await;
 
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Finalized { height },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: (finalization, block).encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 response_rx.await.expect("delivery response missing"),
                 "finalization verified through a verify-only scope should be accepted"
@@ -5527,19 +5547,23 @@ mod tests {
             .await;
 
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Finalized { height },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: (finalization, block).encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 !response_rx.await.expect("delivery response missing"),
                 "finalization whose epoch mismatches the height's epoch must blame the peer"
@@ -5900,19 +5924,21 @@ mod tests {
             .await;
 
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Notarized { round },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Notarization { round },
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: (notarization, block.clone()).encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Notarized { round },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Notarization { round },
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (notarization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 response_rx.await.expect("delivery response missing"),
                 "notarized delivery should validate"
@@ -6216,44 +6242,48 @@ mod tests {
             // provider has no verifier, so the marshal cannot decode it and
             // must ack (true) rather than blame the peer (false).
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver_tx
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Finalized {
-                            height: Height::new(5),
-                        },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Finalized(handler::Finalized::ByHeight {
+            assert!(
+                resolver_tx
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized {
                                 height: Height::new(5),
-                            }),
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: Bytes::from_static(b"unverifiable"),
-                    response,
-                })
-                .accepted());
+                            },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height: Height::new(5),
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: Bytes::from_static(b"unverifiable"),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(response_rx.await.unwrap());
 
             // Same for a Notarized delivery.
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver_tx
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Notarized {
-                            round: Round::new(Epoch::zero(), View::new(1)),
-                        },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Notarization {
+            assert!(
+                resolver_tx
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Notarized {
                                 round: Round::new(Epoch::zero(), View::new(1)),
                             },
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: Bytes::from_static(b"unverifiable"),
-                    response,
-                })
-                .accepted());
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Notarization {
+                                    round: Round::new(Epoch::zero(), View::new(1)),
+                                },
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: Bytes::from_static(b"unverifiable"),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(response_rx.await.unwrap());
         });
     }
@@ -6767,52 +6797,58 @@ mod tests {
             // anchor.
             let next = make_raw_block(block.digest(), Height::new(2), 200);
             let (next_response, next_response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Block(StandardHarness::commitment(&next)),
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                height: Height::new(2),
-                            }),
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: next.encode(),
-                    response: next_response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(StandardHarness::commitment(&next)),
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height: Height::new(2),
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: next.encode(),
+                        response: next_response,
+                    })
+                    .accepted()
+            );
             let above = make_raw_block(next.digest(), Height::new(3), 300);
             let (above_response, above_response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Block(StandardHarness::commitment(&above)),
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                height: Height::new(3),
-                            }),
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: above.encode(),
-                    response: above_response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(StandardHarness::commitment(&above)),
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height: Height::new(3),
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: above.encode(),
+                        response: above_response,
+                    })
+                    .accepted()
+            );
             let (anchor_response, anchor_response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: anchor_fetch.key,
-                        subscribers: NonEmptyVec::new((
-                            anchor_fetch.subscriber,
-                            tracing::Span::none()
-                        )),
-                    },
-                    value: fork.encode(),
-                    response: anchor_response,
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: anchor_fetch.key,
+                            subscribers: NonEmptyVec::new((
+                                anchor_fetch.subscriber,
+                                tracing::Span::none()
+                            )),
+                        },
+                        value: fork.encode(),
+                        response: anchor_response,
+                    })
+                    .accepted()
+            );
             let delivered_at = context.current();
             assert!(
                 next_response_rx.await.expect("repair response missing"),

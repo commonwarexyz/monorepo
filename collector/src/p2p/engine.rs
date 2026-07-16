@@ -1,17 +1,16 @@
 use super::{
-    ingress::{Mailbox, Message},
     Config,
+    ingress::{Mailbox, Message},
 };
 use crate::p2p::{Handler, Monitor};
 use commonware_actor::mailbox;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
+use commonware_p2p::{Blocker, Receiver, Recipients, Sender, utils::codec::wrap};
 use commonware_runtime::{
-    spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{channel::oneshot, futures::Pool};
 use std::collections::{HashMap, HashSet};

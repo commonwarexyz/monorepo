@@ -1,21 +1,21 @@
 use super::{
-    ingress::{Mailbox, Message},
     Config,
+    ingress::{Mailbox, Message},
 };
 use crate::{
+    Scheme,
     types::{
         block::BlockFormat,
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    Scheme,
 };
 use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Activity, Viewable};
+use commonware_consensus::{Viewable, simplex::types::Activity};
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
+    bls12381::primitives::variant::{MinSig, Variant},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Metrics, Sink, Spawner, Stream};

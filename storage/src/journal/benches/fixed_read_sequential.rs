@@ -3,9 +3,9 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
 };
-use commonware_storage::journal::contiguous::{fixed::Journal, Contiguous as _};
-use commonware_utils::{sequence::FixedBytes, NZU64};
-use criterion::{criterion_group, Criterion};
+use commonware_storage::journal::contiguous::{Contiguous as _, fixed::Journal};
+use commonware_utils::{NZU64, sequence::FixedBytes};
+use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     num::NonZeroU64,

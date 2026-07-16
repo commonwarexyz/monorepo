@@ -260,8 +260,8 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
-        Storage as _,
+        Blob, BufferPoolConfig, Storage as _, storage::tests::run_storage_tests,
+        telemetry::metrics::Registry,
     };
     use commonware_utils::sys_rng;
     use rand::RngExt as _;

@@ -8,16 +8,16 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
+    Context,
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     merkle::{Graftable, Location},
     qmdb::{
-        any::{unordered::fixed::Operation, value::FixedEncoding, FixedValue},
-        current::FixedConfig as Config,
         Error,
+        any::{FixedValue, unordered::fixed::Operation, value::FixedEncoding},
+        current::FixedConfig as Config,
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -37,15 +37,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 >;
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context,
+    K: Array,
+    V: FixedValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, K, V, H, T, N, S>
 {
     /// Initializes a [Db] authenticated database from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -83,16 +83,16 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable,
-            E: Context,
-            K: Array,
-            V: FixedValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            const N: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, N, S>
+        F: Graftable,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -110,9 +110,9 @@ pub mod test {
         qmdb::current::{tests::fixed_config, unordered::tests as shared},
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
+    use commonware_runtime::{Metrics, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::TestRng;
     use rand::Rng as _;
     use std::collections::HashMap;

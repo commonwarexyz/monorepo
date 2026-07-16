@@ -1,7 +1,7 @@
 //! Benchmark: `hex()` encoding.
 
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use criterion::{Criterion, criterion_group};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::hint::black_box;
 
 fn bench_encode(c: &mut Criterion) {

@@ -98,22 +98,22 @@ use super::{
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
 };
+use crate::{
+    Context,
+    journal::{
+        Error,
+        contiguous::{Many, Mutable, metrics::Metrics},
+    },
+};
 #[commonware_macros::stability(ALPHA)]
 use crate::{journal::authenticated, merkle};
-use crate::{
-    journal::{
-        contiguous::{metrics::Metrics, Many, Mutable},
-        Error,
-    },
-    Context,
-};
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Writer},
     Blob as RBlob, Buf, IoBuf,
+    buffer::paged::{CacheRef, Writer},
 };
 use commonware_utils::Cached;
-use futures::{future::try_join_all, Stream};
+use futures::{Stream, future::try_join_all};
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -474,11 +474,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 drop(pending.remove(&newest));
                 partition.remove(newest).await?;
             }
-            if let Some(writer) = pending.get_mut(&tail_blob) {
-                if truncate_to < writer.size() {
-                    writer.resize(truncate_to).await.map_err(Error::Runtime)?;
-                    writer.sync().await.map_err(Error::Runtime)?;
-                }
+            if let Some(writer) = pending.get_mut(&tail_blob)
+                && truncate_to < writer.size()
+            {
+                writer.resize(truncate_to).await.map_err(Error::Runtime)?;
+                writer.sync().await.map_err(Error::Runtime)?;
             }
         }
 
@@ -1486,16 +1486,16 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::Contiguous as _;
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::Writer,
-        deterministic::{self, Context},
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
         Supervisor as _,
+        buffer::paged::Writer,
+        deterministic::{self, Context},
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
-    use futures::{pin_mut, StreamExt};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);

@@ -46,7 +46,7 @@ impl CounterNonce {
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
-        use aws_lc_rs::aead::{self, LessSafeKey, UnboundKey, CHACHA20_POLY1305};
+        use aws_lc_rs::aead::{self, CHACHA20_POLY1305, LessSafeKey, UnboundKey};
 
         struct Cipher(LessSafeKey);
 
@@ -83,7 +83,7 @@ cfg_if::cfg_if! {
             }
         }
     } else {
-        use chacha20poly1305::{aead::AeadInPlace, ChaCha20Poly1305, KeyInit as _};
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, aead::AeadInPlace};
 
         struct Cipher(ChaCha20Poly1305);
 
@@ -232,7 +232,7 @@ impl RecvCipher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::{test_rng, TestRng};
+    use commonware_utils::{TestRng, test_rng};
 
     #[test]
     fn test_send_recv_roundtrip() {

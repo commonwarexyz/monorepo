@@ -6,14 +6,14 @@
 use crate::{
     common::Digest,
     merkleize::{
-        any_fix_cfg_with_cache, cur_fix_cfg_with_cache, AnyUFix, BenchOptions, CurOFix256Mmb,
-        MerkleizeWorkload, Variant, LARGE_PAGE_CACHE_SIZE, PAGE_SIZE,
+        AnyUFix, BenchOptions, CurOFix256Mmb, LARGE_PAGE_CACHE_SIZE, MerkleizeWorkload, PAGE_SIZE,
+        Variant, any_fix_cfg_with_cache, cur_fix_cfg_with_cache,
     },
 };
 use commonware_runtime::{
+    Runner as _, Supervisor as _,
     buffer::paged::CacheRef,
     tokio::{Config, Context, Runner},
-    Runner as _, Supervisor as _,
 };
 use commonware_storage::merkle::mmr::Family as MmrFamily;
 use gungraun::{library_benchmark, library_benchmark_group};

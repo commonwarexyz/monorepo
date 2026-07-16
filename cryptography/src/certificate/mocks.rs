@@ -2,15 +2,15 @@
 
 use super::{Attestation, Scheme, Signers, Subject, Verification};
 use crate::{
-    ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
     Digest, PublicKey,
+    ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
 };
 use bytes::Bytes;
 use commonware_utils::{
+    Faults, Participant,
     ordered::{Quorum, Set},
     sequence::U64,
     sync::Mutex,
-    Faults, Participant,
 };
 use core::fmt;
 use rand_core::CryptoRng;
@@ -518,11 +518,11 @@ macro_rules! impl_certificate_mock {
         }
 
         impl<
-                P: $crate::PublicKey,
-                const ATTRIBUTABLE: bool,
-                const BATCHABLE: bool,
-                const ALLOW_INVALID: bool,
-            > Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+            P: $crate::PublicKey,
+            const ATTRIBUTABLE: bool,
+            const BATCHABLE: bool,
+            const ALLOW_INVALID: bool,
+        > Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
             pub fn signer(
                 namespace: &[u8],
@@ -556,11 +556,11 @@ macro_rules! impl_certificate_mock {
         }
 
         impl<
-                P: $crate::PublicKey,
-                const ATTRIBUTABLE: bool,
-                const BATCHABLE: bool,
-                const ALLOW_INVALID: bool,
-            > $crate::certificate::Verifier for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+            P: $crate::PublicKey,
+            const ATTRIBUTABLE: bool,
+            const BATCHABLE: bool,
+            const ALLOW_INVALID: bool,
+        > $crate::certificate::Verifier for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
@@ -614,8 +614,8 @@ macro_rules! impl_certificate_mock {
                 self.generic.certificate_codec_config()
             }
 
-            fn certificate_codec_config_unbounded(
-            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+            fn certificate_codec_config_unbounded()
+            -> <Self::Certificate as commonware_codec::Read>::Cfg {
                 $crate::certificate::mocks::Generic::<
                     P,
                     $namespace,
@@ -627,11 +627,11 @@ macro_rules! impl_certificate_mock {
         }
 
         impl<
-                P: $crate::PublicKey,
-                const ATTRIBUTABLE: bool,
-                const BATCHABLE: bool,
-                const ALLOW_INVALID: bool,
-            > $crate::certificate::Scheme for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+            P: $crate::PublicKey,
+            const ATTRIBUTABLE: bool,
+            const BATCHABLE: bool,
+            const ALLOW_INVALID: bool,
+        > $crate::certificate::Scheme for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
             type Signature = commonware_utils::sequence::U64;
 
@@ -717,7 +717,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_parallel::Sequential;
-    use commonware_utils::{sequence::U64, test_rng, N3f1, Participant};
+    use commonware_utils::{N3f1, Participant, sequence::U64, test_rng};
 
     #[derive(Clone, Copy, Debug)]
     pub struct TestSubject<'a> {
@@ -829,13 +829,15 @@ mod tests {
             Scheme::<Ed25519PublicKey>::certificate_codec_config_unbounded(),
             ()
         );
-        assert!(Scheme::<Ed25519PublicKey>::signer(
-            b"mock-scheme",
-            fixture.verifier.participants().clone(),
-            Participant::new(99),
-            Shared::default(),
-        )
-        .is_none());
+        assert!(
+            Scheme::<Ed25519PublicKey>::signer(
+                b"mock-scheme",
+                fixture.verifier.participants().clone(),
+                Participant::new(99),
+                Shared::default(),
+            )
+            .is_none()
+        );
         assert!(fixture.verifier.sign::<Sha256Digest>(subject).is_none());
         assert!(cloned.sign::<Sha256Digest>(subject).is_some());
         assert!(format!("{cloned:?}").contains("participants"));
@@ -861,25 +863,31 @@ mod tests {
             .sign::<Sha256Digest>(subject)
             .expect("foreign signer must produce an attestation");
 
-        assert!(!scheme_fixture
-            .verifier
-            .verify_attestation::<_, Sha256Digest>(
-                &mut rng,
-                subject,
-                &invalid_signer,
-                &Sequential,
-            ));
-        assert!(!scheme_fixture
-            .verifier
-            .verify_attestation::<_, Sha256Digest>(
-                &mut rng,
-                subject,
-                &missing_signature,
-                &Sequential,
-            ));
-        assert!(!scheme_fixture
-            .verifier
-            .verify_attestation::<_, Sha256Digest>(&mut rng, subject, &foreign, &Sequential,));
+        assert!(
+            !scheme_fixture
+                .verifier
+                .verify_attestation::<_, Sha256Digest>(
+                    &mut rng,
+                    subject,
+                    &invalid_signer,
+                    &Sequential,
+                )
+        );
+        assert!(
+            !scheme_fixture
+                .verifier
+                .verify_attestation::<_, Sha256Digest>(
+                    &mut rng,
+                    subject,
+                    &missing_signature,
+                    &Sequential,
+                )
+        );
+        assert!(
+            !scheme_fixture
+                .verifier
+                .verify_attestation::<_, Sha256Digest>(&mut rng, subject, &foreign, &Sequential,)
+        );
     }
 
     #[test]
@@ -979,16 +987,18 @@ mod tests {
                     &Sequential,
                 )
         );
-        assert!(!fixture
-            .verifier
-            .verify_certificate::<_, Sha256Digest, N3f1>(
-                &mut rng,
-                TestSubject {
-                    message: b"other-subject",
-                },
-                &decoded,
-                &Sequential,
-            ));
+        assert!(
+            !fixture
+                .verifier
+                .verify_certificate::<_, Sha256Digest, N3f1>(
+                    &mut rng,
+                    TestSubject {
+                        message: b"other-subject",
+                    },
+                    &decoded,
+                    &Sequential,
+                )
+        );
     }
 
     #[test]
@@ -1045,30 +1055,34 @@ mod tests {
         let fixture = fixture(&mut rng, b"mock-scheme", 4);
         let subject = TestSubject { message: b"vote-1" };
 
-        assert!(fixture
-            .verifier
-            .assemble::<_, N3f1>(
-                [
-                    fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
-                    fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
-                ],
-                &Sequential,
-            )
-            .is_none());
+        assert!(
+            fixture
+                .verifier
+                .assemble::<_, N3f1>(
+                    [
+                        fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
+                        fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
+                    ],
+                    &Sequential,
+                )
+                .is_none()
+        );
 
-        assert!(fixture
-            .verifier
-            .assemble::<_, N3f1>(
-                [
-                    fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
-                    fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
-                    fixture.schemes[2]
-                        .sign::<Sha256Digest>(TestSubject { message: b"vote-2" })
-                        .unwrap(),
-                ],
-                &Sequential,
-            )
-            .is_none());
+        assert!(
+            fixture
+                .verifier
+                .assemble::<_, N3f1>(
+                    [
+                        fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
+                        fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
+                        fixture.schemes[2]
+                            .sign::<Sha256Digest>(TestSubject { message: b"vote-2" })
+                            .unwrap(),
+                    ],
+                    &Sequential,
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -1121,36 +1135,44 @@ mod tests {
             .unwrap();
         let missing = U64::new(u64::MAX);
 
-        assert!(!fixture
-            .verifier
-            .verify_certificate::<_, Sha256Digest, N3f1>(
-                &mut rng,
-                subject_a,
-                &certificate_b,
-                &Sequential,
-            ));
-        assert!(!fixture
-            .verifier
-            .verify_certificate::<_, Sha256Digest, N3f1>(
-                &mut rng,
-                subject_b,
-                &missing,
-                &Sequential,
-            ));
-        assert!(fixture
-            .verifier
-            .verify_certificates::<_, Sha256Digest, _, N3f1>(
-                &mut rng,
-                [(subject_a, &certificate_a), (subject_b, &certificate_b)].into_iter(),
-                &Sequential,
-            ));
-        assert!(!fixture
-            .verifier
-            .verify_certificates::<_, Sha256Digest, _, N3f1>(
-                &mut rng,
-                [(subject_a, &certificate_a), (subject_b, &missing)].into_iter(),
-                &Sequential,
-            ));
+        assert!(
+            !fixture
+                .verifier
+                .verify_certificate::<_, Sha256Digest, N3f1>(
+                    &mut rng,
+                    subject_a,
+                    &certificate_b,
+                    &Sequential,
+                )
+        );
+        assert!(
+            !fixture
+                .verifier
+                .verify_certificate::<_, Sha256Digest, N3f1>(
+                    &mut rng,
+                    subject_b,
+                    &missing,
+                    &Sequential,
+                )
+        );
+        assert!(
+            fixture
+                .verifier
+                .verify_certificates::<_, Sha256Digest, _, N3f1>(
+                    &mut rng,
+                    [(subject_a, &certificate_a), (subject_b, &certificate_b)].into_iter(),
+                    &Sequential,
+                )
+        );
+        assert!(
+            !fixture
+                .verifier
+                .verify_certificates::<_, Sha256Digest, _, N3f1>(
+                    &mut rng,
+                    [(subject_a, &certificate_a), (subject_b, &missing)].into_iter(),
+                    &Sequential,
+                )
+        );
     }
 
     #[test]

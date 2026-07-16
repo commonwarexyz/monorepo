@@ -81,7 +81,7 @@
 //! ```
 
 use crate::merkle::{
-    hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
+    Error, Family, Location, Position, Readable, hasher::Hasher, mem::Mem, path, proof::Proof,
 };
 use ahash::RandomState;
 use alloc::{
@@ -653,9 +653,9 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard, mem::Mem, Bagging::ForwardFold};
-    use commonware_cryptography::{sha256, Sha256};
-    use commonware_runtime::{deterministic, Runner as _};
+    use crate::merkle::{Bagging::ForwardFold, hasher::Standard, mem::Mem};
+    use commonware_cryptography::{Sha256, sha256};
+    use commonware_runtime::{Runner as _, deterministic};
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;

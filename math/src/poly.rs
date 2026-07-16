@@ -1,11 +1,11 @@
 use crate::algebra::{
-    msm_naive, powers, Additive, CryptoGroup, Field, Object, Random, Ring, Space,
+    Additive, CryptoGroup, Field, Object, Random, Ring, Space, msm_naive, powers,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_parallel::Strategy;
-use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
+use commonware_utils::{TryCollect, non_empty_vec, ordered::Map, vec::NonEmptyVec};
 use core::{
     fmt::Debug,
     iter,
@@ -583,8 +583,8 @@ pub mod fuzz {
     use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
     use commonware_utils::{
-        ordered::{BiMap, Map},
         TryFromIterator,
+        ordered::{BiMap, Map},
     };
 
     #[derive(Debug, Arbitrary)]

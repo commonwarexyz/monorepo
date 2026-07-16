@@ -1,8 +1,8 @@
 use crate::{
-    marshal::core::{durability::Durable as _, Mailbox, Variant},
+    marshal::core::{Mailbox, Variant, durability::Durable as _},
     types::Round,
 };
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::Handle;
 use commonware_utils::{
@@ -196,7 +196,10 @@ pub(crate) async fn drive<D, F, Fut>(
 {
     let result = select! {
         _ = tx.closed() => {
-            debug!(reason = "consensus dropped receiver", "skipping certification");
+            debug!(
+                reason = "consensus dropped receiver",
+                "skipping certification"
+            );
             return;
         },
         result = task => result,
@@ -214,7 +217,10 @@ pub(crate) async fn drive<D, F, Fut>(
             let fallback = fallback().await;
             let result = select! {
                 _ = tx.closed() => {
-                    debug!(reason = "consensus dropped receiver", "skipping certification");
+                    debug!(
+                        reason = "consensus dropped receiver",
+                        "skipping certification"
+                    );
                     return;
                 },
                 result = fallback => result,
@@ -230,8 +236,8 @@ pub(crate) async fn drive<D, F, Fut>(
 mod tests {
     use super::*;
     use crate::types::{Epoch, View};
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, Sha256};
-    use commonware_runtime::{deterministic, Runner, Spawner};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
+    use commonware_runtime::{Runner, Spawner, deterministic};
 
     type D = Sha256Digest;
     type TestGates = Gates<D, u64>;

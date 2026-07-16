@@ -1,12 +1,12 @@
 use super::Error;
 use crate::{
+    Channel, Message as NetworkMessage, Recipients,
     authenticated::lookup::actors::router::{self, Messenger},
     utils::limited::{CheckedSender, LimitedSender},
-    Channel, Message as NetworkMessage, Recipients,
 };
 use commonware_actor::{
-    mailbox::{self, UnreliablePolicy},
     Feedback, Unreliable,
+    mailbox::{self, UnreliablePolicy},
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Metrics, Quota};

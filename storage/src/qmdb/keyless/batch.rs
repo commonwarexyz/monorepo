@@ -1,15 +1,15 @@
 //! Batch mutation API for Keyless QMDBs.
 
-use super::{operation::Operation, Keyless};
+use super::{Keyless, operation::Operation};
 use crate::{
+    Context,
     journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location},
     qmdb::{
+        Error,
         any::value::ValueEncoding,
         batch_chain::{self, Bounds},
-        Error,
     },
-    Context,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
@@ -72,7 +72,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 }
@@ -166,12 +166,11 @@ where
 
         // Check parent operation chain. If the ancestor was freed, read_chain_op returns None
         // and we fall through to the DB.
-        if let Some(parent) = self.parent.as_ref() {
-            if loc_val >= self.db_size {
-                if let Some(op) = read_chain_op(parent, loc_val) {
-                    return Ok(op.into_value());
-                }
-            }
+        if let Some(parent) = self.parent.as_ref()
+            && loc_val >= self.db_size
+            && let Some(op) = read_chain_op(parent, loc_val)
+        {
+            return Ok(op.into_value());
         }
 
         // Fall through to base DB.
@@ -217,13 +216,12 @@ where
             }
 
             // Check parent operation chain.
-            if let Some(parent) = self.parent.as_ref() {
-                if loc_val >= self.db_size {
-                    if let Some(op) = read_chain_op(parent, loc_val) {
-                        results.push(op.into_value());
-                        continue;
-                    }
-                }
+            if let Some(parent) = self.parent.as_ref()
+                && loc_val >= self.db_size
+                && let Some(op) = read_chain_op(parent, loc_val)
+            {
+                results.push(op.into_value());
+                continue;
             }
 
             // Need DB fallthrough -- record index for reassembly.
@@ -333,10 +331,10 @@ where
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
         // freed, fall through to the committed DB.
-        if loc_val >= self.bounds.db_size {
-            if let Some(op) = read_chain_op(self, loc_val) {
-                return Ok(op.into_value());
-            }
+        if loc_val >= self.bounds.db_size
+            && let Some(op) = read_chain_op(self, loc_val)
+        {
+            return Ok(op.into_value());
         }
 
         // Fall through to base DB.
@@ -371,11 +369,11 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc_val >= self.bounds.db_size {
-                if let Some(op) = read_chain_op(self, loc_val) {
-                    results.push(op.into_value());
-                    continue;
-                }
+            if loc_val >= self.bounds.db_size
+                && let Some(op) = read_chain_op(self, loc_val)
+            {
+                results.push(op.into_value());
+                continue;
             }
 
             db_indices.push(i);

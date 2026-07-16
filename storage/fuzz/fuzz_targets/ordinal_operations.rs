@@ -1,12 +1,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, deterministic};
 use commonware_storage::{
     ordinal::{Config, Ordinal},
     utils::bits_for_indices,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -173,12 +173,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 OrdinalOperation::Sync => {
-                    if let Some(ordinal) = store.as_mut() {
-                        if ordinal.sync().await.is_ok() {
+                    if let Some(ordinal) = store.as_mut()
+                        && ordinal.sync().await.is_ok() {
                             // After sync, all expected data should be persisted
                             synced_data = expected_data.clone();
                         }
-                    }
                 }
 
                 OrdinalOperation::Prune { min } => {

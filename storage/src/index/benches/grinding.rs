@@ -13,10 +13,10 @@
 use super::DummyMetrics;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
-    index::{partitioned, Unordered},
+    index::{Unordered, partitioned},
     translator::Cap,
 };
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     time::{Duration, Instant},

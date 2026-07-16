@@ -1456,7 +1456,7 @@ mod tests {
     fn test_set_chunk_by_index_accepts_valid_partial_chunk() {
         let mut p = Prunable::<4>::new();
         p.extend_to(35); // 1 full chunk + 3 bits in chunk 1
-                         // Only the low 3 bits of byte 0 are valid; rest must be zero.
+        // Only the low 3 bits of byte 0 are valid; rest must be zero.
         p.set_chunk_by_index(1, &[0b0000_0111, 0, 0, 0]);
         assert_eq!(p.get_chunk(1), &[0b0000_0111, 0, 0, 0]);
     }
@@ -1465,7 +1465,7 @@ mod tests {
     fn test_set_chunk_by_index_accepts_full_chunk() {
         let mut p = Prunable::<4>::new();
         p.extend_to(64); // 2 full chunks
-                         // Full chunk: any byte pattern is valid.
+        // Full chunk: any byte pattern is valid.
         p.set_chunk_by_index(1, &[0xFF; 4]);
         assert_eq!(p.get_chunk(1), &[0xFF; 4]);
     }
@@ -1475,7 +1475,7 @@ mod tests {
     fn test_set_chunk_by_index_rejects_high_bits_in_last_byte() {
         let mut p = Prunable::<4>::new();
         p.extend_to(35); // 3 valid bits in chunk 1
-                         // Bit 3 (0b0000_1000) is beyond len.
+        // Bit 3 (0b0000_1000) is beyond len.
         p.set_chunk_by_index(1, &[0b0000_1000, 0, 0, 0]);
     }
 
@@ -1484,7 +1484,7 @@ mod tests {
     fn test_set_chunk_by_index_rejects_nonzero_trailing_bytes() {
         let mut p = Prunable::<4>::new();
         p.extend_to(35); // 3 valid bits in chunk 1
-                         // Byte 1 is entirely beyond len.
+        // Byte 1 is entirely beyond len.
         p.set_chunk_by_index(1, &[0, 0xFF, 0, 0]);
     }
 

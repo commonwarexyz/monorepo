@@ -1,11 +1,12 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_storage::merkle::{
+    Bagging, Family as MerkleFamily, Location,
     hasher::Standard,
     mem::{Config, Mem},
-    mmb, mmr, Bagging, Family as MerkleFamily, Location,
+    mmb, mmr,
 };
 use libfuzzer_sys::fuzz_target;
 

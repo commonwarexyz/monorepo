@@ -4,14 +4,14 @@
 //! Tests both MMR and MMB families.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::merkle::{
-    full::Config, hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold,
-    Family as MerkleFamily, Location,
+    Bagging::ForwardFold, Family as MerkleFamily, Location, full::Config,
+    hasher::Standard as StandardHasher, mmb, mmr,
 };
 use commonware_utils::NZU64;
 use libfuzzer_sys::fuzz_target;

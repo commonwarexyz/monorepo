@@ -1,6 +1,6 @@
 //! Codec utility functions
 
-use crate::{extensions::ReadExt as _, Error};
+use crate::{Error, extensions::ReadExt as _};
 use bytes::Buf;
 
 /// Checks if the buffer has at least `len` bytes remaining. Returns an [Error::EndOfBuffer] if not.

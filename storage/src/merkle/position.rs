@@ -1,6 +1,6 @@
-use super::{location::Location, Family};
+use super::{Family, location::Location};
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, ReadExt};
+use commonware_codec::{ReadExt, varint::UInt};
 use core::{
     fmt,
     marker::PhantomData,
@@ -357,7 +357,7 @@ mod tests {
     use super::{Location as GenericLocation, Position as GenericPosition};
     use crate::{
         merkle::{Bagging::ForwardFold, Family as _},
-        mmr::{self, mem::Mmr, StandardHasher as Standard},
+        mmr::{self, StandardHasher as Standard, mem::Mmr},
     };
     use commonware_cryptography::Sha256;
 
@@ -401,9 +401,11 @@ mod tests {
 
         // Exceeding MAX_NODES returns None, but MAX_NODES itself IS valid (inclusive bound)
         assert!(mmr::Family::MAX_NODES.checked_add(1).is_none());
-        assert!(Position::new(*mmr::Family::MAX_NODES - 5)
-            .checked_add(10)
-            .is_none());
+        assert!(
+            Position::new(*mmr::Family::MAX_NODES - 5)
+                .checked_add(10)
+                .is_none()
+        );
         // MAX_NODES - 10 + 10 = MAX_NODES, which IS valid (inclusive bound)
         assert_eq!(
             Position::new(*mmr::Family::MAX_NODES - 10)
@@ -594,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_read_cfg_invalid_values() {
-        use commonware_codec::{varint::UInt, Encode, ReadExt};
+        use commonware_codec::{Encode, ReadExt, varint::UInt};
 
         // Encode MAX_NODES + 1 as a raw varint, then try to decode as Position
         let invalid_value = *mmr::Family::MAX_NODES + 1;

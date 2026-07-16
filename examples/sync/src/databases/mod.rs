@@ -218,10 +218,10 @@ pub trait CompactSyncable: ExampleDatabase {
 #[cfg(test)]
 mod tests {
     use super::{
-        immutable, immutable_compact, keyless, keyless_compact, DatabaseType, ExampleDatabase,
-        SyncMode,
+        DatabaseType, ExampleDatabase, SyncMode, immutable, immutable_compact, keyless,
+        keyless_compact,
     };
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
     #[test]
     fn test_supported_client_mode_matrix() {

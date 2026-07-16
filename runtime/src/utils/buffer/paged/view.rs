@@ -265,8 +265,8 @@ fn map_misses(
 
 #[cfg(test)]
 mod tests {
-    use crate::{buffer::paged::Writer, deterministic, Runner as _, Storage as _};
-    use commonware_utils::{NZUsize, NZU16};
+    use crate::{Runner as _, Storage as _, buffer::paged::Writer, deterministic};
+    use commonware_utils::{NZU16, NZUsize};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);

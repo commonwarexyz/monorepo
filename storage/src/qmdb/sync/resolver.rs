@@ -1,8 +1,10 @@
 use crate::{
+    Context,
     merkle::{Family, Location, Proof},
     qmdb::{
         self,
         any::{
+            FixedValue, VariableValue,
             ordered::{
                 fixed::{Db as OrderedFixedDb, Operation as OrderedFixedOperation},
                 variable::{Db as OrderedVariableDb, Operation as OrderedVariableOperation},
@@ -11,7 +13,6 @@ use crate::{
                 fixed::{Db as FixedDb, Operation as FixedOperation},
                 variable::{Db as VariableDb, Operation as VariableOperation},
             },
-            FixedValue, VariableValue,
         },
         immutable::{
             fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
@@ -24,14 +25,13 @@ use crate::{
         operation::Key,
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
+    Array,
     channel::oneshot,
     sync::{AsyncRwLock, TracedAsyncRwLock},
-    Array,
 };
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
@@ -219,8 +219,8 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         include_pinned_nodes: bool,
         cancel_rx: oneshot::Receiver<()>,
     ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
-           + Send
-           + 'a;
+    + Send
+    + 'a;
 }
 
 macro_rules! impl_resolver {
@@ -624,7 +624,7 @@ pub(crate) mod tests {
         merkle::mmr,
         translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest as ShaDigest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_parallel::Rayon;
     use commonware_runtime::deterministic;
     use commonware_utils::sync::AsyncRwLock;

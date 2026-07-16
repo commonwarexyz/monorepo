@@ -3,8 +3,8 @@
 use commonware_actor::mailbox::{Policy, Sender};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
-    bls12381::primitives::{group, sharing::Sharing, variant::Variant},
     PublicKey,
+    bls12381::primitives::{group, sharing::Sharing, variant::Variant},
 };
 use commonware_utils::ordered::Set;
 use std::collections::VecDeque;

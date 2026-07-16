@@ -3,8 +3,8 @@ use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Encode, ReadExt as _};
 use commonware_consensus::{
     marshal::{
-        core::{Mailbox as MarshalMailbox, Variant},
         Identifier,
+        core::{Mailbox as MarshalMailbox, Variant},
     },
     simplex::{scheme::Scheme, types::Finalization},
 };

@@ -1,10 +1,11 @@
 use super::{
+    BlockDigest, StateSyncMetadata, SyncResult,
     mailbox::{Mailbox, Message},
-    resolve_state_sync_floor, BlockDigest, StateSyncMetadata, SyncResult,
+    resolve_state_sync_floor,
 };
 use crate::stateful::{
-    db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
     Application,
+    db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
 use commonware_consensus::{
@@ -13,13 +14,13 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
 use commonware_storage::Context;
 use commonware_utils::{
+    NZUsize,
     channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
     sync::AsyncMutex,
-    NZUsize,
 };
 use futures::SinkExt;
 use rand_core::Rng;

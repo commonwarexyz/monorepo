@@ -2,7 +2,7 @@
 
 use crate::{
     merkle::{Family, Location, Proof},
-    qmdb::{operation::Key, Error},
+    qmdb::{Error, operation::Key},
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
@@ -43,13 +43,13 @@ pub trait BatchableDb {
     type V;
     type Merkleized: MerkleizedBatch;
     type Batch: UnmerkleizedBatch<
-        Self,
-        Family = Self::Family,
-        K = Self::K,
-        V = Self::V,
-        Metadata = Self::V,
-        Merkleized = Self::Merkleized,
-    >;
+            Self,
+            Family = Self::Family,
+            K = Self::K,
+            V = Self::V,
+            Metadata = Self::V,
+            Merkleized = Self::Merkleized,
+        >;
 
     /// Create a new speculative batch of operations with this database as its parent.
     fn new_batch(&self) -> Self::Batch;

@@ -11,7 +11,7 @@
 use crate::{
     merkle::Graftable,
     qmdb::{
-        any::{ordered::Update, ValueEncoding},
+        any::{ValueEncoding, ordered::Update},
         current::proof::OperationProof,
         operation::Key,
     },
@@ -148,38 +148,38 @@ where
 pub mod tests {
     //! Shared test utilities for ordered Current QMDB variants.
 
-    use super::{db, ExclusionProof};
+    use super::{ExclusionProof, db};
     use crate::{
         index::ordered::Index,
         journal::contiguous::{Contiguous as _, Mutable},
         merkle::{Graftable, Location, Proof},
         mmb,
         qmdb::{
+            Error,
             any::{
+                ValueEncoding,
                 ordered::{Operation, Update},
                 traits::{DbAny, UnmerkleizedBatch as _},
                 value::FixedEncoding,
-                ValueEncoding,
             },
             current::{
+                BitmapPrunedBits,
                 proof::{OperationProof, RangeProof},
                 tests::apply_random_ops,
-                BitmapPrunedBits,
             },
             store::tests::{TestKey, TestValue},
-            Error,
         },
         translator::OneCap,
     };
     use commonware_codec::{Codec, Decode as _, Encode as _, EncodeSize as _};
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
+    use commonware_cryptography::{Digest as _, Hasher as _, Sha256, sha256::Digest};
     use commonware_runtime::{
-        deterministic::{self, Context},
         Runner as _, Supervisor as _,
+        deterministic::{self, Context},
     };
     use commonware_utils::{
-        bitmap::{Prunable as BitMap, Readable as _},
         NZU64,
+        bitmap::{Prunable as BitMap, Readable as _},
     };
     use core::future::Future;
     use rand::Rng;
@@ -975,7 +975,7 @@ pub mod tests {
             merkle::{mmb, mmr},
             qmdb::{
                 any::value::{FixedEncoding, VariableEncoding},
-                current::ordered::{db::KeyValueProof, ExclusionProof},
+                current::ordered::{ExclusionProof, db::KeyValueProof},
             },
         };
         use commonware_codec::conformance::CodecConformance;

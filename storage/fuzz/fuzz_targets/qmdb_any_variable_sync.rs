@@ -4,18 +4,18 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily, Location},
+    merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{unordered::variable::Db, VariableConfig as Config},
+        any::{VariableConfig as Config, unordered::variable::Db},
         verify_proof,
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -236,11 +236,12 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     let start_loc = Location::<F>::new(*start_loc % (*F::MAX_LEAVES + 1));
                     let op_count = db.bounds().end;
                     let oldest_retained_loc = db.sync_boundary();
-                    if start_loc >= oldest_retained_loc && start_loc < op_count {
-                        if let Ok((proof, log)) = db.proof(start_loc, *max_ops).await {
-                            let root = db.root();
-                            assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &log, &root,));
-                        }
+                    if start_loc >= oldest_retained_loc
+                        && start_loc < op_count
+                        && let Ok((proof, log)) = db.proof(start_loc, *max_ops).await
+                    {
+                        let root = db.root();
+                        assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &log, &root,));
                     }
                 }
 

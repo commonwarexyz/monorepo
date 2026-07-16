@@ -1,14 +1,14 @@
 use commonware_cryptography::{
+    Signer as _,
     bls12381::{
         dkg::feldman_desmedt::deal,
         primitives::{self, sharing::Mode, variant::MinSig},
     },
     ed25519::PrivateKey,
-    Signer as _,
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{test_rng, Faults, N3f1, NZUsize, TryCollect};
-use criterion::{criterion_group, BatchSize, Criterion};
+use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand::seq::SliceRandom;
 use std::hint::black_box;
 

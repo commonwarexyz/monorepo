@@ -2,8 +2,8 @@
 
 use super::SyncResult;
 use crate::stateful::{
-    db::{Anchor, DatabaseSet, TipUpdate},
     Application,
+    db::{Anchor, DatabaseSet, TipUpdate},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::Digestible;
@@ -38,10 +38,10 @@ where
     where
         F: FnMut(Message<E, A>) -> Self,
     {
-        if let Some(message) = self.take() {
-            if let Some(message) = push(message) {
-                *self = Some(message);
-            }
+        if let Some(message) = self.take()
+            && let Some(message) = push(message)
+        {
+            *self = Some(message);
         }
     }
 }
@@ -120,10 +120,10 @@ mod tests {
     use super::{Mailbox, Message};
     use crate::stateful::{
         actor::syncer::SyncResult,
-        tests::mocks::{anchor, test_databases, TestApp},
+        tests::mocks::{TestApp, anchor, test_databases},
     };
     use commonware_actor::mailbox as actor_mailbox;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::NZUsize;
     use futures::FutureExt;
 

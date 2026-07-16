@@ -30,20 +30,19 @@
 use crate::{
     journal::contiguous::Contiguous,
     merkle::{
-        self, hasher::Hasher as _, storage::Storage, Family, Graftable, Location, PendingChunk,
-        Position, Proof,
+        self, Family, Graftable, Location, PendingChunk, Position, Proof, hasher::Hasher as _,
+        storage::Storage,
     },
     qmdb::{
-        self,
+        self, Error,
         current::{
             db::{combine_roots, partial_chunk, pending_chunk},
             grafting,
         },
-        Error,
     },
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt as _, Write};
+use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::{num::NonZeroU64, ops::Range};
@@ -650,7 +649,7 @@ mod tests {
         qmdb::current::{db, grafting},
     };
     use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
     use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
@@ -792,11 +791,10 @@ mod tests {
         let encoded = proof.encode();
 
         // MMB allows pending_chunk_digest.
-        assert!(RangeProof::<mmb::Family, sha256::Digest>::decode_cfg(
-            encoded.clone(),
-            &MAX_DIGESTS
-        )
-        .is_ok());
+        assert!(
+            RangeProof::<mmb::Family, sha256::Digest>::decode_cfg(encoded.clone(), &MAX_DIGESTS)
+                .is_ok()
+        );
 
         // MMR rejects it on decode.
         assert!(
@@ -1390,25 +1388,29 @@ mod tests {
         // Mutating operations or bitmap chunks must invalidate the extracted proof.
         let mut wrong_operations = operations.clone();
         wrong_operations[0] = hasher.digest(b"wrong operation");
-        assert!(verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
-            &proof,
-            start,
-            &wrong_operations,
-            &chunks,
-            &root,
-        )
-        .is_err());
+        assert!(
+            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+                &proof,
+                start,
+                &wrong_operations,
+                &chunks,
+                &root,
+            )
+            .is_err()
+        );
 
         let mut bad_chunks = chunks;
         bad_chunks.last_mut().unwrap()[0] ^= 1;
-        assert!(verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
-            &proof,
-            start,
-            &operations,
-            &bad_chunks,
-            &root,
-        )
-        .is_err());
+        assert!(
+            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+                &proof,
+                start,
+                &operations,
+                &bad_chunks,
+                &root,
+            )
+            .is_err()
+        );
     }
 
     #[test_async]
@@ -1625,9 +1627,9 @@ mod tests {
             for chunk_idx in 0..graftable {
                 let count = F::chunk_peaks(size, chunk_idx, grafting_height).count();
                 assert_eq!(
-                count, 1,
-                "graftable chunk {chunk_idx} has {count} peaks (leaves={leaves_count}, graftable={graftable}, complete={complete})"
-            );
+                    count, 1,
+                    "graftable chunk {chunk_idx} has {count} peaks (leaves={leaves_count}, graftable={graftable}, complete={complete})"
+                );
             }
         }
         assert!(

@@ -9,18 +9,18 @@
 //! destroyed) every `cycles` flushes so the backing journal doesn't grow without bound over a run.
 //! `cycles` scales down as `n` grows so the peak on-disk size stays roughly constant.
 
-use commonware_cryptography::{sha256, Sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
+    BufferPooler, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Supervisor as _,
 };
-use commonware_storage::merkle::{self, full, Bagging::ForwardFold, Family};
-use commonware_utils::{test_rng, NZUsize, NZU16, NZU64};
-use criterion::{criterion_group, Criterion};
+use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, full};
+use commonware_utils::{NZU16, NZU64, NZUsize, test_rng};
+use criterion::{Criterion, criterion_group};
 use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},

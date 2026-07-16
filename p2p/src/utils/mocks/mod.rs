@@ -4,8 +4,8 @@ use crate::{CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::{Metric, Registered, Registration},
     IoBuf, IoBufs, Metrics as RuntimeMetrics, Name, Supervisor,
+    telemetry::metrics::{Metric, Registered, Registration},
 };
 use core::future;
 use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
@@ -122,7 +122,7 @@ pub fn inert_channel<P: PublicKey>(peers: impl AsRef<[P]>) -> (InertSender<P>, I
 mod tests {
     use super::*;
     use crate::Sender;
-    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+    use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
 

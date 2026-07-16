@@ -6,12 +6,12 @@
 use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
+    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
     buffer::{
-        paged::{CacheRef, Writer},
         Write,
+        paged::{CacheRef, Writer},
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
 };
 use futures::future::{join_all, try_join_all};
 use std::{
@@ -523,15 +523,15 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, Runner as _, Spawner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
-        future::{BoxFuture, Shared},
         FutureExt as _,
+        future::{BoxFuture, Shared},
     };
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     type SyncSender = oneshot::Sender<Result<(), RError>>;

@@ -1,10 +1,10 @@
 use super::mailbox::{Mailbox, Message};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::Epoch};
-use commonware_cryptography::{certificate::Provider, PublicKey};
+use commonware_cryptography::{PublicKey, certificate::Provider};
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::NonZeroDuration;
 use discovery::Discovery;
 use rand_core::CryptoRng;

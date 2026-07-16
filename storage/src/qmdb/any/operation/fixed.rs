@@ -1,28 +1,24 @@
 use crate::{
     merkle::{Family, Location},
     qmdb::any::{
+        FixedValue,
         operation::{
-            update, Operation, OperationCodec, Update, COMMIT_CONTEXT, DELETE_CONTEXT,
-            UPDATE_CONTEXT,
+            COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
+            update,
         },
         value::FixedEncoding,
-        FixedValue,
     },
 };
 use commonware_codec::{
-    util::{at_least, ensure_zeros},
     Codec, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
+    util::{at_least, ensure_zeros},
 };
 use commonware_runtime::{Buf, BufMut};
 use commonware_utils::Array;
 
 /// `max(a, b)` in a const context.
 const fn const_max(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 const fn update_op_size<S: FixedSize>() -> usize {

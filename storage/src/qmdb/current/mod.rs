@@ -325,23 +325,22 @@
 //! committed by a trusted canonical root; the sync engine does not perform this check itself.
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig, Location},
+    merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
         any::{
-            self,
+            self, Config as AnyConfig,
             operation::{Operation, Update},
-            Config as AnyConfig,
         },
         bitmap::Shared,
         operation::Committable,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
@@ -509,7 +508,7 @@ pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
     pub use super::BitmapPrunedBits;
-    use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
+    use super::{FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig, ordered, unordered};
     use crate::{
         merkle::{self, mmb, mmr},
         qmdb::{
@@ -524,11 +523,11 @@ pub mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
+        BufferPooler, Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{bitmap::Readable, NZUsize, TestRng, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, bitmap::Readable};
     use core::future::Future;
     use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
     use rand::Rng;
@@ -1345,7 +1344,7 @@ pub mod tests {
     }
 
     use crate::translator::OneCap;
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_group, test_traced};
 
     type OrderedFixedDb =

@@ -1,8 +1,8 @@
 use crate::{
-    config::{callgrind_labels, Benchmark},
+    config::{Benchmark, callgrind_labels},
     results::BenchResult,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::{
