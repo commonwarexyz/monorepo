@@ -115,10 +115,13 @@ async fn take_snapshot<S: crate::Storage>(
 ) -> Result<Snapshot, Error> {
     // Assign the seq and advance the freeze epoch before touching blobs:
     // writes racing the snapshot land with `born > snapshot_seq` and are
-    // exempt from freezing (their extents are invisible to this commit).
-    // Uncaptured dirty blobs lose that exemption too (their young extents
-    // are not referenced by any table): conservatively over-frozen, which
-    // costs an extra COW on a later in-place rewrite but is always safe.
+    // exempt from freezing only until their blob's capture below, which
+    // re-stamps every run it references (a racing run captured by this
+    // commit is NOT invisible to it — only runs created after the capture
+    // are). Uncaptured dirty blobs lose the exemption entirely (their young
+    // extents are not referenced by any table): conservatively over-frozen,
+    // which costs an extra COW on a later in-place rewrite but is always
+    // safe.
     let (seq, dirty_ids) = {
         let mut state = ready.state.lock();
         let seq = state.seq;
@@ -156,6 +159,18 @@ async fn take_snapshot<S: crate::Storage>(
             // Raise the freeze boundary: nothing this snapshot covers may be
             // rewritten in place until it is confirmed (or rolled back).
             inner.freeze_size = inner.freeze_size.max(inner.size);
+
+            // Freeze the captured runs atomically with the capture (the
+            // model freezes per-run coverage at snapshot time): this entry,
+            // its checksum extents, and its manifest reference every run
+            // below, so the young-extent exemption must not apply to any of
+            // them — an in-place rewrite after capture would invalidate a
+            // manifested chunk and roll back this commit at recovery. Runs
+            // created after this point keep `born > snapshot_seq` and stay
+            // exempt: they are genuinely absent from this commit's table.
+            for run in inner.runs.values_mut() {
+                run.born = run.born.min(seq);
+            }
             let dirty_chunks: Vec<u64> = std::mem::take(&mut inner.dirty_chunks)
                 .into_iter()
                 .collect();

@@ -22,6 +22,16 @@
 //! impossible by construction, and the deterministic runtime's crash model
 //! is the production model.
 //!
+//! Corruption loudness has ONE bounded exception: media corruption (bit
+//! rot) that lands inside the NEWEST commit's table, checksum extents, or
+//! delta-manifested chunks is indistinguishable from a torn commit at
+//! recovery, which then falls back to the previous confirmed commit and
+//! emits a warn-level event instead of returning an error (see `recover`).
+//! Corruption anywhere else — committed data, any older commit's metadata —
+//! is always a loud [`crate::Error::BlobCorrupt`]. The crash contract
+//! itself is model-checked under crash and power loss, not under media
+//! corruption.
+//!
 //! A commit may make MORE data durable than a caller explicitly synced (the
 //! single inner fsync covers every pending write of the volume file, which
 //! is equivalent to the OS persisting write-back cache early — always
@@ -417,6 +427,12 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         super::validate_partition_name(partition)?;
         let ready = self.ensure().await?;
         let _ns = self.shared.ns_lock.lock().await;
+        // Hold the commit lock across unlink-plus-commit (exactly as staged
+        // batch removals do): an entry drop is global, so a commit racing
+        // the window between the namespace edit and the removal's own
+        // commit would resolve the removal without capturing its
+        // applied-batch group, splitting the group (never-split).
+        let _commit = ready.commit_lock.lock().await;
         ready.check_poisoned()?;
 
         let removed = {
@@ -456,7 +472,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         // "An Ok result indicates the blob is durably removed." The removed
         // ids root the commit so their applied-batch groups (if any) are
         // captured with the removal (never-split).
-        commit::commit(&ready, &removed).await
+        commit::commit_locked(&ready, &removed).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {

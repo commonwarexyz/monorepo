@@ -11,7 +11,15 @@
 //!   for partial frontier chunks).
 //! - A failed candidate falls back to the other slot — always a confirmed
 //!   commit, because commits serialize and never write the sacred slot. The
-//!   losing slot is zeroed so a later crash cannot resurrect it.
+//!   losing slot is zeroed so a later crash cannot resurrect it. On crash
+//!   histories the rejected candidate is always an unacknowledged torn
+//!   commit (model I1-I3). Media corruption (bit rot) inside the NEWEST
+//!   commit's table, checksum extents, or delta-manifested chunks is
+//!   indistinguishable from such tearing, so recovery silently rolls back
+//!   that one commit instead of failing loudly — a warn-level event is the
+//!   only signal, emitted before zeroing destroys the evidence. Corruption
+//!   in any OLDER commit's state has no such window: it surfaces as a loud
+//!   [`crate::Error::BlobCorrupt`] at hydration or read.
 //! - Repairs (shadow splices + slot zeroing) are idempotent and re-run on a
 //!   crash during recovery.
 
@@ -231,7 +239,7 @@ pub(super) async fn recover<S: crate::Storage>(
     slots.sort_by_key(|(_, sb)| std::cmp::Reverse(sb.seq));
 
     let mut adopted: Option<(u8, Superblock, Table)> = None;
-    let mut losing_slot: Option<u8> = None;
+    let mut losing_slot: Option<(u8, u64)> = None;
     for (idx, (slot, sb)) in slots.iter().enumerate() {
         let is_candidate = idx == 0 && slots.len() == 2;
         let table = match read_table(&file, len, sb).await? {
@@ -245,7 +253,7 @@ pub(super) async fn recover<S: crate::Storage>(
             }
             None if is_candidate => {
                 // Torn newest commit: fall back; zero this slot afterwards.
-                losing_slot = Some(*slot);
+                losing_slot = Some((*slot, sb.seq));
             }
             None => {
                 return Err(Error::PartitionCorrupt(format!(
@@ -265,7 +273,18 @@ pub(super) async fn recover<S: crate::Storage>(
     // Repairs: zero the losing slot, splice every partial frontier chunk
     // from its shadow. Idempotent; one sync.
     let mut repaired = false;
-    if let Some(losing) = losing_slot {
+    if let Some((losing, losing_seq)) = losing_slot {
+        // The one signal an operator gets that the newest commit was
+        // discarded: an unacknowledged torn commit is the normal case, but
+        // bit rot in the newest commit's metadata looks identical and is
+        // rolled back the same way (see the module docs). Zeroing the slot
+        // below destroys the on-disk evidence.
+        tracing::warn!(
+            partition = cfg.partition,
+            rejected_seq = losing_seq,
+            adopted_seq = sb.seq,
+            "newest volume commit failed verification: falling back one commit"
+        );
         write_blocks(
             &file,
             pool,

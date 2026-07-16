@@ -599,13 +599,28 @@ stability_scope!(BETA {
     ///
     /// # Crash contract
     ///
-    /// Every runtime serves storage through the
-    /// the storage volume, whose atomic commit is THE storage
+    /// Every runtime context in this crate serves storage through the
+    /// storage volume, whose atomic commit is THE storage
     /// contract structures may build on: after a crash, each blob reads back
     /// exactly the state captured by one commit (its last successful
     /// [`Blob::sync`], or a newer fully-landed commit), an applied [Batchable]
     /// batch is never split across commits, and corruption is loud (every
     /// read is checksum-verified), never silent truncation.
+    ///
+    /// Loudness has one bounded exception: media corruption (bit rot) that
+    /// lands inside the NEWEST commit's metadata is indistinguishable from a
+    /// torn commit, so recovery rolls back that one commit (emitting a
+    /// warning) instead of returning an error. Corruption anywhere else
+    /// surfaces as a read or open error.
+    ///
+    /// Failure is latched: after any failed sync or commit (a failed
+    /// [`Blob::sync`] or [`Blob::write_at_sync`], a failed blob
+    /// creation/removal, or a failed [WriteBatch::apply_sync]), the volume
+    /// is poisoned and EVERY subsequent storage operation — reads and
+    /// [`Storage::scan`] included, on every blob — returns the original
+    /// error until restart. A failed fsync of the shared volume file leaves
+    /// durability unprovable volume-wide, so no later operation may vouch
+    /// for bytes it cannot prove will land.
     ///
     /// # Partition Names
     ///
@@ -744,6 +759,9 @@ stability_scope!(BETA {
         /// only the bytes submitted to this call are guaranteed durable. Earlier unsynced
         /// [`Blob::write_at`] or [`Blob::resize`] calls require [`Blob::sync`] to become
         /// durable.
+        ///
+        /// On runtime contexts a failure here poisons ALL storage until restart
+        /// (see the [Storage] crash contract).
         fn write_at_sync(
             &self,
             offset: u64,
@@ -757,6 +775,9 @@ stability_scope!(BETA {
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Ensure all pending data is durably persisted.
+        ///
+        /// On runtime contexts a failure here poisons ALL storage until restart
+        /// (see the [Storage] crash contract).
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that all pending data is durably persisted.
@@ -779,12 +800,17 @@ stability_scope!(BETA {
     /// A [Storage] that can stage operations spanning multiple blobs and
     /// apply them as one atomic unit.
     ///
-    /// Every runtime serves batches through the
-    /// the storage volume backend, which applies and commits a
+    /// Every runtime context in this crate serves batches through the
+    /// storage volume backend, which applies and commits a
     /// batch ATOMICALLY: after a crash, either every staged operation is
     /// visible or none is, and [WriteBatch::apply_sync] is one commit with
-    /// one fsync. Structures can therefore treat the crash windows between
-    /// staged operations as nonexistent.
+    /// one fsync. Structures running on runtime storage can therefore treat
+    /// the crash windows between staged operations as nonexistent, and
+    /// conforming implementations must uphold the same atomicity. One
+    /// documented exception exists: the test-only context wrappers in
+    /// [crate::mocks] satisfy this trait with [crate::mocks::SequentialBatch],
+    /// which replays staged operations in order WITHOUT cross-blob
+    /// atomicity (see its docs).
     pub trait Batchable: Storage {
         /// The staged-batch type.
         type Batch: WriteBatch<Blob = Self::Blob>;
@@ -847,6 +873,9 @@ stability_scope!(BETA {
         /// Apply the staged operations atomically WITHOUT making them
         /// durable.
         ///
+        /// Implementations outside the runtime contexts may weaken the
+        /// atomicity (see [crate::mocks::SequentialBatch]).
+        ///
         /// # Panics
         ///
         /// Panics if removals were staged (they require [Self::apply_sync]).
@@ -854,6 +883,9 @@ stability_scope!(BETA {
 
         /// Apply the staged operations and make every staged blob durable:
         /// one atomic commit.
+        ///
+        /// Implementations outside the runtime contexts may weaken the
+        /// atomicity (see [crate::mocks::SequentialBatch]).
         fn apply_sync(self) -> impl Future<Output = Result<(), Error>> + Send;
     }
 });

@@ -188,6 +188,32 @@ async fn test_volume_inner_io_block_aligned() {
     let got = blob.read_at(0, size as usize).await.unwrap();
     assert_eq!(got.coalesce().len(), size as usize);
 
+    // Coalescing: a physically contiguous 64 KiB span is served by ONE
+    // inner read, not one per chunk.
+    let span = 16 * BLOCK as usize;
+    let (big, _) = volume.open("p", b"big").await.unwrap();
+    big.write_at(0, IoBuf::copy_from_slice(&vec![3u8; span]))
+        .await
+        .unwrap();
+    big.sync().await.unwrap();
+    let reads_before = recording.log.lock().iter().filter(|(w, _, _)| !*w).count();
+    let got = big.read_at(0, span).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &vec![3u8; span][..]);
+    {
+        let log = recording.log.lock();
+        let new_reads: Vec<_> = log
+            .iter()
+            .filter(|(w, _, _)| !*w)
+            .skip(reads_before)
+            .collect();
+        assert_eq!(
+            new_reads.len(),
+            1,
+            "contiguous chunks must coalesce into one inner read: {new_reads:?}"
+        );
+        assert_eq!(new_reads[0].2, span, "coalesced read length");
+    }
+
     let log = recording.log.lock();
     let writes = log.iter().filter(|(w, _, _)| *w).count();
     let reads = log.iter().filter(|(w, _, _)| !*w).count();
@@ -915,5 +941,472 @@ async fn test_volume_detects_bit_rot() {
                 "bit rot must be loud: {result:?}"
             );
         }
+    }
+}
+
+/// A one-shot pause point for inner I/O: while armed, the next matching
+/// operation signals `reached` and blocks until released. Later operations
+/// pass through untouched.
+#[derive(Clone, Default)]
+struct Gate {
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    reached: Arc<std::sync::atomic::AtomicBool>,
+    released: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Gate {
+    fn arm(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.released.store(false, SeqCst);
+        self.reached.store(false, SeqCst);
+        self.armed.store(true, SeqCst);
+    }
+
+    /// Pause here (once) while armed.
+    async fn pass(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.armed.swap(false, SeqCst) {
+            self.reached.store(true, SeqCst);
+            while !self.released.load(SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    async fn wait_reached(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        while !self.reached.load(SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn release(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.released.store(true, SeqCst);
+    }
+}
+
+/// An inner storage wrapper with one-shot read/write gates, for pinning
+/// cross-task interleavings inside the volume (a task parked at a gate
+/// holds whatever volume locks it acquired on the way in).
+#[derive(Clone)]
+struct Gated<S: crate::Storage> {
+    inner: S,
+    read_gate: Gate,
+    write_gate: Gate,
+}
+
+impl<S: crate::Storage> Gated<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            read_gate: Gate::default(),
+            write_gate: Gate::default(),
+        }
+    }
+}
+
+impl<S: crate::Storage> crate::Storage for Gated<S> {
+    type Blob = GatedBlob<S::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (blob, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            GatedBlob {
+                inner: blob,
+                read_gate: self.read_gate.clone(),
+                write_gate: self.write_gate.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+#[derive(Clone)]
+struct GatedBlob<B: crate::Blob> {
+    inner: B,
+    read_gate: Gate,
+    write_gate: Gate,
+}
+
+impl<B: crate::Blob> crate::Blob for GatedBlob<B> {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.read_gate.pass().await;
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.read_gate.pass().await;
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_gate.pass().await;
+        self.inner.write_at(offset, bufs).await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at(offset, bufs).await?;
+        self.sync().await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> crate::Handle<()> {
+        crate::Handle::ready(self.sync().await)
+    }
+}
+
+/// A run created AFTER a commit's snapshot-seq bump but BEFORE its blob's
+/// capture is referenced by that commit's table, checksum extent, and delta
+/// manifest: the capture must freeze it. An in-place overwrite of such a
+/// chunk after the commit confirms would invalidate the manifested chunk
+/// and roll the CONFIRMED commit back at recovery.
+#[tokio::test]
+async fn test_volume_capture_freezes_racing_extents() {
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let gated = Gated::new(tearing.clone());
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    // `a` (lower id) and `b` form one applied-batch group, so a commit
+    // rooted at `a` captures both, in id order: parking the snapshotter at
+    // `a` (a paused writer holds its write lock) opens a window before
+    // `b`'s capture.
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&a, 0, IoBuf::copy_from_slice(b"A0"))
+        .await
+        .unwrap();
+    batch
+        .write_at(&b, 0, IoBuf::copy_from_slice(b"B0"))
+        .await
+        .unwrap();
+    batch.apply().await.unwrap();
+
+    gated.write_gate.arm();
+    let a_writer = {
+        let a = a.clone();
+        tokio::spawn(async move {
+            a.write_at(2, IoBuf::copy_from_slice(&[0xAA]))
+                .await
+                .unwrap();
+        })
+    };
+    gated.write_gate.wait_reached().await;
+
+    // The commit bumps the snapshot seq, then parks on `a`'s write lock.
+    let commit = {
+        let a = a.clone();
+        tokio::spawn(async move { a.sync().await.unwrap() })
+    };
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    // In the bump-to-capture window: a fresh-extent full-block write on
+    // `b`. Its run is born after the snapshot seq, yet `b`'s capture will
+    // reference it.
+    let w1 = vec![0x11u8; BLOCK as usize];
+    b.write_at(BLOCK, IoBuf::copy_from_slice(&w1))
+        .await
+        .unwrap();
+
+    // Unblock `a`: the commit captures `a`, then `b` (including w1), and
+    // confirms.
+    gated.write_gate.release();
+    a_writer.await.unwrap();
+    commit.await.unwrap();
+
+    // Post-confirm overwrite of w1's chunk: the captured extent must have
+    // been frozen (copy-on-write), never rewritten in place.
+    b.write_at(BLOCK + 8, IoBuf::copy_from_slice(&[0x77u8; 16]))
+        .await
+        .unwrap();
+
+    // Crash without committing the overwrite: whatever lands, vanishes, or
+    // tears, recovery must adopt the confirmed commit.
+    for seed in 0..8u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let (a, a_size) = recovered.open("p", b"a").await.unwrap();
+        assert_eq!(a_size, 3, "seed {seed}: confirmed commit rolled back");
+        let got = a.read_at(0, 3).await.unwrap().coalesce();
+        assert_eq!(got.as_ref(), &[b'A', b'0', 0xAA], "seed {seed}");
+        let (b, b_size) = recovered.open("p", b"b").await.unwrap();
+        assert_eq!(
+            b_size,
+            2 * BLOCK,
+            "seed {seed}: confirmed commit rolled back"
+        );
+        let got = b.read_at(0, 2).await.unwrap().coalesce();
+        assert_eq!(got.as_ref(), b"B0", "seed {seed}");
+        let got = b.read_at(BLOCK, BLOCK as usize).await.unwrap().coalesce();
+        assert_eq!(got.as_ref(), w1.as_slice(), "seed {seed}");
+    }
+}
+
+/// A concurrent reader racing a legal in-place overwrite of the same chunk
+/// (uncommitted bytes move no relocation generation) must retry against the
+/// quiesced writer state, never report false corruption.
+#[tokio::test]
+async fn test_volume_read_races_in_place_overwrite() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    // A fully-written, uncommitted chunk: overwrites land in place.
+    let (blob, _) = volume.open("p", b"d").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; BLOCK as usize]))
+        .await
+        .unwrap();
+
+    // The reader snapshots the chunk's expected CRC, then parks on the
+    // inner read.
+    gated.read_gate.arm();
+    let reader = {
+        let blob = blob.clone();
+        tokio::spawn(async move { blob.read_at(0, 100).await })
+    };
+    gated.read_gate.wait_reached().await;
+
+    // A disjoint-range in-place overwrite of the same chunk publishes a new
+    // CRC while the reader is in flight.
+    blob.write_at(200, IoBuf::copy_from_slice(&[0x22u8; 50]))
+        .await
+        .unwrap();
+
+    gated.read_gate.release();
+    let got = reader
+        .await
+        .unwrap()
+        .expect("in-place overwrite must never surface as corruption")
+        .coalesce();
+    assert_eq!(got.as_ref(), &[0x11u8; 100]);
+}
+
+/// A removal racing an in-flight commit on an unrelated blob must not let
+/// that commit resolve the removal without the removed blob's applied-batch
+/// group (never-split through removals): the namespace edit and the
+/// removal's own commit are atomic under the commit lock.
+#[tokio::test]
+async fn test_volume_remove_never_splits_group() {
+    use std::future::Future as _;
+
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let gated = Gated::new(tearing.clone());
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    // A committed baseline on `a` distinguishes "entry dropped by a foreign
+    // commit" from "entry never captured".
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    let (c, _) = volume.open("p", b"c").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(b"a-base"))
+        .await
+        .unwrap();
+    a.sync().await.unwrap();
+
+    // Applied-but-uncommitted group {a, b}.
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&a, 6, IoBuf::copy_from_slice(b"batch-a"))
+        .await
+        .unwrap();
+    batch
+        .write_at(&b, 0, IoBuf::copy_from_slice(b"batch-b"))
+        .await
+        .unwrap();
+    batch.apply().await.unwrap();
+
+    // Dirty `c`, then park a commit rooted at `c` inside its snapshot,
+    // before table assembly (a paused writer holds `c`'s write lock).
+    c.write_at(0, IoBuf::copy_from_slice(b"c-data"))
+        .await
+        .unwrap();
+    gated.write_gate.arm();
+    let c_writer = {
+        let c = c.clone();
+        tokio::spawn(async move {
+            c.write_at(6, IoBuf::copy_from_slice(b"!")).await.unwrap();
+        })
+    };
+    gated.write_gate.wait_reached().await;
+    let c_sync = {
+        let c = c.clone();
+        tokio::spawn(async move { c.sync().await.unwrap() })
+    };
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    // Start removing `a` while that commit is in flight, and abandon the
+    // call while it waits: its namespace edit must not become observable to
+    // the in-flight commit, which captures only {c} and would otherwise
+    // drop `a`'s entry while leaving group-sibling `b` unresolved.
+    {
+        let mut remove = std::pin::pin!(volume.remove("p", Some(b"a")));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..16 {
+            assert!(
+                remove.as_mut().poll(&mut cx).is_pending(),
+                "remove must wait for the in-flight commit"
+            );
+        }
+    }
+
+    gated.write_gate.release();
+    c_writer.await.unwrap();
+    c_sync.await.unwrap();
+
+    // Crash: exactly what the `c` commit made durable.
+    let mut rng = TestRng::new(0);
+    let image = tearing.crash(&mut rng);
+    let post = Tearing::from_image(pool.clone(), image).await;
+    let recovered = Volume::new(post, pool.clone(), Config::default());
+
+    // The removal never resolved (`remove` never returned): `a` keeps its
+    // committed baseline, `b` stays pre-batch, and `c`'s sync is durable.
+    let (a, a_size) = recovered.open("p", b"a").await.unwrap();
+    assert_eq!(a_size, 6, "removal leaked into a foreign commit");
+    let got = a.read_at(0, 6).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), b"a-base");
+    let (_, b_size) = recovered.open("p", b"b").await.unwrap();
+    assert_eq!(b_size, 0, "applied group must resolve all-or-nothing");
+    let (c, c_size) = recovered.open("p", b"c").await.unwrap();
+    assert_eq!(c_size, 7);
+    let got = c.read_at(0, 7).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), b"c-data!");
+}
+
+/// Crash recovery with a growth quantum: the provisioned zero tail —
+/// surviving in full or truncated with the file-length metadata — must
+/// never confuse recovery, and provisioning must resume after reopening
+/// with the same or a different quantum.
+#[tokio::test]
+async fn test_volume_growth_quantum_crash_recovery() {
+    let quantum = 16 * BLOCK;
+    for (seed, reopen_quantum) in [
+        (0u64, quantum),
+        (1, quantum),
+        (2, 4 * BLOCK),
+        (3, 64 * BLOCK),
+    ] {
+        let pool = test_pool();
+        let tearing = Tearing::new(pool.clone());
+        let cfg = Config {
+            growth_quantum: quantum,
+            ..Config::default()
+        };
+        let volume = Volume::new(tearing.clone(), pool.clone(), cfg.clone());
+
+        // Several commits, then unsynced writes racing the crash.
+        let (blob, _) = volume.open("p", b"q").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&[7u8; 2 * BLOCK as usize]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        blob.write_at(2 * BLOCK, IoBuf::copy_from_slice(&[8u8; 100]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        blob.write_at(
+            2 * BLOCK + 100,
+            IoBuf::copy_from_slice(&[9u8; BLOCK as usize]),
+        )
+        .await
+        .unwrap();
+
+        // The file is provisioned in whole quanta beyond the data.
+        let (_, provisioned) = tearing.inner.open(&cfg.partition, &cfg.name).await.unwrap();
+        assert!(provisioned >= quantum && provisioned.is_multiple_of(quantum));
+
+        let mut rng = TestRng::new(seed);
+        let mut image = tearing.crash(&mut rng);
+        // File length is metadata: alternate between the provisioned tail
+        // surviving the crash intact and vanishing with it.
+        if seed % 2 == 0 {
+            image.resize(provisioned as usize, 0);
+        }
+
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let reopen_cfg = Config {
+            growth_quantum: reopen_quantum,
+            ..Config::default()
+        };
+        let recovered = Volume::init(post.clone(), pool.clone(), reopen_cfg)
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: recovery with provisioned tail: {e}"));
+        let (blob, size) = recovered.open("p", b"q").await.unwrap();
+        assert_eq!(size, 2 * BLOCK + 100, "seed {seed}");
+        let got = blob.read_at(0, size as usize).await.unwrap().coalesce();
+        assert_eq!(
+            &got.as_ref()[..2 * BLOCK as usize],
+            &[7u8; 2 * BLOCK as usize][..],
+            "seed {seed}"
+        );
+        assert_eq!(
+            &got.as_ref()[2 * BLOCK as usize..],
+            &[8u8; 100][..],
+            "seed {seed}"
+        );
+
+        // Provisioning resumes: the re-derived high-water covers the whole
+        // file (growth never shrinks it) and new growth provisions in whole
+        // quanta of the reopened config.
+        let (_, len_before) = post.inner.open(&cfg.partition, &cfg.name).await.unwrap();
+        blob.write_at(
+            size,
+            IoBuf::copy_from_slice(&vec![5u8; 2 * quantum as usize]),
+        )
+        .await
+        .unwrap();
+        blob.sync().await.unwrap();
+        let (_, len_after) = post.inner.open(&cfg.partition, &cfg.name).await.unwrap();
+        assert!(len_after >= len_before, "seed {seed}: file shrank");
+        assert!(
+            len_after.is_multiple_of(reopen_quantum),
+            "seed {seed}: growth ignored the reopened quantum ({len_after})"
+        );
+        let got = blob
+            .read_at(size, 2 * quantum as usize)
+            .await
+            .unwrap()
+            .coalesce();
+        assert!(got.as_ref().iter().all(|&x| x == 5), "seed {seed}");
     }
 }

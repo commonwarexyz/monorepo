@@ -3105,12 +3105,16 @@ mod tests {
 
     // A notarization's durable sync is observed by the actor's sync pool rather than
     // a consensus caller. The fatal policy must still apply: a sync failure panics
-    // the actor instead of being silently swallowed. The first failed commit
-    // poisons the volume, so every subsequent storage operation surfaces the
-    // fault too; which fatal site trips first is scheduling-dependent, so the
-    // expectation pins only that the injected fault is fatal.
+    // the actor instead of being silently swallowed. The failed sync poisons the
+    // volume while the notarization is still being handled, and on the
+    // deterministic schedule the first fatal observer is the handling path's own
+    // block lookup (the pool's durable barrier would trip moments later), so the
+    // durable-site message is not assertable here. The expectation pins the full
+    // deterministic panic instead — the strongest property this schedule offers.
     #[test_traced("WARN")]
-    #[should_panic(expected = "injected storage fault")]
+    #[should_panic(
+        expected = "failed to get block: freezer error: runtime error: io error: injected storage fault"
+    )]
     fn test_notarization_sync_failure_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

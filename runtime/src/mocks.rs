@@ -461,11 +461,13 @@ enum SequentialOp<B> {
 /// cross-blob atomicity.
 ///
 /// Real runtime contexts batch atomically through the
-/// the storage volume. The mock context wrappers in this
-/// module cannot reach the wrapped context's batch (their blob types wrap
-/// the inner ones), so they satisfy [crate::Batchable] with this fallback:
-/// staged operations drive the wrapper's own blob and remove operations,
-/// preserving the wrapper's interception (gating, fault injection).
+/// storage volume. This fallback does NOT deliver the [crate::Batchable]
+/// crash atomicity and must never back code that relies on it. The mock
+/// context wrappers in this module cannot reach the wrapped context's batch
+/// (their blob types wrap the inner ones), so they satisfy
+/// [crate::Batchable] with this fallback: staged operations drive the
+/// wrapper's own blob and remove operations, preserving the wrapper's
+/// interception (gating, fault injection).
 pub struct SequentialBatch<S: Storage> {
     storage: S,
     ops: Vec<SequentialOp<S::Blob>>,

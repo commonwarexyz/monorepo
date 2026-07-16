@@ -1898,6 +1898,23 @@ mod tests {
         Action::Crash,
     ];
 
+    /// Batch + removal workload: a removal interleaving with selective
+    /// commits must resolve an applied group holding the removed blob
+    /// all-or-nothing (every commit drops the removed entry, so the group's
+    /// live members must be captured with it — the removed-group arm of the
+    /// never-split rule).
+    const BATCH_REMOVE: &[Action] = &[
+        Action::BatchAppend(0),
+        Action::BatchAppend(1),
+        Action::BatchApply,
+        Action::Remove(0),
+        Action::Snapshot(0b10),
+        Action::Snapshot(ALL),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
     /// Batch overwrite workload: staged COW of committed cells plus batch
     /// drop (staged extents returned through deferred frees).
     const BATCH_COW: &[Action] = &[
@@ -1974,6 +1991,11 @@ mod tests {
     #[test]
     fn spec_holds_batch_cow() {
         assert_holds(BATCH_COW, 7, 2, 10_000);
+    }
+
+    #[test]
+    fn spec_holds_batch_remove() {
+        assert_holds(BATCH_REMOVE, 8, 2, 10_000);
     }
 
     /// Disabling the never-split group expansion must let a selective commit
