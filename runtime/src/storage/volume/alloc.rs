@@ -146,6 +146,7 @@ impl Allocator {
     }
 
     /// Offset one past the last allocated byte.
+    #[cfg(test)]
     pub(super) const fn end(&self) -> u64 {
         self.end
     }

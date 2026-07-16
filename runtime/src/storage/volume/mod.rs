@@ -119,6 +119,16 @@ impl<S: crate::Storage> Storage<S> {
         Ok(storage)
     }
 
+    /// The inner storage holding the volume file.
+    pub fn inner(&self) -> &S {
+        &self.shared.inner
+    }
+
+    /// The volume file's location.
+    pub fn config(&self) -> &Config {
+        &self.shared.cfg
+    }
+
     /// Recovery, single-flight, before any operation.
     async fn ensure(&self) -> Result<Arc<Ready<S>>, Error> {
         if let Some(ready) = self.shared.ready.get() {

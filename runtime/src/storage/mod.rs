@@ -95,9 +95,7 @@ stability_scope!(ALPHA {
     pub mod audited;
     pub mod faulty;
     pub mod memory;
-    // TODO(volume): drop the allow once the volume is wired into the
-    // deterministic/tokio runtime configs.
-    #[allow(dead_code)]
+    pub mod switch;
     pub mod volume;
 });
 stability_scope!(ALPHA, cfg(feature = "iouring-storage") {

@@ -42,7 +42,7 @@
 //! });
 //! ```
 
-pub use crate::storage::faulty::Config as FaultConfig;
+pub use crate::storage::{faulty::Config as FaultConfig, volume::Config as VolumeConfig};
 use crate::{
     child_label,
     network::{
@@ -53,6 +53,7 @@ use crate::{
     storage::{
         audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
         memory::Storage as MemStorage, metered::Storage as MeteredStorage,
+        switch::Storage as SwitchStorage, volume::Storage as VolumeStorage,
     },
     telemetry::metrics::{
         add_attribute, raw, task::Label, validate_label, Counter, CounterFamily, GaugeFamily,
@@ -238,6 +239,12 @@ pub struct Config {
     /// Defaults to no faults being injected.
     storage_fault_cfg: FaultConfig,
 
+    /// When set, storage is served through a [crate::storage::volume] over
+    /// the in-memory backend (fault injection then applies to the volume's
+    /// inner file operations). Simulated crashes reconstruct the volume so
+    /// its recovery protocol runs exactly as it would in production.
+    storage_volume: Option<VolumeConfig>,
+
     /// Buffer pool configuration for network I/O.
     network_buffer_pool_cfg: BufferPoolConfig,
 
@@ -272,6 +279,7 @@ impl Config {
             timeout: None,
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
+            storage_volume: None,
             network_buffer_pool_cfg,
             storage_buffer_pool_cfg,
         }
@@ -331,6 +339,17 @@ impl Config {
     /// reproducible failure patterns for a given seed.
     pub const fn with_storage_fault_config(mut self, faults: FaultConfig) -> Self {
         self.storage_fault_cfg = faults;
+        self
+    }
+
+    /// Serve storage through a [crate::storage::volume] (single-file backend
+    /// with atomic group commit) over the in-memory backend.
+    ///
+    /// Storage faults then inject into the volume's inner file operations,
+    /// and simulated crashes (`start_and_recover`) exercise the volume's
+    /// recovery protocol.
+    pub fn with_storage_volume(mut self, cfg: VolumeConfig) -> Self {
+        self.storage_volume = Some(cfg);
         self
     }
 
@@ -894,7 +913,7 @@ impl Tasks {
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
-type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
+type Storage = MeteredStorage<AuditedStorage<SwitchStorage<FaultyStorage<MemStorage>>>>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
@@ -940,15 +959,21 @@ impl Context {
 
         // Create storage fault config (default to disabled if None)
         let storage_fault_config = Arc::new(RwLock::new(cfg.storage_fault_cfg));
+        let faulty = FaultyStorage::new(
+            MemStorage::new(storage_buffer_pool.clone()),
+            rng.clone(),
+            storage_fault_config,
+        );
+        let switch = match cfg.storage_volume {
+            Some(volume_cfg) => SwitchStorage::Volume(VolumeStorage::new(
+                faulty,
+                storage_buffer_pool.clone(),
+                volume_cfg,
+            )),
+            None => SwitchStorage::Direct(faulty),
+        };
         let storage = MeteredStorage::new(
-            AuditedStorage::new(
-                FaultyStorage::new(
-                    MemStorage::new(storage_buffer_pool.clone()),
-                    rng.clone(),
-                    storage_fault_config,
-                ),
-                auditor.clone(),
-            ),
+            AuditedStorage::new(switch, auditor.clone()),
             &mut runtime_registry,
         );
 
@@ -1026,6 +1051,33 @@ impl Context {
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(checkpoint.catch_panics);
 
+        // Reconstruct the storage stack over the surviving durable state:
+        // the in-memory backend's map persists (it is the "disk"), but the
+        // wrapper layers are rebuilt. This is what makes the recovery a
+        // faithful crash for the volume — its in-RAM state (tables,
+        // allocator, unsynced write-through bytes held by its inner blob
+        // handle) dies here, and its recovery protocol re-runs from the
+        // durable image on first use.
+        let storage = {
+            let switch = checkpoint.storage.inner().inner();
+            let volume_cfg = switch.volume_config();
+            let fault_cfg = switch.inner().config();
+            let mem = switch.inner().inner().clone();
+            let faulty = FaultyStorage::new(mem, checkpoint.rng.clone(), fault_cfg);
+            let switch = match volume_cfg {
+                Some(cfg) => SwitchStorage::Volume(VolumeStorage::new(
+                    faulty,
+                    storage_buffer_pool.clone(),
+                    cfg,
+                )),
+                None => SwitchStorage::Direct(faulty),
+            };
+            MeteredStorage::new(
+                AuditedStorage::new(switch, checkpoint.auditor.clone()),
+                &mut runtime_registry,
+            )
+        };
+
         let executor = Arc::new(Executor {
             // Copied from the checkpoint
             cycle: checkpoint.cycle,
@@ -1049,7 +1101,7 @@ impl Context {
                 attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
-                storage: checkpoint.storage,
+                storage: Arc::new(storage),
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1077,7 +1129,7 @@ impl Context {
 
     /// Compute a [Sha256] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
-        self.storage.inner().inner().inner().audit()
+        self.storage.inner().inner().inner().inner().audit()
     }
 
     /// Access the storage fault configuration.
@@ -1086,7 +1138,7 @@ impl Context {
     /// subsequent storage operations. This allows dynamically enabling or
     /// disabling fault injection during a test.
     pub fn storage_fault_config(&self) -> Arc<RwLock<FaultConfig>> {
-        self.storage.inner().inner().config()
+        self.storage.inner().inner().inner().config()
     }
 
     /// Register a DNS mapping for a hostname.
@@ -1822,6 +1874,37 @@ mod tests {
         // Check that unsynced storage does not persist after recovery
         executor.start(|context| async move {
             let (_, len) = context.open(partition, name).await.unwrap();
+            assert_eq!(len, 0);
+        });
+    }
+
+    #[test]
+    fn test_recover_volume_storage() {
+        // Serve storage through a volume: recovery must reconstruct the
+        // volume (dropping its in-RAM state) so synced data survives a
+        // simulated crash, unsynced data vanishes, and the volume's own
+        // recovery protocol runs on the surviving image.
+        let cfg = deterministic::Config::default().with_storage_volume(VolumeConfig::default());
+        let executor = deterministic::Runner::new(cfg);
+        let partition = "test_partition";
+
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let (synced, _) = context.open(partition, b"synced").await.unwrap();
+            synced.write_at(0, b"durable").await.unwrap();
+            synced.sync().await.unwrap();
+            let (unsynced, _) = context.open(partition, b"unsynced").await.unwrap();
+            unsynced.write_at(0, b"ephemeral").await.unwrap();
+        });
+
+        let executor = Runner::from(checkpoint);
+        executor.start(|context| async move {
+            let (blob, len) = context.open(partition, b"synced").await.unwrap();
+            assert_eq!(len, 7);
+            let read = blob.read_at(0, 7).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"durable");
+            // The blob's creation committed (durably created), but its
+            // unsynced bytes are gone.
+            let (_, len) = context.open(partition, b"unsynced").await.unwrap();
             assert_eq!(len, 0);
         });
     }
