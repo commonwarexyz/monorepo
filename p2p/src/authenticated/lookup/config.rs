@@ -73,10 +73,6 @@ pub struct Config<C: Signer> {
     ///
     /// This bounds address resolution, connection establishment, and the handshake so a
     /// peer reservation cannot be held indefinitely.
-    ///
-    /// When this is at most [Config::peer_connection_cooldown], a timed-out dial never
-    /// delays a peer's re-dial beyond the cooldown. [Config::recommended] preserves this
-    /// property, while the faster profiles intentionally trade it for short cooldowns.
     pub dial_timeout: Duration,
 
     /// Minimum time between connection reservations for a single peer.
