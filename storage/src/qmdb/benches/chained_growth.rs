@@ -19,6 +19,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{self, full, mmb::Family as Mmb},
     qmdb::{
+        InitParallelism,
         any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
         current::{ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed},
     },
@@ -81,6 +82,7 @@ fn cur_fix_cfg(
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = pc(ctx);
     commonware_storage::qmdb::current::FixedConfig {
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),

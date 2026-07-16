@@ -1664,8 +1664,8 @@ mod tests {
             },
             merkle::{full::Config as MerkleConfig, mmr},
             qmdb::{
-                any as storage_any, current as storage_current, immutable as storage_immutable,
-                keyless as storage_keyless,
+                InitParallelism, any as storage_any, current as storage_current,
+                immutable as storage_immutable, keyless as storage_keyless,
             },
             translator::TwoCap,
         };
@@ -1828,6 +1828,7 @@ mod tests {
                 journal_config: fixed_journal_config(context, suffix),
                 translator: TwoCap,
                 init_cache_size: Some(NZUsize!(1024)),
+                init_parallelism: InitParallelism::Serial,
             }
         }
 
@@ -1840,6 +1841,7 @@ mod tests {
                 journal_config: variable_journal_config(context, suffix, ((), ())),
                 translator: TwoCap,
                 init_cache_size: Some(NZUsize!(1024)),
+                init_parallelism: InitParallelism::Serial,
             }
         }
 
@@ -1853,6 +1855,7 @@ mod tests {
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache_size: Some(NZUsize!(1024)),
+                init_parallelism: InitParallelism::Serial,
             }
         }
 
@@ -1866,6 +1869,7 @@ mod tests {
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache_size: Some(NZUsize!(1024)),
+                init_parallelism: InitParallelism::Serial,
             }
         }
 
