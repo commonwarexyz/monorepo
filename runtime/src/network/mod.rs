@@ -622,7 +622,7 @@ mod tests {
         client_result.expect("Client task failed");
     }
 
-    /// Test a network backend's connect timeout against a real TCP connection.
+    /// Test a network backend's dial timeout against a real TCP connection.
     ///
     /// This is Linux-only because the behavior of a zero-length listen backlog is
     /// platform-specific. Linux permits one connection to occupy the accept queue, and
@@ -630,9 +630,9 @@ mod tests {
     /// pending rather than completing. Other operating systems may clamp the backlog to a
     /// different value or handle an overflowing accept queue differently.
     #[cfg(target_os = "linux")]
-    pub(super) async fn test_network_connect_timeout<N: crate::Network>(
+    pub(super) async fn test_network_dial_timeout<N: crate::Network>(
         network: N,
-        connect_timeout: Duration,
+        dial_timeout: Duration,
     ) {
         // Create a loopback listener with the smallest possible accept queue.
         let socket = tokio::net::TcpSocket::new_v4().expect("Failed to create TCP socket");
@@ -644,20 +644,20 @@ mod tests {
 
         // Establish one connection without accepting it. Keeping both the listener
         // and this connection alive fills the accept queue, so the next connection
-        // remains pending long enough for the backend's connect timeout to fire.
+        // remains pending long enough for the backend's dial timeout to fire.
         let _queued_connection = tokio::net::TcpStream::connect(listener_addr)
             .await
             .expect("Failed to fill listener accept queue");
 
         let start = std::time::Instant::now();
-        let result = tokio::time::timeout(connect_timeout * 2, network.dial(listener_addr))
+        let result = tokio::time::timeout(dial_timeout * 2, network.dial(listener_addr))
             .await
-            .expect("Dial did not honor connect timeout");
+            .expect("Dial did not honor dial timeout");
 
         assert!(matches!(result, Err(crate::Error::Timeout)));
 
         // Confirm the dial remained pending for the configured budget.
-        assert!(start.elapsed() >= connect_timeout);
+        assert!(start.elapsed() >= dial_timeout);
     }
 
     /// Network stress tests

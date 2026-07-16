@@ -58,7 +58,7 @@ pub struct Config {
     /// Timeout for establishing an outbound TCP connection.
     ///
     /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
-    pub connect_timeout: Duration,
+    pub dial_timeout: Duration,
     /// Timeout budget applied to each top-level send/recv call.
     ///
     /// This is a network-level policy and is independent from io_uring loop
@@ -82,7 +82,7 @@ impl Default for Config {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
-            connect_timeout: iouring_config.max_request_timeout,
+            dial_timeout: iouring_config.max_request_timeout,
             read_write_timeout: iouring_config.max_request_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
@@ -104,7 +104,7 @@ pub struct Network {
     /// Used to submit recv operations to the recv io_uring event loop.
     recv_handle: iouring::Handle,
     /// Timeout for establishing an outbound TCP connection.
-    connect_timeout: Duration,
+    dial_timeout: Duration,
     /// Timeout budget applied to each send/recv call.
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
@@ -135,7 +135,7 @@ impl Network {
         cfg.iouring_config.max_request_timeout = cfg
             .iouring_config
             .max_request_timeout
-            .max(cfg.connect_timeout)
+            .max(cfg.dial_timeout)
             .max(cfg.read_write_timeout);
 
         // Create an io_uring instance to handle send operations.
@@ -155,7 +155,7 @@ impl Network {
             zero_linger: cfg.zero_linger,
             send_handle,
             recv_handle,
-            connect_timeout: cfg.connect_timeout,
+            dial_timeout: cfg.dial_timeout,
             read_write_timeout: cfg.read_write_timeout,
             read_buffer_size: cfg.read_buffer_size,
             pool,
@@ -186,7 +186,7 @@ impl crate::Network for Network {
         &self,
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
-        let stream = timeout(self.connect_timeout, TcpStream::connect(socket))
+        let stream = timeout(self.dial_timeout, TcpStream::connect(socket))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::ConnectionFailed)?;
@@ -626,15 +626,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connect_timeout() {
-        let connect_timeout = Duration::from_millis(100);
+    async fn test_dial_timeout() {
+        let dial_timeout = Duration::from_millis(100);
         let network = test_network(Config {
-            connect_timeout,
+            dial_timeout,
             ..Default::default()
         })
         .expect("Failed to start io_uring");
 
-        tests::test_network_connect_timeout(network, connect_timeout).await;
+        tests::test_network_dial_timeout(network, dial_timeout).await;
     }
 
     #[test_group("slow")]
