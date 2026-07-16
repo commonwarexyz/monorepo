@@ -477,12 +477,8 @@ impl crate::Runner for Runner {
                         continue;
                     };
 
-                    // Prepare task for polling
-                    let waker = waker(Arc::new(TaskWaker {
-                        id,
-                        tasks: Arc::downgrade(&executor.tasks),
-                    }));
-                    let mut cx = task::Context::from_waker(&waker);
+                    // Prepare task for polling with its cached waker.
+                    let mut cx = task::Context::from_waker(&t.waker);
 
                     // Poll the task
                     match &t.mode {
@@ -610,6 +606,12 @@ enum Mode {
 /// A future being executed by the [Executor].
 struct Task {
     mode: Mode,
+    /// Waker re-enqueuing this task, built once at registration.
+    ///
+    /// The waker's identity is stable for the task's lifetime, so re-polls
+    /// present the same waker and `Waker::will_wake` lets waiters (e.g. the
+    /// driver's slot wakers) skip refresh clones.
+    waker: task::Waker,
 }
 
 /// A waker for a [Task].
@@ -680,7 +682,11 @@ impl Tasks {
     /// Register the root task.
     fn register_root(arc_self: &Arc<Self>) {
         let id = arc_self.increment();
-        arc_self.register(id, Arc::new(Task { mode: Mode::Root }));
+        let task = Arc::new(Task {
+            mode: Mode::Root,
+            waker: Self::task_waker(arc_self, id),
+        });
+        arc_self.register(id, task);
     }
 
     /// Register a non-root task to be executed.
@@ -689,12 +695,19 @@ impl Tasks {
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) {
         let id = arc_self.increment();
-        arc_self.register(
+        let task = Arc::new(Task {
+            mode: Mode::Work(Mutex::new(Some(future))),
+            waker: Self::task_waker(arc_self, id),
+        });
+        arc_self.register(id, task);
+    }
+
+    /// Build the waker that re-enqueues task `id`.
+    fn task_waker(arc_self: &Arc<Self>, id: u128) -> task::Waker {
+        waker(Arc::new(TaskWaker {
             id,
-            Arc::new(Task {
-                mode: Mode::Work(Mutex::new(Some(future))),
-            }),
-        );
+            tasks: Arc::downgrade(arc_self),
+        }))
     }
 
     /// Register a new task to be executed.
