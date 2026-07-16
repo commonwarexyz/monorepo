@@ -52,12 +52,12 @@
 //! first try to re-enter the dropping thread's local cache, spilling a bounded
 //! batch back to the global freelist if needed.
 
-use super::{freelist::Freelist, page_size, IoBufMut};
+use super::{IoBufMut, freelist::Freelist, page_size};
 use crate::{
     iobuf::buffer::{PooledBufMut, PooledBuffer},
-    telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
+    telemetry::metrics::{Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register, raw},
 };
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{NZU32, NZUsize};
 use std::{
     alloc::Layout,
     cell::{Cell, UnsafeCell},
@@ -66,8 +66,8 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
     ptr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -2000,13 +2000,13 @@ impl BufferPool {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::{cache_line_size, freelist, IoBuf},
+        iobuf::{IoBuf, cache_line_size, freelist},
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut};
     use commonware_utils::NZU32;
     use std::{
-        sync::{mpsc, Arc},
+        sync::{Arc, mpsc},
         thread,
     };
 
@@ -2701,9 +2701,11 @@ mod tests {
         assert_eq!(config.pool_min_size, 1024);
         assert_eq!(config.min_size(), page);
         assert_eq!(config.max_size().get(), 128 * 1024);
-        assert!(config
-            .size_classes()
-            .all(|class| class.max_buffers.get() == 64));
+        assert!(
+            config
+                .size_classes()
+                .all(|class| class.max_buffers.get() == 64)
+        );
         assert_eq!(config.parallelism, NZUsize!(4));
         assert_eq!(
             config.thread_cache_config,

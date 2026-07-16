@@ -1,4 +1,4 @@
-use crate::{mocks, Error};
+use crate::{Error, mocks};
 use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::{
     collections::HashMap,

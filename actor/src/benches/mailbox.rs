@@ -1,14 +1,14 @@
-use commonware_actor::{mailbox, Feedback, Unreliable};
+use commonware_actor::{Feedback, Unreliable, mailbox};
 use commonware_runtime::{
-    telemetry::metrics::{Metric, Registered, Registration},
     Metrics, Name, Supervisor,
+    telemetry::metrics::{Metric, Registered, Registration},
 };
 use commonware_utils::NZUsize;
-use criterion::{criterion_group, BatchSize, Criterion, Throughput};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group};
 use futures::pin_mut;
 use std::{
     collections::VecDeque,
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     hint::black_box,
     task::Poll,
 };

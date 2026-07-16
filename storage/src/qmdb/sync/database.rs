@@ -1,8 +1,8 @@
 use crate::{
-    merkle::{full, Family, Location},
+    Context,
+    merkle::{Family, Location, full},
     qmdb::sync::{Journal, Target},
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;

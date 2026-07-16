@@ -9,10 +9,10 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::{
+    Ident, Token, Type,
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
-    Ident, Token, Type,
 };
 
 /// A single conformance test entry: `Type` or `Type => n_cases`

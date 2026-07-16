@@ -3,18 +3,18 @@
 //! For fixed-size values, use [super::fixed].
 
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::variable::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
+        Error, ROOT_BAGGING,
         any::value::{VariableEncoding, VariableValue},
         keyless::operation::Operation as BaseOperation,
         operation::Committable,
-        Error, ROOT_BAGGING,
     },
-    Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
@@ -59,13 +59,13 @@ impl<F: Family, E: Context, V: VariableValue, H: Hasher, S: Strategy> Db<F, E, V
 }
 
 impl<
-        F: Family,
-        E: Context,
-        V: VariableValue,
-        H: Hasher,
-        C: Clone + Send + Sync + 'static,
-        S: Strategy,
-    > CompactDb<F, E, V, H, C, S>
+    F: Family,
+    E: Context,
+    V: VariableValue,
+    H: Hasher,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+> CompactDb<F, E, V, H, C, S>
 where
     Operation<F, V>: Read<Cfg = C>,
 {
@@ -93,9 +93,9 @@ mod test {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     // Use some weird sizes here to test boundary conditions.

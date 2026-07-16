@@ -1,6 +1,6 @@
 use crate::{
-    buffer::{tip::Buffer, SyncState},
     Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs,
+    buffer::{SyncState, tip::Buffer},
 };
 use std::num::NonZeroUsize;
 
@@ -175,16 +175,16 @@ impl<B: Blob> Write<B> {
             // Chunk cannot be merged, so flush the buffer if the range overlaps, and check
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
-            if self.buffer.offset < chunk_end {
-                if let Some((old_buf, old_offset)) = self.buffer.take() {
-                    self.sync_state
-                        .write_at(&self.blob, old_offset, old_buf)
-                        .await?;
-                    if self.buffer.merge(chunk, current_offset) {
-                        bufs.advance(chunk_len);
-                        current_offset += chunk_len as u64;
-                        continue;
-                    }
+            if self.buffer.offset < chunk_end
+                && let Some((old_buf, old_offset)) = self.buffer.take()
+            {
+                self.sync_state
+                    .write_at(&self.blob, old_offset, old_buf)
+                    .await?;
+                if self.buffer.merge(chunk, current_offset) {
+                    bufs.advance(chunk_len);
+                    current_offset += chunk_len as u64;
+                    continue;
                 }
             }
 
@@ -238,10 +238,10 @@ impl<B: Blob> Write<B> {
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
-        if let Some((buf, offset)) = self.buffer.take() {
-            if let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await {
-                return Handle::ready(Err(err));
-            }
+        if let Some((buf, offset)) = self.buffer.take()
+            && let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await
+        {
+            return Handle::ready(Err(err));
         }
 
         self.sync_state.start_sync(&self.blob).await

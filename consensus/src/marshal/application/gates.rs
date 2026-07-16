@@ -130,7 +130,10 @@ pub(crate) async fn drive<D, F, Fut>(
 {
     let result = select! {
         _ = tx.closed() => {
-            debug!(reason = "consensus dropped receiver", "skipping certification");
+            debug!(
+                reason = "consensus dropped receiver",
+                "skipping certification"
+            );
             return;
         },
         result = task => result,
@@ -148,7 +151,10 @@ pub(crate) async fn drive<D, F, Fut>(
             let fallback = fallback().await;
             let result = select! {
                 _ = tx.closed() => {
-                    debug!(reason = "consensus dropped receiver", "skipping certification");
+                    debug!(
+                        reason = "consensus dropped receiver",
+                        "skipping certification"
+                    );
                     return;
                 },
                 result = fallback => result,
@@ -164,7 +170,7 @@ pub(crate) async fn drive<D, F, Fut>(
 mod tests {
     use super::*;
     use crate::types::{Epoch, View};
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
 
     type D = Sha256Digest;
 

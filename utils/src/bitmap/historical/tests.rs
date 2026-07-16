@@ -1,5 +1,5 @@
 use super::*;
-use crate::{bitmap::Prunable, TestRng};
+use crate::{TestRng, bitmap::Prunable};
 use commonware_formatting::hex;
 use rand::RngExt as _;
 

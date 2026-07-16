@@ -1,18 +1,18 @@
 use crate::stateful::{
-    db::{DatabaseSet, ManagedDb, Merkleized, Unmerkleized},
     Application, Proposed,
+    db::{DatabaseSet, ManagedDb, Merkleized, Unmerkleized},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
+    Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::standard::Standard,
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
-    ed25519, sha256::Digest as Sha256Digest, Digest as _, Digestible, Signer as _,
+    Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{deterministic, Buf, BufMut};
+use commonware_runtime::{Buf, BufMut, deterministic};
 use commonware_utils::sync::TracedAsyncRwLock;
 use futures::Stream;
 use std::{convert::Infallible, sync::Arc};

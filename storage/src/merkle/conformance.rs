@@ -1,6 +1,6 @@
 //! Shared conformance test utilities and stability tests for Merkle-family structures.
 
-use crate::merkle::{hasher::Hasher, mem::Mem, Family};
+use crate::merkle::{Family, hasher::Hasher, mem::Mem};
 use commonware_cryptography::sha256;
 
 /// Build a test Merkle structure by adding `elements` elements using the provided hasher.
@@ -43,16 +43,16 @@ pub fn build_test_mmr<H: Hasher<crate::mmr::Family, Digest = sha256::Digest>>(
 #[cfg(feature = "arbitrary")]
 mod tests {
     use super::*;
-    use crate::merkle::{full, Bagging::ForwardFold};
-    use commonware_conformance::{conformance_tests, Conformance};
+    use crate::merkle::{Bagging::ForwardFold, full};
+    use commonware_conformance::{Conformance, conformance_tests};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
+        BufferPooler, Supervisor as _,
         buffer::paged::CacheRef,
         conformance::{StorageConformance, StorageWorkload},
-        BufferPooler, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use rand::RngExt as _;
 
     type Standard = crate::merkle::hasher::Standard<Sha256>;

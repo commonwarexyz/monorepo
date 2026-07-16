@@ -1,11 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{deterministic, Runner};
+use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_runtime::{Runner, deterministic};
 use commonware_storage::merkle::{
-    hasher::Standard, mem::Mem, mmb, mmr, Bagging::ForwardFold, Error, Family as MerkleFamily,
-    Location, Position,
+    Bagging::ForwardFold, Error, Family as MerkleFamily, Location, Position, hasher::Standard,
+    mem::Mem, mmb, mmr,
 };
 use core::any::type_name;
 use libfuzzer_sys::fuzz_target;
@@ -118,11 +118,7 @@ impl<F: MerkleFamily> ReferenceMerkle<F> {
 }
 
 fn limit(data: &[u8]) -> &[u8] {
-    if data.len() > 16 {
-        &data[..16]
-    } else {
-        data
-    }
+    if data.len() > 16 { &data[..16] } else { data }
 }
 
 fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {

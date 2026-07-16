@@ -2,20 +2,20 @@
 
 use crate::stateful::Application;
 use commonware_actor::{
-    mailbox::{Overflow, Policy, Sender},
     Feedback,
+    mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    marshal::Update, Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter,
-    Viewable,
+    Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter, Viewable,
+    marshal::Update,
 };
 use commonware_cryptography::Digestible;
-use commonware_runtime::{telemetry::traces::TracedExt as _, Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use futures::Stream;
 use rand_core::Rng;
 use std::{collections::VecDeque, pin::Pin, sync::Arc};
-use tracing::{info_span, Span};
+use tracing::{Span, info_span};
 
 /// Type alias for an ancestor stream sent through the actor mailbox.
 pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = Arc<B>> + Send>>;

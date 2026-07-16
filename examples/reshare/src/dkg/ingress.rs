@@ -4,15 +4,15 @@
 
 use crate::application::Block;
 use commonware_actor::{
-    mailbox::{Policy, Sender},
     Feedback,
+    mailbox::{Policy, Sender},
 };
-use commonware_consensus::{marshal::Update, Reporter};
+use commonware_consensus::{Reporter, marshal::Update};
 use commonware_cryptography::{
-    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
     Hasher, Signer,
+    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
 };
-use commonware_utils::{acknowledgement::Exact, channel::oneshot, Acknowledgement};
+use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot};
 use std::{collections::VecDeque, sync::Arc};
 use tracing::error;
 

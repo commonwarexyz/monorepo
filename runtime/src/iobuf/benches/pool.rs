@@ -31,11 +31,11 @@
 //! measures the cost observed by callers that actually use the buffer, including
 //! first-touch behavior for pages that have not yet been materialized.
 
-use super::utils::{measure, Threading};
+use super::utils::{Threading, measure};
 use commonware_runtime::{
-    page_size, tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
+    BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _, page_size, tokio,
 };
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{NZU32, NZUsize};
 use criterion::Criterion;
 use std::{hint::black_box, num::NonZeroUsize};
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];

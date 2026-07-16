@@ -4,19 +4,19 @@
 //! used by both fixed and variable ordered QMDB implementations.
 
 use crate::{
+    Context,
     index::Ordered as OrderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{self, Location},
     qmdb::{
+        Error,
         any::{
-            ordered::{Operation, Update},
             ValueEncoding,
+            ordered::{Operation, Update},
         },
         current::proof::OperationProof,
         operation::Key,
-        Error,
     },
-    Context,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Read, Write};
@@ -86,16 +86,16 @@ pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
 
 // Shared read-only functionality.
 impl<
-        F: merkle::Graftable,
-        E: Context,
-        C: Contiguous<Item = Operation<F, K, V>>,
-        K: Key,
-        V: ValueEncoding,
-        I: OrderedIndex<Value = Location<F>>,
-        H: Hasher,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, C, K, V, I, H, N, S>
+    F: merkle::Graftable,
+    E: Context,
+    C: Contiguous<Item = Operation<F, K, V>>,
+    K: Key,
+    V: ValueEncoding,
+    I: OrderedIndex<Value = Location<F>>,
+    H: Hasher,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, C, K, V, I, H, N, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -181,16 +181,16 @@ where
 }
 
 impl<
-        F: merkle::Graftable,
-        E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
-        K: Key,
-        V: ValueEncoding,
-        I: OrderedIndex<Value = Location<F>>,
-        H: Hasher,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, C, K, V, I, H, N, S>
+    F: merkle::Graftable,
+    E: Context,
+    C: Mutable<Item = Operation<F, K, V>>,
+    K: Key,
+    V: ValueEncoding,
+    I: OrderedIndex<Value = Location<F>>,
+    H: Hasher,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, C, K, V, I, H, N, S>
 where
     Operation<F, K, V>: Codec,
 {

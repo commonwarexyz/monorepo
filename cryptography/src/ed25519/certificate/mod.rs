@@ -8,17 +8,17 @@ pub mod mocks;
 
 use super::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature};
 use crate::{
-    certificate::{Attestation, Namespace, Scheme, Signers, Subject, Verification},
     BatchVerifier, Digest, Signer as _, Verifier as _,
+    certificate::{Attestation, Namespace, Scheme, Signers, Subject, Verification},
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    ordered::{Quorum, Set},
     Faults, Participant,
+    ordered::{Quorum, Set},
 };
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -615,7 +615,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, Faults, N3f1, Participant, TryCollect};
+    use commonware_utils::{Faults, N3f1, Participant, TryCollect, ordered::Set, test_rng};
 
     const NAMESPACE: &[u8] = b"test-ed25519";
     const MESSAGE: &[u8] = b"test message";
@@ -696,11 +696,13 @@ mod tests {
     fn test_verifier_cannot_sign() {
         let mut rng = test_rng();
         let (_, verifier) = setup_signers(&mut rng, 4);
-        assert!(verifier
-            .sign::<Sha256Digest>(TestSubject {
-                message: Bytes::from_static(MESSAGE)
-            })
-            .is_none());
+        assert!(
+            verifier
+                .sign::<Sha256Digest>(TestSubject {
+                    message: Bytes::from_static(MESSAGE)
+                })
+                .is_none()
+        );
     }
 
     #[test]
@@ -941,9 +943,11 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .is_none());
+        assert!(
+            schemes[0]
+                .assemble::<_, N3f1>(attestations, &Sequential)
+                .is_none()
+        );
     }
 
     #[test]
@@ -966,9 +970,11 @@ mod tests {
         // Corrupt signer index to be out of range
         attestations[0].signer = Participant::new(999);
 
-        assert!(schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .is_none());
+        assert!(
+            schemes[0]
+                .assemble::<_, N3f1>(attestations, &Sequential)
+                .is_none()
+        );
     }
 
     #[test]

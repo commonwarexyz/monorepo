@@ -9,16 +9,16 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
+    Context,
     index::ordered::Index,
     journal::contiguous::fixed::Journal,
     merkle::{Graftable, Location},
     qmdb::{
-        any::{ordered::fixed::Operation, value::FixedEncoding, FixedValue},
-        current::FixedConfig as Config,
         Error,
+        any::{FixedValue, ordered::fixed::Operation, value::FixedEncoding},
+        current::FixedConfig as Config,
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -37,15 +37,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 >;
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context,
+    K: Array,
+    V: FixedValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, K, V, H, T, N, S>
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -80,16 +80,16 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable,
-            E: Context,
-            K: Array,
-            V: FixedValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            const N: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, N, S>
+        F: Graftable,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -105,17 +105,17 @@ pub mod test {
     use crate::{
         mmr,
         qmdb::{
-            current::{ordered::tests as shared, tests::fixed_config},
             Error,
+            current::{ordered::tests as shared, tests::fixed_config},
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
-        bitmap::{Prunable as BitMap, Readable as _},
         NZU64,
+        bitmap::{Prunable as BitMap, Readable as _},
     };
 
     /// A type alias for the concrete [Db] type used in these unit tests.

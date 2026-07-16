@@ -80,7 +80,7 @@ cfg_if::cfg_if! {
 
 pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 use crate::merkle::{self, Family as _, Graftable};
-pub use crate::merkle::{hasher, Readable};
+pub use crate::merkle::{Readable, hasher};
 pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
 use commonware_cryptography::Digest;
 
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_position_read_cfg_invalid_values() {
-        use commonware_codec::{varint::UInt, Encode, ReadExt};
+        use commonware_codec::{Encode, ReadExt, varint::UInt};
 
         let encoded = UInt(*MAX_NODES + 1).encode();
         assert!(matches!(
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_location_read_cfg_invalid_values() {
-        use commonware_codec::{varint::UInt, Encode, ReadExt};
+        use commonware_codec::{Encode, ReadExt, varint::UInt};
 
         let encoded = UInt(*MAX_LEAVES + 1).encode();
         assert!(matches!(

@@ -11,18 +11,19 @@
 //! fetchers do not have peer-specific routing.
 
 use crate::{
+    Consumer, Delivery, Fetch, TargetedResolver,
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
     ingress::{self, FetchKey, Message},
-    subscribers, Consumer, Delivery, Fetch, TargetedResolver,
+    subscribers,
 };
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::{Feedback, mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::{
+    Span,
     futures::{AbortablePool, Aborter},
     vec::NonEmptyVec,
-    Span,
 };
 use futures::future::{self, Either};
 use std::{
@@ -583,16 +584,16 @@ mod tests {
     use crate::Resolver as _;
     use bytes::Bytes;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{deterministic, deterministic::Runner, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Runner};
     use commonware_utils::{channel::oneshot, non_empty_vec, sync::Mutex};
     use std::{
         collections::{HashMap, VecDeque},
         sync::{
-            atomic::{AtomicU32, Ordering},
             Arc,
+            atomic::{AtomicU32, Ordering},
         },
     };
 
@@ -754,23 +755,27 @@ mod tests {
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
 
-            assert!(resolver
-                .fetch(Fetch {
-                    key: 1,
-                    subscriber: 10,
-                    span: tracing::Span::none(),
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
             let first = wait_for_delivery(&context, &consumer).await;
             assert_eq!(first.value, Bytes::from_static(b"value"));
 
-            assert!(resolver
-                .fetch(Fetch {
-                    key: 1,
-                    subscriber: 11,
-                    span: tracing::Span::none(),
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 11,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
             context.sleep(Duration::from_millis(10)).await;
             first.response.send(true).expect("response dropped");
 
@@ -802,13 +807,15 @@ mod tests {
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
 
-            assert!(resolver
-                .fetch(Fetch {
-                    key: 1,
-                    subscriber: 10,
-                    span: tracing::Span::none(),
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
             context
                 .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
                 .await;
@@ -829,22 +836,26 @@ mod tests {
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
 
-            assert!(resolver
-                .fetch(Fetch {
-                    key: 1,
-                    subscriber: 10,
-                    span: tracing::Span::none(),
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
             let first = wait_for_delivery(&context, &consumer).await;
 
-            assert!(resolver
-                .fetch(Fetch {
-                    key: 1,
-                    subscriber: 11,
-                    span: tracing::Span::none(),
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 11,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
             context.sleep(Duration::from_millis(10)).await;
             first.response.send(true).expect("response dropped");
 
@@ -866,24 +877,30 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver = start_resolver(context.child("resolver"), fetcher, consumer.clone());
 
-            assert!(resolver
-                .fetch(Fetch {
-                    key: 1,
-                    subscriber: 10,
-                    span: tracing::Span::none(),
-                })
-                .accepted());
-            assert!(resolver
-                .fetch(Fetch {
-                    key: 1,
-                    subscriber: 11,
-                    span: tracing::Span::none(),
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 11,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
             started.await.expect("fetch did not start");
-            assert!(resolver
-                .retain(|_, subscriber| *subscriber == 11)
-                .accepted());
+            assert!(
+                resolver
+                    .retain(|_, subscriber| *subscriber == 11)
+                    .accepted()
+            );
             context.sleep(Duration::from_millis(10)).await;
             response
                 .send(Some(Bytes::from_static(b"value")))
@@ -910,13 +927,15 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver = start_resolver(context.child("resolver"), fetcher, consumer.clone());
 
-            assert!(resolver
-                .fetch(Fetch {
-                    key: 1,
-                    subscriber: 10,
-                    span: tracing::Span::none(),
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
             started.await.expect("fetch did not start");
             assert!(resolver.retain(|_, _| false).accepted());
             context.sleep(Duration::from_millis(10)).await;
@@ -941,13 +960,15 @@ mod tests {
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
 
-            assert!(resolver
-                .fetch(Fetch {
-                    key: 1,
-                    subscriber: 10,
-                    span: tracing::Span::none(),
-                })
-                .accepted());
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert!(resolver.retain(|_, _| false).accepted());
             context.sleep(Duration::from_millis(10)).await;
@@ -974,16 +995,18 @@ mod tests {
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
             let target = PrivateKey::from_seed(0).public_key();
 
-            assert!(resolver
-                .fetch_targeted(
-                    Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    },
-                    non_empty_vec![target]
-                )
-                .accepted());
+            assert!(
+                resolver
+                    .fetch_targeted(
+                        Fetch {
+                            key: 1,
+                            subscriber: 10,
+                            span: tracing::Span::none(),
+                        },
+                        non_empty_vec![target]
+                    )
+                    .accepted()
+            );
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"value"));
             delivery.response.send(true).expect("response dropped");

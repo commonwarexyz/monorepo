@@ -6,14 +6,14 @@
 //! Timed: do `batches` more merkleize + apply iterations on top of the pre-built chain, with a
 //! single random update per batch so each overlay covers a tiny fraction of chunks.
 
-use crate::common::{seed_db, write_random_updates, Digest, WRITE_BUFFER_SIZE};
+use crate::common::{Digest, WRITE_BUFFER_SIZE, seed_db, write_random_updates};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
+    BufferPooler, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Strategizer, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -24,8 +24,8 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
-use criterion::{criterion_group, Criterion};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},

@@ -1,8 +1,8 @@
 #![no_main]
 
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::cache::{Cache, Config};
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::{
     arbitrary::{Arbitrary, Unstructured},
     fuzz_target,

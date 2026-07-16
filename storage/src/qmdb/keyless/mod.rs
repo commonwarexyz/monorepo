@@ -44,15 +44,15 @@
 //! ```
 
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable},
     },
-    merkle::{full::Config as MerkleConfig, Family, Location, Proof},
+    merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        any::value::ValueEncoding, batch_chain, metrics::Metrics, single_operation_root, Error,
+        Error, any::value::ValueEncoding, batch_chain, metrics::Metrics, single_operation_root,
     },
-    Context,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
@@ -553,7 +553,7 @@ pub(crate) mod tests {
     use crate::{journal::contiguous::Mutable, qmdb::verify_proof};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
-    use commonware_runtime::{deterministic, Supervisor as _};
+    use commonware_runtime::{Supervisor as _, deterministic};
     use commonware_utils::NZU64;
     use std::{future::Future, pin::Pin};
 

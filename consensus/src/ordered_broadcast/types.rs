@@ -2,17 +2,17 @@
 
 use super::scheme;
 use crate::{
-    types::{Epoch, Height},
     Heightable,
+    types::{Epoch, Height},
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
-    certificate::{Attestation, Namespace, Provider, Scheme, Subject, Verifier},
     Digest, PublicKey, Signer,
+    certificate::{Attestation, Namespace, Provider, Scheme, Subject, Verifier},
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{channel::oneshot, ordered::Set, union, N3f1};
+use commonware_utils::{N3f1, channel::oneshot, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::{
     hash::{Hash, Hasher},
@@ -1123,20 +1123,20 @@ mod tests {
     use crate::{
         ordered_broadcast::{
             mocks::Provider,
-            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+            scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
         },
         types::Participant,
     };
     use commonware_codec::{DecodeExt as _, Encode, Read};
     use commonware_cryptography::{
+        Signer,
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::{mocks::Fixture, ConstantProvider},
+        certificate::{ConstantProvider, mocks::Fixture},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        Signer,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, TestRng};
+    use commonware_utils::{Faults, N3f1, TestRng, test_rng};
     use std::panic::catch_unwind;
 
     const NAMESPACE: &[u8] = b"test";
@@ -1814,9 +1814,10 @@ mod tests {
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier);
         let verifier = chunk_verifier();
-        assert!(node
-            .verify(&mut rng, &verifier, &provider, &Sequential)
-            .is_ok());
+        assert!(
+            node.verify(&mut rng, &verifier, &provider, &Sequential)
+                .is_ok()
+        );
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(chunk_namespace.as_ref(), &node.encode());
@@ -1884,9 +1885,10 @@ mod tests {
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier.clone());
         let verifier = chunk_verifier();
-        assert!(node
-            .verify(&mut rng, &verifier, &provider, &Sequential)
-            .is_ok());
+        assert!(
+            node.verify(&mut rng, &verifier, &provider, &Sequential)
+                .is_ok()
+        );
 
         // Now create a parent with invalid certificate
         // Generate certificate with the wrong keys (sign with schemes[1..] but pretend it's from schemes[0..])
@@ -2240,22 +2242,30 @@ mod tests {
     fn test_node_genesis_with_parent_panics() {
         assert!(catch_unwind(|| node_genesis_with_parent_panics(ed25519::fixture)).is_err());
         assert!(catch_unwind(|| node_genesis_with_parent_panics(secp256r1::fixture)).is_err());
-        assert!(catch_unwind(|| node_genesis_with_parent_panics(
-            bls12381_multisig::fixture::<MinPk, _>
-        ))
-        .is_err());
-        assert!(catch_unwind(|| node_genesis_with_parent_panics(
-            bls12381_multisig::fixture::<MinSig, _>
-        ))
-        .is_err());
-        assert!(catch_unwind(|| node_genesis_with_parent_panics(
-            bls12381_threshold::fixture::<MinPk, _>
-        ))
-        .is_err());
-        assert!(catch_unwind(|| node_genesis_with_parent_panics(
-            bls12381_threshold::fixture::<MinSig, _>
-        ))
-        .is_err());
+        assert!(
+            catch_unwind(|| node_genesis_with_parent_panics(
+                bls12381_multisig::fixture::<MinPk, _>
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(|| node_genesis_with_parent_panics(
+                bls12381_multisig::fixture::<MinSig, _>
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(|| node_genesis_with_parent_panics(
+                bls12381_threshold::fixture::<MinPk, _>
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(|| node_genesis_with_parent_panics(
+                bls12381_threshold::fixture::<MinSig, _>
+            ))
+            .is_err()
+        );
     }
 
     fn node_non_genesis_without_parent_panics<S, F>(fixture: F)
@@ -2285,22 +2295,30 @@ mod tests {
         assert!(
             catch_unwind(|| node_non_genesis_without_parent_panics(secp256r1::fixture)).is_err()
         );
-        assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_multisig::fixture::<MinPk, _>
-        ))
-        .is_err());
-        assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_multisig::fixture::<MinSig, _>
-        ))
-        .is_err());
-        assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_threshold::fixture::<MinPk, _>
-        ))
-        .is_err());
-        assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_threshold::fixture::<MinSig, _>
-        ))
-        .is_err());
+        assert!(
+            catch_unwind(|| node_non_genesis_without_parent_panics(
+                bls12381_multisig::fixture::<MinPk, _>
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(|| node_non_genesis_without_parent_panics(
+                bls12381_multisig::fixture::<MinSig, _>
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(|| node_non_genesis_without_parent_panics(
+                bls12381_threshold::fixture::<MinPk, _>
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(|| node_non_genesis_without_parent_panics(
+                bls12381_threshold::fixture::<MinSig, _>
+            ))
+            .is_err()
+        );
     }
 
     #[cfg(feature = "arbitrary")]

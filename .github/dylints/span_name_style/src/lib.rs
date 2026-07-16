@@ -6,9 +6,9 @@ extern crate rustc_errors;
 extern crate rustc_span;
 
 use rustc_ast::{
+    AttrArgs, AttrKind, Attribute, DelimArgs, MacCall,
     token::{Lit, LitKind, Token, TokenKind},
     tokenstream::{TokenStream, TokenTree},
-    AttrArgs, AttrKind, Attribute, DelimArgs, MacCall,
 };
 use rustc_errors::DiagDecorator;
 use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
@@ -100,13 +100,17 @@ impl EarlyLintPass for SpanNameStyle {
 fn span_macro_name(args: &DelimArgs, has_level: bool) -> Option<(String, Span)> {
     let mut skip_level = has_level;
     for group in top_level_groups(&args.tokens) {
-        if let [TokenTree::Token(Token { kind, .. }, _), TokenTree::Token(
-            Token {
-                kind: TokenKind::Colon,
-                ..
-            },
-            _,
-        ), ..] = group.as_slice()
+        if let [
+            TokenTree::Token(Token { kind, .. }, _),
+            TokenTree::Token(
+                Token {
+                    kind: TokenKind::Colon,
+                    ..
+                },
+                _,
+            ),
+            ..,
+        ] = group.as_slice()
         {
             if let TokenKind::Ident(ident, _) = kind {
                 if ident.as_str() == "target" || ident.as_str() == "parent" {
@@ -128,19 +132,23 @@ fn span_macro_name(args: &DelimArgs, has_level: bool) -> Option<(String, Span)> 
 /// Extracts the `name = "..."` value from `#[instrument(...)]` arguments.
 fn instrument_name(args: &DelimArgs) -> Option<(String, Span)> {
     for group in top_level_groups(&args.tokens) {
-        if let [TokenTree::Token(
-            Token {
-                kind: TokenKind::Ident(ident, _),
-                ..
-            },
-            _,
-        ), TokenTree::Token(
-            Token {
-                kind: TokenKind::Eq,
-                ..
-            },
-            _,
-        ), rest @ ..] = group.as_slice()
+        if let [
+            TokenTree::Token(
+                Token {
+                    kind: TokenKind::Ident(ident, _),
+                    ..
+                },
+                _,
+            ),
+            TokenTree::Token(
+                Token {
+                    kind: TokenKind::Eq,
+                    ..
+                },
+                _,
+            ),
+            rest @ ..,
+        ] = group.as_slice()
         {
             if ident.as_str() == "name" {
                 return string_literal(rest);
@@ -172,18 +180,20 @@ fn top_level_groups(tokens: &TokenStream) -> Vec<Vec<TokenTree>> {
 
 /// Returns the contents of a group consisting of a single string literal.
 fn string_literal(group: &[TokenTree]) -> Option<(String, Span)> {
-    let [TokenTree::Token(
-        Token {
-            kind:
-                TokenKind::Literal(Lit {
-                    kind: LitKind::Str,
-                    symbol,
-                    ..
-                }),
-            span,
-        },
-        _,
-    )] = group
+    let [
+        TokenTree::Token(
+            Token {
+                kind:
+                    TokenKind::Literal(Lit {
+                        kind: LitKind::Str,
+                        symbol,
+                        ..
+                    }),
+                span,
+            },
+            _,
+        ),
+    ] = group
     else {
         return None;
     };

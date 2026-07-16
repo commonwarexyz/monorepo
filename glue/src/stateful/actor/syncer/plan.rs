@@ -1,6 +1,6 @@
 use super::StateSyncMetadata;
 use commonware_consensus::{
-    marshal::{core::Variant, Start},
+    marshal::{Start, core::Variant},
     simplex::types::Finalization,
     types::Height,
 };
@@ -100,15 +100,15 @@ where
             return self;
         }
 
-        if let Some(selected) = &self.floor {
-            if floor.round() <= selected.round() {
-                warn!(
-                    candidate = ?floor.round(),
-                    selected = ?selected.round(),
-                    "state sync floor not updated, candidate is not newer",
-                );
-                return self;
-            }
+        if let Some(selected) = &self.floor
+            && floor.round() <= selected.round()
+        {
+            warn!(
+                candidate = ?floor.round(),
+                selected = ?selected.round(),
+                "state sync floor not updated, candidate is not newer",
+            );
+            return self;
         }
 
         self.floor = Some(floor);
@@ -170,7 +170,7 @@ mod tests {
     };
     use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
 
     fn finalization(
         schemes: &[TestScheme],

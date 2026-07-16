@@ -1,22 +1,22 @@
 //! Benchmarks for applying already-merkleized QMDB batches.
 
 use crate::common::{
-    any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db, AnyOFixP256Db, AnyUFixDb,
-    Digest, ImmFixDb, CHUNK_SIZE, PAGE_CACHE_SIZE,
+    AnyOFixP256Db, AnyUFixDb, CHUNK_SIZE, Digest, ImmFixDb, PAGE_CACHE_SIZE, any_fix_cfg_with,
+    imm_fix_cfg_with, make_fixed_value, seed_db,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
 use commonware_runtime::{
+    Supervisor,
     benchmarks::{context, tokio},
     tokio::{Config, Context},
-    Supervisor,
 };
 use commonware_storage::{
     merkle::mmb::Family as Mmb,
     qmdb::any::traits::{BatchableDb, UnmerkleizedBatch},
 };
-use commonware_utils::{TestRng, NZU64};
-use criterion::{criterion_group, Criterion};
+use commonware_utils::{NZU64, TestRng};
+use criterion::{Criterion, criterion_group};
 use rand::Rng;
 use std::{
     num::NonZeroU64,

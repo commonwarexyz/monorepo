@@ -1,19 +1,19 @@
-use super::{metrics::Metrics, record::Record, Metadata, Reservation};
+use super::{Metadata, Reservation, metrics::Metrics, record::Record};
 use crate::{
+    AddressableTrackedPeers, Ingress, PeerSetUpdate, TrackedPeers,
     authenticated::{
-        dialing::{earliest, DialStatus, Dialable, ReserveResult},
+        dialing::{DialStatus, Dialable, ReserveResult, earliest},
         lookup::actors::tracker::ingress::Releaser,
     },
     types::Address,
     utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
-    AddressableTrackedPeers, Ingress, PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{telemetry::metrics::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{ordered::Set, IpAddrExt, PrioritySet, SystemTimeExt};
+use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner, telemetry::metrics::GaugeExt};
+use commonware_utils::{IpAddrExt, PrioritySet, SystemTimeExt, ordered::Set};
 use rand_core::Rng;
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     net::IpAddr,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
@@ -162,11 +162,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.peer_sets.last_key_value() {
-            if index <= *last {
-                warn!(?index, ?last, "index must monotonically increase");
-                return None;
-            }
+        if let Some((last, _)) = self.peer_sets.last_key_value()
+            && index <= *last
+        {
+            warn!(?index, ?last, "index must monotonically increase");
+            return None;
         }
 
         // Create and store new primary peer set (all peers are tracked regardless of address
@@ -334,10 +334,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // If record exists, check if it's blockable
-        if let Some(record) = self.peers.get(peer) {
-            if !record.is_blockable() {
-                return;
-            }
+        if let Some(record) = self.peers.get(peer)
+            && !record.is_blockable()
+        {
+            return;
         }
 
         let blocked_until = self.context.current() + self.block_duration;
@@ -532,16 +532,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        authenticated::lookup::actors::tracker::directory::Directory, types::Address,
         AddressableTrackedPeers, Ingress,
+        authenticated::lookup::actors::tracker::directory::Directory, types::Address,
     };
     use commonware_actor::mailbox;
-    use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Clock, Metrics as _, Runner, Supervisor as _};
+    use commonware_cryptography::{Signer, ed25519};
+    use commonware_runtime::{Clock, Metrics as _, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        hostname,
+        NZUsize, SystemTimeExt, hostname,
         ordered::{Map, Set},
-        NZUsize, SystemTimeExt,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -725,39 +724,45 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            assert!(directory
-                .track(
-                    0,
-                    AddressableTrackedPeers::new(
-                        [(primary_0, addr(primary_0_addr))].try_into().unwrap(),
-                        [(secondary_0.clone(), addr(secondary_0_addr))]
-                            .try_into()
-                            .unwrap(),
-                    ),
-                )
-                .is_some());
+            assert!(
+                directory
+                    .track(
+                        0,
+                        AddressableTrackedPeers::new(
+                            [(primary_0, addr(primary_0_addr))].try_into().unwrap(),
+                            [(secondary_0.clone(), addr(secondary_0_addr))]
+                                .try_into()
+                                .unwrap(),
+                        ),
+                    )
+                    .is_some()
+            );
             assert!(directory.eligible(&secondary_0));
 
-            assert!(directory
-                .track(
-                    1,
-                    AddressableTrackedPeers::new(
-                        [(primary_1, addr(primary_1_addr))].try_into().unwrap(),
-                        [(secondary_1.clone(), addr(secondary_1_addr))]
-                            .try_into()
-                            .unwrap(),
-                    ),
-                )
-                .is_some());
+            assert!(
+                directory
+                    .track(
+                        1,
+                        AddressableTrackedPeers::new(
+                            [(primary_1, addr(primary_1_addr))].try_into().unwrap(),
+                            [(secondary_1.clone(), addr(secondary_1_addr))]
+                                .try_into()
+                                .unwrap(),
+                        ),
+                    )
+                    .is_some()
+            );
             assert!(directory.eligible(&secondary_0));
             assert!(directory.eligible(&secondary_1));
 
-            assert!(directory
-                .track(
-                    2,
-                    primary([(primary_2, addr(primary_2_addr))].try_into().unwrap(),),
-                )
-                .is_some());
+            assert!(
+                directory
+                    .track(
+                        2,
+                        primary([(primary_2, addr(primary_2_addr))].try_into().unwrap(),),
+                    )
+                    .is_some()
+            );
             assert!(!directory.peers.contains_key(&secondary_0));
             assert!(directory.eligible(&secondary_1));
         });
@@ -1184,33 +1189,37 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            assert!(directory
-                .track(
-                    10,
-                    primary(
-                        [
-                            (pk_a.clone(), addr(addr_a)),
-                            (pk_overlap.clone(), addr(addr_overlap_p)),
-                        ]
-                        .try_into()
-                        .unwrap(),
-                    ),
-                )
-                .is_some());
-            assert!(directory
-                .track(
-                    11,
-                    AddressableTrackedPeers::new(
-                        [(pk_b.clone(), addr(addr_b))].try_into().unwrap(),
-                        [
-                            (pk_overlap.clone(), addr(addr_overlap_s)),
-                            (pk_sec.clone(), addr(addr_sec)),
-                        ]
-                        .try_into()
-                        .unwrap(),
-                    ),
-                )
-                .is_some());
+            assert!(
+                directory
+                    .track(
+                        10,
+                        primary(
+                            [
+                                (pk_a.clone(), addr(addr_a)),
+                                (pk_overlap.clone(), addr(addr_overlap_p)),
+                            ]
+                            .try_into()
+                            .unwrap(),
+                        ),
+                    )
+                    .is_some()
+            );
+            assert!(
+                directory
+                    .track(
+                        11,
+                        AddressableTrackedPeers::new(
+                            [(pk_b.clone(), addr(addr_b))].try_into().unwrap(),
+                            [
+                                (pk_overlap.clone(), addr(addr_overlap_s)),
+                                (pk_sec.clone(), addr(addr_sec)),
+                            ]
+                            .try_into()
+                            .unwrap(),
+                        ),
+                    )
+                    .is_some()
+            );
 
             let agg = directory.all();
             assert!(

@@ -300,13 +300,13 @@
 //! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
 
 use crate::{
+    BatchVerifier, PublicKey, Secret, Signer,
     bls12381::primitives::{
         group::{Private, Scalar, ScalarReadCfg, Share},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    BatchVerifier, PublicKey, Secret, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
@@ -317,8 +317,8 @@ use commonware_parallel::{Sequential, Strategy};
 #[cfg(feature = "arbitrary")]
 use commonware_utils::N3f1;
 use commonware_utils::{
+    Faults, NZU32, Participant, TryCollect,
     ordered::{Map, Quorum, Set},
-    Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRng;
@@ -1955,11 +1955,12 @@ pub fn deal_anonymous<V: Variant, M: Faults>(
 mod test_plan {
     use super::*;
     use crate::{
+        PublicKey,
         bls12381::primitives::{
             ops::{self, threshold},
             variant::Variant,
         },
-        ed25519, PublicKey,
+        ed25519,
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
@@ -2786,7 +2787,10 @@ mod test_plan {
                 for player in player_set.iter() {
                     let expected = expected_reveals.get(player).copied().unwrap_or(0) > max_faults;
                     let actual = observer_output.revealed().position(player).is_some();
-                    assert_eq!(expected, actual, "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})");
+                    assert_eq!(
+                        expected, actual,
+                        "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})"
+                    );
                 }
 
                 // Finalize each player
@@ -3020,7 +3024,7 @@ mod test {
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_invariants::minifuzz;
-    use commonware_utils::{test_rng, Faults, N3f1, TestRng};
+    use commonware_utils::{Faults, N3f1, TestRng, test_rng};
     use core::num::NonZeroI32;
 
     const PRE_VERIFY_DEALERS: usize = 8;
@@ -3403,25 +3407,31 @@ mod test {
 
     #[test]
     fn invalid_checkpoint_configs_fail_validation() {
-        assert!(Plan::new(NZU32!(4))
-            .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
-            .validate()
-            .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .resume_missing_dealer_msg_fails(1, 2),
-            )
-            .validate()
-            .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .bad_reveal(1, 0)
-                    .resume_missing_dealer_msg_fails(2, 1),
-            )
-            .validate()
-            .is_err());
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(
+                    Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                        .resume_missing_dealer_msg_fails(1, 2),
+                )
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(
+                    Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                        .bad_reveal(1, 0)
+                        .resume_missing_dealer_msg_fails(2, 1),
+                )
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]

@@ -1,16 +1,16 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
-    qmdb::current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
+    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
+    qmdb::current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -316,8 +316,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         }
 
                         let bad_pending_digest = (*bad_pending_digest).map(Digest::from);
-                        if let Ok(bad_pending) = <F::PendingChunk<Digest>>::try_from(bad_pending_digest) {
-                            if range_proof.pending_chunk_digest != bad_pending {
+                        if let Ok(bad_pending) = <F::PendingChunk<Digest>>::try_from(bad_pending_digest)
+                            && range_proof.pending_chunk_digest != bad_pending {
                                 let mut bad_pending_proof = range_proof.clone();
                                 bad_pending_proof.pending_chunk_digest = bad_pending;
                                 assert!(!Db::<F>::verify_range_proof(
@@ -328,7 +328,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                                     &root
                                 ), "proof with bad pending chunk digest should not verify");
                             }
-                        }
 
                         let bad_partial_digest = (*bad_partial_digest).map(Digest::from);
                         if range_proof.partial_chunk_digest != bad_partial_digest {

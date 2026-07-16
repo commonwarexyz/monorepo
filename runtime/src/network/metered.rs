@@ -1,6 +1,6 @@
 use crate::{
-    telemetry::metrics::{raw, Counter, Register},
     IoBufs, SinkOf, StreamOf,
+    telemetry::metrics::{Counter, Register, raw},
 };
 use std::{net::SocketAddr, sync::Arc};
 
@@ -167,11 +167,11 @@ impl<N: crate::Network> crate::Network for Network<N> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        Listener as _, Network as _, Sink as _, Stream as _,
         network::{
             deterministic::Network as DeterministicNetwork, metered::Network as MeteredNetwork,
             tests,
         },
-        Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use std::net::SocketAddr;

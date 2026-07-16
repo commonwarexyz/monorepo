@@ -1,9 +1,9 @@
 //! Mailbox for the shard buffer engine.
 
 use crate::{
-    marshal::coding::types::CodedBlock,
-    types::{coding::Commitment, Round},
     CertifiableBlock,
+    marshal::coding::types::CodedBlock,
+    types::{Round, coding::Commitment},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_coding::Scheme as CodingScheme;

@@ -40,12 +40,12 @@ use super::{
     view::View,
 };
 use crate::{
-    buffer::{
-        paged::{CacheRef, Checksum, Slot, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
-        tip::Buffer,
-        SyncState,
-    },
     Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
+    buffer::{
+        SyncState,
+        paged::{CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE, CacheRef, Checksum, Slot},
+        tip::Buffer,
+    },
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
@@ -708,12 +708,12 @@ impl<B: Blob> Writer<B> {
 
         // If there are no full pages and the partial page length matches what was already
         // written, there's nothing new to write.
-        if pages_to_write == 0 {
-            if let Some(old_crc) = old_crc_record {
-                let (old_len, _) = old_crc.get_crc();
-                if partial_page.len() == old_len as usize {
-                    return (write_buffer, None);
-                }
+        if pages_to_write == 0
+            && let Some(old_crc) = old_crc_record
+        {
+            let (old_len, _) = old_crc.get_crc();
+            if partial_page.len() == old_len as usize {
+                return (write_buffer, None);
             }
         }
         let partial_len = partial_page.len();
@@ -1149,22 +1149,22 @@ impl<B: Blob> Writer<B> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
-        deterministic,
-        mocks::{next_pending_sync, DelayedSyncBlob},
-        telemetry::metrics::Registry,
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
+        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
+        deterministic,
+        mocks::{DelayedSyncBlob, next_pending_sync},
+        telemetry::metrics::Registry,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16, NZU32};
+    use commonware_utils::{NZU16, NZU32, NZUsize, channel::oneshot, sync::Mutex};
     use futures::FutureExt as _;
     use std::{
         num::NonZeroU16,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -3178,21 +3178,26 @@ mod tests {
                 &coalesced.as_ref()[partial_start..partial_start + partial_len],
                 &data[logical_page_size * 2..],
             );
-            assert!(coalesced.as_ref()
-                [partial_start + partial_len..partial_start + logical_page_size]
-                .iter()
-                .all(|byte| *byte == 0));
+            assert!(
+                coalesced.as_ref()[partial_start + partial_len..partial_start + logical_page_size]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
 
             // Each assembled physical page must carry a valid CRC record.
             assert!(Checksum::validate_page(&coalesced.as_ref()[..physical_page_size]).is_some());
-            assert!(Checksum::validate_page(
-                &coalesced.as_ref()[physical_page_size..physical_page_size * 2]
-            )
-            .is_some());
-            assert!(Checksum::validate_page(
-                &coalesced.as_ref()[physical_page_size * 2..physical_page_size * 3]
-            )
-            .is_some());
+            assert!(
+                Checksum::validate_page(
+                    &coalesced.as_ref()[physical_page_size..physical_page_size * 2]
+                )
+                .is_some()
+            );
+            assert!(
+                Checksum::validate_page(
+                    &coalesced.as_ref()[physical_page_size * 2..physical_page_size * 3]
+                )
+                .is_some()
+            );
         });
     }
 

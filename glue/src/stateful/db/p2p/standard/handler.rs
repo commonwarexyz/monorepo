@@ -4,11 +4,11 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{self as resolver, p2p::Producer, Delivery};
+use commonware_resolver::{self as resolver, Delivery, p2p::Producer};
 use commonware_storage::merkle::{
-    Family, Location, Proof, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT,
+    Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof,
 };
-use commonware_utils::{channel::oneshot, Span};
+use commonware_utils::{Span, channel::oneshot};
 use std::{
     cmp::Ordering,
     collections::VecDeque,

@@ -2,8 +2,8 @@
 //! properties from their output.
 
 use crate::merkle::{
-    mmb::{Family, Location, Position},
     Family as _,
+    mmb::{Family, Location, Position},
 };
 
 /// A PeakIterator yields `(position, height)` for each peak in an MMB with the given size, in

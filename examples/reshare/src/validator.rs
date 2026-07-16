@@ -11,12 +11,12 @@ use commonware_consensus::{
     simplex::{elector::Config as Elector, scheme::Scheme},
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
+    Hasher, Sha256, Signer, bls12381::primitives::variant::MinSig, ed25519,
 };
 use commonware_macros::boxed;
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Quota, Strategizer, Supervisor as _};
-use commonware_utils::{union, union_unique, NZUsize, NZU32};
+use commonware_runtime::{Quota, Strategizer, Supervisor as _, tokio};
+use commonware_utils::{NZU32, NZUsize, union, union_unique};
 use futures::future::try_join_all;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -165,32 +165,33 @@ mod test {
         types::Epoch,
     };
     use commonware_cryptography::{
+        Signer,
         bls12381::{
-            dkg::feldman_desmedt::{deal, Output},
+            dkg::feldman_desmedt::{Output, deal},
             primitives::{group::Share, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},
-        Signer,
     };
     use commonware_macros::{boxed, select, test_group, test_traced};
     use commonware_p2p::{
+        Message, Receiver,
         simulated::{self, Link, Network, Oracle},
         utils::mux,
-        Message, Receiver,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic::{self, Runner},
         Clock, Handle, Metrics as _, Quota, Runner as _, Spawner,
+        deterministic::{self, Runner},
     };
     use commonware_utils::{
+        N3f1, TestRng, TryCollect,
         channel::{mpsc, oneshot},
-        union, N3f1, TestRng, TryCollect,
+        union,
     };
     use rand::seq::IndexedRandom;
     use rand_core::CryptoRng;
     use std::{
-        collections::{btree_map::Entry, BTreeMap, HashSet},
+        collections::{BTreeMap, HashSet, btree_map::Entry},
         future::Future,
         num::NonZeroU32,
         pin::Pin,
@@ -727,10 +728,10 @@ mod test {
                         let min_epoch = progress.min_epoch();
                         if progress.successes >= target {
                             // Wait for all active participants to reach the target epoch
-                            if let Some(target_epoch) = progress.success_target_epoch(target) {
-                                if min_epoch < target_epoch {
-                                    continue;
-                                }
+                            if let Some(target_epoch) = progress.success_target_epoch(target)
+                                && min_epoch < target_epoch
+                            {
+                                continue;
                             }
                             // Verify all delayed participants got acknowledged shares
                             if matches!(self.crash, Some(Crash::Delay { .. })) {
@@ -886,14 +887,16 @@ mod test {
         let err = progress
             .observe(pk.clone(), Epoch::new(1), None)
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("unexpected update epoch transition"));
+        assert!(
+            err.to_string()
+                .contains("unexpected update epoch transition")
+        );
 
         let err = progress.observe(pk, Epoch::zero(), None).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("unexpected update epoch transition"));
+        assert!(
+            err.to_string()
+                .contains("unexpected update epoch transition")
+        );
     }
 
     #[test]

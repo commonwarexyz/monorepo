@@ -1,8 +1,8 @@
 //! Benchmark: `Hex` newtype's `Display` impl (stack-allocated, no `String`).
 
 use commonware_formatting::Hex;
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use criterion::{Criterion, criterion_group};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{fmt::Write as _, hint::black_box};
 
 fn bench_display(c: &mut Criterion) {

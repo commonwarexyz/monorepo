@@ -5,16 +5,16 @@
 //! instead for better performance._
 
 use crate::{
+    Context,
     index::unordered::Index,
     journal::contiguous::variable::Journal,
     merkle::{Family, Location},
     qmdb::{
-        any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
-        operation::Key,
         Error,
+        any::{VariableConfig, VariableValue, unordered, value::VariableEncoding},
+        operation::Key,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
@@ -59,16 +59,16 @@ where
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
+        Context,
         index::partitioned::unordered::Index,
         journal::contiguous::variable::Journal,
         merkle::{Family, Location},
         qmdb::{
+            Error,
             any::{VariableConfig, VariableValue},
             operation::Key,
-            Error,
         },
         translator::Translator,
-        Context,
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
@@ -95,15 +95,15 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family,
-            E: Context,
-            K: Key,
-            V: VariableValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, S>
+        F: Family,
+        E: Context,
+        K: Key,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, S>
     where
         Operation<F, K, V>: Codec,
     {
@@ -134,16 +134,16 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{index::Unordered as _, mmr, translator::TwoCap};
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
+        BufferPooler, Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
     use rand::Rng;
     use std::{
         num::{NonZeroU16, NonZeroUsize},

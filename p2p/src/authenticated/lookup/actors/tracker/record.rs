@@ -309,7 +309,7 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
     use std::{net::SocketAddr, time::Duration};
 
     fn test_socket() -> SocketAddr {
@@ -666,8 +666,8 @@ mod tests {
 
     #[test]
     fn test_dialable_checks_ingress_ip() {
-        use std::net::IpAddr;
         use Ingress;
+        use std::net::IpAddr;
 
         let now = SystemTime::UNIX_EPOCH;
 

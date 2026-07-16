@@ -43,30 +43,30 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
 #[cfg(test)]
 mod tests {
     use super::{
+        Config, Engine, Mailbox,
         mocks::{
             handler::Handler as MockHandler,
             monitor::Monitor as MockMonitor,
             types::{Request, Response},
         },
-        Config, Engine, Mailbox,
     };
     use crate::{Handler, Monitor, Originator};
     use commonware_actor::Feedback;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Committable, Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager as _, Recipients, Sender as _,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, Clock, Quota, Runner,
-        Supervisor as _,
+        Clock, Quota, Runner, Supervisor as _, deterministic,
+        telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{ordered::Set, NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize, ordered::Set};
     use std::{num::NonZeroUsize, time::Duration};
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)

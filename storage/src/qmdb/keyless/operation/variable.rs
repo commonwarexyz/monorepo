@@ -1,8 +1,8 @@
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        any::{value::VariableEncoding, VariableValue},
-        keyless::operation::{Codec, Operation, APPEND_CONTEXT, COMMIT_CONTEXT},
+        any::{VariableValue, value::VariableEncoding},
+        keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Codec, Operation},
     },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn commit_floor_overflow_rejected() {
         // Hand-build a Commit with a varint floor of u64::MAX, which exceeds MAX_LEAVES.
-        use commonware_codec::{varint::UInt, Write};
+        use commonware_codec::{Write, varint::UInt};
         let mut buf = Vec::new();
         COMMIT_CONTEXT.write(&mut buf);
         Option::<U64>::None.write(&mut buf);

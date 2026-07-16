@@ -123,11 +123,11 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     {
     }
     impl<
-            T: commonware_runtime::BufferPooler
-                + commonware_runtime::Storage
-                + commonware_runtime::Clock
-                + commonware_runtime::Metrics,
-        > Context for T
+        T: commonware_runtime::BufferPooler
+            + commonware_runtime::Storage
+            + commonware_runtime::Clock
+            + commonware_runtime::Metrics,
+    > Context for T
     {
     }
 });

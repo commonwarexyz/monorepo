@@ -35,7 +35,7 @@ pub use self::{
     rate_high::{HighRate, HighRateDecoder, HighRateEncoder},
     rate_low::{LowRate, LowRateDecoder, LowRateEncoder},
 };
-use crate::reed_solomon::{engine::Engine, DecoderResult, EncoderResult, Error};
+use crate::reed_solomon::{DecoderResult, EncoderResult, Error, engine::Engine};
 
 mod decoder_work;
 mod encoder_work;

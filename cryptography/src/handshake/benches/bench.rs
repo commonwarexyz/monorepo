@@ -1,10 +1,10 @@
 use commonware_cryptography::{
+    Signer,
     ed25519::PrivateKey,
     handshake::{
-        dial_end, dial_start, listen_end, listen_start, Context, Error, RecvCipher, SendCipher,
+        Context, Error, RecvCipher, SendCipher, dial_end, dial_start, listen_end, listen_start,
     },
     transcript::Transcript,
-    Signer,
 };
 use commonware_math::algebra::Random;
 use criterion::criterion_main;

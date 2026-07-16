@@ -3,21 +3,22 @@
 //! The impl blocks in this file define shared functionality across all Current QMDB variants.
 
 use crate::{
+    Context,
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Mutable},
         Error as JournalError,
+        contiguous::{Contiguous, Mutable},
     },
     merkle::{
-        self, hasher::Hasher as _, mem::Mem, storage::Storage as MerkleStorage, Graftable,
-        Location, Position,
+        self, Graftable, Location, Position, hasher::Hasher as _, mem::Mem,
+        storage::Storage as MerkleStorage,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
-        self,
+        self, Error,
         any::{
             self,
-            operation::{update::Update, Operation},
+            operation::{Operation, update::Update},
         },
         current::{
             batch::BitmapBatch,
@@ -25,17 +26,15 @@ use crate::{
             proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
         operation::Operation as _,
-        Error,
     },
-    Context,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::{
-    histogram::{ScopedTimer, Timed},
     Counter, Gauge, GaugeExt as _, MetricsExt as _,
+    histogram::{ScopedTimer, Timed},
 };
 use commonware_utils::{
     bitmap::{self, Readable as _},
@@ -595,10 +594,10 @@ where
         if rewind_size < pruned_bits {
             return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
         }
-        if let Some(rewind_floor) = self.delayed_merge_rewind_floor() {
-            if rewind_size < rewind_floor {
-                return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
-            }
+        if let Some(rewind_floor) = self.delayed_merge_rewind_floor()
+            && rewind_size < rewind_floor
+        {
+            return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
         }
 
         // Ensure the target commit's logical range is fully representable with the current
@@ -1217,7 +1216,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 mod tests {
     use super::*;
     use crate::{
-        merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold},
+        merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr},
         qmdb::{
             any::traits::{DbAny, UnmerkleizedBatch as _},
             current::{tests::fixed_config, unordered::fixed},
@@ -1225,9 +1224,9 @@ mod tests {
         translator::OneCap,
     };
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::bitmap::Prunable as PrunableBitMap;
 
     const N: usize = sha256::Digest::SIZE;

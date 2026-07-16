@@ -4,17 +4,17 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
+    Block,
     marshal::{
         ancestry::BlockProvider,
         core::{Buffer, CommitmentFallback, Mailbox, Variant},
     },
     simplex::scheme::Scheme as SimplexScheme,
     types::Round,
-    Block,
 };
 use commonware_broadcast::buffered;
 use commonware_codec::Read;
-use commonware_cryptography::{certificate::Scheme, Digestible, PublicKey};
+use commonware_cryptography::{Digestible, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};

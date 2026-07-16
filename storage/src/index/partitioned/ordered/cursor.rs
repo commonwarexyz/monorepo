@@ -11,7 +11,7 @@ use super::partition::Partition;
 use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
 use std::{
-    collections::{btree_map, hash_map, BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, btree_map, hash_map},
     ops::Range,
 };
 

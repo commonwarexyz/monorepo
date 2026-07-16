@@ -1,9 +1,9 @@
 use crate::{
-    delivery::{Completion, Tracker},
     Consumer, Delivery,
+    delivery::{Completion, Tracker},
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{telemetry::metrics::histogram, Clock};
+use commonware_runtime::{Clock, telemetry::metrics::histogram};
 use futures::future::Aborted;
 
 /// Tracks all in-flight fetch state.
@@ -127,13 +127,13 @@ mod tests {
     use crate::p2p::mocks::{Consumer as MockConsumer, Key as MockKey};
     use bytes::Bytes;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        deterministic::{Context, Runner},
-        telemetry::metrics::{histogram::Buckets, MetricsExt},
         Metrics, Runner as _,
+        deterministic::{Context, Runner},
+        telemetry::metrics::{MetricsExt, histogram::Buckets},
     };
     use commonware_utils::non_empty_vec;
 

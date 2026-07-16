@@ -1,5 +1,5 @@
-use anyhow::{bail, Result};
-use serde::{de, Deserialize, Deserializer, Serialize};
+use anyhow::{Result, bail};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use std::collections::HashSet;
 
 pub(crate) const CALLGRIND_METRICS: &[&str] = &[

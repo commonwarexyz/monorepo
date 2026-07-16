@@ -11,10 +11,9 @@
 //! reset to a snapshot; after that they are no longer readable.
 
 use crate::merkle::{
-    batch,
+    Error, Family, Location, batch,
     hasher::Hasher,
     mem::{Config as MemConfig, Mem},
-    Error, Family, Location,
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
@@ -191,7 +190,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold};
+    use crate::merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
 

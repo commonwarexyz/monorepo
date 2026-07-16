@@ -3,17 +3,17 @@
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 
-use crate::{sha256::Sha256, Hasher};
+use crate::{Hasher, sha256::Sha256};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
+    EncodeSize, FixedSize,
     codec::{Read, Write},
     error::Error as CodecError,
-    EncodeSize, FixedSize,
 };
 use commonware_utils::bitmap::BitMap;
 use core::{
     marker::PhantomData,
-    num::{NonZeroU64, NonZeroU8, NonZeroUsize},
+    num::{NonZeroU8, NonZeroU64, NonZeroUsize},
 };
 #[cfg(feature = "std")]
 use {
@@ -129,7 +129,7 @@ impl<H: Hasher> BloomFilter<H> {
     }
 
     /// Generate `num_hashers` bit indices for a given item.
-    fn indices(&self, item: &[u8]) -> impl Iterator<Item = u64> {
+    fn indices(&self, item: &[u8]) -> impl Iterator<Item = u64> + use<H> {
         #[allow(path_statements)]
         Self::_ASSERT_DIGEST_AT_LEAST_16_BYTES;
 
@@ -334,7 +334,7 @@ impl<H: Hasher> arbitrary::Arbitrary<'_> for BloomFilter<H> {
 mod tests {
     use super::*;
     use commonware_codec::{Decode, Encode};
-    use commonware_utils::{NZUsize, NZU64, NZU8};
+    use commonware_utils::{NZU8, NZU64, NZUsize};
 
     #[test]
     fn test_insert_and_contains() {

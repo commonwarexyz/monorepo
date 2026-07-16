@@ -1,6 +1,7 @@
 use crate::reed_solomon::engine::{
+    Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, ShardsRefMut,
     tables::{self, Mul128, Multiply128lutT, Skew},
-    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES,
+    utils,
 };
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
