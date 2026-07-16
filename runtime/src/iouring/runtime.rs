@@ -36,28 +36,35 @@ use crate::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
         task::Label, validate_label,
     },
-    utils::{self, Panicker, signal::Stopper, supervision::Tree},
+    utils::{self, Join, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
 use commonware_utils::{channel::oneshot, sync::Mutex, sys_rng};
-use futures::task::{ArcWake, waker};
+use futures::{
+    FutureExt as _,
+    future::{AbortHandle, Abortable, Aborted},
+    task::{ArcWake, waker},
+};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BinaryHeap},
+    collections::BinaryHeap,
     convert::Infallible,
     env,
     future::Future,
-    mem::{replace, take},
+    mem::{ManuallyDrop, replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{self, Poll, Waker},
     time::{Duration, Instant, SystemTime},
 };
@@ -432,14 +439,15 @@ impl crate::Runner for Runner {
         // we are using `runtime_registry` rather than the one provided by `Context`.
         let process = MeteredProcess::init(&mut runtime_registry);
         let process_executor = Arc::downgrade(&executor);
-        Tasks::register_work(
-            &executor.tasks,
-            process.collect(move |duration| Sleeper {
-                executor: process_executor.clone(),
-                time: Instant::now() + duration.min(MAX_SLEEP),
-                registered: false,
-            }),
-        );
+        let collector = process.collect(move |duration| Sleeper {
+            executor: process_executor.clone(),
+            time: Instant::now() + duration.min(MAX_SLEEP),
+            registered: false,
+        });
+        let _ = Tasks::register(&executor.tasks, async move {
+            collector.await;
+            Ok(())
+        });
 
         // Get metrics
         let label = Label::root();
@@ -461,47 +469,34 @@ impl crate::Runner for Runner {
         };
         let mut root = Box::pin(panicked.interrupt(f(context)));
 
-        // Register the root task
-        let root_waker = Tasks::register_root(&executor.tasks);
+        // Build the root task's waker (the root starts ready).
+        let root_waker = Tasks::root_waker(&executor.tasks);
 
         // Process tasks until the root task completes.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
         let result = catch_unwind(AssertUnwindSafe(|| {
             loop {
-                // Drain all ready tasks. Wakes that arrive while this snapshot is
-                // being polled land in the next snapshot.
-                let queue = executor.tasks.drain();
-                let mut output = None;
-                for id in queue {
-                    // The root future lives on this stack frame, not in the
-                    // arena, so its typed output is captured un-erased.
-                    if id == ROOT_TASK {
-                        let mut cx = task::Context::from_waker(&root_waker);
-                        if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
-                            output = Some(result);
-                            break;
-                        }
-                        continue;
-                    }
-
-                    // Lookup the task (it may have completed already). The
-                    // Arc is cloned out so the arena lock is not held while
-                    // polling (a task spawning during its own poll would
-                    // otherwise deadlock).
-                    let Some(task) = executor.tasks.get(id) else {
-                        continue;
-                    };
-
-                    // Poll the task with its cached waker.
-                    let mut cx = task::Context::from_waker(task.waker());
-                    if task.poll(&mut cx) {
-                        executor.tasks.remove(id);
+                // Drain all ready tasks. Wakes that arrive while this snapshot
+                // is being polled land in the next snapshot. The queue holds
+                // the tasks themselves, so polling needs no registry lookup.
+                //
+                // Tasks run before the root so a task registered ahead of the
+                // root's poll (e.g. the process-metrics collector) is polled
+                // even if the root never yields.
+                for task in executor.tasks.drain() {
+                    let slot = task.slot();
+                    if task.poll() {
+                        executor.tasks.remove(slot);
                     }
                 }
 
-                // If the root task has completed, exit as soon as possible
-                if let Some(output) = output {
-                    break output;
+                // The root future lives on this stack frame, not in the
+                // arena, so its typed output is captured un-erased.
+                if executor.tasks.take_root_ready() {
+                    let mut cx = task::Context::from_waker(&root_waker);
+                    if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
+                        break result;
+                    }
                 }
 
                 // Service the ring: completions wake tasks and staged submissions
@@ -512,7 +507,7 @@ impl crate::Runner for Runner {
                 executor.wake_ready_sleepers(Instant::now());
 
                 // If any task became ready, keep polling instead of parking.
-                if executor.tasks.ready() != 0 {
+                if executor.tasks.has_ready() {
                     continue;
                 }
 
@@ -587,112 +582,254 @@ impl crate::Runner for Runner {
     }
 }
 
-/// Task id reserved for the root future, which lives on the runtime thread's
-/// stack (so its typed output is captured un-erased) rather than in the arena.
-const ROOT_TASK: u128 = 0;
-
-/// Type-erased boundary for a spawned task.
+/// Type-erased boundary for a task in the arena.
 ///
-/// The concrete future is stored inline in the task's single `Arc` allocation
-/// (there is no nested `Box<dyn Future>`), so the only dynamic dispatch on the
-/// poll path is this trait: inside the monomorphized [TaskCell] methods the
-/// compiler sees the concrete future type end to end.
+/// The concrete future and its join state live inline in the task's single
+/// `Arc` allocation, so the only dynamic dispatch on the poll path is this
+/// trait: inside the monomorphized [TaskCell] methods the compiler sees the
+/// concrete future type end to end.
 trait Erased: Send + Sync {
-    /// Poll the stored future, returning true once it has completed.
-    fn poll(&self, cx: &mut task::Context<'_>) -> bool;
+    /// Poll the stored future, returning true when this call completed it
+    /// (the caller then frees the task's arena slot).
+    fn poll(self: Arc<Self>) -> bool;
 
-    /// Drop the stored future in place.
+    /// Resolve the task without polling: drop the future in place and park a
+    /// [Error::Closed] result for any join handle.
     fn clear(&self);
 
-    /// The waker re-enqueuing this task.
-    fn waker(&self) -> &task::Waker;
+    /// The arena slot owning this task.
+    fn slot(&self) -> usize;
 }
 
-/// A spawned task: its waker plus the inline future.
-struct TaskCell<F> {
-    /// Waker re-enqueuing this task, built once at registration.
-    ///
-    /// The waker's identity is stable for the task's lifetime, so re-polls
-    /// present the same waker and `Waker::will_wake` lets waiters (e.g. the
-    /// driver's slot wakers) skip refresh clones.
-    waker: task::Waker,
-    /// The future, polled and cleared only on the executor thread (spawns run
-    /// inline, so no lock is needed).
+/// Result rendezvous between a task and its [Handle].
+enum JoinState<T> {
+    /// The task is still running; the handle's waker parks here.
+    Pending(Option<task::Waker>),
+    /// The terminal result is parked for the handle.
+    Ready(Result<T, Error>),
+    /// The handle already took the result.
+    Taken,
+}
+
+/// A spawned task: one allocation holding the concrete future, the join
+/// state its handle polls, and the identity behind its raw-vtable waker.
+struct TaskCell<F, T>
+where
+    F: Future<Output = Result<T, Error>>,
+{
+    /// Arena slot to free at completion.
+    slot: usize,
+    /// Re-enqueue target for wakes.
+    tasks: Weak<Tasks>,
+    /// The future, polled and cleared only on the executor thread (spawns
+    /// run inline, so no lock is needed).
     ///
     /// `None` once the future completed or teardown cleared it.
     future: Affine<RefCell<Option<F>>>,
+    /// Parked result and handle waker. Handles are polled on the executor
+    /// thread (tasks run inline); off-thread polls panic like every other
+    /// runtime operation.
+    join: Affine<RefCell<JoinState<T>>>,
 }
 
-impl<F> Erased for TaskCell<F>
+impl<F, T> TaskCell<F, T>
 where
-    F: Future<Output = ()> + Send + 'static,
+    F: Future<Output = Result<T, Error>> + Send + 'static,
+    T: Send + 'static,
 {
-    fn poll(&self, cx: &mut task::Context<'_>) -> bool {
-        self.future.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            let Some(future) = slot.as_mut() else {
-                return true;
+    /// Waker vtable sharing the task's own allocation: cloning bumps the
+    /// task's strong count and waking enqueues the task pointer directly, so
+    /// wakes carry no id and polls need no registry lookup.
+    const VTABLE: task::RawWakerVTable = task::RawWakerVTable::new(
+        Self::waker_clone,
+        Self::waker_wake,
+        Self::waker_wake_by_ref,
+        Self::waker_drop,
+    );
+
+    /// Manufacture a waker backed by this task's allocation.
+    ///
+    /// Waker identity is (data pointer, vtable), both stable for the task's
+    /// lifetime, so every poll presents an identical waker and
+    /// `Waker::will_wake` fast paths (e.g. the driver's slot refreshes) hold.
+    fn waker(self: &Arc<Self>) -> task::Waker {
+        let ptr = Arc::into_raw(Arc::clone(self)).cast::<()>();
+        // SAFETY: the vtable functions uphold the RawWaker contract over the
+        // Arc reference encoded in `ptr`.
+        unsafe { task::Waker::from_raw(task::RawWaker::new(ptr, &Self::VTABLE)) }
+    }
+
+    unsafe fn waker_clone(ptr: *const ()) -> task::RawWaker {
+        // SAFETY: `ptr` encodes an Arc<Self> reference from [Self::waker].
+        unsafe { Arc::increment_strong_count(ptr.cast::<Self>()) };
+        task::RawWaker::new(ptr, &Self::VTABLE)
+    }
+
+    unsafe fn waker_wake(ptr: *const ()) {
+        // SAFETY: consumes the waker's Arc reference.
+        let cell = unsafe { Arc::from_raw(ptr.cast::<Self>()) };
+        cell.enqueue();
+    }
+
+    unsafe fn waker_wake_by_ref(ptr: *const ()) {
+        // SAFETY: borrows the waker's Arc reference without consuming it.
+        let cell = unsafe { ManuallyDrop::new(Arc::from_raw(ptr.cast::<Self>())) };
+        cell.enqueue();
+    }
+
+    unsafe fn waker_drop(ptr: *const ()) {
+        // SAFETY: releases the waker's Arc reference.
+        drop(unsafe { Arc::from_raw(ptr.cast::<Self>()) });
+    }
+
+    /// Re-enqueue this task for polling.
+    ///
+    /// If the upgrade fails, the runtime already exited and the wake is a
+    /// no-op (e.g. data holding a waker dropped after `start` returned).
+    fn enqueue(self: &Arc<Self>) {
+        if let Some(tasks) = self.tasks.upgrade() {
+            tasks.queue(Arc::clone(self) as Arc<dyn Erased>);
+        }
+    }
+
+    /// Park `result` for the handle and wake it.
+    ///
+    /// Tolerates an already-resolved join so completion and teardown can both
+    /// call it.
+    fn finish(&self, result: Result<T, Error>) {
+        let waker = self.join.with(|join| {
+            let mut join = join.borrow_mut();
+            let JoinState::Pending(waker) = &mut *join else {
+                return None;
             };
+            let waker = waker.take();
+            *join = JoinState::Ready(result);
+            waker
+        });
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+impl<F, T> Erased for TaskCell<F, T>
+where
+    F: Future<Output = Result<T, Error>> + Send + 'static,
+    T: Send + 'static,
+{
+    fn poll(self: Arc<Self>) -> bool {
+        let waker = self.waker();
+        let mut cx = task::Context::from_waker(&waker);
+        let polled = self.future.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            // A duplicate wake may re-poll a completed task: its slot was
+            // already freed, so report no completion.
+            let future = slot.as_mut()?;
             // SAFETY: the future lives inside this task's Arc allocation and
             // is never moved out of it: completion (below) and teardown
-            // ([Erased::clear]) both drop it in place by overwriting the slot
-            // with None.
+            // ([Erased::clear]) both drop it in place by overwriting the
+            // option with None.
             let future = unsafe { Pin::new_unchecked(future) };
-            if future.poll(cx).is_ready() {
-                *slot = None;
-                true
-            } else {
-                false
+            match future.poll(&mut cx) {
+                Poll::Ready(result) => {
+                    *slot = None;
+                    Some(Some(result))
+                }
+                Poll::Pending => Some(None),
             }
-        })
+        });
+        match polled {
+            // Completed on this poll: park the result and free the slot.
+            Some(Some(result)) => {
+                self.finish(result);
+                true
+            }
+            // Still pending.
+            Some(None) => false,
+            // Already completed by an earlier poll.
+            None => false,
+        }
     }
 
     fn clear(&self) {
         self.future.with(|cell| {
             *cell.borrow_mut() = None;
         });
+        self.finish(Err(Error::Closed));
     }
 
-    fn waker(&self) -> &task::Waker {
-        &self.waker
+    fn slot(&self) -> usize {
+        self.slot
     }
 }
 
-/// A waker for a task in the arena (or the root).
-struct TaskWaker {
-    id: u128,
+impl<F, T> Join<T> for TaskCell<F, T>
+where
+    F: Future<Output = Result<T, Error>> + Send + 'static,
+    T: Send + 'static,
+{
+    fn poll_join(&self, cx: &mut task::Context<'_>) -> Poll<Result<T, Error>> {
+        self.join.with(|join| {
+            let mut join = join.borrow_mut();
+            match &mut *join {
+                JoinState::Pending(waker) => {
+                    match waker {
+                        Some(waker) => waker.clone_from(cx.waker()),
+                        None => *waker = Some(cx.waker().clone()),
+                    }
+                    Poll::Pending
+                }
+                JoinState::Ready(_) => {
+                    let JoinState::Ready(result) = std::mem::replace(&mut *join, JoinState::Taken)
+                    else {
+                        unreachable!("join state verified ready above");
+                    };
+                    Poll::Ready(result)
+                }
+                // Match the receiver-backed handle: polling after the result
+                // was taken resolves closed.
+                JoinState::Taken => Poll::Ready(Err(Error::Closed)),
+            }
+        })
+    }
+}
+
+/// A waker for the root task, which lives on the runtime thread's stack (so
+/// its typed output is captured un-erased) rather than in the arena.
+struct RootWaker {
     tasks: Weak<Tasks>,
 }
 
-impl ArcWake for TaskWaker {
+impl ArcWake for RootWaker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        // Upgrade the weak reference to re-enqueue this task.
-        // If upgrade fails, the task queue has been dropped and no action is required.
-        //
-        // This can happen if some data is passed into the runtime and it drops after the runtime exits.
+        // If the upgrade fails, the runtime already exited.
         if let Some(tasks) = arc_self.tasks.upgrade() {
-            tasks.queue(arc_self.id);
+            tasks.queue_root();
         }
     }
 }
 
-/// All running tasks, plus whether the executor has shut down.
+/// The arena of running tasks, plus whether the executor has shut down.
 struct Running {
-    /// Tasks tracked by id.
-    tasks: BTreeMap<u128, Arc<dyn Erased>>,
+    /// Task slots; freed slots are recycled through `free`.
+    slots: Vec<Option<Arc<dyn Erased>>>,
+    /// Recycled slot indices.
+    free: Vec<usize>,
     /// Set once the executor clears the arena at teardown. Registrations that
-    /// race teardown from other threads are rejected (dropping their futures)
-    /// instead of leaking into an arena nothing will ever poll again.
+    /// race teardown are rejected (resolving their handles with
+    /// [Error::Closed]) instead of leaking into an arena nothing will ever
+    /// poll again.
     closed: bool,
 }
 
-/// A collection of [Task]s that are being executed by the [Executor].
+/// The tasks being executed by the [Executor].
 struct Tasks {
-    /// The next task id.
-    counter: Mutex<u128>,
-    /// Tasks ready to be polled.
-    ready: Mutex<Vec<u128>>,
-    /// All running tasks.
+    /// Tasks ready to be polled, queued by pointer (no ids, no lookups).
+    ready: Mutex<Vec<Arc<dyn Erased>>>,
+    /// Whether the root task is ready to be polled. Starts true for the
+    /// kickoff poll.
+    root_ready: AtomicBool,
+    /// The arena owning all running tasks (for teardown enumeration).
     running: Mutex<Running>,
     /// Wakes the runtime thread when a task becomes ready.
     ///
@@ -705,109 +842,97 @@ impl Tasks {
     /// Create a new task queue.
     const fn new(unpark: RingWaker) -> Self {
         Self {
-            // Id 0 is reserved for the root task.
-            counter: Mutex::new(1),
             ready: Mutex::new(Vec::new()),
+            root_ready: AtomicBool::new(true),
             running: Mutex::new(Running {
-                tasks: BTreeMap::new(),
+                slots: Vec::new(),
+                free: Vec::new(),
                 closed: false,
             }),
             unpark,
         }
     }
 
-    /// Increment the task counter and return the old value.
-    fn increment(&self) -> u128 {
-        let mut counter = self.counter.lock();
-        let old = *counter;
-        *counter = counter.checked_add(1).expect("task counter overflow");
-        old
-    }
-
-    /// Build the root task's waker and queue its first poll.
-    fn register_root(arc_self: &Arc<Self>) -> task::Waker {
-        let waker = Self::task_waker(arc_self, ROOT_TASK);
-        arc_self.queue(ROOT_TASK);
-        waker
-    }
-
-    /// Register a non-root task to be executed.
-    ///
-    /// The future is stored inline in the task's allocation, keeping its
-    /// concrete type visible to the compiler behind the [Erased] boundary.
-    fn register_work<F>(arc_self: &Arc<Self>, future: F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let id = arc_self.increment();
-        let task: Arc<dyn Erased> = Arc::new(TaskCell {
-            waker: Self::task_waker(arc_self, id),
-            future: Affine::new(RefCell::new(Some(future))),
-        });
-        arc_self.register(id, task);
-    }
-
-    /// Build the waker that re-enqueues task `id`.
-    fn task_waker(arc_self: &Arc<Self>, id: u128) -> task::Waker {
-        waker(Arc::new(TaskWaker {
-            id,
+    /// Build the root task's waker.
+    fn root_waker(arc_self: &Arc<Self>) -> task::Waker {
+        waker(Arc::new(RootWaker {
             tasks: Arc::downgrade(arc_self),
         }))
     }
 
-    /// Register a new task to be executed.
+    /// Register a task for `future`, returning its cell (which doubles as
+    /// the join point for the spawner's handle).
     ///
-    /// Registrations racing executor teardown from another thread are dropped:
-    /// the arena has already been cleared, so inserting would leak the future
-    /// (nothing polls or clears the arena again). Dropping the task's future
-    /// releases its resources and resolves its handle with [Error::Closed].
-    fn register(&self, id: u128, task: Arc<dyn Erased>) {
-        // Track as running until completion
-        {
-            let mut running = self.running.lock();
+    /// Returns `None` when the executor is already tearing down.
+    fn register<F, T>(arc_self: &Arc<Self>, future: F) -> Option<Arc<TaskCell<F, T>>>
+    where
+        F: Future<Output = Result<T, Error>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let cell = {
+            let mut running = arc_self.running.lock();
             if running.closed {
-                return;
+                return None;
             }
-            running.tasks.insert(id, task);
-        }
+            let slot = running.free.pop().unwrap_or_else(|| {
+                running.slots.push(None);
+                running.slots.len() - 1
+            });
+            let cell = Arc::new(TaskCell {
+                slot,
+                tasks: Arc::downgrade(arc_self),
+                future: Affine::new(RefCell::new(Some(future))),
+                join: Affine::new(RefCell::new(JoinState::Pending(None))),
+            });
+            running.slots[slot] = Some(Arc::clone(&cell) as Arc<dyn Erased>);
+            cell
+        };
 
-        // Add to ready
-        self.queue(id);
+        // Queue the first poll.
+        arc_self.queue(Arc::clone(&cell) as Arc<dyn Erased>);
+        Some(cell)
     }
 
-    /// Enqueue an already registered task to be executed.
-    fn queue(&self, id: u128) {
-        self.ready.lock().push(id);
+    /// Enqueue an already registered task to be polled.
+    fn queue(&self, task: Arc<dyn Erased>) {
+        self.ready.lock().push(task);
 
         // Wake the runtime thread in case it is parked. Wakes from the runtime
         // thread itself only latch the (already awake) wake state.
         self.unpark.wake();
     }
 
+    /// Mark the root task ready to be polled.
+    fn queue_root(&self) {
+        self.root_ready.store(true, Ordering::Release);
+        self.unpark.wake();
+    }
+
+    /// Take the root task's readiness.
+    fn take_root_ready(&self) -> bool {
+        self.root_ready.swap(false, Ordering::Acquire)
+    }
+
     /// Drain all ready tasks.
-    fn drain(&self) -> Vec<u128> {
+    fn drain(&self) -> Vec<Arc<dyn Erased>> {
         let mut queue = self.ready.lock();
         let len = queue.len();
         replace(&mut *queue, Vec::with_capacity(len))
     }
 
-    /// The number of ready tasks.
-    fn ready(&self) -> usize {
-        self.ready.lock().len()
+    /// Whether any task (including the root) is ready to be polled.
+    fn has_ready(&self) -> bool {
+        self.root_ready.load(Ordering::Acquire) || !self.ready.lock().is_empty()
     }
 
-    /// Lookup a task.
-    ///
-    /// We must return cloned here because we cannot hold the running lock while polling a task (will
-    /// deadlock if [Self::register_work] is called).
-    fn get(&self, id: u128) -> Option<Arc<dyn Erased>> {
-        let running = self.running.lock();
-        running.tasks.get(&id).cloned()
-    }
-
-    /// Remove a task.
-    fn remove(&self, id: u128) {
-        self.running.lock().tasks.remove(&id);
+    /// Free a completed task's arena slot.
+    fn remove(&self, slot: usize) {
+        let mut running = self.running.lock();
+        if running.closed {
+            return;
+        }
+        running.slots[slot] = None;
+        running.free.push(slot);
     }
 
     /// Clear all tasks and reject future registrations.
@@ -816,13 +941,14 @@ impl Tasks {
         self.ready.lock().clear();
 
         // Clear running tasks and close the arena so registrations racing
-        // teardown from other threads are dropped rather than leaked.
-        let tasks: BTreeMap<u128, Arc<dyn Erased>> = {
+        // teardown are rejected rather than leaked.
+        let slots = {
             let mut running = self.running.lock();
             running.closed = true;
-            take(&mut running.tasks)
+            running.free.clear();
+            take(&mut running.slots)
         };
-        tasks.into_values().collect()
+        slots.into_iter().flatten().collect()
     }
 }
 
@@ -886,29 +1012,50 @@ impl crate::Spawner for Context {
         }
         self.tree = child;
 
-        // Spawn the task
+        // The single-threaded executor cannot absorb blocking work, and the
+        // runtime manages no worker threads to offload it to. Support is
+        // planned to return with a blocking pool.
+        if !matches!(past, Execution::Shared(false)) {
+            panic!(
+                "blocking and dedicated tasks are temporarily unsupported on the io_uring runtime"
+            );
+        }
+
+        // Wrap the future with panic catching, abort support, and cleanup.
+        // The task cell parks the result for the handle directly, so no
+        // completion channel is allocated.
         let executor = self.executor();
         let future = f(self);
-        let (f, handle) = Handle::init(
-            future,
-            metric,
-            executor.panicker.clone(),
-            Arc::clone(&parent),
-        );
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let panicker = executor.panicker.clone();
+        let tree = Arc::clone(&parent);
+        let metric_handle = metric.clone();
+        let wrapped = async move {
+            let result =
+                Abortable::new(AssertUnwindSafe(future).catch_unwind(), abort_registration).await;
+            let output = match result {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(panic)) => {
+                    panicker.notify(panic);
+                    Err(Error::Exited)
+                }
+                Err(Aborted) => Err(Error::Closed),
+            };
 
-        match past {
-            Execution::Shared(false) => {
-                Tasks::register_work(&executor.tasks, f);
-            }
-            // The single-threaded executor cannot absorb blocking work, and the
-            // runtime manages no worker threads to offload it to. Support is
-            // planned to return with a blocking pool.
-            Execution::Shared(true) | Execution::Dedicated => {
-                panic!(
-                    "blocking and dedicated tasks are temporarily unsupported on the io_uring runtime"
-                );
-            }
-        }
+            // Mark the task as aborted and abort all descendants.
+            tree.abort();
+
+            // Finish the metric.
+            metric_handle.finish();
+
+            output
+        };
+
+        // Register the task; its cell doubles as the handle's join point.
+        let handle = match Tasks::register(&executor.tasks, wrapped) {
+            Some(cell) => Handle::from_join(cell, abort_handle, metric),
+            None => Handle::closed(metric),
+        };
 
         // Register the task on the parent
         if let Some(aborter) = handle.aborter() {

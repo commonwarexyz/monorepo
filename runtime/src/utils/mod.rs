@@ -20,7 +20,8 @@ mod handle;
 pub use handle::Handle;
 #[commonware_macros::stability(ALPHA)]
 pub(crate) use handle::Panicked;
-pub(crate) use handle::{Aborter, MetricHandle, Panicker};
+#[cfg_attr(not(feature = "iouring"), allow(unused_imports))]
+pub(crate) use handle::{Aborter, Join, MetricHandle, Panicker};
 
 mod cell;
 pub use cell::Cell as ContextCell;
