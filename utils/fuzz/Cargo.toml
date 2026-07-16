@@ -18,7 +18,6 @@ futures.workspace = true
 libfuzzer-sys.workspace = true
 num-bigint.workspace = true
 num-rational.workspace = true
-rand = { workspace = true, features = ["std_rng"] }
 
 [[bin]]
 name = "lib_functions"

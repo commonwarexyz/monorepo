@@ -11,7 +11,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{telemetry::metrics::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{ordered::Set, IpAddrExt, PrioritySet, SystemTimeExt};
-use rand::Rng;
+use rand_core::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::IpAddr,

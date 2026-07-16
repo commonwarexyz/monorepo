@@ -3,9 +3,10 @@ use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{
     self, mem::Mem, Bagging::ForwardFold, Family, Location, LocationRangeExt as _,
 };
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
 use futures::executor::block_on;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngExt as _;
 use std::ops::Range;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
@@ -26,7 +27,7 @@ fn make_test_data<F: Family>(
     let hasher = StandardHasher::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
     let mut elements = Vec::with_capacity(n);
-    let mut sampler = StdRng::seed_from_u64(0);
+    let mut sampler = test_rng();
 
     block_on(async {
         let batch = {
@@ -44,7 +45,7 @@ fn make_test_data<F: Family>(
     let max_start = n as u64 - range;
     let mut samples: Vec<Sample<F>> = Vec::with_capacity(SAMPLE_SIZE);
     while samples.len() < SAMPLE_SIZE {
-        let start_index = sampler.gen_range(0..max_start);
+        let start_index = sampler.random_range(0..max_start);
         let leaf_range = Location::<F>::new(start_index)..Location::<F>::new(start_index + range);
         if samples
             .iter()

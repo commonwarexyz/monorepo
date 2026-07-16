@@ -4,7 +4,7 @@ use crate::{
 };
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
-use rand::Rng;
+use rand_core::Rng;
 use std::{
     net::IpAddr,
     time::{Duration, SystemTime},

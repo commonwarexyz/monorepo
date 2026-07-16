@@ -4,8 +4,9 @@ use commonware_storage::{
     index::{partitioned, unordered, Unordered},
     translator::{Cap, EightCap, FourCap, OneCap, Translator, TwoCap},
 };
+use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::seq::SliceRandom;
 use std::{
     hint::black_box,
     time::{Duration, Instant},
@@ -30,7 +31,7 @@ fn run_lookup<T: Translator>(
     }
 
     // Shuffle lookup order
-    let mut rng = StdRng::seed_from_u64(1);
+    let mut rng = TestRng::new(1);
     let mut lookup_keys: Vec<_> = keys.iter().take(items).cloned().collect();
     lookup_keys.shuffle(&mut rng);
 
@@ -62,7 +63,7 @@ fn run_lookup_prebuilt<I: Unordered<Value = u64>>(
         index.insert(key, i as u64);
     }
 
-    let mut rng = StdRng::seed_from_u64(1);
+    let mut rng = TestRng::new(1);
     let mut lookup_keys: Vec<_> = keys.iter().take(items).cloned().collect();
     lookup_keys.shuffle(&mut rng);
 

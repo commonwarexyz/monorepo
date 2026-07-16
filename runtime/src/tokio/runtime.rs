@@ -28,13 +28,14 @@ use crate::{
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
-use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, NZUsize};
+use commonware_parallel::Rayon;
+use commonware_utils::{sync::Mutex, sys_rng, NZUsize};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use rand::{rngs::OsRng, CryptoRng, RngCore};
+use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use std::{
+    convert::Infallible,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -174,7 +175,7 @@ pub struct Config {
 impl Config {
     /// Returns a new [Config] with default values.
     pub fn new() -> Self {
-        let rng = OsRng.next_u64();
+        let rng = sys_rng().next_u64();
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
@@ -635,13 +636,10 @@ impl crate::Spawner for Context {
 }
 
 #[stability(BETA)]
-impl crate::ThreadPooler for Context {
-    fn create_thread_pool(
-        &self,
-        concurrency: NonZeroUsize,
-    ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        ThreadPoolBuilder::new()
-            .num_threads(concurrency.get())
+impl crate::Strategizer for Context {
+    fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(parallelism.get())
             .spawn_handler(move |thread| {
                 // Tasks spawned in a thread pool are expected to run longer than any single
                 // task and thus should be provisioned as a dedicated thread.
@@ -651,7 +649,8 @@ impl crate::ThreadPooler for Context {
                 Ok(())
             })
             .build()
-            .map(Arc::new)
+            .expect("failed to create Tokio Rayon thread pool");
+        Rayon::with_pool(Arc::new(pool))
     }
 }
 
@@ -778,25 +777,24 @@ impl crate::Resolver for Context {
     }
 }
 
-impl RngCore for Context {
-    fn next_u32(&mut self) -> u32 {
-        OsRng.next_u32()
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(sys_rng().next_u32())
     }
 
-    fn next_u64(&mut self) -> u64 {
-        OsRng.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(sys_rng().next_u64())
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        OsRng.fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        OsRng.try_fill_bytes(dest)
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        sys_rng().fill_bytes(dest);
+        Ok(())
     }
 }
 
-impl CryptoRng for Context {}
+impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;

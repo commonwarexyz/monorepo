@@ -73,13 +73,14 @@ use crate::{
     qmdb::{
         any::operation::{Operation, Update},
         bitmap::Shared,
+        metrics::Metrics,
         operation::Committable,
-        ROOT_BAGGING,
+        single_operation_root, ROOT_BAGGING,
     },
     translator::Translator,
     Context,
 };
-use commonware_codec::CodecShared;
+use commonware_codec::{CodecShared, Encode};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -97,6 +98,20 @@ pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
+
+/// Compute the authenticated root of a newly initialized database without opening storage.
+///
+/// The initial commit never carries metadata, so this root always represents
+/// `CommitFloor(None, 0)`.
+pub fn initial_root<F, U, H>() -> H::Digest
+where
+    F: Family,
+    H: Hasher,
+    U: Update,
+    Operation<F, U>: Encode,
+{
+    single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
+}
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
@@ -178,7 +193,7 @@ where
     }
 
     let index = I::new(context.child("index"), cfg.translator);
-    let metrics = db::Metrics::new(context);
+    let metrics = Metrics::new(context);
     db::Db::init_from_log(index, log, bitmap, cfg.init_cache_size, metrics).await
 }
 
@@ -218,6 +233,17 @@ pub(crate) mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential> {
+        fixed_db_config_with_strategy(suffix, pooler, Sequential)
+    }
+
+    pub(crate) fn fixed_db_config_with_strategy<
+        T: Translator + Default,
+        S: commonware_parallel::Strategy,
+    >(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+        strategy: S,
+    ) -> FixedConfig<T, S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -225,7 +251,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                strategy: Sequential,
+                strategy,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -522,6 +548,66 @@ pub(crate) mod test {
         assert_eq!(db.size(), committed_size);
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Pruning to a floor advanced by an applied-but-uncommitted batch must not durably outrun
+    /// the last durable commit: after a crash, the recovered commit's floor would lie below the
+    /// pruned boundary and the database could never reopen.
+    pub(crate) async fn test_any_db_prune_after_unsynced_floor_recovery<
+        F: Family,
+        D,
+        V: Clone + CodecShared,
+    >(
+        context: Context,
+        mut db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+    {
+        const ELEMENTS: u64 = 1000;
+
+        // Establish a durable state whose last commit declares an early inactivity floor.
+        {
+            let mut batch = db.new_batch();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                batch = batch.write(k, Some(make_value(i)));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+        }
+        db.commit().await.unwrap();
+        let durable_floor = db.inactivity_floor_loc();
+
+        // Apply (but do not commit) a batch that advances the in-memory floor well past the
+        // durable commit's floor.
+        {
+            let mut batch = db.new_batch();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                batch = batch.write(k, Some(make_value(i + 1)));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+        }
+        let unsynced_floor = db.inactivity_floor_loc();
+        assert!(unsynced_floor > durable_floor);
+
+        // Prune to the in-memory floor, then crash before any further commit.
+        db.prune(db.sync_boundary()).await.unwrap();
+        let root = db.root();
+        let op_count = db.size();
+        drop(db);
+
+        // Reopening must succeed: pruning made the floor-declaring commit durable before the
+        // journal durably advanced its boundary past positions that commit still needs.
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
+        assert_eq!(db.size(), op_count);
+        assert_eq!(db.inactivity_floor_loc(), unsynced_floor);
+        assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
     }
@@ -1425,6 +1511,7 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_non_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
     test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
 
     fn key(i: u64) -> Digest {

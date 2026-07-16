@@ -325,7 +325,7 @@ mod test {
     use commonware_runtime::{deterministic::Context, Supervisor as _};
     use commonware_utils::{sequence::FixedBytes, test_rng};
     use core::{future::Future, pin::Pin};
-    use rand::Rng;
+    use rand::RngExt as _;
 
     /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
     /// ascending query sequence, including queries past the last candidate (cyclic wrap).
@@ -333,14 +333,14 @@ mod test {
     fn find_next_key_ascending_matches_binary_search() {
         let mut rng = test_rng();
         for _ in 0..50 {
-            let mut candidates: Vec<u64> = (0..rng.gen_range(1..40))
-                .map(|_| rng.gen_range(0..60u64))
+            let mut candidates: Vec<u64> = (0..rng.random_range(1..40))
+                .map(|_| rng.random_range(0..60u64))
                 .collect();
             candidates.sort_unstable();
             candidates.dedup();
 
-            let mut queries: Vec<u64> = (0..rng.gen_range(1..80))
-                .map(|_| rng.gen_range(0..70u64))
+            let mut queries: Vec<u64> = (0..rng.random_range(1..80))
+                .map(|_| rng.random_range(0..70u64))
                 .collect();
             queries.sort_unstable();
 

@@ -9,7 +9,10 @@ use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
-use std::{marker::PhantomData, sync::Arc};
+use std::{
+    marker::PhantomData,
+    sync::{Arc, OnceLock},
+};
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
@@ -149,10 +152,8 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     commitment: C::Commitment,
     /// The coded shards.
     ///
-    /// These shards are optional to enable lazy construction. If the block is
-    /// constructed with [`Self::new_trusted`], the shards are computed lazily
-    /// via [`Self::shards`].
-    shards: Option<Arc<[C::Shard]>>,
+    /// These shards are lazily-constructed when [`CodedBlock`] is formed with [`Self::new_trusted`].
+    shards: OnceLock<Arc<[C::Shard]>>,
     /// Phantom data for the hasher.
     _hasher: PhantomData<H>,
 }
@@ -178,19 +179,22 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
             inner: Arc::new(inner),
             config,
             commitment,
-            shards: Some(shards.into()),
+            shards: OnceLock::from(Arc::<[C::Shard]>::from(shards)),
             _hasher: PhantomData,
         }
     }
 
-    /// Create a new [`CodedBlock`] from an owned or shared [`Block`] and
-    /// trusted [`Commitment`].
-    pub fn new_trusted(inner: impl Into<Arc<B>>, commitment: Commitment) -> Self {
+    /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`Commitment`].
+    pub fn new_trusted(inner: B, commitment: Commitment) -> Self {
+        Self::new_trusted_shared(Arc::new(inner), commitment)
+    }
+
+    fn new_trusted_shared(inner: Arc<B>, commitment: Commitment) -> Self {
         Self {
-            inner: inner.into(),
+            inner,
             config: commitment.config(),
             commitment: commitment.root(),
-            shards: None,
+            shards: OnceLock::new(),
             _hasher: PhantomData,
         }
     }
@@ -203,21 +207,17 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Returns a reference to the shards in this coded block.
     ///
     /// If the shards have not yet been generated, they will be created via [`Scheme::encode`].
-    pub fn shards(&mut self, strategy: &impl Strategy) -> &[C::Shard] {
-        match self.shards {
-            Some(ref shards) => shards,
-            None => {
-                let (commitment, shards) = Self::encode(&self.inner, self.config, strategy);
+    pub fn shards(&self, strategy: &impl Strategy) -> &[C::Shard] {
+        self.shards.get_or_init(|| {
+            let (commitment, shards) = Self::encode(&self.inner, self.config, strategy);
 
-                assert_eq!(
-                    commitment, self.commitment,
-                    "coded block constructed with trusted commitment does not match commitment"
-                );
+            assert_eq!(
+                commitment, self.commitment,
+                "coded block constructed with trusted commitment does not match commitment"
+            );
 
-                self.shards = Some(shards.into());
-                self.shards.as_ref().unwrap()
-            }
-        }
+            shards.into()
+        })
     }
 
     /// Returns a [`Shard`] at the given index, if the index is valid.
@@ -228,7 +228,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         Some(Shard::new(
             self.commitment(),
             index,
-            self.shards.as_ref()?.get(usize::from(index))?.clone(),
+            self.shards.get()?.get(usize::from(index))?.clone(),
         ))
     }
 
@@ -237,13 +237,23 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         &self.inner
     }
 
+    /// Returns a shared reference to the inner [`Block`].
+    pub fn inner_shared(&self) -> Arc<B> {
+        Arc::clone(&self.inner)
+    }
+
+    /// Takes the shared inner [`Block`].
+    pub fn into_inner_shared(self) -> Arc<B> {
+        self.inner
+    }
+
     /// Takes the inner [`Block`].
     pub fn into_inner(self) -> B {
         Arc::unwrap_or_clone(self.inner)
     }
 }
 
-impl<B: CertifiableBlock + Clone, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
     for StoredCodedBlock<B, C, H>
 {
     fn from(block: CodedBlock<B, C, H>) -> Self {
@@ -354,7 +364,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
             inner: Arc::new(inner),
             config,
             commitment,
-            shards: Some(shards.into()),
+            shards: OnceLock::from(Arc::<[C::Shard]>::from(shards)),
             _hasher: PhantomData,
         })
     }
@@ -431,10 +441,9 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
 
     /// Convert back to a [`CodedBlock`] using the trusted commitment.
     ///
-    /// The returned [`CodedBlock`] will have `shards: None`, meaning shards
-    /// will be lazily generated if needed via [`CodedBlock::shards`].
+    /// The returned [`CodedBlock`] generates shards lazily if they are needed.
     pub fn into_coded_block(self) -> CodedBlock<B, C, H> {
-        CodedBlock::new_trusted(self.inner, self.commitment)
+        CodedBlock::new_trusted_shared(self.inner, self.commitment)
     }
 
     /// Returns a reference to the inner block.
@@ -446,7 +455,7 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
 /// Converts a [`StoredCodedBlock`] back to a [`CodedBlock`].
 impl<B: Block, C: Scheme, H: Hasher> From<StoredCodedBlock<B, C, H>> for CodedBlock<B, C, H> {
     fn from(stored: StoredCodedBlock<B, C, H>) -> Self {
-        Self::new_trusted(stored.inner, stored.commitment)
+        Self::new_trusted_shared(stored.inner, stored.commitment)
     }
 }
 
@@ -697,7 +706,7 @@ mod test {
     }
 
     #[test]
-    fn test_coded_block_clone_shares_storage() {
+    fn test_coded_block_clone_shares_shards() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
             extra_shards: NZU16!(2),
@@ -709,8 +718,8 @@ mod test {
 
         assert!(Arc::ptr_eq(&coded_block.inner, &cloned.inner));
         assert!(Arc::ptr_eq(
-            coded_block.shards.as_ref().unwrap(),
-            cloned.shards.as_ref().unwrap()
+            coded_block.shards.get().unwrap(),
+            cloned.shards.get().unwrap()
         ));
     }
 

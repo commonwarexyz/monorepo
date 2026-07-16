@@ -72,6 +72,7 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_storage::archive;
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
+use std::sync::Arc;
 
 mod config;
 pub use config::{Config, Start};
@@ -142,11 +143,11 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// until the application explicitly acknowledges the update. If the [Acknowledgement] is dropped before
     /// handling, marshal will exit (assuming the application is shutting down).
     ///
-    /// Because the [Acknowledgement] is clonable, the application can pass [Update] to multiple consumers
-    /// (and marshal will only consider the block delivered once all consumers have acknowledged it).
+    /// Cloning the update shares the immutable block, so applications can fan it out without requiring
+    /// block clones. Marshal only considers the block delivered once every acknowledgement is handled.
     ///
     /// Marshal only emits a block after it has durably persisted the said block. This ensures applications
     /// that make stateful changes based on a block in other locations can access the same block on restart (often
     /// some logic on startup attempts on infallible read on the last processed block).
-    Block(B, A),
+    Block(Arc<B>, A),
 }

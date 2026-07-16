@@ -5,8 +5,9 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::{CryptoGroup, Random};
 use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
+use rand_core::CryptoRng;
 use std::{hint::black_box, num::NonZeroUsize};
 
 fn make_setup(len: usize) -> Setup<G1> {
@@ -21,7 +22,7 @@ fn make_setup(len: usize) -> Setup<G1> {
     )
 }
 
-fn make_elements(rng: &mut StdRng, len: usize) -> Vec<(Scalar, Scalar)> {
+fn make_elements(rng: &mut impl CryptoRng, len: usize) -> Vec<(Scalar, Scalar)> {
     let mut elements = Vec::with_capacity(len);
     for _ in 0..len {
         elements.push((Scalar::random(&mut *rng), Scalar::random(&mut *rng)));
@@ -30,7 +31,7 @@ fn make_elements(rng: &mut StdRng, len: usize) -> Vec<(Scalar, Scalar)> {
 }
 
 fn make_proof(setup: &Setup<G1>, len: usize) -> (ipa::Claim<Scalar, G1>, Proof<Scalar, G1>) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let y = Scalar::random(&mut rng);
     let (witness, claim) =
         Witness::new_with_claim(setup, y, make_elements(&mut rng, len)).expect("valid witness");
@@ -49,7 +50,7 @@ fn bench_prove(c: &mut Criterion) {
         c.bench_function(&format!("{}::prove/n={len} conc=1", module_path!()), |b| {
             b.iter_batched(
                 || {
-                    let mut rng = StdRng::seed_from_u64(0);
+                    let mut rng = test_rng();
                     let y = Scalar::random(&mut rng);
                     let elements = make_elements(&mut rng, len);
                     let (witness, claim) =
@@ -74,7 +75,7 @@ fn bench_prove(c: &mut Criterion) {
         c.bench_function(&format!("{}::prove/n={len} conc=8", module_path!()), |b| {
             b.iter_batched(
                 || {
-                    let mut rng = StdRng::seed_from_u64(0);
+                    let mut rng = test_rng();
                     let y = Scalar::random(&mut rng);
                     let elements = make_elements(&mut rng, len);
                     let (witness, claim) =

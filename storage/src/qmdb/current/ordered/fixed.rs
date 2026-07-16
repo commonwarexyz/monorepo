@@ -205,4 +205,9 @@ pub mod test {
     pub fn test_current_db_exclusion_proofs() {
         shared::test_exclusion_proofs(open_db);
     }
+
+    crate::qmdb::current::tests::staged_merkleize_parity_test!(
+        test_current_ordered_fixed_staged_merkleize_parity,
+        open_db
+    );
 }

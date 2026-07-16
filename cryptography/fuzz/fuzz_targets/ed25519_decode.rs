@@ -11,10 +11,6 @@ use ed25519_consensus::{
     Signature as ConsensusSignature, SigningKey as ConsensusPrivateKey,
     VerificationKey as ConsensusPublicKey,
 };
-use ed25519_zebra::{
-    Signature as ZebraSignature, SigningKey as ZebraPrivateKey, VerificationKey as ZebraPublicKey,
-    VerificationKeyBytes as ZebraPublicKeyBytes,
-};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug)]
@@ -128,42 +124,29 @@ fn split_namespace_message(bytes: &[u8]) -> (&[u8], &[u8]) {
 
 fn test_pubkey(pubkey: &[u8]) {
     let consensus_result = ConsensusPublicKey::try_from(pubkey);
-    let zebra_result = ZebraPublicKey::try_from(pubkey);
     let our_result = PublicKey::decode(pubkey);
 
-    // All implementations should agree on public key validity
+    // Consensus implements the same ZIP-215 validation rules.
     assert_eq!(consensus_result.is_err(), our_result.is_err());
-    assert_eq!(zebra_result.is_err(), our_result.is_err());
 
     // If all succeeded, check round-trip encoding
-    if let (Ok(consensus_key), Ok(zebra_key), Ok(our_key)) =
-        (consensus_result, zebra_result, our_result)
-    {
+    if let (Ok(consensus_key), Ok(our_key)) = (consensus_result, our_result) {
         let our_bytes = our_key.encode();
         assert_eq!(&consensus_key.to_bytes()[..], our_bytes.as_ref());
-        assert_eq!(
-            ZebraPublicKeyBytes::from(zebra_key).as_ref(),
-            our_bytes.as_ref()
-        );
     }
 }
 
 fn test_signature(signature: &[u8]) {
     let consensus_result = ConsensusSignature::try_from(signature);
-    let zebra_result = ZebraSignature::from_slice(signature);
     let our_result = Signature::decode(signature);
 
-    // All implementations should agree on signature byte validity
+    // Consensus implements the same ZIP-215 validation rules.
     assert_eq!(consensus_result.is_err(), our_result.is_err());
-    assert_eq!(zebra_result.is_err(), our_result.is_err());
 
     // If all succeeded, check round-trip encoding
-    if let (Ok(consensus_signature), Ok(zebra_signature), Ok(our_signature)) =
-        (consensus_result, zebra_result, our_result)
-    {
+    if let (Ok(consensus_signature), Ok(our_signature)) = (consensus_result, our_result) {
         let our_bytes = our_signature.encode();
         assert_eq!(&consensus_signature.to_bytes()[..], our_bytes.as_ref());
-        assert_eq!(&zebra_signature.to_bytes()[..], our_bytes.as_ref());
     }
 }
 
@@ -177,13 +160,6 @@ fn test_verification(pubkey: &[u8], signature: &[u8], namespace: &[u8], message:
         (Ok(public_key), Ok(signature)) => Some(public_key.verify(&signature, &payload).is_ok()),
         _ => None,
     };
-    let zebra_result = match (
-        ZebraPublicKey::try_from(pubkey),
-        ZebraSignature::from_slice(signature),
-    ) {
-        (Ok(public_key), Ok(signature)) => Some(public_key.verify(&signature, &payload).is_ok()),
-        _ => None,
-    };
     let our_result = match (PublicKey::decode(pubkey), Signature::decode(signature)) {
         (Ok(public_key), Ok(signature)) => Some(public_key.verify(namespace, message, &signature)),
         _ => None,
@@ -191,7 +167,6 @@ fn test_verification(pubkey: &[u8], signature: &[u8], namespace: &[u8], message:
 
     // Decoding and verification should agree for arbitrary triples
     assert_eq!(consensus_result, our_result);
-    assert_eq!(zebra_result, our_result);
 }
 
 fn test_signing(seed: [u8; 32], namespace: &[u8], message: &[u8]) {
@@ -199,36 +174,27 @@ fn test_signing(seed: [u8; 32], namespace: &[u8], message: &[u8]) {
 
     // Construct equivalent signing keys from the same raw seed
     let consensus_private_key = ConsensusPrivateKey::from(seed);
-    let zebra_private_key = ZebraPrivateKey::from(seed);
     let our_private_key = PrivateKey::decode(seed.as_ref()).unwrap();
 
     // The derived public keys should have identical encodings
     let consensus_public_key = ConsensusPublicKey::from(&consensus_private_key);
-    let zebra_public_key = ZebraPublicKey::from(&zebra_private_key);
     let our_public_key = our_private_key.public_key();
 
     assert_eq!(
         &consensus_public_key.to_bytes()[..],
         our_public_key.as_ref()
     );
-    assert_eq!(
-        ZebraPublicKeyBytes::from(zebra_public_key).as_ref(),
-        our_public_key.as_ref()
-    );
 
     // Signing the same domain-separated payload should produce identical signatures
     let consensus_signature = consensus_private_key.sign(&payload);
-    let zebra_signature = zebra_private_key.sign(&payload);
     let our_signature = our_private_key.sign(namespace, message);
 
     assert_eq!(&consensus_signature.to_bytes()[..], our_signature.as_ref());
-    assert_eq!(&zebra_signature.to_bytes()[..], our_signature.as_ref());
 
     // Each implementation should accept the signature it produced
     assert!(consensus_public_key
         .verify(&consensus_signature, &payload)
         .is_ok());
-    assert!(zebra_public_key.verify(&zebra_signature, &payload).is_ok());
     assert!(our_public_key.verify(namespace, message, &our_signature));
 }
 

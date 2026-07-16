@@ -99,7 +99,7 @@ mod tests {
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
-        let scalar = group::Scalar::random(&mut test_rng());
+        let scalar = group::Scalar::random(test_rng());
         let mut signature = <MinSig as commonware_cryptography::bls12381::primitives::variant::Variant>::Signature::generator();
         signature *= &scalar;
         Finalization {

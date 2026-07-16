@@ -336,7 +336,7 @@ mod tests {
     use crate::reed_solomon::engine::{Engine, Naive, NoSimd, SHARD_CHUNK_BYTES};
     #[cfg(not(feature = "std"))]
     use alloc::vec;
-    use rand::{Rng, RngCore, SeedableRng};
+    use rand::{Rng, RngExt as _, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
             rng.fill_bytes(data_nosimd.as_flattened_mut());
             let mut data_naive = data_nosimd.clone();
 
-            let log_m = rng.gen();
+            let log_m = rng.random();
 
             nosimd.mul(&mut data_nosimd, log_m);
             naive.mul(&mut data_naive, log_m);

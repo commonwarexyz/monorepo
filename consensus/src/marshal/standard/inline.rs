@@ -47,8 +47,9 @@ use crate::{
         application::gates::{self, Gates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
+            relay,
             validation::{
-                fetch_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
+                await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
                 ParentCheck,
             },
             Standard,
@@ -62,7 +63,6 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_p2p::Recipients;
 use commonware_runtime::{
     telemetry::{
         metrics::{
@@ -77,7 +77,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::TracedAsyncMutex,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, info_span, Instrument as _};
 
@@ -89,7 +89,7 @@ async fn await_block_subscription<T, D>(
     stage: &'static str,
 ) -> Option<T>
 where
-    D: std::fmt::Debug + ?Sized,
+    D: std::fmt::Debug,
 {
     select! {
         _ = tx.closed() => {
@@ -142,7 +142,7 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    gates: Gates<B::Digest>,
+    gates: Gates<B::Digest, B>,
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
@@ -229,9 +229,10 @@ where
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
     /// Proposal runs in a spawned task and returns a receiver for the resulting digest. The
-    /// block's persistence is enqueued before the digest is delivered, and the resulting sync
+    /// block is staged before the digest is delivered and handed to marshal when consensus
+    /// requests the relay broadcast, which persists it after the send. The resulting sync
     /// handle is awaited only at certification so it overlaps consensus voting. The digest does
-    /// not imply durability on its own; [`CertifiableAutomaton::certify`] awaits the registered
+    /// not imply durability on its own. [`CertifiableAutomaton::certify`] awaits the registered
     /// certification gate before the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
@@ -261,8 +262,9 @@ where
         context.spawn(move |runtime_context| {
             async move {
                 // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted by a pre-crash propose whose
-                // notarize vote never reached the journal).
+                // for this round (persisted by a pre-crash propose that reached
+                // its relay broadcast while the notarize vote never reached the
+                // journal).
                 //
                 // The parent context recovered by simplex may differ from the one
                 // the cached block was built against, so the stored block is not
@@ -324,14 +326,12 @@ where
                     .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
-
-                    let persist = marshal.verified_deferred(consensus_context.round, parent);
                     gates
-                        .persist_and_defer(
+                        .stage(
                             consensus_context.round,
                             digest,
+                            parent,
                             tx,
-                            persist,
                             "re-proposed boundary block",
                         )
                         .await;
@@ -379,14 +379,12 @@ where
                 build_timer.observe(&runtime_context);
 
                 let digest = built_block.digest();
-
-                let persist = marshal.proposed_deferred(consensus_context.round, built_block);
                 gates
-                    .persist_and_defer(
+                    .stage(
                         consensus_context.round,
                         digest,
+                        Arc::new(built_block),
                         tx,
-                        persist,
                         "proposed block",
                     )
                     .await;
@@ -442,6 +440,22 @@ where
         );
         runtime_context.spawn(move |runtime_context| {
             async move {
+                // Start the parent fetch immediately: its commitment and certified
+                // round are known from the consensus context, so it can proceed in
+                // parallel with broadcast delivery of the candidate block.
+                // Reproposals (digest == context.parent.1) skip parent validation
+                // entirely, so they must not fetch: the "parent" is the candidate
+                // itself, and candidate acquisition is deliberately local-only.
+                let parent_request = (digest != context.parent.1).then(|| {
+                    let (parent_view, parent_commitment) = context.parent;
+                    marshal.subscribe_by_commitment(
+                        parent_commitment,
+                        CommitmentFallback::FetchByRound {
+                            round: Round::new(context.epoch(), parent_view),
+                        },
+                    )
+                });
+
                 let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let Some(block) =
                     await_block_subscription(&mut tx, block_request, &digest, "verification").await
@@ -473,6 +487,11 @@ where
                     Decision::Continue(block) => block,
                 };
 
+                // `Continue` implies a non-reproposal, so the parent subscription
+                // was started above.
+                let parent_request =
+                    parent_request.expect("non-reproposal has a parent subscription");
+
                 // Start the candidate store immediately: it depends on neither the
                 // parent fetch (which may hit the network) nor the verdict below.
                 // Storing before validation is intentional: these caches provide
@@ -488,12 +507,15 @@ where
                 // verdict (a notarization implies f+1 honest validators already
                 // verified), and the store still completes through the join, so
                 // the fallback rides the verified write instead of re-persisting.
-                let store = marshal.verified(round, block.clone());
+                let store = marshal.verified(round, Arc::clone(&block));
                 let verify_then_vote = async {
-                    // Non-reproposal path: fetch the expected parent and validate
-                    // ancestry.
-                    let parent = match fetch_and_validate_parent(
-                        &context, &block, &marshal, &mut tx,
+                    // Non-reproposal path: validate the parent we already started
+                    // fetching.
+                    let parent = match await_and_validate_parent(
+                        context.parent.1,
+                        block.as_ref(),
+                        parent_request,
+                        &mut tx,
                     )
                     .await
                     {
@@ -507,7 +529,7 @@ where
                     let valid = run_app_verify(
                         runtime_context,
                         context,
-                        &block,
+                        Arc::clone(&block),
                         parent,
                         &mut application,
                         &marshal,
@@ -521,7 +543,7 @@ where
                     valid
                 };
                 let (verdict, durable) = futures::join!(verify_then_vote, store);
-                if let Some(valid) = gates::handle(verdict, durable) {
+                if let Some(valid) = gates::resolve(verdict, durable) {
                     durable_tx.send_lossy(valid);
                 }
             }
@@ -544,6 +566,8 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+        self.gates.flush_unrelayed(&self.marshal, round, digest);
+
         // `propose`/`verify` register an in-flight certification gate whose result resolves
         // once the block's sync handle completes. Awaiting it here is the durability barrier
         // for the finalize vote, and it lets the sync overlap consensus voting
@@ -624,11 +648,7 @@ where
     type Plan = Plan<S::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
-        let (round, recipients) = match plan {
-            Plan::Propose { round } => (round, Recipients::All),
-            Plan::Forward { round, recipients } => (round, recipients),
-        };
-        self.marshal.forward(round, commitment, recipients)
+        relay::broadcast(&self.gates, &self.marshal, commitment, plan)
     }
 }
 
@@ -1204,7 +1224,7 @@ mod tests {
             // block subscription is still pending.
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(marshal.proposed(round, block).await);
+            assert!(marshal.verified(round, block).await);
             let certify_rx = inline.certify(round, digest).await;
             select! {
                 result = certify_rx => {

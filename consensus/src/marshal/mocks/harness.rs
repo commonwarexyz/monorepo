@@ -50,11 +50,11 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{test_rng_seeded, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+use commonware_utils::{test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
-    Rng,
+    RngExt as _,
 };
 use std::{
     collections::BTreeMap,
@@ -211,6 +211,7 @@ pub trait TestHarness: 'static + Sized {
     type TestBlock: Heightable
         + Clone
         + Send
+        + Sync
         + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
 
     /// Additional per-validator state (e.g., shards mailbox for coding).
@@ -269,12 +270,25 @@ pub trait TestHarness: 'static + Sized {
     /// Get the height from a test block.
     fn height(block: &Self::TestBlock) -> Height;
 
-    /// Propose a block (broadcast to network).
+    /// Drive the leader's propose durability handshake: persist the proposed
+    /// block and assert it is durable, without broadcasting it (mirroring the
+    /// certify-time flush of a staged proposal whose broadcast was never
+    /// requested). Scenarios drive dissemination explicitly, so a proposal
+    /// must not pre-seed peer buffers and mask delivery and backfill paths.
     fn propose(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
         block: &Self::TestBlock,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = ()> + Send {
+        async move {
+            let block: <Self::Variant as crate::marshal::core::Variant>::Block =
+                block.clone().into();
+            assert!(
+                handle.mailbox.verified(round, block).await,
+                "proposed block must be durable"
+            );
+        }
+    }
 
     /// Mark a block as verified.
     fn verify(
@@ -354,8 +368,8 @@ fn contract_runner(seed: u64) -> deterministic::Runner {
 }
 
 fn restart_cycles_for_seed(seed: u64) -> usize {
-    let mut rng = test_rng_seeded(seed);
-    rng.gen_range(2..=4)
+    let mut rng = TestRng::new(seed);
+    rng.random_range(2..=4)
 }
 
 struct HailstormValidator<H: TestHarness> {
@@ -556,13 +570,13 @@ async fn drive_hailstorm_height_up_to_verify<H: TestHarness>(
 ) -> PendingHailstormHeight<H> {
     let height = Height::new(height_value);
     let active = active_validator_indices(state.validators);
-    let proposer_idx = active[context.gen_range(0..active.len())];
+    let proposer_idx = active[context.random_range(0..active.len())];
     let verifier_count = usize::min(QUORUM as usize, active.len());
     let verifier_indices = active
         .iter()
         .copied()
         .filter(|idx| *idx != proposer_idx)
-        .choose_multiple(context, verifier_count.saturating_sub(1));
+        .sample(context, verifier_count.saturating_sub(1));
     let block = H::make_test_block(
         *state.parent,
         *state.parent_commitment,
@@ -732,7 +746,7 @@ pub fn hailstorm<H: TestHarness>(
         let max_down = max_down.max(1);
 
         for shutdown_idx in 0..shutdowns {
-            let leadup = context.gen_range(1..=max_interval);
+            let leadup = context.random_range(1..=max_interval);
             target_height += leadup;
 
             // Pick validators to crash and compute how far the advance should
@@ -743,13 +757,10 @@ pub fn hailstorm<H: TestHarness>(
             // reported for it.
             let active_pre = active_validator_indices(&validators);
             let down_limit = usize::min(max_down, active_pre.len().saturating_sub(1));
-            let down_count = context.gen_range(1..=down_limit.max(1));
-            let mut selected = active_pre
-                .iter()
-                .copied()
-                .choose_multiple(&mut context, down_count);
+            let down_count = context.random_range(1..=down_limit.max(1));
+            let mut selected = active_pre.iter().copied().sample(&mut context, down_count);
             selected.sort_unstable();
-            let crash_after = context.gen_range(0..=leadup);
+            let crash_after = context.random_range(0..=leadup);
             let persisted_height = target_height - leadup + crash_after;
 
             {
@@ -821,7 +832,7 @@ pub fn hailstorm<H: TestHarness>(
                 "marshal hailstorm shutdown"
             );
 
-            let downtime = context.gen_range(1..=max_interval);
+            let downtime = context.random_range(1..=max_interval);
             target_height += downtime;
             let mut state = HailstormState {
                 validators: &mut validators,
@@ -901,8 +912,9 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: `marshal.proposed(...)=true` means the block survives an
-/// immediate crash and repeated recoveries.
+/// Contract: a durable propose handshake (the proposal's sync handle
+/// resolving durable) means the block survives an immediate crash and
+/// repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -912,7 +924,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -980,18 +992,9 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered =
-                            restarted
-                                .mailbox
-                                .get_verified(round)
-                                .await
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "marshal.proposed() returning true must imply \
-                                     get_verified(round) recovers the block after restart \
-                                     (seed={seed}, cycle={cycle})"
-                                    )
-                                });
+                        let recovered = restarted.mailbox.get_verified(round).await.unwrap_or_else(
+                            || panic!("durable proposal lost after restart (seed={seed}, cycle={cycle})"),
+                        );
                         assert_eq!(
                             recovered.digest(),
                             digest,
@@ -1021,7 +1024,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -1136,7 +1139,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -1510,7 +1513,7 @@ where
         participants,
         schemes,
         ..
-    } = bls12381_threshold_vrf::fixture::<V, _>(&mut test_rng_seeded(0), NAMESPACE, NUM_VALIDATORS);
+    } = bls12381_threshold_vrf::fixture::<V, _>(&mut test_rng(), NAMESPACE, NUM_VALIDATORS);
 
     let me = participants[0].clone();
     let provider = ConstantProvider::new(schemes[0].clone());
@@ -1641,7 +1644,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -1975,10 +1978,6 @@ impl TestHarness for StandardHarness {
         block.height()
     }
 
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2225,18 +2224,6 @@ impl TestHarness for InlineHarness {
         StandardHarness::height(block)
     }
 
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        StandardHarness::propose(
-            &mut ValidatorHandle::<StandardHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2427,18 +2414,6 @@ impl TestHarness for DeferredHarness {
 
     fn height(block: &Self::TestBlock) -> Height {
         InlineHarness::height(block)
-    }
-
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        InlineHarness::propose(
-            &mut ValidatorHandle::<InlineHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
     }
 
     async fn verify(
@@ -2820,14 +2795,6 @@ impl TestHarness for CodingHarness {
         block.height()
     }
 
-    async fn propose(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
-    ) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -3101,10 +3068,10 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
             let fin = H::make_finalization(proposal, &schemes, QUORUM);
             if quorum_sees_finalization {
-                let do_finalize = context.gen_bool(0.2);
+                let do_finalize = context.random_bool(0.2);
                 for (i, h) in handles
                     .iter_mut()
-                    .choose_multiple(&mut context, NUM_VALIDATORS as usize)
+                    .sample(&mut context, NUM_VALIDATORS as usize)
                     .iter_mut()
                     .enumerate()
                 {
@@ -3117,7 +3084,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
                 }
             } else {
                 for h in handles.iter_mut() {
-                    if context.gen_bool(0.2)
+                    if context.random_bool(0.2)
                         || height.get() == NUM_BLOCKS
                         || height == bounds.last()
                     {

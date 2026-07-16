@@ -1,5 +1,4 @@
 use crate::{deterministic::Auditor, Error, Handle, IoBufs, IoBufsMut};
-use sha2::digest::Update;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -31,8 +30,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
-            hasher.update(&versions.start().to_be_bytes());
-            hasher.update(&versions.end().to_be_bytes());
+            hasher.update(versions.start().to_be_bytes());
+            hasher.update(versions.end().to_be_bytes());
         });
         self.inner
             .open_versioned(partition, name, versions)
@@ -54,8 +53,12 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.auditor.event(b"remove", |hasher| {
             hasher.update(partition.as_bytes());
-            if let Some(name) = name {
-                hasher.update(name);
+            match name {
+                Some(name) => {
+                    hasher.update([1]);
+                    hasher.update(name);
+                }
+                None => hasher.update([0]),
             }
         });
         self.inner.remove(partition, name).await
@@ -82,8 +85,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            hasher.update(&len.to_be_bytes());
+            hasher.update(offset.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
         self.inner.read_at(offset, len).await
     }
@@ -98,8 +101,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"read_at_buf", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            hasher.update(&len.to_be_bytes());
+            hasher.update(offset.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
         self.inner.read_at_buf(offset, len, bufs).await
     }
@@ -109,8 +112,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            bufs.for_each_chunk(|chunk| hasher.update(chunk));
+            hasher.update(offset.to_be_bytes());
+            hasher.update_bufs(&bufs);
         });
         self.inner.write_at(offset, bufs).await
     }
@@ -124,8 +127,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"write_at_sync", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            bufs.for_each_chunk(|chunk| hasher.update(chunk));
+            hasher.update(offset.to_be_bytes());
+            hasher.update_bufs(&bufs);
         });
         self.inner.write_at_sync(offset, bufs).await
     }
@@ -134,7 +137,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"resize", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&len.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
         self.inner.resize(len).await
     }
@@ -183,6 +186,19 @@ mod tests {
         let storage = AuditedStorage::new(inner, auditor.clone());
 
         run_storage_tests(storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_audited_storage_separates_partition_and_blob_names() {
+        let auditor1 = Arc::new(Auditor::default());
+        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let auditor2 = Arc::new(Auditor::default());
+        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+
+        storage1.open("a", b"bc").await.unwrap();
+        storage2.open("ab", b"c").await.unwrap();
+
+        assert_ne!(auditor1.state(), auditor2.state());
     }
 
     #[tokio::test]

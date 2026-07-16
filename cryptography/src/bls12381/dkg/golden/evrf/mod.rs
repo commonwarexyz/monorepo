@@ -27,7 +27,7 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::num::NonZeroU32;
 use zeroize::Zeroizing;
 
@@ -159,7 +159,7 @@ pub struct PrivateKey {
 }
 
 impl Random for PrivateKey {
-    fn random(rng: impl CryptoRngCore) -> Self {
+    fn random(rng: impl CryptoRng) -> Self {
         Self {
             inner: Secret::new(F::random(rng)),
         }
@@ -185,13 +185,13 @@ impl crate::Signer for PrivateKey {
             let mut nonce_t = t.fork(b"nonce");
             let x_bytes = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
             nonce_t.commit(x_bytes.as_slice());
-            F::random(&mut nonce_t.noise(b"k"))
+            F::random(nonce_t.noise(b"k"))
         });
 
         let k_big = G::generator() * &k;
         let k_big_bytes: [u8; G::SIZE] = k_big.encode_fixed();
         t.commit(k_big_bytes.as_slice());
-        let e = F::random(&mut t.noise(b"challenge"));
+        let e = F::random(t.noise(b"challenge"));
 
         // s = k + e * x
         let s = self.inner.expose(|x| e * x + &k);
@@ -230,7 +230,7 @@ impl PrivateKey {
     /// Panics if `receivers` contains duplicate public keys.
     pub(super) fn vrf_batch_checked(
         &self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         setup: &Setup,
         transcript: &mut Transcript,
         msg: &Summary,
@@ -415,7 +415,7 @@ impl crate::Verifier for PublicKey {
             .commit(msg)
             .commit(self.raw.as_slice())
             .commit(sig.raw[..G::SIZE].as_ref());
-        let e = F::random(&mut t.noise(b"challenge"));
+        let e = F::random(t.noise(b"challenge"));
 
         // Check: s * G == K + e * X
         let lhs = G::generator() * &s;
@@ -616,7 +616,7 @@ impl VrfCommitments {
     ///
     /// Panics if `outputs` contains duplicate sender public keys.
     pub fn check_batch(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         setup: &Setup,
         transcript: &Transcript,
         players: &Set<PublicKey>,

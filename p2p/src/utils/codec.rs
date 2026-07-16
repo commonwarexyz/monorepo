@@ -53,6 +53,16 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         message: V,
         priority: bool,
     ) -> Vec<S::PublicKey> {
+        self.send_ref(recipients, &message, priority)
+    }
+
+    /// Send a borrowed message to a set of recipients.
+    pub fn send_ref(
+        &mut self,
+        recipients: Recipients<S::PublicKey>,
+        message: &V,
+        priority: bool,
+    ) -> Vec<S::PublicKey> {
         let encoded = message.encode_with_pool(&self.pool);
         self.sender.send(recipients, encoded, priority)
     }
@@ -87,6 +97,10 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
     }
 
     pub fn send(self, message: V, priority: bool) -> Unreliable<Feedback> {
+        self.send_ref(&message, priority)
+    }
+
+    pub fn send_ref(self, message: &V, priority: bool) -> Unreliable<Feedback> {
         let encoded = message.encode_with_pool(self.pool);
         self.sender.send(encoded, priority)
     }
@@ -217,7 +231,7 @@ where
     /// limit. With a multi-worker strategy this lets the receive loop continue draining the network
     /// buffer while decodes proceed on pool workers; inline strategies decode on the receive loop.
     async fn run(mut self) {
-        let decode_queue_capacity = self.strategy.manual().parallelism_hint();
+        let decode_queue_capacity = self.strategy.manual().parallelism();
         let mut decode_pool = Pool::default();
         let mut receiver_closed = false;
 
@@ -464,6 +478,25 @@ mod tests {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             Sequential.try_fold(iter, identity, fold_op, reduce_op)
+        }
+
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            Sequential.run(len, serial, parallel)
+        }
+
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            Sequential.try_run(len, serial, parallel)
         }
 
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)

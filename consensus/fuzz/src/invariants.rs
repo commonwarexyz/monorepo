@@ -11,7 +11,7 @@ use commonware_cryptography::{
     certificate::{self, Signers},
     sha256::Digest as Sha256Digest,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::collections::{HashMap, HashSet};
 
 pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
@@ -205,7 +205,7 @@ pub fn extract<E, S, L>(
     max_participants: usize,
 ) -> Vec<ReplicaState>
 where
-    E: CryptoRngCore,
+    E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {

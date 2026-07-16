@@ -148,7 +148,7 @@ use commonware_utils::{
 };
 pub use evrf::{PrivateKey, PublicKey, Setup};
 use evrf::{Signature, VrfCommitments};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU32};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_GOLDEN_DKG";
@@ -422,7 +422,7 @@ impl Info {
     /// However, if there is a previous round, we expect a share, hence `Result`.
     fn unwrap_or_random_share(
         &self,
-        mut rng: impl CryptoRngCore,
+        mut rng: impl CryptoRng,
         share: Option<Scalar>,
     ) -> Result<Scalar, Error> {
         let out = match (self.previous.as_ref(), share) {
@@ -477,7 +477,7 @@ const fn check_setup(setup: &Setup, info: &Info) -> Result<(), Error> {
 ///
 /// Returns a [`SignedDealerLog`] ready for broadcast.
 pub fn deal(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     setup: &Setup,
     info: &Info,
     me: &PrivateKey,
@@ -559,7 +559,7 @@ impl Selection {
 }
 
 fn select(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     setup: &Setup,
     info: &Info,
     logs: BTreeMap<PublicKey, DealerLog>,
@@ -620,7 +620,7 @@ fn select(
 /// [`Error::DkgFailed`] if too few valid dealings are available, or
 /// [`Error::UnsupportedNumPlayers`] if `setup` is too small for `info`.
 pub fn observe(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     setup: &Setup,
     info: &Info,
     logs: BTreeMap<PublicKey, DealerLog>,
@@ -654,7 +654,7 @@ pub fn observe(
 /// `setup` must support at least `info.players.len()` players (see
 /// [`Setup::supports`]); otherwise [`Error::UnsupportedNumPlayers`] is returned.
 pub fn play(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     setup: &Setup,
     info: &Info,
     logs: BTreeMap<PublicKey, DealerLog>,
@@ -835,7 +835,7 @@ impl Read for DealerLog {
 impl DealerLog {
     #[allow(dead_code)]
     fn batch_check(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         setup: &Setup,
         info: &Info,
         batch: impl IntoIterator<Item = (PublicKey, Self)>,
@@ -943,7 +943,7 @@ impl Dealing {
     #[must_use]
     fn check(
         &self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         info: &Info,
         dealer: &PublicKey,
         mask_commitments: &Map<PublicKey, G1>,
@@ -1042,9 +1042,12 @@ mod test_plan {
     use super::*;
     use commonware_math::{algebra::Random, poly::Poly};
     use commonware_parallel::Sequential;
-    use commonware_utils::N3f1;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{N3f1, TestRng};
     use std::collections::{BTreeMap, BTreeSet};
+
+    /// The largest dealer or player count the `Arbitrary` implementation for
+    /// [`Plan`] generates. A [`Setup`] of this size fits every generated plan.
+    pub const MAX_PARTICIPANTS: u32 = 7;
 
     /// A golden DKG test plan.
     ///
@@ -1231,7 +1234,7 @@ mod test_plan {
 
         /// Run a fresh (honest) DKG round and return the output and per-player shares.
         pub fn run_fresh(
-            rng: &mut StdRng,
+            rng: &mut impl CryptoRng,
             setup: &Setup,
             dealer_keys: &[PrivateKey],
             player_keys: &[PrivateKey],
@@ -1268,7 +1271,7 @@ mod test_plan {
             self.validate()?;
             let expect_failure = self.expect_failure();
 
-            let mut rng = StdRng::seed_from_u64(seed);
+            let mut rng = TestRng::new(seed);
 
             let dealer_keys: Vec<PrivateKey> = (0..self.num_dealers)
                 .map(|_| PrivateKey::random(&mut rng))
@@ -1485,9 +1488,26 @@ mod test_plan {
     #[cfg(any(feature = "arbitrary", test))]
     impl<'a> arbitrary::Arbitrary<'a> for Plan {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            const MAX: u32 = 7;
-            let num_dealers = u.int_in_range(1..=MAX)?;
-            let num_players = u.int_in_range(1..=MAX)?;
+            // A single plan run costs seconds to minutes, so the generated shape
+            // is capped to keep cases affordable enough for a time-budgeted fuzz
+            // to run several of them. Dealers are drawn across their full range
+            // first so every quorum regime stays reachable, and the cap squeezes
+            // the player count. Plain plan cost grows with the dealer x player
+            // product, while reshare cost is driven by dealer count almost
+            // regardless of players, so reshare plans additionally bound dealers
+            // tightly.
+            const PLAIN_PRODUCT_CAP: u32 = 21;
+            const RESHARE_DEALER_CAP: u32 = 3;
+            const RESHARE_PRODUCT_CAP: u32 = 8;
+            let reshare = u.ratio(1, 4)?;
+            let (dealer_cap, product_cap) = if reshare {
+                (RESHARE_DEALER_CAP, RESHARE_PRODUCT_CAP)
+            } else {
+                (MAX_PARTICIPANTS, PLAIN_PRODUCT_CAP)
+            };
+            let num_dealers = u.int_in_range(1..=dealer_cap)?;
+            let max_players = (product_cap / num_dealers).clamp(1, MAX_PARTICIPANTS);
+            let num_players = u.int_in_range(1..=max_players)?;
             let star = u.int_in_range(0..=num_players - 1)?;
             let mut plan = Self::new(num_dealers, num_players, star);
 
@@ -1525,8 +1545,8 @@ mod test_plan {
                 }
             }
 
-            // Optionally enable reshare.
-            if u.ratio(1, 4)? {
+            // Apply the reshare decision drawn above.
+            if reshare {
                 plan = plan.reshare();
                 for d in 0..num_dealers {
                     if u.ratio(1, 6)? {
@@ -1543,7 +1563,7 @@ mod test_plan {
 }
 
 #[cfg(feature = "arbitrary")]
-pub use test_plan::Plan as FuzzPlan;
+pub use test_plan::{Plan as FuzzPlan, MAX_PARTICIPANTS as FUZZ_PLAN_MAX_PARTICIPANTS};
 
 #[cfg(test)]
 mod tests {
@@ -1553,6 +1573,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{N3f1, N5f1};
+    use rstest::rstest;
     use std::{sync::LazyLock, time::Duration};
 
     const TEST_NAMESPACE: &[u8] = b"test";
@@ -2205,12 +2226,16 @@ mod tests {
         assert!(signed.identify(&other_faults).is_none());
     }
 
+    #[rstest]
+    #[case()]
+    #[case()]
+    #[case()]
+    #[case()]
     #[test_group("slow")]
-    #[test]
     fn fuzz_plan() {
         minifuzz::Builder::default()
             .with_min_iterations(0)
-            .with_search_time(Duration::from_secs(600))
+            .with_search_time(Duration::from_secs(180))
             .test(|u| {
                 let plan: Plan = u.arbitrary()?;
                 let seed: u64 = u.arbitrary()?;

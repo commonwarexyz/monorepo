@@ -58,8 +58,14 @@ default-features = false
 features = ["alloc"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
-# Enable "js" feature when WASM is target
-version = "0.2.15"
+# Enable the JS backend for transitive dependencies that use getrandom on WASM.
+version = "0.4.3"
+features = ["wasm_js"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom_v2]
+# Enable the JS backend for transitive dependencies that still use getrandom 0.2 on WASM.
+package = "getrandom"
+version = "0.2"
 features = ["js"]
 
 [dev-dependencies]
@@ -107,6 +113,7 @@ std = [
 	"ecdsa/std",
 	"fixedbitset/std",
 	"getrandom/std",
+	"getrandom_v2/std",
 	"num-rational",
 	"num-traits",
 	"num-traits?/std",
@@ -115,7 +122,6 @@ std = [
 	"rand/std",
 	"rand/std_rng",
 	"rand_chacha/std",
-	"rand_core/std",
 	"thiserror/std",
 	"zeroize/std",
 ]

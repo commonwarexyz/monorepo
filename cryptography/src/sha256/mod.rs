@@ -34,7 +34,7 @@ use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
@@ -153,7 +153,7 @@ impl crate::Digest for Digest {
 }
 
 impl Random for Digest {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)

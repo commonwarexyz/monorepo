@@ -140,7 +140,7 @@ use commonware_math::{
     synthetic::Synthetic,
 };
 use commonware_parallel::{Sequential, Strategy};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
     ops::{Index, IndexMut, Mul},
@@ -358,7 +358,7 @@ mod zkc {
     use crate::zk::circuit as zk;
     use commonware_math::algebra::{Field, Random, Ring};
     use commonware_utils::ordered::Map;
-    use rand_core::CryptoRngCore;
+    use rand_core::CryptoRng;
     use std::{borrow::Cow, collections::BTreeMap};
 
     /// A column of the bulletproofs weight matrix.
@@ -530,7 +530,7 @@ mod zkc {
         /// Without a `blinding_rng`, the blinding factors are zero.
         pub fn circuit_and_witness(
             mut self,
-            blinding_rng: Option<&mut impl CryptoRngCore>,
+            blinding_rng: Option<&mut impl CryptoRng>,
             zkc: zk::ValuedCircuit<F>,
         ) -> (super::Circuit<F>, super::Witness<F>) {
             self.populate(&zkc.circuit);
@@ -833,7 +833,7 @@ pub fn zkc_to_circuit<F: Field + Random>(
 /// allocated by the circuit; other indices are unsupported, and may panic
 /// or leave a commitment unconstrained.
 pub fn zkc_to_circuit_and_witness<F: Field + Random>(
-    blinding_rng: Option<&mut impl CryptoRngCore>,
+    blinding_rng: Option<&mut impl CryptoRng>,
     zkc: crate::zk::circuit::ValuedCircuit<F>,
     committed_indices: &[crate::zk::circuit::CircuitIdx],
 ) -> (Circuit<F>, Witness<F>) {
@@ -983,7 +983,7 @@ impl<G> Setup<G> {
     /// returned `Vec` indicate that the corresponding item is structurally
     /// invalid; they are reported as `false` in the result without ever
     /// being included in any subset sum.
-    pub fn eval_check_batched<F: Field + Random, R: CryptoRngCore>(
+    pub fn eval_check_batched<F: Field + Random, R: CryptoRng>(
         &self,
         rng: &mut R,
         f: impl FnOnce(&Setup<Synthetic<F, G>>, &mut R) -> Option<Vec<Option<Synthetic<F, G>>>>,
@@ -1265,7 +1265,7 @@ where
 /// witness lengths are inconsistent with the circuit, or if the claim does not
 /// match the witness.
 pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<G>,
     circuit: &Circuit<F>,
@@ -1710,7 +1710,7 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
 /// The extra randomness is used to compress the circuit-specific checks into a
 /// single equation before combining them with the inner product argument.
 pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<Synthetic<F, G>>,
     circuit: &Circuit<F>,

@@ -166,30 +166,24 @@ pub trait Contiguous: Send + Sync {
 
     /// Read multiple items at the given positions, which must be strictly increasing.
     ///
-    /// The default implementation calls [`read`](Self::read) in a loop. Concrete journal
-    /// implementations override this to batch I/O.
+    /// Equivalent to serving every position [`try_read_many_sync`](Self::try_read_many_sync)
+    /// declines with one batched read. Implementations may fuse the two passes.
     fn read_many(
         &self,
         positions: &[u64],
     ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send
     where
-        Self::Item: Send,
-    {
-        async move {
-            let mut items = Vec::with_capacity(positions.len());
-            for &pos in positions {
-                items.push(self.read(pos).await?);
-            }
-            Ok(items)
-        }
-    }
+        Self::Item: Send;
 
-    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
-    ///
-    /// Default implementation always returns `None`.
-    fn try_read_sync(&self, _position: u64) -> Option<Self::Item> {
-        None
-    }
+    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None`
+    /// otherwise. Decode failures surface as `None` and the async read path reports the error.
+    fn try_read_sync(&self, position: u64) -> Option<Self::Item>;
+
+    /// Probe multiple strictly increasing positions, serving those that can be read
+    /// synchronously (e.g. from a page cache) and returning one slot per position. Positions
+    /// that require I/O, fail to decode, or fall outside `bounds()` decline to `None`. The
+    /// async read paths are the sole error authority for declined positions.
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
@@ -250,39 +244,13 @@ pub trait Mutable: Contiguous + Send + Sync {
 
     /// Append items to the journal, returning the position of the last item appended.
     ///
-    /// The default implementation calls [Self::append] in a loop. Concrete implementations
-    /// may override this to encode and write all items in one batch.
-    ///
     /// Returns [Error::EmptyAppend] if items is empty.
     fn append_many<'a>(
         &'a mut self,
         items: Many<'a, Self::Item>,
     ) -> impl std::future::Future<Output = Result<u64, Error>> + Send + 'a
     where
-        Self::Item: Sync,
-    {
-        async move {
-            if items.is_empty() {
-                return Err(Error::EmptyAppend);
-            }
-            let mut last_pos = self.bounds().end;
-            match items {
-                Many::Flat(items) => {
-                    for item in items {
-                        last_pos = self.append(item).await?;
-                    }
-                }
-                Many::Nested(nested_items) => {
-                    for items in nested_items {
-                        for item in *items {
-                            last_pos = self.append(item).await?;
-                        }
-                    }
-                }
-            }
-            Ok(last_pos)
-        }
-    }
+        Self::Item: Sync;
 
     /// Prune items at positions strictly less than `min_position`.
     ///
@@ -331,9 +299,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// Durably persist the journal, guaranteeing the current state will survive a crash.
     ///
     /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send {
-        self.sync()
-    }
+    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Durably persist the journal, guaranteeing the current state will survive a crash, and that
     /// no recovery will be needed on startup.

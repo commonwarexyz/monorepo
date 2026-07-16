@@ -13,11 +13,11 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, Quota, Runner, Supervisor as _};
-use commonware_utils::{channel::oneshot, futures::Pool, vec::Bounded, NZUsize};
+use commonware_utils::{channel::oneshot, futures::Pool, vec::Bounded, NZUsize, TestRng};
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
-use rand::{seq::SliceRandom, SeedableRng};
-use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+use rand::seq::SliceRandom;
+use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc, time::Duration};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -35,7 +35,7 @@ const MAX_SLEEP_DURATION_MS: u64 = 1000;
 const MAX_RECENT_DIGESTS: usize = (u8::MAX as usize) + 1;
 
 /// Subscription result paired with the digest requested so completions can be validated.
-type Subscription = (Digest, Result<FuzzMessage, oneshot::error::RecvError>);
+type Subscription = (Digest, Result<Arc<FuzzMessage>, oneshot::error::RecvError>);
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
@@ -190,7 +190,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
             Recipients::One(peers[index].clone())
         }
         RecipientPattern::Some(seed) => {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(*seed);
+            let mut rng = TestRng::new(*seed);
             let mut shuffled_peers = peers.to_vec();
             shuffled_peers.shuffle(&mut rng);
 

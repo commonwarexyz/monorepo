@@ -1,9 +1,8 @@
 use super::Header;
-use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut};
+use crate::{deterministic::AuditHasher, Buf, BufferPool, Handle, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
 /// In-memory storage implementation for the commonware runtime.
@@ -23,20 +22,24 @@ impl Storage {
 }
 
 impl Storage {
-    /// Compute a [Sha256] digest of all blob contents.
+    /// Compute a SHA-256 digest of all blob contents.
     pub fn audit(&self) -> [u8; 32] {
         let partitions = self.partitions.lock();
-        let mut hasher = Sha256::new();
+        let mut hasher = AuditHasher::new();
+        hasher.update(b"commonware-runtime-storage-audit-v1");
 
         for (partition_name, blobs) in partitions.iter() {
             for (blob_name, content) in blobs.iter() {
+                hasher.update(b"partition");
                 hasher.update(partition_name.as_bytes());
+                hasher.update(b"blob");
                 hasher.update(blob_name);
+                hasher.update(b"content");
                 hasher.update(content);
             }
         }
 
-        hasher.finalize().into()
+        hasher.finalize()
     }
 }
 
@@ -349,5 +352,20 @@ mod tests {
         assert!(
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_audit_separates_partition_and_blob_names() {
+        let storage_a = Storage::new(test_pool());
+        let (blob_a, _) = storage_a.open("a", b"bc").await.unwrap();
+        blob_a.write_at(0, b"d").await.unwrap();
+        blob_a.sync().await.unwrap();
+
+        let storage_b = Storage::new(test_pool());
+        let (blob_b, _) = storage_b.open("ab", b"c").await.unwrap();
+        blob_b.write_at(0, b"d").await.unwrap();
+        blob_b.sync().await.unwrap();
+
+        assert_ne!(storage_a.audit(), storage_b.audit());
     }
 }

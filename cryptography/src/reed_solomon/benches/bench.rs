@@ -10,7 +10,7 @@ use commonware_cryptography::reed_solomon::{
     Decoder, Encoder, SHARD_CHUNK_BYTES,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng, RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
 
@@ -389,7 +389,7 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine
     let shard_chunk_count = SHARD_BYTES / SHARD_CHUNK_BYTES;
 
     let mut rng = ChaCha8Rng::from_seed([0; 32]);
-    let mut data = [(); GF_ORDER].map(|_| rng.gen());
+    let mut data = [(); GF_ORDER].map(|_| rng.random());
 
     c.bench_function(
         &format!("reed_solomon::engine_eval_poly/engine={engine_name} elems={GF_ORDER}"),

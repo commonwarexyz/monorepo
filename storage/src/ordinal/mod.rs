@@ -97,6 +97,8 @@
 //! });
 //! ```
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
 mod storage;
 
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -146,7 +148,7 @@ mod tests {
         deterministic, Blob, Buf, BufMut, Metrics as _, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
-    use rand::RngCore;
+    use rand::Rng;
     use std::collections::BTreeMap;
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;

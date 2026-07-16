@@ -77,7 +77,7 @@ fn run(plan: Plan) {
             }
             Op::GetOrInsertMut(k, v) => {
                 let k = k % KEY_SPACE;
-                *cache.get_or_insert_mut(k, || v) = v;
+                *cache.get_or_insert_mut(k, || v).1 = v;
                 model.insert(k, v);
                 assert_eq!(cache.peek(&k).copied(), Some(v));
             }

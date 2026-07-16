@@ -35,7 +35,7 @@ use commonware_runtime::{
 use commonware_storage::archive::immutable;
 use commonware_utils::{union, NZUsize, NZU16, NZU32, NZU64};
 use futures::future::try_join_all;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZero, NonZeroU16, NonZeroUsize},
@@ -82,7 +82,7 @@ where
 
 pub struct Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -126,7 +126,7 @@ where
 
 impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,

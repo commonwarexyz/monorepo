@@ -300,9 +300,33 @@ where
         }
     }
 
-    /// Borrow the committed Mem through the read lock.
-    pub(crate) fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, H::Digest>) -> R) -> R {
-        self.merkle.with_mem(f)
+    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound
+    /// job submitted through [`Strategy::spawn`].
+    ///
+    /// The job hashes against an immutable snapshot of the committed Merkle state, so a
+    /// parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
+    /// occupying the calling task. If the caller is cancelled mid-job, the job still runs to
+    /// completion against its snapshot and the result is discarded (a panic inside the job is
+    /// caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
+    pub(crate) async fn merkleize(
+        &self,
+        batch: UnmerkleizedBatch<F, H, C::Item, S>,
+        items: Vec<C::Item>,
+        inactive_peaks: usize,
+    ) -> Result<(MerkleizedBatchArc<F, H, C::Item, S>, H::Digest), merkle::Error<F>>
+    where
+        C::Item: 'static,
+    {
+        let mem = self.merkle.snapshot();
+        let hasher = self.hasher.clone();
+        let strategy = self.strategy().clone();
+        strategy
+            .spawn(move |_| {
+                let merkleized = batch.add_many(items).merkleize(&mem);
+                let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+                Ok((merkleized, root))
+            })
+            .await
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
@@ -534,7 +558,12 @@ where
         // Sync the Merkle structure before pruning the journal, otherwise its last element could
         // end up behind the journal's first element after a crash, and there would be no way to
         // replay the items between the structure's last element and the journal's first element.
-        self.merkle.sync().await?;
+        // Commit the journal alongside: the prune target may be justified by a buffered append
+        // (e.g. a commit operation), and pruning does not guarantee buffered appends are durable.
+        try_join!(
+            self.journal.commit().map_err(Error::Journal),
+            self.merkle.sync().map_err(Error::Merkle)
+        )?;
 
         let journal_pruned = self.journal.prune(*prune_loc).await?;
         let bounds = self.journal.bounds();
@@ -640,9 +669,14 @@ where
     /// Destroy the authenticated journal, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
+        // `try_join!` contains an await boundary, so destructure first to avoid
+        // stack growth from retaining the entire `self` in the future.
+        let Self {
+            journal, merkle, ..
+        } = self;
         try_join!(
-            self.journal.destroy().map_err(Error::Journal),
-            self.merkle.destroy().map_err(Error::Merkle),
+            journal.destroy().map_err(Error::Journal),
+            merkle.destroy().map_err(Error::Merkle),
         )?;
 
         Ok(())
@@ -710,6 +744,105 @@ macro_rules! impl_journal_new {
 impl_journal_new!(fixed, fixed::Config, CodecFixedShared);
 impl_journal_new!(variable, variable::Config<O::Cfg>, CodecShared);
 
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
+where
+    F: Family,
+    E: Context,
+    C: Contiguous<Item: EncodeShared>,
+    H: Hasher,
+    S: Strategy,
+{
+    /// Like [`Contiguous::read_many`], but returns the items partitioned into the shards the
+    /// probe ran with. Concatenating the shards yields the items in `positions` order.
+    ///
+    /// Large batches shard the page-cache probe across the strategy pool. Each shard
+    /// assembles its own hits while they are still cache-hot on the probing worker, so bulk
+    /// callers that can consume partitioned results (e.g. the floor raise, which classifies
+    /// candidates in chunks) skip the serial reassembly a flat result would require.
+    pub(crate) async fn read_many_sharded(
+        &self,
+        positions: &[u64],
+    ) -> Result<Vec<Vec<C::Item>>, JournalError> {
+        // An empty batch cannot shard: the parallel arm's chunk math needs a non-zero chunk
+        // size, and the policy may explore that arm at any batch size.
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Probe page-cache hits synchronously and complete the misses with one batched read.
+        // The strategy policy decides per batch size whether the probe runs on the calling
+        // thread or sharded across the pool (one scratch buffer per shard and one cache-lock
+        // acquisition per blob a shard touches). The sortedness assert keeps contract
+        // violations deterministic: past it, a non-increasing batch would only trip per-shard
+        // validation when an inversion lands inside a single shard.
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        let strategy = self.strategy();
+        let journal = &self.journal;
+
+        // Each shard yields its hits densely plus the shard-local indices it declined.
+        let probe = |positions: &[u64]| -> (Vec<C::Item>, Vec<usize>) {
+            let probed = journal.try_read_many_sync(positions);
+            let mut hits = Vec::with_capacity(probed.len());
+            let mut missed = Vec::new();
+            for (idx, item) in probed.into_iter().enumerate() {
+                match item {
+                    Some(item) => hits.push(item),
+                    None => missed.push(idx),
+                }
+            }
+            (hits, missed)
+        };
+        let shards: Vec<(Vec<C::Item>, Vec<usize>)> = strategy.run(
+            positions.len(),
+            || vec![probe(positions)],
+            || {
+                let manual = strategy.manual();
+                let shard_len = positions.len().div_ceil(manual.parallelism());
+                manual.map_collect_vec(positions.chunks(shard_len).collect::<Vec<_>>(), &probe)
+            },
+        );
+
+        // The declined positions are a strictly increasing subsequence of `positions`, so one
+        // batched read serves them all. Each shard covers the slice of `positions` starting
+        // at the previous shards' total item count, whatever geometry the probe ran with.
+        let mut misses: Vec<u64> = Vec::new();
+        let mut offset = 0;
+        for (hits, missed) in &shards {
+            misses.extend(missed.iter().map(|idx| positions[offset + idx]));
+            offset += hits.len() + missed.len();
+        }
+        if misses.is_empty() {
+            return Ok(shards.into_iter().map(|(hits, _)| hits).collect());
+        }
+        let mut fetched = journal.read_many(&misses).await?.into_iter();
+
+        // Weave the fetched items back into each shard that declined positions.
+        let mut result = Vec::with_capacity(shards.len());
+        for (hits, missed) in shards {
+            if missed.is_empty() {
+                result.push(hits);
+                continue;
+            }
+            let total = hits.len() + missed.len();
+            let mut woven = Vec::with_capacity(total);
+            let mut hits = hits.into_iter();
+            let mut missed = missed.into_iter().peekable();
+            for idx in 0..total {
+                if missed.next_if_eq(&idx).is_some() {
+                    woven.push(fetched.next().expect("one fetched item per miss"));
+                } else {
+                    woven.push(hits.next().expect("one probed item per hit"));
+                }
+            }
+            result.push(woven);
+        }
+        Ok(result)
+    }
+}
+
 impl<F, E, C, H, S> Contiguous for Journal<F, E, C, H, S>
 where
     F: Family,
@@ -729,11 +862,23 @@ where
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
-        self.journal.read_many(positions).await
+        let mut shards = self.read_many_sharded(positions).await?;
+        if shards.len() == 1 {
+            return Ok(shards.pop().expect("length checked"));
+        }
+        let mut items = Vec::with_capacity(positions.len());
+        for shard in shards {
+            items.extend(shard);
+        }
+        Ok(items)
     }
 
     fn try_read_sync(&self, position: u64) -> Option<C::Item> {
         self.journal.try_read_sync(position)
+    }
+
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<C::Item>> {
+        self.journal.try_read_many_sync(positions)
     }
 
     async fn replay(
@@ -757,6 +902,37 @@ where
         let res = self.append(item).await.map_err(Self::map_error)?;
 
         Ok(*res)
+    }
+
+    async fn append_many<'a>(
+        &'a mut self,
+        items: Many<'a, Self::Item>,
+    ) -> Result<u64, JournalError> {
+        // The per-item loop below never reaches the inner journal's shared empty check, so the
+        // trait's EmptyAppend contract must be enforced here.
+        if items.is_empty() {
+            return Err(JournalError::EmptyAppend);
+        }
+
+        // Every append must also update the Merkle structure, so items append one at a time.
+        // Batched appends of already-merkleized items go through `apply_batch`, which batches
+        // the inner journal writes instead.
+        let mut last_pos = self.journal.bounds().end;
+        match items {
+            Many::Flat(items) => {
+                for item in items {
+                    last_pos = Mutable::append(self, item).await?;
+                }
+            }
+            Many::Nested(nested_items) => {
+                for items in nested_items {
+                    for item in *items {
+                        last_pos = Mutable::append(self, item).await?;
+                    }
+                }
+            }
+        }
+        Ok(last_pos)
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, JournalError> {
@@ -832,7 +1008,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Strategizer as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -946,6 +1122,73 @@ mod tests {
             let child: UnmerkleizedBatch<mmr::Family, Sha256, TestOp<mmr::Family>, Sequential> =
                 merkleized.new_batch();
             assert_eq!(child.hasher.root_bagging(), BackwardFold);
+        });
+    }
+
+    /// Large batched reads shard across the strategy pool and match per-position reads.
+    #[test]
+    fn test_read_many_shards_across_strategy_pool() {
+        deterministic::Runner::default().start(|context| async move {
+            // A parallelism > 1 strategy with more positions than the shard threshold
+            // exercises the sharded sync path. The tiny test page cache pushes most
+            // positions through the batched miss fallback while the write buffer serves
+            // the tail synchronously.
+            let strategy = context.strategy(NZUsize!(2));
+            let merkle_cfg = merkle_config_with("shard", &context, strategy);
+            let journal_cfg = journal_config("shard", &context);
+            type RayonJournal = Journal<
+                mmr::Family,
+                Context,
+                ContiguousJournal<Context, TestOp<mmr::Family>>,
+                Sha256,
+                Rayon,
+            >;
+            let mut journal = RayonJournal::new(
+                context,
+                merkle_cfg,
+                journal_cfg,
+                |op: &TestOp<mmr::Family>| op.is_commit(),
+                ForwardFold,
+            )
+            .await
+            .unwrap();
+
+            let count = 4200u64;
+            for i in 0..count {
+                let op = create_operation::<mmr::Family>((i % 251) as u8);
+                journal.append(&op).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..count).collect();
+            let batch = Contiguous::read_many(&journal, &positions).await.unwrap();
+            assert_eq!(batch.len(), positions.len());
+            for &pos in &positions {
+                let single = Contiguous::read(&journal, pos).await.unwrap();
+                assert_eq!(batch[pos as usize], single);
+            }
+
+            // An empty batch is a no-op, even with a multi-threaded strategy.
+            assert!(Contiguous::read_many(&journal, &[])
+                .await
+                .unwrap()
+                .is_empty());
+        });
+    }
+
+    /// A non-increasing batch panics deterministically, even when fully cached.
+    #[test]
+    #[should_panic(expected = "positions must be strictly increasing")]
+    fn test_read_many_rejects_unsorted_positions() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut journal = create_empty_journal::<mmr::Family>(context, "unsorted").await;
+            for i in 0..2u8 {
+                let op = create_operation::<mmr::Family>(i);
+                journal.append(&op).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let _ = Contiguous::read_many(&journal, &[1, 0]).await;
         });
     }
 

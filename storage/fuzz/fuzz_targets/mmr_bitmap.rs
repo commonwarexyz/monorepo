@@ -3,15 +3,17 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Digest, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage, Supervisor as _};
-use commonware_storage::{merkle::Bagging::ForwardFold, MerkleizedBitMap, UnmerkleizedBitMap};
+use commonware_runtime::{deterministic, Runner, Supervisor as _};
+use commonware_storage::{
+    merkle::Bagging::ForwardFold, Context, MerkleizedBitMap, UnmerkleizedBitMap,
+};
 use commonware_utils::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 100;
 const CHUNK_SIZE: usize = 32;
 
-enum Bitmap<E: Clock + Storage + Metrics, D: Digest, const N: usize> {
+enum Bitmap<E: Context, D: Digest, const N: usize> {
     Merkleized(MerkleizedBitMap<E, D, N, Sequential>),
     Unmerkleized(UnmerkleizedBitMap<E, D, N, Sequential>),
 }

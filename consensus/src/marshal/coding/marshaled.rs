@@ -120,7 +120,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::TracedAsyncMutex,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, info_span, warn, Instrument as _};
 
@@ -173,7 +173,7 @@ where
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
-    gates: Gates<Commitment>,
+    gates: Gates<Commitment, CodedBlock<B, C, H>>,
 
     build_duration: Timed,
     verify_duration: Timed,
@@ -317,7 +317,7 @@ where
         &mut self,
         consensus_context: Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
         commitment: Commitment,
-        prefetched_block: Option<CodedBlock<B, C, H>>,
+        prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let marshal = self.marshal.clone();
@@ -342,6 +342,18 @@ where
             async move {
                 let round = consensus_context.round;
                 let (parent_view, parent_commitment) = consensus_context.parent;
+
+                // Start the parent fetch immediately so it can proceed in parallel
+                // with candidate reconstruction. The parent round comes from the
+                // caller's context (the certified consensus context in verify, the
+                // quorum-defended embedded context in certify), never from the
+                // unverified child block.
+                let parent_request = marshal.subscribe_by_commitment(
+                    parent_commitment,
+                    core::CommitmentFallback::FetchByRound {
+                        round: Round::new(consensus_context.epoch(), parent_view),
+                    },
+                );
 
                 // Get the candidate block either from the caller or by waiting for
                 // local reconstruction. Candidate data remains local-only: a
@@ -375,15 +387,9 @@ where
                 // candidate availability/recovery, not a validity decision. This
                 // task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
-                let store = stage.store(&marshal, round, block.clone());
+                let store = stage.store(&marshal, round, Arc::clone(&block));
                 let verify = async {
-                    // The context supplies the certified parent round. Do not derive a
-                    // height from the unverified child block for this lookup.
-                    let fallback = core::CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    };
-                    let parent_request =
-                        marshal.subscribe_by_commitment(parent_commitment, fallback);
+                    // Await the parent fetch we started above.
                     let parent = select! {
                         _ = tx.closed() => {
                             debug!(
@@ -403,8 +409,8 @@ where
 
                     if let Err(err) = validate_block::<H, _, _>(
                         &epocher,
-                        &block,
-                        &parent,
+                        block.as_ref(),
+                        parent.as_ref(),
                         &consensus_context,
                         commitment,
                         parent_commitment,
@@ -426,7 +432,7 @@ where
 
                     let ancestry_stream = marshal.ancestor_stream(
                         Arc::new(runtime_context.child("ancestor_stream")),
-                        [block.clone(), parent],
+                        [block.inner_shared(), parent.inner_shared()],
                         ancestor_fetch_duration,
                     );
                     let validity_request = application
@@ -465,7 +471,7 @@ where
                 // Publish only when the block is both valid and durable. App-invalid
                 // candidates may already be in the cache from the concurrent store above,
                 // so the gate verdict is the authority for consensus progress.
-                if let Some(application_valid) = gates::handle(verdict, durable) {
+                if let Some(application_valid) = gates::resolve(verdict, durable) {
                     tx.send_lossy(application_valid);
                 }
             }
@@ -657,11 +663,12 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. The block's persistence is enqueued
-    /// before the commitment is delivered, and the resulting sync handle is awaited only at
-    /// certification so it overlaps consensus voting. The commitment does not imply durability
-    /// on its own; [`CertifiableAutomaton::certify`] awaits the registered certification gate
-    /// before the finalize vote.
+    /// contain the proposed block's commitment when ready. The block is staged before the
+    /// commitment is delivered and handed to marshal when consensus requests the relay
+    /// broadcast, which persists it after the shards are sent. The resulting sync handle is
+    /// awaited only at certification so it overlaps consensus voting. The commitment does not
+    /// imply durability on its own. [`CertifiableAutomaton::certify`] awaits the registered
+    /// certification gate before the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn propose(
@@ -709,7 +716,8 @@ where
         context.spawn(move |runtime_context| {
             async move {
                 // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted before voting in consensus).
+                // for this round (persisted by a pre-crash propose that reached
+                // its relay broadcast).
                 //
                 // The pre-crash commitment may already have been broadcast,
                 // so building a fresh block would equivocate. The stored
@@ -732,15 +740,20 @@ where
                         );
                         return;
                     }
+                    // Stage the recovered block so the relay broadcast re-sends
+                    // its shards through the same handshake as a fresh
+                    // proposal. The relay-time persist deduplicates against the
+                    // pre-crash write, with the handle covering the original.
                     let commitment = block.commitment();
                     let round = consensus_context.round;
-                    let success = tx.send_lossy(commitment);
                     debug!(
                         ?round,
                         ?commitment,
-                        success,
-                        "reused verified block from marshal on leader recovery"
+                        "reusing verified block from marshal on leader recovery"
                     );
+                    gates
+                        .stage(round, commitment, Arc::new(block), tx, "recovered block")
+                        .await;
                     return;
                 }
 
@@ -790,22 +803,15 @@ where
                     let commitment = parent.commitment();
                     let round = consensus_context.round;
 
-                    let persist = marshal.verified_deferred(round, parent);
                     gates
-                        .persist_and_defer(
-                            round,
-                            commitment,
-                            tx,
-                            persist,
-                            "re-proposed boundary block",
-                        )
+                        .stage(round, commitment, parent, tx, "re-proposed boundary block")
                         .await;
                     return;
                 }
 
                 let ancestor_stream = marshal.ancestor_stream(
                     Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent],
+                    [parent.inner_shared()],
                     ancestor_fetch_duration,
                 );
                 let build_request = application
@@ -850,9 +856,14 @@ where
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
 
-                let persist = marshal.proposed_deferred(round, coded_block);
                 gates
-                    .persist_and_defer(round, commitment, tx, persist, "proposed block")
+                    .stage(
+                        round,
+                        commitment,
+                        Arc::new(coded_block),
+                        tx,
+                        "proposed block",
+                    )
                     .await;
             }
             .instrument(span)
@@ -1088,6 +1099,8 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+        self.gates.flush_unrelayed(&self.marshal, round, payload);
+
         // First, check for an in-progress certification gate task.
         let task = self.gates.take(round, payload);
         if let Some(task) = task {
@@ -1121,7 +1134,12 @@ where
         let Plan::Propose { round } = plan else {
             return Feedback::Ok;
         };
-        self.marshal.forward(round, commitment, Recipients::All)
+
+        let Some((block, ack)) = self.gates.take_staged(round, commitment) else {
+            debug!(%round, %commitment, "no staged proposal to relay, attempting forwarding");
+            return self.marshal.forward(round, commitment, Recipients::All);
+        };
+        self.marshal.proposed(round, block, Recipients::All, ack)
     }
 }
 

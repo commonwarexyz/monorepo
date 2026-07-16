@@ -7,7 +7,7 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
-use rand::Rng;
+use rand_core::Rng;
 use std::marker::PhantomData;
 
 pub struct Application<E, S, H, C, V>

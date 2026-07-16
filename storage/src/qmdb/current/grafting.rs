@@ -68,6 +68,7 @@ use crate::{
     qmdb,
 };
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use commonware_utils::bitmap::BitMap;
 use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;
@@ -101,6 +102,29 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
     }
     let chunk_size = 1u64 << grafting_height;
     (ops_leaves - birth_chunk_0) / chunk_size + 1
+}
+
+/// Compute grafted leaf digests for resolved `(chunk_idx, chunk_ops_digest, chunk)` triples:
+/// each leaf is `hash(chunk || chunk_ops_digest)`, except all-zero chunks preserve
+/// `chunk_ops_digest` directly (zero-chunk identity).
+pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
+    strategy: &S,
+    inputs: Vec<(usize, H::Digest, [u8; N])>,
+) -> Vec<(usize, H::Digest)> {
+    strategy.map_init_collect_vec(
+        inputs,
+        || qmdb::hasher::<H>(),
+        |h, (chunk_idx, chunk_ops_digest, chunk)| {
+            if chunk == BitMap::<N>::EMPTY_CHUNK {
+                (chunk_idx, chunk_ops_digest)
+            } else {
+                (
+                    chunk_idx,
+                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
+                )
+            }
+        },
+    )
 }
 
 /// Return the number of root peaks whose covered leaves end on or before `inactivity_floor`, while
