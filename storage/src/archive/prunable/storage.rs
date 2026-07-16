@@ -11,7 +11,7 @@ use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
+    Batchable, Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
@@ -118,10 +118,10 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     ///
     /// Retention is load-bearing: a [crate::archive::Archive::start_sync] handle must cover
     /// every previously accepted write, even when the call itself wrote nothing (e.g. a
-    /// duplicate put). Re-requesting these sections makes their buffers return the in-flight
-    /// sync's handle (a completed sync resolves immediately; no new I/O is issued). Pruned
-    /// sections must be removed from this set, or a later request would trip the journal's
-    /// prune guard.
+    /// duplicate put). Re-requesting these sections re-stages them in the next request's
+    /// atomic commit (a no-op for already-durable sections), so a request that failed
+    /// before completing is retried rather than forgotten. Pruned sections must be removed
+    /// from this set, or a later request would trip the journal's prune guard.
     requested: BTreeSet<u64>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
@@ -149,7 +149,7 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     syncs: Counter,
 }
 
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
+impl<T: Translator, E: BufferPooler + Batchable + Metrics, K: Array, V: CodecShared>
     Archive<T, E, K, V>
 {
     /// Calculate the section for a given index.
@@ -371,7 +371,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             return Ok(());
         }
 
-        // Write value and index entry atomically (glob first, then index)
+        // Write value and index entry (glob first, then index)
         let section = self.section(index);
         let entry = Record::new(index, key.clone(), 0, 0);
         let (position, _, _) = self.oversized.append(section, entry, &data).await?;
@@ -450,7 +450,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 }
 
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
+impl<T: Translator, E: BufferPooler + Batchable + Metrics, K: Array, V: CodecShared>
     crate::archive::Archive for Archive<T, E, K, V>
 {
     type Key = K;
@@ -480,8 +480,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.syncs.inc_by(self.pending.len() as u64);
         self.requested.append(&mut self.pending);
 
-        // Sync oversized journal (handles both index and values). Re-syncing `requested` sections
-        // also waits for any of their syncs still in flight.
+        // Sync oversized journal (both index and values, one atomic commit). Re-syncing
+        // `requested` sections retries any earlier request that failed before completing.
         self.oversized.sync(&self.requested).await?;
 
         self.requested.clear();
@@ -492,9 +492,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // Update metrics
         self.syncs.inc_by(self.pending.len() as u64);
 
-        // Move sections into `requested` rather than dropping them: section buffers reuse
-        // in-flight syncs, so re-requesting a section makes this handle observe outstanding work
-        // without issuing a new sync.
+        // Move sections into `requested` rather than dropping them: a request that fails
+        // before completing stays requested, so the next request re-stages (and retries)
+        // those sections in its own atomic commit.
         self.requested.append(&mut self.pending);
         Ok(self.oversized.start_sync(&self.requested).await?)
     }
@@ -529,7 +529,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 }
 
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
+impl<T: Translator, E: BufferPooler + Batchable + Metrics, K: Array, V: CodecShared>
     crate::archive::MultiArchive for Archive<T, E, K, V>
 {
     async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {

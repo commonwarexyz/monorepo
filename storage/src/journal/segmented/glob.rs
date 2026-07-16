@@ -126,6 +126,25 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(value)
     }
 
+    /// Returns whether the given section exists.
+    ///
+    /// # Errors
+    ///
+    /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
+    pub(crate) fn contains(&self, section: u64) -> Result<bool, Error> {
+        Ok(self.manager.get(section)?.is_some())
+    }
+
+    /// Stage the creation of a fresh section's blob with `batch` (see
+    /// [super::manager::Manager::create_into] for the caller contract).
+    pub(crate) async fn create_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        section: u64,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.manager.create_into(section, batch).await
+    }
+
     /// Sync the given `sections` to disk (flushes write buffers).
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         self.manager.sync(sections).await
@@ -177,6 +196,25 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         self.manager.prune(min).await
     }
 
+    /// [Self::prune], staged with `batch` (see
+    /// [super::manager::Manager::prune_into] for the caller contract).
+    pub(crate) async fn prune_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        min: u64,
+        batch: &mut T,
+    ) -> Result<bool, Error> {
+        self.manager.prune_into(min, batch).await
+    }
+
+    /// Stage the removal of every section's blob with `batch` (see
+    /// [super::manager::Manager::clear_into] for the caller contract).
+    pub(crate) async fn clear_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.manager.clear_into(batch).await
+    }
+
     /// Returns the number of the oldest section.
     pub fn oldest_section(&self) -> Option<u64> {
         self.manager.oldest_section()
@@ -190,11 +228,6 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Returns an iterator over all section numbers.
     pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
         self.manager.sections()
-    }
-
-    /// Remove a specific section. Returns true if the section existed and was removed.
-    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
-        self.manager.remove_section(section).await
     }
 
     /// Destroy all blobs.

@@ -183,7 +183,7 @@ pub struct Config<F> {
 /// # In-flight syncs
 ///
 /// Syncs started by [Manager::start_sync] complete in the background, so every path that
-/// removes a blob from `blobs` (`prune`, `remove_section`, `rewind`, `clear`, `destroy`) must
+/// removes a blob from `blobs` (`prune`, `rewind`, `clear`, `destroy`) must
 /// call [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared
 /// completion first, guaranteeing that caller-held sync handles always report the sync's true
 /// result and that no buffer is dropped with I/O in flight.
@@ -288,6 +288,36 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
 
         Ok(self.blobs.get_mut(&section).unwrap())
+    }
+
+    /// Stage the creation of a section's blob with `batch` and track it.
+    ///
+    /// The blob exists (empty, durable) once the caller applies the batch with
+    /// [WriteBatch::apply_sync]. Until then the tracked buffer must not be read
+    /// or written, so the caller must apply the batch before any other
+    /// operation touches the section.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the section is already tracked.
+    pub async fn create_into<T: WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        section: u64,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.prune_guard(section)?;
+        assert!(
+            !self.blobs.contains_key(&section),
+            "section {section} already exists"
+        );
+
+        let blob = batch
+            .create(&self.partition, &section.to_be_bytes())
+            .await?;
+        let buffer = self.factory.create(blob, 0).await?;
+        self.tracked.inc();
+        self.blobs.insert(section, buffer);
+        Ok(())
     }
 
     /// Sync the given `sections` to storage.
@@ -411,6 +441,47 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(pruned)
     }
 
+    /// [Self::prune], staged with `batch` instead of removed directly: every
+    /// pruned section's removal lands when the caller applies the batch with
+    /// [WriteBatch::apply_sync], atomically with everything else it stages.
+    ///
+    /// The manager stops tracking pruned sections immediately, so the caller
+    /// must apply the batch: a batch dropped without apply leaves the blobs
+    /// on disk untracked until the next initialization.
+    pub async fn prune_into<T: WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        min: u64,
+        batch: &mut T,
+    ) -> Result<bool, Error> {
+        let mut pruned = false;
+        while let Some((&section, _)) = self.blobs.first_key_value() {
+            // Stop pruning if we reach the minimum
+            if section >= min {
+                break;
+            }
+
+            // Remove blob from map
+            let mut blob = self.blobs.remove(&section).unwrap();
+            blob.wait_for_sync().await?;
+            let size = blob.size();
+            drop(blob);
+
+            // Stage the blob's removal
+            batch.remove(&self.partition, Some(&section.to_be_bytes()));
+            pruned = true;
+
+            debug!(section, size, "pruned blob (staged)");
+            self.tracked.dec();
+            self.pruned.inc();
+        }
+
+        if pruned {
+            self.oldest_retained_section = min;
+        }
+
+        Ok(pruned)
+    }
+
     /// Returns the oldest section number, if any blobs exist.
     pub fn oldest_section(&self) -> Option<u64> {
         self.blobs.first_key_value().map(|(&s, _)| s)
@@ -442,25 +513,6 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Returns an iterator over all section numbers.
     pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
         self.blobs.keys().copied()
-    }
-
-    /// Remove a specific section. Returns true if the section existed and was removed.
-    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
-        self.prune_guard(section)?;
-
-        if let Some(mut blob) = self.blobs.remove(&section) {
-            blob.wait_for_sync().await?;
-            let size = blob.size();
-            drop(blob);
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-            self.tracked.dec();
-            debug!(section, size, "removed section");
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 
     /// Remove all underlying blobs.
@@ -496,6 +548,31 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
+        }
+        let _ = self.tracked.try_set(0);
+        self.oldest_retained_section = 0;
+        Ok(())
+    }
+
+    /// [Self::clear], staged with `batch` instead of removed directly: every
+    /// blob's removal lands when the caller applies the batch with
+    /// [WriteBatch::apply_sync], atomically with everything else it stages.
+    /// The partition itself is not removed.
+    ///
+    /// The manager stops tracking its blobs immediately, so the caller must
+    /// apply the batch: a batch dropped without apply leaves the blobs on
+    /// disk untracked until the next initialization.
+    pub async fn clear_into<T: WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        Self::wait_for_syncs(self.blobs.values_mut()).await?;
+        let blobs = take(&mut self.blobs);
+        for (section, blob) in blobs {
+            let size = blob.size();
+            drop(blob);
+            debug!(section, size, "cleared blob (staged)");
+            batch.remove(&self.partition, Some(&section.to_be_bytes()));
         }
         let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;

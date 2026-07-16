@@ -338,6 +338,25 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         )
     }
 
+    /// Returns whether the given section exists.
+    ///
+    /// # Errors
+    ///
+    /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
+    pub(crate) fn contains(&self, section: u64) -> Result<bool, Error> {
+        Ok(self.manager.get(section)?.is_some())
+    }
+
+    /// Stage the creation of a fresh section's blob with `batch` (see
+    /// [super::manager::Manager::create_into] for the caller contract).
+    pub(crate) async fn create_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        section: u64,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.manager.create_into(section, batch).await
+    }
+
     /// Sync the given `sections` to storage.
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         self.manager.sync(sections).await
@@ -368,6 +387,25 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         self.manager.prune(min).await
+    }
+
+    /// [Self::prune], staged with `batch` (see
+    /// [super::manager::Manager::prune_into] for the caller contract).
+    pub(crate) async fn prune_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        min: u64,
+        batch: &mut T,
+    ) -> Result<bool, Error> {
+        self.manager.prune_into(min, batch).await
+    }
+
+    /// [Self::clear], staged with `batch` (see
+    /// [super::manager::Manager::clear_into] for the caller contract).
+    pub(crate) async fn clear_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.manager.clear_into(batch).await
     }
 
     /// Returns the oldest section number, if any blobs exist.

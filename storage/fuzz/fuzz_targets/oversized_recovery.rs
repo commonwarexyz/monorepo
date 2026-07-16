@@ -2,11 +2,12 @@
 
 //! Fuzz test for oversized journal crash recovery.
 //!
-//! This test creates valid data, randomly corrupts storage, and verifies that recovery either
-//! reports loud corruption (structural damage a crash cannot produce, e.g. a partial index
-//! entry) or leaves the journal in a consistent state: the index is rewound (by binary search
-//! over monotone value offsets) to the last entry backed by the durable glob, and the journal
-//! remains readable and appendable. It never panics.
+//! This test creates valid data, randomly corrupts storage, and verifies that initialization
+//! is verification, not repair: every mutation commits both journals as one atomic batch, so
+//! damage a crash cannot produce (a partial index entry, or index entries referencing bytes
+//! beyond the durable glob) surfaces as loud corruption. States it tolerates (orphan glob
+//! sections, unreferenced trailing glob bytes) leave the journal readable and appendable. It
+//! never panics.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
@@ -293,8 +294,9 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        // Phase 3: Recovery - this should never panic. Structural damage that a crash cannot
-        // produce (e.g. a partial trailing index entry) surfaces as loud corruption.
+        // Phase 3: Recovery - this should never panic. Damage that a crash cannot produce
+        // (a partial trailing index entry, or index entries referencing bytes beyond the
+        // durable glob) surfaces as loud corruption.
         let mut recovered: Oversized<_, TestEntry, TestValue> =
             match Oversized::init(context.child("recovered"), cfg.clone()).await {
                 Ok(recovered) => recovered,
@@ -303,9 +305,9 @@ fn fuzz(input: FuzzInput) {
             };
 
         // Phase 4: Verify get operations don't panic
-        // Note: mid-file corruption can break the monotonicity the binary-search rewind
-        // relies on, leaving entries whose values are unreadable - get_value() may return
-        // an error, but must not panic.
+        // Note: initialization only checks each section's LAST entry, so mid-file
+        // corruption can leave earlier entries whose values are unreadable - get_value()
+        // may return an error, but must not panic.
         for section in 1u64..=3 {
             let mut pos = 0u64;
             while let Ok(entry) = recovered.get(section, pos).await {

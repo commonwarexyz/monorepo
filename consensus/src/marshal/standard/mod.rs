@@ -2963,10 +2963,11 @@ mod tests {
         }
     }
 
-    // The sync failure surfaces when `verified` awaits the durable-sync handle, which
-    // applies the fatal policy: panic rather than resolve a recoverable verdict.
+    // The archive's start_sync commits inline, so the sync failure surfaces at the
+    // persist call itself, which applies the fatal policy: panic rather than resolve
+    // a recoverable verdict.
     #[test_traced("WARN")]
-    #[should_panic(expected = "failed to sync verified")]
+    #[should_panic(expected = "failed to persist verified")]
     fn test_mailbox_verified_sync_failure_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -3036,10 +3037,10 @@ mod tests {
         });
     }
 
-    // Twin of `test_mailbox_verified_sync_failure_panics` for the certify barrier:
-    // `certified` awaits the composed block + notarization sync handle.
+    // Twin of `test_mailbox_verified_sync_failure_panics` for the certify path: the
+    // failure surfaces at the certified block's persist call (the "notarized" cache).
     #[test_traced("WARN")]
-    #[should_panic(expected = "failed to sync certified")]
+    #[should_panic(expected = "failed to persist notarized")]
     fn test_mailbox_certified_sync_failure_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -3103,18 +3104,12 @@ mod tests {
         });
     }
 
-    // A notarization's durable sync is observed by the actor's sync pool rather than
-    // a consensus caller. The fatal policy must still apply: a sync failure panics
-    // the actor instead of being silently swallowed. The failed sync poisons the
-    // volume while the notarization is still being handled, and on the
-    // deterministic schedule the first fatal observer is the handling path's own
-    // block lookup (the pool's durable barrier would trip moments later), so the
-    // durable-site message is not assertable here. The expectation pins the full
-    // deterministic panic instead — the strongest property this schedule offers.
+    // A notarization's durable sync commits inline (the archive's start_sync applies
+    // its batch before returning), so the fatal policy fires at the durable site
+    // itself: a sync failure panics the actor at the persist call instead of being
+    // silently swallowed or first observed by a downstream reader.
     #[test_traced("WARN")]
-    #[should_panic(
-        expected = "failed to get block: freezer error: runtime error: io error: injected storage fault"
-    )]
+    #[should_panic(expected = "failed to persist notarization")]
     fn test_notarization_sync_failure_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
