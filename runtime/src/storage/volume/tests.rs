@@ -35,12 +35,14 @@ type IoLog = Arc<Mutex<Vec<(bool, u64, usize)>>>;
 /// An inner storage wrapper recording every read and write the volume issues
 /// to the volume file, plus the buffer address of every `read_at_buf` (to
 /// pin that caller buffers reach the inner blob directly, without a pool
-/// scratch buffer in between).
+/// scratch buffer in between) and of every `write_at` chunk (to pin that
+/// large write payloads reach the inner blob zero-copy).
 #[derive(Clone)]
 struct Recording {
     inner: memory::Storage,
     log: IoLog,
     buf_ptrs: Arc<Mutex<Vec<usize>>>,
+    write_ptrs: Arc<Mutex<Vec<usize>>>,
 }
 
 impl Recording {
@@ -49,7 +51,13 @@ impl Recording {
             inner: memory::Storage::new(pool),
             log: Arc::new(Mutex::new(Vec::new())),
             buf_ptrs: Arc::new(Mutex::new(Vec::new())),
+            write_ptrs: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Inner reads issued so far.
+    fn reads(&self) -> usize {
+        self.log.lock().iter().filter(|(w, _, _)| !*w).count()
     }
 }
 
@@ -68,6 +76,7 @@ impl crate::Storage for Recording {
                 inner: blob,
                 log: self.log.clone(),
                 buf_ptrs: self.buf_ptrs.clone(),
+                write_ptrs: self.write_ptrs.clone(),
             },
             len,
             version,
@@ -88,6 +97,7 @@ struct RecordingBlob {
     inner: memory::Blob,
     log: IoLog,
     buf_ptrs: Arc<Mutex<Vec<usize>>>,
+    write_ptrs: Arc<Mutex<Vec<usize>>>,
 }
 
 impl crate::Blob for RecordingBlob {
@@ -109,7 +119,12 @@ impl crate::Blob for RecordingBlob {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let buf = bufs.into().coalesce();
+        let bufs = bufs.into();
+        {
+            let mut ptrs = self.write_ptrs.lock();
+            bufs.for_each_chunk(|chunk| ptrs.push(chunk.as_ptr() as usize));
+        }
+        let buf = bufs.coalesce();
         self.log.lock().push((true, offset, buf.len()));
         self.inner.write_at(offset, buf).await
     }
@@ -1150,6 +1165,257 @@ async fn test_volume_written_chunks_read_exact_range() {
     );
 }
 
+/// Repeated sub-block rewrites of the same uncommitted chunk defer the CRC:
+/// after the first splice pays its read-back, later rewrites write the
+/// payload at its exact offset with no reads and no widening, reads of the
+/// pending chunk are served from RAM, and the sync finalizes exact CRCs.
+#[tokio::test]
+async fn test_volume_pending_rmw_serves_from_ram() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![0x11u8; 2 * BLOCK as usize]))
+        .await
+        .unwrap();
+
+    // First sub-block rewrite of chunk 0: pays the read-back splice once
+    // and leaves the chunk pending (overlay-resident).
+    let before = recording.reads();
+    blob.write_at(100, IoBuf::copy_from_slice(&[0x22u8; 50]))
+        .await
+        .unwrap();
+    assert!(recording.reads() > before, "first splice reads back");
+
+    // Repeated rewrite of the same chunk: no reads, and exactly one inner
+    // write of exactly the payload.
+    let before_reads = recording.reads();
+    let writes_before = recording.log.lock().len();
+    blob.write_at(200, IoBuf::copy_from_slice(&[0x33u8; 50]))
+        .await
+        .unwrap();
+    assert_eq!(recording.reads(), before_reads, "fast path must not read");
+    {
+        let log = recording.log.lock();
+        let new: Vec<_> = log[writes_before..].to_vec();
+        assert_eq!(new.len(), 1, "one exact write: {new:?}");
+        assert_eq!((new[0].0, new[0].2), (true, 50), "exact payload write");
+    }
+
+    // Reads of the pending chunk are served from the overlay: no inner
+    // read at all.
+    let before_reads = recording.reads();
+    let mut expect = vec![0x11u8; 300];
+    expect[100..150].fill(0x22);
+    expect[200..250].fill(0x33);
+    let got = blob.read_at(0, 300).await.unwrap().coalesce();
+    assert_eq!(
+        recording.reads(),
+        before_reads,
+        "pending read is RAM-served"
+    );
+    assert_eq!(got.as_ref(), &expect[..]);
+
+    // The sync finalizes the deferred CRCs; a fresh process verifies the
+    // committed bytes against them.
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(recording, pool, Config::default());
+    let (blob, size) = volume.open("p", b"b").await.unwrap();
+    assert_eq!(size, 2 * BLOCK);
+    let got = blob.read_at(0, 300).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expect[..]);
+}
+
+/// A COW of an overlay-resident chunk splices from the overlay: no disk
+/// read-back, and the relocated chunk commits exact CRCs.
+#[tokio::test]
+async fn test_volume_pending_cow_skips_read_back() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![0x11u8; 2 * BLOCK as usize]))
+        .await
+        .unwrap();
+    // Make chunk 0 overlay-resident, then freeze it with a commit (which
+    // finalizes its deferred CRC but keeps the overlay bytes).
+    blob.write_at(100, IoBuf::copy_from_slice(&[0x22u8; 50]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+
+    // Overwriting the frozen chunk relocates it (COW), sourcing the old
+    // span from the overlay: no disk read-back.
+    let before = recording.reads();
+    blob.write_at(200, IoBuf::copy_from_slice(&[0x33u8; 50]))
+        .await
+        .unwrap();
+    assert_eq!(recording.reads(), before, "COW must source the overlay");
+
+    // The relocated chunk reads correctly and commits exactly.
+    let mut expect = vec![0x11u8; 300];
+    expect[100..150].fill(0x22);
+    expect[200..250].fill(0x33);
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(recording, pool, Config::default());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    let got = blob.read_at(0, 300).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expect[..]);
+}
+
+/// More splice-rewritten chunks than the overlay holds: evictions finalize
+/// deferred CRCs early, the sync finalizes the rest, and every committed
+/// value verifies after reopen.
+#[tokio::test]
+async fn test_volume_overlay_eviction_finalizes() {
+    const CHUNKS: usize = 1100;
+
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    blob.write_at(
+        0,
+        IoBuf::copy_from_slice(&vec![0x11u8; CHUNKS * BLOCK as usize]),
+    )
+    .await
+    .unwrap();
+    for chunk in 0..CHUNKS {
+        let at = chunk as u64 * BLOCK + 7;
+        blob.write_at(at, IoBuf::copy_from_slice(&[chunk as u8; 16]))
+            .await
+            .unwrap();
+    }
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+
+    // A fresh process verifies every chunk against the committed CRCs:
+    // eviction-finalized and capture-finalized values must both be exact.
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"b").await.unwrap();
+    assert_eq!(size, CHUNKS as u64 * BLOCK);
+    let got = blob
+        .read_at(0, CHUNKS * BLOCK as usize)
+        .await
+        .unwrap()
+        .coalesce();
+    for chunk in 0..CHUNKS {
+        let bytes = &got.as_ref()[chunk * BLOCK as usize..(chunk + 1) * BLOCK as usize];
+        assert!(bytes[..7].iter().all(|&b| b == 0x11), "chunk {chunk}");
+        assert!(
+            bytes[7..23].iter().all(|&b| b == chunk as u8),
+            "chunk {chunk}"
+        );
+        assert!(bytes[23..].iter().all(|&b| b == 0x11), "chunk {chunk}");
+    }
+}
+
+/// Large appends pass the caller's payload slices to the inner write
+/// zero-copy (same buffer addresses): block-aligned bulk goes through
+/// without an assembly copy, with only partial-block edges assembled.
+#[tokio::test]
+async fn test_volume_large_append_zero_copy() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+
+    // Aligned fresh write: the inner write receives the payload buffer
+    // itself.
+    let len = 3 * BLOCK as usize + 123;
+    let payload = IoBuf::from(vec![0x11u8; len]);
+    let ptr = payload.as_ptr() as usize;
+    blob.write_at(0, payload).await.unwrap();
+    assert!(
+        recording.write_ptrs.lock().contains(&ptr),
+        "fresh aligned append must pass the caller's buffer through"
+    );
+
+    // Misaligned append: the in-place edge writes the payload head
+    // zero-copy, and the fresh remainder passes the payload tail through.
+    let payload = IoBuf::from(vec![0x22u8; 2 * BLOCK as usize]);
+    let head = payload.as_ptr() as usize;
+    let edge = BLOCK as usize - 123; // bytes to the next block boundary
+    blob.write_at(len as u64, payload).await.unwrap();
+    {
+        let ptrs = recording.write_ptrs.lock();
+        assert!(ptrs.contains(&head), "edge payload must pass through");
+        assert!(
+            ptrs.contains(&(head + edge)),
+            "fresh remainder must pass through"
+        );
+    }
+
+    // Contents and committed CRCs are exact.
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(recording, pool, Config::default());
+    let (blob, size) = volume.open("p", b"b").await.unwrap();
+    let total = len + 2 * BLOCK as usize;
+    assert_eq!(size, total as u64);
+    let got = blob.read_at(0, total).await.unwrap().coalesce();
+    assert!(got.as_ref()[..len].iter().all(|&b| b == 0x11));
+    assert!(got.as_ref()[len..].iter().all(|&b| b == 0x22));
+}
+
+/// A batch staging over a blob whose chunk holds a deferred CRC: the staged
+/// COW sources the blob's overlay (its base content) without a read-back,
+/// the apply supersedes the pending state, and the committed bytes are
+/// exact.
+#[tokio::test]
+async fn test_volume_batch_stages_over_pending_chunk() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![0x11u8; BLOCK as usize]))
+        .await
+        .unwrap();
+    // Chunk 0 goes pending (overlay-resident).
+    blob.write_at(10, IoBuf::copy_from_slice(&[0x22u8; 10]))
+        .await
+        .unwrap();
+
+    // Stage a write below the published size: it relocates (staged COW),
+    // sourcing the span from the blob's overlay.
+    let before = recording.reads();
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&blob, 100, IoBuf::copy_from_slice(&[0x33u8; 50]))
+        .await
+        .unwrap();
+    assert_eq!(
+        recording.reads(),
+        before,
+        "staged COW must source the overlay"
+    );
+    batch.apply_sync().await.unwrap();
+
+    let mut expect = vec![0x11u8; BLOCK as usize];
+    expect[10..20].fill(0x22);
+    expect[100..150].fill(0x33);
+    let got = blob.read_at(0, BLOCK as usize).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expect[..]);
+
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(recording, pool, Config::default());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    let got = blob.read_at(0, BLOCK as usize).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expect[..]);
+}
+
 /// A one-shot pause point for inner I/O: while armed, the next matching
 /// operation signals `reached` and blocks until released. Later operations
 /// pass through untouched.
@@ -1424,30 +1690,27 @@ async fn test_volume_read_races_in_place_overwrite() {
     assert_eq!(got.as_ref(), &[0x11u8; 100]);
 }
 
-/// The quiesce-retry protocol is preserved for UNVERIFIED chunks: a partial
-/// in-place overwrite that read back disk bytes for its CRC assembly leaves
-/// its chunk unverified, so a reader racing a second in-place overwrite of
-/// that chunk takes the full verification path and must re-verify against
-/// the quiesced writer state, never report false corruption.
+/// The quiesce-retry protocol is preserved for UNVERIFIED chunks: a reader
+/// racing an in-place overwrite of an unverified chunk (here: a resize
+/// boundary chunk, whose CRC was recomputed from an unchecked read-back)
+/// takes the full verification path and must re-verify against the
+/// quiesced writer state, never report false corruption.
 #[tokio::test]
 async fn test_volume_unverified_read_races_in_place_overwrite() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
     let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
 
-    // Three fresh chunks (verified by construction), then a partial
-    // overwrite of chunk 0: its prefix and suffix are disk read-backs (the
-    // tail buffer describes chunk 2), leaving chunk 0 unverified.
+    // A resize-down leaves the boundary chunk unverified (recomputed from
+    // an unchecked read-back) and holds no overlay entry for it.
     let (blob, _) = volume.open("p", b"d").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 3 * BLOCK as usize]))
         .await
         .unwrap();
-    blob.write_at(100, IoBuf::copy_from_slice(&[0x33u8; 100]))
-        .await
-        .unwrap();
+    blob.resize(2048).await.unwrap();
 
-    // The reader snapshots chunk 0's expected CRC, then parks on the inner
-    // (widened, whole-span) read.
+    // The reader snapshots the chunk's expected CRC, then parks on the
+    // inner (widened, whole-span) read.
     gated.read_gate.arm();
     let reader = {
         let blob = blob.clone();
@@ -1455,9 +1718,9 @@ async fn test_volume_unverified_read_races_in_place_overwrite() {
     };
     gated.read_gate.wait_reached().await;
 
-    // A disjoint-range in-place overwrite of chunk 0 publishes a new CRC
-    // while the reader is in flight.
-    blob.write_at(300, IoBuf::copy_from_slice(&[0x22u8; 50]))
+    // A whole-span in-place overwrite publishes a new computed CRC (full
+    // cover: no splice, no deferral) while the reader is in flight.
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x22u8; 2048]))
         .await
         .unwrap();
 
@@ -1466,6 +1729,44 @@ async fn test_volume_unverified_read_races_in_place_overwrite() {
         .await
         .unwrap()
         .expect("in-place overwrite must never surface as corruption")
+        .coalesce();
+    assert_eq!(got.as_ref(), &[0x22u8; 100]);
+}
+
+/// A reader racing a splice-rewrite that turns the chunk PENDING mid-read
+/// (its CRC deferred to the overlay) must serve the quiesced overlay
+/// content, never report false corruption.
+#[tokio::test]
+async fn test_volume_unverified_read_races_pending_overwrite() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"d").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 3 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.resize(2048).await.unwrap();
+
+    gated.read_gate.arm();
+    let reader = {
+        let blob = blob.clone();
+        tokio::spawn(async move { blob.read_at(0, 100).await })
+    };
+    gated.read_gate.wait_reached().await;
+
+    // A disjoint sub-block splice defers the chunk's CRC while the reader
+    // is in flight: the parked read observes torn expectations and must
+    // fall back to the overlay under the write lock.
+    blob.write_at(1024, IoBuf::copy_from_slice(&[0x22u8; 512]))
+        .await
+        .unwrap();
+
+    gated.read_gate.release();
+    let got = reader
+        .await
+        .unwrap()
+        .expect("pending overwrite must never surface as corruption")
         .coalesce();
     assert_eq!(got.as_ref(), &[0x11u8; 100]);
 }

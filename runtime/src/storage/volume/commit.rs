@@ -17,7 +17,7 @@
 
 use super::{
     alloc::{block_align, Extent},
-    core::{chunk_of, BlobCore, Ready},
+    core::{chunk_of, BlobCore, ChunkCrc, Ready},
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
     BLOCK,
 };
@@ -160,6 +160,11 @@ async fn take_snapshot<S: crate::Storage>(
             // rewritten in place until it is confirmed (or rolled back).
             inner.freeze_size = inner.freeze_size.max(inner.size);
 
+            // Finalize deferred chunk CRCs from their overlay entries (the
+            // write lock quiesces the writer): the checksum array, tail
+            // CRC, and delta manifest below must carry exact values.
+            inner.overlay_finalize();
+
             // Freeze the captured runs atomically with the capture (the
             // model freezes per-run coverage at snapshot time): this entry,
             // its checksum extents, and its manifest reference every run
@@ -194,7 +199,12 @@ async fn take_snapshot<S: crate::Storage>(
             let cksum_bytes: Vec<u8> = last_backed.map_or_else(Vec::new, |last| {
                 let mut bytes = Vec::with_capacity(((last + 1) * 4) as usize);
                 for c in 0..=last {
-                    bytes.extend_from_slice(&inner.crcs.get(&c).map_or(0, |s| s.crc).to_be_bytes());
+                    let crc = inner.crcs.get(&c).map_or(0, |s| match s.crc {
+                        ChunkCrc::Ready(crc) => crc,
+                        // Finalized above (every pending chunk is resident).
+                        ChunkCrc::Pending => unreachable!("pending CRC at capture"),
+                    });
+                    bytes.extend_from_slice(&crc.to_be_bytes());
                 }
                 bytes
             });
@@ -211,9 +221,13 @@ async fn take_snapshot<S: crate::Storage>(
                 })
             });
 
-            let tail_crc = last_backed
-                .and_then(|last| inner.crcs.get(&last))
-                .map_or(0, |s| s.crc);
+            let tail_crc =
+                last_backed
+                    .and_then(|last| inner.crcs.get(&last))
+                    .map_or(0, |s| match s.crc {
+                        ChunkCrc::Ready(crc) => crc,
+                        ChunkCrc::Pending => unreachable!("pending CRC at capture"),
+                    });
 
             let runs: Vec<Run> = inner
                 .runs

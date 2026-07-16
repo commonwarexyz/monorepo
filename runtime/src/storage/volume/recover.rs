@@ -25,7 +25,7 @@
 
 use super::{
     alloc::{block_align, Allocator, Extent},
-    core::{chunk_of, BlobInner, ChunkState, Ready, RunMeta, State},
+    core::{chunk_of, BlobInner, ChunkCrc, ChunkState, Ready, RunMeta, State},
     layout::{Entry, Superblock, Table},
     Config, BLOCK,
 };
@@ -516,7 +516,7 @@ pub(super) async fn hydrate<S: crate::Storage>(
             inner.crcs.insert(
                 chunk,
                 ChunkState {
-                    crc,
+                    crc: ChunkCrc::Ready(crc),
                     verified: false,
                 },
             );
@@ -524,8 +524,11 @@ pub(super) async fn hydrate<S: crate::Storage>(
         // Load + verify the frontier span into the tail buffer.
         let (phys, span) = entry_chunk_span(entry, last).unwrap();
         let bytes = ready.file.read_at(phys, span as usize).await?.coalesce();
-        let expected = inner.crcs.get(&last).copied().unwrap();
-        if Crc32::checksum(bytes.as_ref()) != expected.crc {
+        let expected = match inner.crcs.get(&last).expect("frontier chunk has crc").crc {
+            ChunkCrc::Ready(crc) => crc,
+            ChunkCrc::Pending => unreachable!("hydration computes every CRC"),
+        };
+        if Crc32::checksum(bytes.as_ref()) != expected {
             return Err(Error::BlobCorrupt(
                 partition.into(),
                 commonware_formatting::hex(&entry.name),

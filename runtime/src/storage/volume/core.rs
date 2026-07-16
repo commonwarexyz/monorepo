@@ -10,6 +10,8 @@
 //! - Readers take no locks across I/O: they snapshot backing + checksum
 //!   state (per-chunk CRC and verified bit) and a relocation `generation`,
 //!   read, verify what needs verifying, and retry if the generation moved.
+//!   Chunks with a deferred (pending) CRC are served from the blob's
+//!   in-memory overlay under the state lock instead of from disk.
 //!   Chunks already verified this process are read exactly and skip the CRC
 //!   pass, so the generation is re-checked after the read (a relocated
 //!   extent may have been recycled mid-read). Unverified chunks keep the
@@ -32,9 +34,9 @@ use super::{
     layout::Entry,
     BLOCK,
 };
-use crate::{Blob as _, BufferPool, Error, IoBuf, IoBufsMut};
+use crate::{Blob as _, BufferPool, Error, IoBuf, IoBufs, IoBufsMut};
 use bytes::{BufMut as _, Bytes};
-use commonware_cryptography::Crc32;
+use commonware_cryptography::{Crc32, Hasher as _};
 use commonware_formatting::hex;
 use commonware_utils::sync::{AsyncMutex, Mutex};
 use std::{
@@ -65,21 +67,57 @@ pub(super) struct RunMeta {
 /// Per-chunk checksum state: the CRC32C over the chunk's written span, and
 /// whether the span's on-disk bytes are known to match it.
 ///
+/// The CRC is either computed ([`ChunkCrc::Ready`]) or deferred
+/// ([`ChunkCrc::Pending`]): a pending chunk's authoritative span bytes live
+/// in the blob's overlay (see [`BlobInner::overlay`]), written through to
+/// disk but not yet checksummed. Deferral amortizes repeated sub-block
+/// rewrites of the same chunk: the CRC is computed once — at snapshot
+/// capture, overlay eviction, or resize — instead of on every write. Reads
+/// of a pending chunk are served from the overlay directly.
+///
 /// `verified` is set once per process lifetime: by a read that checked the
 /// chunk, or by construction when every byte under the CRC came from process
-/// memory (write payloads, gap zeros, tail buffers, or a COW read-back that
-/// was itself checked against the old CRC at assembly). Chunks whose CRC
-/// assembly spliced in unchecked disk read-backs (partial in-place
-/// prefix/suffix read-backs, resize boundary recomputation) stay unverified,
-/// so their first read still runs the full check. Verified chunks are read
-/// exactly (no span widening) with no CRC pass. The bit travels with the
-/// entry: rewrites and relocations re-decide it at publish, and dropping the
-/// entry drops it. All chunks start unverified at hydration except the
+/// memory (write payloads, gap zeros, tail buffers, overlay entries, or a
+/// COW read-back that was itself checked against the old CRC at assembly).
+/// Chunks whose CRC assembly spliced in unchecked disk read-backs (partial
+/// in-place prefix/suffix read-backs, resize boundary recomputation) stay
+/// unverified, so their first read still runs the full check. A pending
+/// chunk carries the bit its finalized CRC will have. Verified chunks are
+/// read exactly (no span widening) with no CRC pass. The bit travels with
+/// the entry: rewrites and relocations re-decide it at publish, and dropping
+/// the entry drops it. All chunks start unverified at hydration except the
 /// frontier chunk, which hydration itself verifies.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ChunkState {
-    pub crc: u32,
+    pub crc: ChunkCrc,
     pub verified: bool,
+}
+
+/// A chunk's CRC32C: computed, or deferred to the blob's overlay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChunkCrc {
+    /// CRC32C over the chunk's written span.
+    Ready(u32),
+    /// Not computed yet: the chunk's overlay entry holds its authoritative
+    /// span bytes (every pending chunk is overlay-resident).
+    Pending,
+}
+
+/// Cap on a blob's overlay entries (chunks kept in RAM for deferred CRCs).
+///
+/// Sized to cover the sub-block-rewrite working set of a table-like blob
+/// (e.g. a hash-table head region) between syncs — 1024 chunks is 4 MiB —
+/// while keeping per-blob RAM bounded. Only chunks that demonstrate
+/// splice-style rewrites are ever resident, and overflow degrades
+/// gracefully: eviction finalizes the chunk's CRC, and a later rewrite of
+/// the evicted chunk falls back to the read-back path.
+const OVERLAY_CHUNKS: usize = 1024;
+
+/// One overlay entry: the full written span of a chunk, with an LRU stamp.
+#[derive(Debug)]
+pub(super) struct OverlayEntry {
+    stamp: u64,
+    bytes: Vec<u8>,
 }
 
 /// Per-blob mutable state.
@@ -100,6 +138,15 @@ pub(super) struct BlobInner {
     pub tail: Vec<u8>,
     /// Chunk `tail` describes.
     pub tail_chunk: u64,
+    /// The tail buffer generalized: full span bytes of recently
+    /// splice-rewritten chunks, bounded by [`OVERLAY_CHUNKS`] (LRU). Entries
+    /// are populated by writes only (never by reads) and mirror the disk
+    /// (every write is written through); a [`ChunkCrc::Pending`] chunk is
+    /// always resident, and its entry is the authoritative source for CRC
+    /// finalization, reads, prefix/suffix sourcing, and COW.
+    pub overlay: BTreeMap<u64, OverlayEntry>,
+    /// Monotonic clock for overlay LRU stamps.
+    pub overlay_clock: u64,
     /// Chunks whose content changed since the last snapshot.
     pub dirty_chunks: BTreeSet<u64>,
     /// Bumped on any relocation/drop of backing (COW, resize-down, remove).
@@ -137,6 +184,74 @@ impl BlobInner {
         let (logical, run) = self.covering(chunk_start)?;
         let span = (logical + run.len - chunk_start).min(BLOCK);
         Some((run.physical + (chunk_start - logical), span))
+    }
+
+    /// The overlay bytes of `chunk` (its full written span), refreshing its
+    /// LRU stamp.
+    pub fn overlay_get(&mut self, chunk: u64) -> Option<&[u8]> {
+        self.overlay_clock += 1;
+        let stamp = self.overlay_clock;
+        let entry = self.overlay.get_mut(&chunk)?;
+        entry.stamp = stamp;
+        Some(&entry.bytes)
+    }
+
+    /// Insert or refresh `chunk`'s overlay entry, evicting (and finalizing)
+    /// the least-recently-used entry beyond the cap.
+    pub fn overlay_insert(&mut self, chunk: u64, bytes: Vec<u8>) {
+        self.overlay_clock += 1;
+        let stamp = self.overlay_clock;
+        self.overlay.insert(chunk, OverlayEntry { stamp, bytes });
+        if self.overlay.len() > OVERLAY_CHUNKS {
+            let lru = self
+                .overlay
+                .iter()
+                .min_by_key(|(_, entry)| entry.stamp)
+                .map(|(&chunk, _)| chunk)
+                .expect("overlay is nonempty");
+            let entry = self.overlay.remove(&lru).expect("listed key");
+            self.finalize_chunk(lru, &entry.bytes);
+        }
+    }
+
+    /// Splice `data` at span offset `at` into the resident entry of `chunk`.
+    pub fn overlay_splice(&mut self, chunk: u64, at: usize, data: &[u8]) {
+        self.overlay_clock += 1;
+        let stamp = self.overlay_clock;
+        let entry = self
+            .overlay
+            .get_mut(&chunk)
+            .expect("splice targets a resident chunk");
+        entry.stamp = stamp;
+        entry.bytes[at..at + data.len()].copy_from_slice(data);
+    }
+
+    /// Drop `chunk`'s overlay entry without finalizing (the caller installs
+    /// a ready CRC for it).
+    pub fn overlay_remove(&mut self, chunk: u64) {
+        self.overlay.remove(&chunk);
+    }
+
+    /// Finalize every pending CRC from its overlay bytes; entries stay
+    /// resident. The caller holds the blob's write lock (quiesced writer).
+    pub fn overlay_finalize(&mut self) {
+        let Self { crcs, overlay, .. } = self;
+        for (chunk, entry) in overlay.iter() {
+            if let Some(state) = crcs.get_mut(chunk) {
+                if state.crc == ChunkCrc::Pending {
+                    state.crc = ChunkCrc::Ready(Crc32::checksum(&entry.bytes));
+                }
+            }
+        }
+    }
+
+    /// Finalize one chunk's pending CRC from `bytes` (its span content).
+    fn finalize_chunk(&mut self, chunk: u64, bytes: &[u8]) {
+        if let Some(state) = self.crcs.get_mut(&chunk) {
+            if state.crc == ChunkCrc::Pending {
+                state.crc = ChunkCrc::Ready(Crc32::checksum(bytes));
+            }
+        }
     }
 }
 
@@ -391,6 +506,23 @@ impl StagedBlob {
     }
 }
 
+/// One chunk's checksum outcome for a planned stretch.
+enum CrcUpdate {
+    /// Computed eagerly (with its verified-by-construction bit). Publish
+    /// drops any overlay entry for the chunk (its bytes were rewritten
+    /// without an overlay refresh).
+    Ready(ChunkState),
+    /// Deferred: `bytes` becomes (or refreshes) the chunk's overlay entry —
+    /// the authoritative span — and the CRC is finalized later. `verified`
+    /// is the bit the finalized chunk will carry. Base mode only.
+    Pending { bytes: Vec<u8>, verified: bool },
+    /// Overlay fast path: splice `data` at span offset `at` into the
+    /// chunk's resident entry and mark its CRC pending (the chunk's
+    /// verified bit is unchanged: the splice is written through, and the
+    /// rest of the span keeps its provenance). Base mode only.
+    Splice { at: usize, data: IoBuf },
+}
+
 /// One planned stretch: a single inner write plus its state updates,
 /// published only after the write completes (a failed write publishes
 /// nothing; its bytes land in space no table references).
@@ -399,17 +531,18 @@ struct Stretch {
     end: u64,
     /// Physical write position.
     physical: u64,
-    /// Write payload, assembled in a pool-allocated buffer and issued
-    /// verbatim at `physical` (no copy at the write site).
-    bytes: IoBuf,
+    /// Write payload, issued verbatim at `physical`: the caller's slice(s)
+    /// passed zero-copy, plus any pool-allocated zero-fill or COW assembly.
+    bytes: IoBufs,
     /// Run insert/replace: (logical start, run).
     run: (u64, RunMeta),
-    /// Chunk checksum updates (with their verified-by-construction bits).
-    crcs: Vec<(u64, ChunkState)>,
+    /// Chunk checksum updates, ascending by chunk.
+    crcs: Vec<(u64, CrcUpdate)>,
     /// Bytes of the final affected chunk's written span (chunk, span bytes),
     /// used to refresh the tail buffer when this stretch reaches the blob's
-    /// write frontier.
-    last_span: (u64, Vec<u8>),
+    /// write frontier. `None` only for an overlay fast-path stretch, whose
+    /// span is derived from the spliced overlay entry at publish.
+    last_span: Option<(u64, Vec<u8>)>,
     /// COW: the replaced chunk's block to defer-free (+ generation bump).
     replaced: Option<Extent>,
     /// Extent allocated for this stretch (Fresh/COW), for staged-overlay
@@ -499,6 +632,7 @@ pub(super) async fn stage_write<S: crate::Storage>(
 /// writable in place; published extents only at or beyond BOTH the
 /// published size and the freeze boundary (bytes no snapshot can capture);
 /// everything else relocates to a fresh extent published only at apply.
+/// Staged stretches always compute CRCs eagerly (deferral is base-only).
 async fn plan_stretch<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
@@ -508,6 +642,14 @@ async fn plan_stretch<S: crate::Storage>(
     data: &IoBuf,
     data_base: u64,
 ) -> Result<Stretch, Error> {
+    /// How a COW sources the old span it splices into.
+    enum CowSource {
+        /// Disk read-back, checked against the span's expected CRC.
+        Disk { expected: u32 },
+        /// The chunk's overlay bytes: its current content (process memory,
+        /// written through), needing no read and no re-check.
+        Overlay(Vec<u8>),
+    }
     enum Plan {
         /// Write in place within an existing run's extent, extending it as
         /// far as `stretch_end` (bounded by the extent capacity). Includes
@@ -520,6 +662,17 @@ async fn plan_stretch<S: crate::Storage>(
             fill_from: u64,
             private: bool,
         },
+        /// Overlay fast path: a rewrite of an overlay-resident chunk, fully
+        /// inside its written span. The payload is written at its exact
+        /// offset and spliced into the overlay entry — no read-back, no CRC
+        /// pass (the chunk's CRC goes pending).
+        Overlay {
+            stretch_end: u64,
+            physical: u64,
+            run_logical: u64,
+            run: RunMeta,
+            private: bool,
+        },
         /// Fresh extent for `[chunk_base, stretch_end)` (zero-lead below the
         /// write; the chunk base is unbacked).
         Fresh {
@@ -529,20 +682,19 @@ async fn plan_stretch<S: crate::Storage>(
             seq: u64,
         },
         /// The cursor's chunk may not be written in place: COW its backed
-        /// span. `expected` is the span's CRC, checked when the span is read
-        /// back for assembly.
+        /// span.
         Cow {
             span_physical: u64,
             span_len: u64,
             extent: Extent,
             seq: u64,
-            expected: u32,
+            source: CowSource,
         },
     }
 
     let plan = {
         let mut state = ready.state.lock();
-        let inner = blob.inner.lock();
+        let mut inner = blob.inner.lock();
         let chunk = chunk_of(cursor);
         let chunk_start = chunk * BLOCK;
 
@@ -577,20 +729,43 @@ async fn plan_stretch<S: crate::Storage>(
                             |st| st.chunk_span(&inner, chunk),
                         )
                         .expect("covered chunk has a span");
-                    // The span's expected CRC pairs with the merged view
-                    // that produced it (staged overlays win).
-                    let expected = staged
-                        .and_then(|st| st.crcs.get(&chunk))
-                        .or_else(|| inner.crcs.get(&chunk))
-                        .expect("covered chunk has crc")
-                        .crc;
+                    // Source the old span from the overlay when it is valid
+                    // for the merged view (base content the batch has not
+                    // staged over), otherwise from a checked disk read-back
+                    // whose expected CRC pairs with the merged view that
+                    // produced the span (staged overlays win).
+                    let staged_crc = staged.and_then(|st| st.crcs.get(&chunk)).copied();
+                    let resident = match staged_crc {
+                        None => inner.overlay_get(chunk).map(<[u8]>::to_vec),
+                        Some(_) => None,
+                    };
+                    let source = resident.map_or_else(
+                        || {
+                            let crc = staged_crc
+                                .or_else(|| inner.crcs.get(&chunk).copied())
+                                .expect("covered chunk has crc")
+                                .crc;
+                            match crc {
+                                ChunkCrc::Ready(expected) => CowSource::Disk { expected },
+                                // Pending chunks are overlay-resident, and
+                                // residency was checked above.
+                                ChunkCrc::Pending => {
+                                    unreachable!("pending chunk without overlay entry")
+                                }
+                            }
+                        },
+                        |bytes| {
+                            debug_assert_eq!(bytes.len() as u64, span_len);
+                            CowSource::Overlay(bytes)
+                        },
+                    );
                     let extent = state.alloc.allocate(BLOCK);
                     Plan::Cow {
                         span_physical,
                         span_len,
                         extent,
                         seq: state.seq,
-                        expected,
+                        source,
                     }
                 } else {
                     // In place. The write may start beyond the backed end
@@ -600,12 +775,31 @@ async fn plan_stretch<S: crate::Storage>(
                     let fill_from = cursor.min(backed_end);
                     let stretch_end = end.min(run_logical + run.capacity);
                     debug_assert!(stretch_end > cursor);
-                    Plan::InPlace {
-                        stretch_end,
-                        run_logical,
-                        run,
-                        fill_from,
-                        private,
+                    // Overlay fast path (base mode): the write stays inside
+                    // this chunk's written span and the span is resident.
+                    let chunk_end = chunk_start + BLOCK;
+                    let span_end = chunk_end.min(backed_end);
+                    if staged.is_none()
+                        && end.min(chunk_end) <= span_end
+                        && inner.overlay_get(chunk).is_some()
+                    {
+                        let (span_physical, _) =
+                            inner.chunk_span(chunk).expect("covered chunk has a span");
+                        Plan::Overlay {
+                            stretch_end: end.min(chunk_end),
+                            physical: span_physical + (cursor - chunk_start),
+                            run_logical,
+                            run,
+                            private,
+                        }
+                    } else {
+                        Plan::InPlace {
+                            stretch_end,
+                            run_logical,
+                            run,
+                            fill_from,
+                            private,
+                        }
                     }
                 }
             }
@@ -633,6 +827,29 @@ async fn plan_stretch<S: crate::Storage>(
     };
 
     match plan {
+        Plan::Overlay {
+            stretch_end,
+            physical,
+            run_logical,
+            run,
+            private,
+        } => {
+            let d0 = (cursor - data_base) as usize;
+            let d1 = (stretch_end - data_base) as usize;
+            let payload = data.slice(d0..d1);
+            let at = (cursor % BLOCK) as usize;
+            Ok(Stretch {
+                end: stretch_end,
+                physical,
+                bytes: payload.clone().into(),
+                run: (run_logical, run),
+                crcs: vec![(chunk_of(cursor), CrcUpdate::Splice { at, data: payload })],
+                last_span: None,
+                replaced: None,
+                allocated: None,
+                private,
+            })
+        }
         Plan::InPlace {
             stretch_end,
             run_logical,
@@ -640,13 +857,15 @@ async fn plan_stretch<S: crate::Storage>(
             fill_from,
             private,
         } => {
-            // CRC recomputation needs the full written span of each affected
-            // chunk, assembled into a pool-allocated buffer: the first chunk
-            // may have a prefix below `fill_from`, and the last chunk may
-            // have a suffix beyond `stretch_end` (an in-place overwrite
-            // inside a longer span). Only `[fill_from, stretch_end)` — the
-            // gap zero-fill and the new data — is written back, at its exact
-            // offset.
+            // Each affected chunk's CRC covers its full written span: the
+            // first chunk may have a prefix below `fill_from`, and the last
+            // chunk may have a suffix beyond `stretch_end` (an in-place
+            // overwrite inside a longer span). Only `[fill_from,
+            // stretch_end)` — the gap zero-fill and the new data — is
+            // written back, at its exact offset: the caller's payload slice
+            // passed zero-copy, preceded by a pooled zero-fill buffer when
+            // the gap is nonempty. CRCs stream over the logical pieces —
+            // no assembly of the payload.
             let d0 = (cursor - data_base) as usize;
             let d1 = (stretch_end - data_base) as usize;
             let first_chunk = chunk_of(fill_from);
@@ -657,54 +876,81 @@ async fn plan_stretch<S: crate::Storage>(
             let chunk_cap = (last_chunk + 1) * BLOCK;
             let suffix_end = span_end.min(chunk_cap);
 
-            let exact = (suffix_end - base) as usize;
-            let mut buf = ready.pool.alloc(exact);
-            let (prefix, prefix_from_memory) =
+            let (prefix, prefix_verified) =
                 read_span_prefix(ready, blob, staged, &run, run_logical, base, fill_from).await?;
-            buf.put_slice(&prefix);
-            buf.put_bytes(0, (cursor - base) as usize - prefix.len());
-            buf.put_slice(data.slice(d0..d1).as_ref());
             let has_suffix = suffix_end > stretch_end;
-            if has_suffix {
-                let phys = run.physical + (stretch_end - run_logical);
-                let suffix = ready
-                    .file
-                    .read_at(phys, (suffix_end - stretch_end) as usize)
-                    .await?
-                    .coalesce();
-                buf.put_slice(suffix.as_ref());
-            }
-            debug_assert_eq!(buf.len(), exact);
+            let (suffix, suffix_verified) = if has_suffix {
+                read_span_suffix(
+                    ready,
+                    blob,
+                    staged,
+                    &run,
+                    run_logical,
+                    stretch_end,
+                    suffix_end,
+                )
+                .await?
+            } else {
+                (Vec::new(), true)
+            };
+            let gap = (cursor - fill_from) as usize;
+            let zeros = (gap > 0).then(|| {
+                let mut buf = ready.pool.alloc(gap);
+                buf.put_bytes(0, gap);
+                buf.freeze()
+            });
+            let payload = data.slice(d0..d1);
+
+            // The logical pieces of `[base, suffix_end)`, in order.
+            let pieces: [(u64, &[u8]); 4] = [
+                (base, &prefix),
+                (fill_from, zeros.as_ref().map_or(&[][..], |z| z.as_ref())),
+                (cursor, payload.as_ref()),
+                (stretch_end, &suffix),
+            ];
 
             let mut crcs = Vec::new();
-            let mut last_span = (last_chunk, Vec::new());
-            let assembled = buf.as_ref();
+            let mut last_span = None;
             for chunk in first_chunk..=last_chunk {
-                let s = ((chunk - first_chunk) * BLOCK) as usize;
-                let e = exact.min(s + BLOCK as usize);
+                let lo = chunk * BLOCK;
+                let hi = suffix_end.min(lo + BLOCK);
                 // A chunk assembled purely from process memory (payload, gap
-                // zeros, tail-buffer prefix) is verified by construction; a
-                // chunk that spliced in an unchecked disk read-back (prefix
-                // or suffix) is not (see [`ChunkState`]).
-                let verified = (chunk != first_chunk || prefix_from_memory)
-                    && (chunk != last_chunk || !has_suffix);
-                let state = ChunkState {
-                    crc: Crc32::checksum(&assembled[s..e]),
-                    verified,
+                // zeros, tail-buffer or overlay-sourced prefix/suffix) is
+                // verified by construction; a chunk that spliced in an
+                // unchecked disk read-back is not (see [`ChunkState`]).
+                let verified = (chunk != first_chunk || prefix_verified)
+                    && (chunk != last_chunk || suffix_verified);
+                // Splice-rewritten chunks keep their span in the overlay
+                // and defer their CRC (base mode); everything else streams
+                // it over the pieces.
+                let spliced = (chunk == first_chunk && !prefix.is_empty())
+                    || (chunk == last_chunk && has_suffix);
+                let update = if spliced && staged.is_none() {
+                    CrcUpdate::Pending {
+                        bytes: copy_over(&pieces, lo, hi),
+                        verified,
+                    }
+                } else {
+                    CrcUpdate::Ready(ChunkState {
+                        crc: ChunkCrc::Ready(crc_over(&pieces, lo, hi)),
+                        verified,
+                    })
                 };
-                crcs.push((chunk, state));
+                crcs.push((chunk, update));
                 if chunk == last_chunk {
-                    last_span = (chunk, assembled[s..e].to_vec());
+                    last_span = Some((chunk, copy_over(&pieces, lo, hi)));
                 }
             }
 
+            let bytes = match zeros {
+                Some(zeros) => IoBufs::from(vec![zeros, payload]),
+                None => payload.into(),
+            };
             let new_len = (stretch_end - run_logical).max(run.len);
             Ok(Stretch {
                 end: stretch_end,
                 physical: run.physical + (fill_from - run_logical),
-                bytes: buf
-                    .freeze()
-                    .slice((fill_from - base) as usize..(stretch_end - base) as usize),
+                bytes,
                 run: (
                     run_logical,
                     RunMeta {
@@ -725,38 +971,59 @@ async fn plan_stretch<S: crate::Storage>(
             chunk_base,
             seq,
         } => {
+            // The caller's payload slice is issued zero-copy, preceded by a
+            // pooled zero-lead when the write starts past the (unbacked)
+            // chunk base. CRCs stream over the same bytes — no assembly.
             let d0 = (cursor - data_base) as usize;
             let d1 = (stretch_end - data_base) as usize;
-            let exact = (stretch_end - chunk_base) as usize;
-            let mut buf = ready.pool.alloc(exact);
-            buf.put_bytes(0, (cursor - chunk_base) as usize);
-            buf.put_slice(data.slice(d0..d1).as_ref());
-            debug_assert_eq!(buf.len(), exact);
+            let lead = (cursor - chunk_base) as usize;
+            let zeros = (lead > 0).then(|| {
+                let mut buf = ready.pool.alloc(lead);
+                buf.put_bytes(0, lead);
+                buf.freeze()
+            });
+            let payload = data.slice(d0..d1);
+            let pieces: [(u64, &[u8]); 2] = [
+                (chunk_base, zeros.as_ref().map_or(&[][..], |z| z.as_ref())),
+                (cursor, payload.as_ref()),
+            ];
 
             let first_chunk = chunk_of(chunk_base);
             let last_chunk = chunk_of(stretch_end - 1);
             let mut crcs = Vec::new();
-            let mut last_span = (last_chunk, Vec::new());
-            let bytes = buf.as_ref();
+            let mut last_span = None;
             for chunk in first_chunk..=last_chunk {
-                let s = ((chunk - first_chunk) * BLOCK) as usize;
-                let e = exact.min(s + BLOCK as usize);
+                let lo = chunk * BLOCK;
+                let hi = stretch_end.min(lo + BLOCK);
                 // Assembled purely from process memory (lead zeros + the
-                // payload): verified by construction.
-                let state = ChunkState {
-                    crc: Crc32::checksum(&bytes[s..e]),
-                    verified: true,
+                // payload): verified by construction. A chunk written from
+                // a sub-block lead (base mode) is a splice-rewrite
+                // candidate: keep its span in the overlay and defer its CRC.
+                let update = if chunk == first_chunk && lead > 0 && staged.is_none() {
+                    CrcUpdate::Pending {
+                        bytes: copy_over(&pieces, lo, hi),
+                        verified: true,
+                    }
+                } else {
+                    CrcUpdate::Ready(ChunkState {
+                        crc: ChunkCrc::Ready(crc_over(&pieces, lo, hi)),
+                        verified: true,
+                    })
                 };
-                crcs.push((chunk, state));
+                crcs.push((chunk, update));
                 if chunk == last_chunk {
-                    last_span = (chunk, bytes[s..e].to_vec());
+                    last_span = Some((chunk, copy_over(&pieces, lo, hi)));
                 }
             }
 
+            let bytes = match zeros {
+                Some(zeros) => IoBufs::from(vec![zeros, payload]),
+                None => payload.into(),
+            };
             Ok(Stretch {
                 end: stretch_end,
                 physical: extent.offset,
-                bytes: buf.freeze(),
+                bytes,
                 run: (
                     chunk_base,
                     RunMeta {
@@ -778,45 +1045,65 @@ async fn plan_stretch<S: crate::Storage>(
             span_len,
             extent,
             seq,
-            expected,
+            source,
         } => {
             let chunk = chunk_of(cursor);
             let chunk_start = chunk * BLOCK;
             let stretch_end = end.min(chunk_start + BLOCK);
-            // Read the old span (stable: frozen extents are never rewritten,
-            // and deferred frees keep them allocated until the next commit
-            // confirms) and check it before splicing. The read-back is the
-            // whole span, so the check is one CRC pass over bytes already in
-            // hand: it surfaces rot loudly at the COW instead of laundering
-            // it under a fresh CRC, and it keeps the relocated chunk
-            // verified by construction.
-            let old = ready
-                .file
-                .read_at(span_physical, span_len as usize)
-                .await?
-                .coalesce();
-            if Crc32::checksum(old.as_ref()) != expected {
-                return Err(Error::BlobCorrupt(
-                    blob.partition.clone(),
-                    hex(&blob.name),
-                    format!("chunk {chunk} checksum mismatch"),
-                ));
-            }
             let w0 = (cursor - chunk_start) as usize;
             let w1 = (stretch_end - chunk_start) as usize;
             let d0 = (cursor - data_base) as usize;
             let d1 = (stretch_end - data_base) as usize;
             let exact = (span_len as usize).max(w1);
             let mut buf = ready.pool.alloc(exact);
-            buf.put_slice(old.as_ref());
+            match source {
+                // The overlay bytes ARE the span's current content.
+                CowSource::Overlay(bytes) => buf.put_slice(&bytes),
+                // Read the old span (stable: frozen extents are never
+                // rewritten, and deferred frees keep them allocated until
+                // the next commit confirms) and check it before splicing.
+                // The read-back is the whole span, so the check is one CRC
+                // pass over bytes already in hand: it surfaces rot loudly
+                // at the COW instead of laundering it under a fresh CRC,
+                // and it keeps the relocated chunk verified by
+                // construction.
+                CowSource::Disk { expected } => {
+                    let old = ready
+                        .file
+                        .read_at(span_physical, span_len as usize)
+                        .await?
+                        .coalesce();
+                    if Crc32::checksum(old.as_ref()) != expected {
+                        return Err(Error::BlobCorrupt(
+                            blob.partition.clone(),
+                            hex(&blob.name),
+                            format!("chunk {chunk} checksum mismatch"),
+                        ));
+                    }
+                    buf.put_slice(old.as_ref());
+                }
+            }
             buf.put_bytes(0, exact - span_len as usize);
             buf.as_mut()[w0..w1].copy_from_slice(data.slice(d0..d1).as_ref());
 
-            let state = ChunkState {
-                crc: Crc32::checksum(buf.as_ref()),
-                verified: true,
+            // A partial rewrite is a splice candidate: keep the relocated
+            // span in the overlay and defer its CRC (base mode). Every byte
+            // lands on the fresh extent, so the chunk is verified by
+            // construction either way.
+            let span_bytes = buf.as_ref().to_vec();
+            let partial = w0 > 0 || w1 < exact;
+            let update = if partial && staged.is_none() {
+                CrcUpdate::Pending {
+                    bytes: span_bytes.clone(),
+                    verified: true,
+                }
+            } else {
+                CrcUpdate::Ready(ChunkState {
+                    crc: ChunkCrc::Ready(Crc32::checksum(buf.as_ref())),
+                    verified: true,
+                })
             };
-            let last_span = (chunk, buf.as_ref().to_vec());
+            let last_span = Some((chunk, span_bytes));
 
             Ok(Stretch {
                 end: stretch_end,
@@ -830,9 +1117,9 @@ async fn plan_stretch<S: crate::Storage>(
                         born: seq,
                     },
                 ),
-                crcs: vec![(chunk, state)],
+                crcs: vec![(chunk, update)],
                 last_span,
-                bytes: buf.freeze(),
+                bytes: buf.freeze().into(),
                 replaced: Some(Extent {
                     offset: span_physical - (span_physical % BLOCK),
                     len: BLOCK,
@@ -844,13 +1131,47 @@ async fn plan_stretch<S: crate::Storage>(
     }
 }
 
+/// CRC32C over `[start, end)` of a logical range assembled from `pieces`:
+/// `(piece start, piece bytes)` entries, contiguous and in order. Streams
+/// the intersecting slices — no assembly buffer.
+fn crc_over(pieces: &[(u64, &[u8])], start: u64, end: u64) -> u32 {
+    let mut hasher = Crc32::new();
+    let mut covered = 0;
+    for &(piece_start, bytes) in pieces {
+        let lo = start.max(piece_start);
+        let hi = end.min(piece_start + bytes.len() as u64);
+        if hi > lo {
+            hasher.update(&bytes[(lo - piece_start) as usize..(hi - piece_start) as usize]);
+            covered += hi - lo;
+        }
+    }
+    debug_assert_eq!(covered, end - start, "pieces must cover the range");
+    hasher.finalize().as_u32()
+}
+
+/// The bytes of `[start, end)` assembled from `pieces` (see [`crc_over`]).
+fn copy_over(pieces: &[(u64, &[u8])], start: u64, end: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity((end - start) as usize);
+    for &(piece_start, bytes) in pieces {
+        let lo = start.max(piece_start);
+        let hi = end.min(piece_start + bytes.len() as u64);
+        if hi > lo {
+            out.extend_from_slice(&bytes[(lo - piece_start) as usize..(hi - piece_start) as usize]);
+        }
+    }
+    debug_assert_eq!(out.len() as u64, end - start, "pieces must cover the range");
+    out
+}
+
 /// Source the first affected chunk's committed prefix `[base, fill_from)`:
-/// from an in-memory tail buffer when one describes this chunk, otherwise a
-/// read-back (rare: mid-run in-place overwrites of unfrozen chunks).
+/// from an in-memory tail buffer or overlay entry when one describes this
+/// chunk, otherwise a read-back (rare: the first splice into a chunk the
+/// overlay does not hold).
 ///
-/// The second element reports whether the prefix came from process memory:
-/// a disk read-back is spliced unchecked, leaving the assembled chunk
-/// unverified (see [`ChunkState`]).
+/// The second element reports the provenance the assembled chunk inherits:
+/// tail buffers are trusted process memory, overlay bytes carry their
+/// chunk's verified bit, and a disk read-back is spliced unchecked, leaving
+/// the assembled chunk unverified (see [`ChunkState`]).
 async fn read_span_prefix<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
@@ -866,26 +1187,24 @@ async fn read_span_prefix<S: crate::Storage>(
     }
     let chunk = chunk_of(base);
     {
-        let inner = blob.inner.lock();
-        match staged {
-            Some(st) => {
-                // The staged tail wins for chunks the batch touched; the
-                // published tail is valid only for untouched chunks.
-                if let Some((tail_chunk, tail)) = &st.tail {
-                    if *tail_chunk == chunk && tail.len() >= prefix_len {
-                        return Ok((tail[..prefix_len].to_vec(), true));
-                    }
-                }
-                if !st.crcs.contains_key(&chunk)
-                    && inner.tail_chunk == chunk
-                    && inner.tail.len() >= prefix_len
-                {
-                    return Ok((inner.tail[..prefix_len].to_vec(), true));
+        let mut inner = blob.inner.lock();
+        // The staged tail wins for chunks the batch touched; published
+        // sources are valid only for chunks the batch has not staged over.
+        if let Some(st) = staged {
+            if let Some((tail_chunk, tail)) = &st.tail {
+                if *tail_chunk == chunk && tail.len() >= prefix_len {
+                    return Ok((tail[..prefix_len].to_vec(), true));
                 }
             }
-            None => {
-                if inner.tail_chunk == chunk && inner.tail.len() >= prefix_len {
-                    return Ok((inner.tail[..prefix_len].to_vec(), true));
+        }
+        if staged.is_none_or(|st| !st.crcs.contains_key(&chunk)) {
+            if inner.tail_chunk == chunk && inner.tail.len() >= prefix_len {
+                return Ok((inner.tail[..prefix_len].to_vec(), true));
+            }
+            let verified = inner.crcs.get(&chunk).is_some_and(|s| s.verified);
+            if let Some(bytes) = inner.overlay_get(chunk) {
+                if bytes.len() >= prefix_len {
+                    return Ok((bytes[..prefix_len].to_vec(), verified));
                 }
             }
         }
@@ -899,6 +1218,54 @@ async fn read_span_prefix<S: crate::Storage>(
         .as_ref()
         .to_vec();
     Ok((prefix, false))
+}
+
+/// Source the last affected chunk's trailing span `[stretch_end,
+/// suffix_end)` (an in-place overwrite inside a longer span): from an
+/// in-memory tail buffer or overlay entry when one describes this chunk,
+/// otherwise a disk read-back. Provenance as for [`read_span_prefix`].
+async fn read_span_suffix<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+    staged: Option<&StagedBlob>,
+    run: &RunMeta,
+    run_logical: u64,
+    stretch_end: u64,
+    suffix_end: u64,
+) -> Result<(Vec<u8>, bool), Error> {
+    let chunk = chunk_of(stretch_end - 1);
+    let s = (stretch_end - chunk * BLOCK) as usize;
+    let e = (suffix_end - chunk * BLOCK) as usize;
+    {
+        let mut inner = blob.inner.lock();
+        if let Some(st) = staged {
+            if let Some((tail_chunk, tail)) = &st.tail {
+                if *tail_chunk == chunk && tail.len() >= e {
+                    return Ok((tail[s..e].to_vec(), true));
+                }
+            }
+        }
+        if staged.is_none_or(|st| !st.crcs.contains_key(&chunk)) {
+            if inner.tail_chunk == chunk && inner.tail.len() >= e {
+                return Ok((inner.tail[s..e].to_vec(), true));
+            }
+            let verified = inner.crcs.get(&chunk).is_some_and(|st| st.verified);
+            if let Some(bytes) = inner.overlay_get(chunk) {
+                if bytes.len() >= e {
+                    return Ok((bytes[s..e].to_vec(), verified));
+                }
+            }
+        }
+    }
+    let phys = run.physical + (stretch_end - run_logical);
+    let suffix = ready
+        .file
+        .read_at(phys, e - s)
+        .await?
+        .coalesce()
+        .as_ref()
+        .to_vec();
+    Ok((suffix, false))
 }
 
 /// Publish a completed stretch. Caller holds the blob write lock.
@@ -922,15 +1289,52 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
         }
     }
 
-    for (chunk, state) in stretch.crcs {
-        inner.crcs.insert(chunk, state);
+    let last_chunk = stretch
+        .crcs
+        .last()
+        .map(|&(chunk, _)| chunk)
+        .expect("stretch affects at least one chunk");
+    for (chunk, update) in stretch.crcs {
+        match update {
+            CrcUpdate::Ready(chunk_state) => {
+                inner.crcs.insert(chunk, chunk_state);
+                // The chunk's bytes were rewritten without an overlay
+                // refresh: any resident entry is stale.
+                inner.overlay_remove(chunk);
+            }
+            CrcUpdate::Pending { bytes, verified } => {
+                inner.crcs.insert(
+                    chunk,
+                    ChunkState {
+                        crc: ChunkCrc::Pending,
+                        verified,
+                    },
+                );
+                inner.overlay_insert(chunk, bytes);
+            }
+            CrcUpdate::Splice { at, data } => {
+                inner.overlay_splice(chunk, at, data.as_ref());
+                let chunk_state = inner.crcs.get_mut(&chunk).expect("resident chunk has crc");
+                chunk_state.crc = ChunkCrc::Pending;
+            }
+        }
         inner.dirty_chunks.insert(chunk);
     }
-    // Refresh the tail buffer if this stretch reaches the write frontier.
-    let (chunk, span) = stretch.last_span;
-    if stretch.end >= inner.size || chunk >= inner.tail_chunk {
-        inner.tail_chunk = chunk;
-        inner.tail = span;
+    // Refresh the tail buffer if this stretch reaches the write frontier
+    // (an overlay fast-path stretch derives its span from the spliced
+    // overlay entry on the rare frontier hit).
+    if stretch.end >= inner.size || last_chunk >= inner.tail_chunk {
+        inner.tail = match stretch.last_span {
+            Some((chunk, span)) => {
+                debug_assert_eq!(chunk, last_chunk);
+                span
+            }
+            None => inner
+                .overlay_get(last_chunk)
+                .expect("fast-path chunk is resident")
+                .to_vec(),
+        };
+        inner.tail_chunk = last_chunk;
     }
     state.dirty.insert(blob.id);
 }
@@ -963,11 +1367,21 @@ fn publish_staged(inner: &BlobInner, staged: &mut StagedBlob, stretch: Stretch) 
         }
     }
 
-    for (chunk, state) in stretch.crcs {
-        staged.crcs.insert(chunk, state);
+    for (chunk, update) in stretch.crcs {
+        match update {
+            CrcUpdate::Ready(chunk_state) => {
+                staged.crcs.insert(chunk, chunk_state);
+            }
+            // Deferral is base-only (see `plan_stretch`).
+            CrcUpdate::Pending { .. } | CrcUpdate::Splice { .. } => {
+                unreachable!("staged stretches compute CRCs eagerly")
+            }
+        }
     }
     // Refresh the staged tail if this stretch reaches the staged frontier.
-    let (chunk, span) = stretch.last_span;
+    let (chunk, span) = stretch
+        .last_span
+        .expect("staged stretches carry a last span");
     let tail_chunk = staged.tail.as_ref().map(|(c, _)| *c);
     if stretch.end >= staged.size || chunk >= tail_chunk.unwrap_or(inner.tail_chunk) {
         staged.tail = Some((chunk, span));
@@ -1109,8 +1523,8 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 chunks: Vec<(u64, u64, u32)>,
             },
         }
-        let (generation, groups) = {
-            let inner = blob.inner.lock();
+        let (generation, groups, splices) = {
+            let mut inner = blob.inner.lock();
             if end > inner.size {
                 return Err(Error::BlobInsufficientLength);
             }
@@ -1122,20 +1536,40 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 }));
             }
             let mut groups: Vec<Group> = Vec::new();
+            // Requested slices of pending chunks, copied under the lock:
+            // (logical start, bytes).
+            let mut splices: Vec<(u64, Vec<u8>)> = Vec::new();
             for chunk in chunk_of(offset)..=chunk_of(end - 1) {
                 let Some((phys, span)) = inner.chunk_span(chunk) else {
                     continue; // hole: zeros already in place
                 };
                 let state = *inner.crcs.get(&chunk).expect("backed chunk has crc");
                 let chunk_start = chunk * BLOCK;
+                let lo = offset.max(chunk_start);
+                let hi = end.min(chunk_start + span);
+                if state.crc == ChunkCrc::Pending {
+                    // Pending chunk: the overlay is authoritative (there is
+                    // no finalized CRC to verify a disk read against), so
+                    // serve its bytes directly. Bytes past the span within
+                    // the chunk are holes (zeros already in place).
+                    if hi > lo {
+                        let bytes = inner
+                            .overlay_get(chunk)
+                            .expect("pending chunk is overlay-resident");
+                        splices.push((
+                            lo,
+                            bytes[(lo - chunk_start) as usize..(hi - chunk_start) as usize]
+                                .to_vec(),
+                        ));
+                    }
+                    continue;
+                }
                 if state.verified {
                     // Exactly the requested bytes of this chunk's span;
                     // bytes past the span are holes (zeros already in
                     // place). Coalesce with the previous verified group
                     // when logically and physically contiguous, bounded by
                     // the per-I/O cap.
-                    let lo = offset.max(chunk_start);
-                    let hi = end.min(chunk_start + span);
                     if hi <= lo {
                         continue;
                     }
@@ -1158,6 +1592,9 @@ pub(super) async fn read_verified<S: crate::Storage>(
                         }),
                     }
                 } else {
+                    let ChunkCrc::Ready(crc) = state.crc else {
+                        unreachable!("pending chunks are served above")
+                    };
                     // Coalesce with the previous unverified group when its
                     // chunks are all full blocks ending exactly where this
                     // chunk's span begins, bounded by the per-I/O cap.
@@ -1169,16 +1606,16 @@ pub(super) async fn read_verified<S: crate::Storage>(
                             && *p + chunks.len() as u64 * BLOCK == phys
                             && (chunks.len() as u64 + 1) * BLOCK <= MAX_READ_SPAN =>
                         {
-                            chunks.push((chunk_start, span, state.crc));
+                            chunks.push((chunk_start, span, crc));
                         }
                         _ => groups.push(Group::Unverified {
                             physical: phys,
-                            chunks: vec![(chunk_start, span, state.crc)],
+                            chunks: vec![(chunk_start, span, crc)],
                         }),
                     }
                 }
             }
-            (inner.generation, groups)
+            (inner.generation, groups, splices)
         };
 
         // Zero-copy fast path: the whole request is one verified stretch —
@@ -1190,7 +1627,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
             len: read_len,
         }] = groups.as_slice()
         {
-            if *logical == offset && *read_len == len as u64 {
+            if splices.is_empty() && *logical == offset && *read_len == len as u64 {
                 match caller.take() {
                     Some(bufs) => {
                         let bufs = ready.file.read_at_buf(*physical, len, bufs).await?;
@@ -1249,7 +1686,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                         let s = i * BLOCK as usize;
                         let mut chunk_bytes = bytes.slice(s..s + span as usize);
                         let mut chunk_span = span;
-                        let mut chunk_crc = crc;
+                        let mut chunk_crc = Some(crc);
                         if Crc32::checksum(chunk_bytes.as_ref()) != crc {
                             {
                                 let inner = blob.inner.lock();
@@ -1266,40 +1703,74 @@ pub(super) async fn read_verified<S: crate::Storage>(
                             // state before reporting corruption.
                             let chunk = chunk_of(chunk_start);
                             let _quiesce = blob.write_lock.lock().await;
+                            /// A quiesced chunk's stable content source.
+                            enum Stable {
+                                Disk { phys: u64, span: u64, crc: u32 },
+                                Ram(Vec<u8>),
+                            }
                             let source = {
-                                let inner = blob.inner.lock();
+                                let mut inner = blob.inner.lock();
                                 if inner.generation != generation {
                                     continue 'retry;
                                 }
-                                inner.chunk_span(chunk).map(|(phys, span)| {
-                                    (
-                                        phys,
-                                        span,
-                                        inner.crcs.get(&chunk).expect("backed chunk has crc").crc,
-                                    )
-                                })
+                                match inner.chunk_span(chunk) {
+                                    None => None,
+                                    Some((phys, span)) => {
+                                        let state =
+                                            *inner.crcs.get(&chunk).expect("backed chunk has crc");
+                                        match state.crc {
+                                            ChunkCrc::Ready(crc) => {
+                                                Some(Stable::Disk { phys, span, crc })
+                                            }
+                                            // The racing writer left the
+                                            // chunk pending: its overlay
+                                            // entry is the stable content.
+                                            ChunkCrc::Pending => Some(Stable::Ram(
+                                                inner
+                                                    .overlay_get(chunk)
+                                                    .expect("pending chunk is overlay-resident")
+                                                    .to_vec(),
+                                            )),
+                                        }
+                                    }
+                                }
                             };
-                            let Some((phys, stable_span, stable_crc)) = source else {
-                                continue 'retry;
-                            };
-                            let reread = ready
-                                .file
-                                .read_at(phys, stable_span as usize)
-                                .await?
-                                .coalesce()
-                                .freeze();
-                            if Crc32::checksum(reread.as_ref()) != stable_crc {
-                                return Err(Error::BlobCorrupt(
-                                    blob.partition.clone(),
-                                    hex(&blob.name),
-                                    format!("chunk {chunk} checksum mismatch"),
-                                ));
+                            match source {
+                                None => continue 'retry,
+                                Some(Stable::Disk {
+                                    phys,
+                                    span: stable_span,
+                                    crc: stable_crc,
+                                }) => {
+                                    let reread = ready
+                                        .file
+                                        .read_at(phys, stable_span as usize)
+                                        .await?
+                                        .coalesce()
+                                        .freeze();
+                                    if Crc32::checksum(reread.as_ref()) != stable_crc {
+                                        return Err(Error::BlobCorrupt(
+                                            blob.partition.clone(),
+                                            hex(&blob.name),
+                                            format!("chunk {chunk} checksum mismatch"),
+                                        ));
+                                    }
+                                    chunk_bytes = reread;
+                                    chunk_span = stable_span;
+                                    chunk_crc = Some(stable_crc);
+                                }
+                                Some(Stable::Ram(stable_bytes)) => {
+                                    chunk_span = stable_bytes.len() as u64;
+                                    chunk_bytes = IoBuf::from(stable_bytes);
+                                    // Served from process memory: nothing
+                                    // was verified against the disk.
+                                    chunk_crc = None;
+                                }
                             }
-                            chunk_bytes = reread;
-                            chunk_span = stable_span;
-                            chunk_crc = stable_crc;
                         }
-                        checked.push((chunk_of(chunk_start), chunk_crc));
+                        if let Some(crc) = chunk_crc {
+                            checked.push((chunk_of(chunk_start), crc));
+                        }
                         // Copy the requested slice of this chunk's span;
                         // bytes past the span within the chunk are holes
                         // (zeros).
@@ -1317,6 +1788,13 @@ pub(super) async fn read_verified<S: crate::Storage>(
             }
         }
 
+        // Serve pending chunks from their overlay copies (taken under the
+        // lock at plan time: coherent regardless of racing writers).
+        for (lo, bytes) in &splices {
+            let at = (lo - offset) as usize;
+            out.as_mut()[at..at + bytes.len()].copy_from_slice(bytes);
+        }
+
         // Publish what this read verified — only where the state it checked
         // against still stands — and distrust what it skipped if a
         // relocation (whose extent may have been recycled) raced the read.
@@ -1325,7 +1803,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
             if inner.generation == generation {
                 for &(chunk, crc) in &checked {
                     if let Some(state) = inner.crcs.get_mut(&chunk) {
-                        if state.crc == crc {
+                        if state.crc == ChunkCrc::Ready(crc) {
                             state.verified = true;
                         }
                     }
@@ -1387,6 +1865,12 @@ pub(super) async fn resize_locked<S: crate::Storage>(
         let mut state = ready.state.lock();
         let mut inner = blob.inner.lock();
 
+        // Deferred CRCs and overlay entries do not survive a shrink (spans
+        // at and beyond the boundary move): finalize every pending chunk,
+        // then drop the overlay wholesale (resize is cold).
+        inner.overlay_finalize();
+        inner.overlay.clear();
+
         let dropped: Vec<u64> = inner.runs.range(len..).map(|(&l, _)| l).collect();
         for l in dropped {
             let run = inner.runs.remove(&l).unwrap();
@@ -1443,7 +1927,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             // Recomputed from an unchecked read-back: the boundary chunk
             // stays unverified (see [`ChunkState`]).
             let state = ChunkState {
-                crc: Crc32::checksum(bytes.as_ref()),
+                crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
                 verified: false,
             };
             inner.crcs.insert(boundary, state);

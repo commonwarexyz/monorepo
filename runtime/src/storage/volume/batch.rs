@@ -50,8 +50,8 @@ use super::{
     alloc::Extent,
     commit,
     core::{
-        chunk_of, stage_write, BlobCore, BlobInner, ChunkState, Ready, RunMeta, StagedBlob,
-        StagedRun,
+        chunk_of, stage_write, BlobCore, BlobInner, ChunkCrc, ChunkState, Ready, RunMeta,
+        StagedBlob, StagedRun,
     },
     unlink, Blob, HandleTracker, Shared, BLOCK,
 };
@@ -245,7 +245,7 @@ impl<S: crate::Storage> Batch<S> {
                 // Recomputed from an unchecked read-back: the boundary chunk
                 // stays unverified (see `ChunkState`).
                 let state = ChunkState {
-                    crc: Crc32::checksum(bytes.as_ref()),
+                    crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
                     verified: false,
                 };
                 staged.overlay.crcs.insert(boundary, state);
@@ -506,6 +506,16 @@ fn publish_overlay(inner: &mut BlobInner, overlay: StagedBlob) {
         inner.generation += 1;
     }
     inner.pending_frees.extend(overlay.replaced);
+
+    // Staged state supersedes the blob's overlay bytes for every chunk it
+    // touched (and a staged shrink may have moved spans): keep only entries
+    // that still back a pending CRC.
+    let BlobInner {
+        crcs,
+        overlay: blob_overlay,
+        ..
+    } = inner;
+    blob_overlay.retain(|chunk, _| crcs.get(chunk).is_some_and(|s| s.crc == ChunkCrc::Pending));
 }
 
 impl<S: crate::Storage> Drop for Batch<S> {
