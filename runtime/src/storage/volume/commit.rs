@@ -194,8 +194,7 @@ async fn take_snapshot<S: crate::Storage>(
             let cksum_bytes: Vec<u8> = last_backed.map_or_else(Vec::new, |last| {
                 let mut bytes = Vec::with_capacity(((last + 1) * 4) as usize);
                 for c in 0..=last {
-                    bytes
-                        .extend_from_slice(&inner.crcs.get(&c).copied().unwrap_or(0).to_be_bytes());
+                    bytes.extend_from_slice(&inner.crcs.get(&c).map_or(0, |s| s.crc).to_be_bytes());
                 }
                 bytes
             });
@@ -213,8 +212,8 @@ async fn take_snapshot<S: crate::Storage>(
             });
 
             let tail_crc = last_backed
-                .and_then(|last| inner.crcs.get(&last).copied())
-                .unwrap_or(0);
+                .and_then(|last| inner.crcs.get(&last))
+                .map_or(0, |s| s.crc);
 
             let runs: Vec<Run> = inner
                 .runs

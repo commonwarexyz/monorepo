@@ -7,13 +7,17 @@
 //!   commit snapshotter) across inner I/O — this keeps chunk CRC state
 //!   coherent with issued bytes. Under it, writers interleave brief
 //!   state-lock sections with I/O freely.
-//! - Readers take no locks across I/O: they snapshot backing + CRC state and
-//!   a relocation `generation`, read, verify, and retry if the generation
-//!   moved. In-place rewrites (uncommitted bytes, young extents) move no
-//!   generation, so on a mismatch with an unchanged generation the reader
-//!   briefly takes the write lock and re-verifies the quiesced chunk before
-//!   reporting corruption. Extent reuse or an in-place rewrite under an
-//!   in-flight read causes a retry, never a false corruption report.
+//! - Readers take no locks across I/O: they snapshot backing + checksum
+//!   state (per-chunk CRC and verified bit) and a relocation `generation`,
+//!   read, verify what needs verifying, and retry if the generation moved.
+//!   Chunks already verified this process are read exactly and skip the CRC
+//!   pass, so the generation is re-checked after the read (a relocated
+//!   extent may have been recycled mid-read). Unverified chunks keep the
+//!   full protocol: in-place rewrites (uncommitted bytes, young extents)
+//!   move no generation, so on a mismatch with an unchanged generation the
+//!   reader briefly takes the write lock and re-verifies the quiesced chunk
+//!   before reporting corruption. Extent reuse or an in-place rewrite under
+//!   an in-flight read causes a retry, never a false corruption report.
 //!
 //! Write placement follows the freeze rule (see module docs): bytes covered
 //! by the last confirmed table or the in-flight snapshot are never rewritten
@@ -28,7 +32,7 @@ use super::{
     layout::Entry,
     BLOCK,
 };
-use crate::{Blob as _, BufferPool, Error, IoBuf};
+use crate::{Blob as _, BufferPool, Error, IoBuf, IoBufsMut};
 use bytes::{BufMut as _, Bytes};
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
@@ -58,6 +62,26 @@ pub(super) struct RunMeta {
     pub born: u64,
 }
 
+/// Per-chunk checksum state: the CRC32C over the chunk's written span, and
+/// whether the span's on-disk bytes are known to match it.
+///
+/// `verified` is set once per process lifetime: by a read that checked the
+/// chunk, or by construction when every byte under the CRC came from process
+/// memory (write payloads, gap zeros, tail buffers, or a COW read-back that
+/// was itself checked against the old CRC at assembly). Chunks whose CRC
+/// assembly spliced in unchecked disk read-backs (partial in-place
+/// prefix/suffix read-backs, resize boundary recomputation) stay unverified,
+/// so their first read still runs the full check. Verified chunks are read
+/// exactly (no span widening) with no CRC pass. The bit travels with the
+/// entry: rewrites and relocations re-decide it at publish, and dropping the
+/// entry drops it. All chunks start unverified at hydration except the
+/// frontier chunk, which hydration itself verifies.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ChunkState {
+    pub crc: u32,
+    pub verified: bool,
+}
+
 /// Per-blob mutable state.
 #[derive(Debug, Default)]
 pub(super) struct BlobInner {
@@ -68,8 +92,8 @@ pub(super) struct BlobInner {
     pub freeze_size: u64,
     /// Written runs keyed by logical start; gaps are holes (zeros).
     pub runs: BTreeMap<u64, RunMeta>,
-    /// CRC32C per backed chunk, over the chunk's written span.
-    pub crcs: BTreeMap<u64, u32>,
+    /// Checksum state per backed chunk, over the chunk's written span.
+    pub crcs: BTreeMap<u64, ChunkState>,
     /// Bytes of the frontier chunk's written span (from its chunk base),
     /// kept in memory so append CRCs and commit shadows never read back.
     /// Meaningful only when `frontier_chunk` is backed.
@@ -304,8 +328,8 @@ pub(super) struct StagedBlob {
     pub runs: BTreeMap<u64, StagedRun>,
     /// Base run keys superseded by the overlay (splices, staged shrink).
     pub removed: BTreeSet<u64>,
-    /// Staged chunk CRCs.
-    pub crcs: BTreeMap<u64, u32>,
+    /// Staged chunk checksum state.
+    pub crcs: BTreeMap<u64, ChunkState>,
     /// Staged frontier span: (chunk, bytes of its written span).
     pub tail: Option<(u64, Vec<u8>)>,
     /// Base extents replaced by staged COW/shrink (pending-freed at apply).
@@ -380,8 +404,8 @@ struct Stretch {
     bytes: IoBuf,
     /// Run insert/replace: (logical start, run).
     run: (u64, RunMeta),
-    /// Chunk CRC updates.
-    crcs: Vec<(u64, u32)>,
+    /// Chunk checksum updates (with their verified-by-construction bits).
+    crcs: Vec<(u64, ChunkState)>,
     /// Bytes of the final affected chunk's written span (chunk, span bytes),
     /// used to refresh the tail buffer when this stretch reaches the blob's
     /// write frontier.
@@ -505,12 +529,14 @@ async fn plan_stretch<S: crate::Storage>(
             seq: u64,
         },
         /// The cursor's chunk may not be written in place: COW its backed
-        /// span.
+        /// span. `expected` is the span's CRC, checked when the span is read
+        /// back for assembly.
         Cow {
             span_physical: u64,
             span_len: u64,
             extent: Extent,
             seq: u64,
+            expected: u32,
         },
     }
 
@@ -551,12 +577,20 @@ async fn plan_stretch<S: crate::Storage>(
                             |st| st.chunk_span(&inner, chunk),
                         )
                         .expect("covered chunk has a span");
+                    // The span's expected CRC pairs with the merged view
+                    // that produced it (staged overlays win).
+                    let expected = staged
+                        .and_then(|st| st.crcs.get(&chunk))
+                        .or_else(|| inner.crcs.get(&chunk))
+                        .expect("covered chunk has crc")
+                        .crc;
                     let extent = state.alloc.allocate(BLOCK);
                     Plan::Cow {
                         span_physical,
                         span_len,
                         extent,
                         seq: state.seq,
+                        expected,
                     }
                 } else {
                     // In place. The write may start beyond the backed end
@@ -625,12 +659,13 @@ async fn plan_stretch<S: crate::Storage>(
 
             let exact = (suffix_end - base) as usize;
             let mut buf = ready.pool.alloc(exact);
-            let prefix =
+            let (prefix, prefix_from_memory) =
                 read_span_prefix(ready, blob, staged, &run, run_logical, base, fill_from).await?;
             buf.put_slice(&prefix);
             buf.put_bytes(0, (cursor - base) as usize - prefix.len());
             buf.put_slice(data.slice(d0..d1).as_ref());
-            if suffix_end > stretch_end {
+            let has_suffix = suffix_end > stretch_end;
+            if has_suffix {
                 let phys = run.physical + (stretch_end - run_logical);
                 let suffix = ready
                     .file
@@ -647,7 +682,17 @@ async fn plan_stretch<S: crate::Storage>(
             for chunk in first_chunk..=last_chunk {
                 let s = ((chunk - first_chunk) * BLOCK) as usize;
                 let e = exact.min(s + BLOCK as usize);
-                crcs.push((chunk, Crc32::checksum(&assembled[s..e])));
+                // A chunk assembled purely from process memory (payload, gap
+                // zeros, tail-buffer prefix) is verified by construction; a
+                // chunk that spliced in an unchecked disk read-back (prefix
+                // or suffix) is not (see [`ChunkState`]).
+                let verified = (chunk != first_chunk || prefix_from_memory)
+                    && (chunk != last_chunk || !has_suffix);
+                let state = ChunkState {
+                    crc: Crc32::checksum(&assembled[s..e]),
+                    verified,
+                };
+                crcs.push((chunk, state));
                 if chunk == last_chunk {
                     last_span = (chunk, assembled[s..e].to_vec());
                 }
@@ -696,7 +741,13 @@ async fn plan_stretch<S: crate::Storage>(
             for chunk in first_chunk..=last_chunk {
                 let s = ((chunk - first_chunk) * BLOCK) as usize;
                 let e = exact.min(s + BLOCK as usize);
-                crcs.push((chunk, Crc32::checksum(&bytes[s..e])));
+                // Assembled purely from process memory (lead zeros + the
+                // payload): verified by construction.
+                let state = ChunkState {
+                    crc: Crc32::checksum(&bytes[s..e]),
+                    verified: true,
+                };
+                crcs.push((chunk, state));
                 if chunk == last_chunk {
                     last_span = (chunk, bytes[s..e].to_vec());
                 }
@@ -727,18 +778,30 @@ async fn plan_stretch<S: crate::Storage>(
             span_len,
             extent,
             seq,
+            expected,
         } => {
             let chunk = chunk_of(cursor);
             let chunk_start = chunk * BLOCK;
             let stretch_end = end.min(chunk_start + BLOCK);
             // Read the old span (stable: frozen extents are never rewritten,
             // and deferred frees keep them allocated until the next commit
-            // confirms).
+            // confirms) and check it before splicing. The read-back is the
+            // whole span, so the check is one CRC pass over bytes already in
+            // hand: it surfaces rot loudly at the COW instead of laundering
+            // it under a fresh CRC, and it keeps the relocated chunk
+            // verified by construction.
             let old = ready
                 .file
                 .read_at(span_physical, span_len as usize)
                 .await?
                 .coalesce();
+            if Crc32::checksum(old.as_ref()) != expected {
+                return Err(Error::BlobCorrupt(
+                    blob.partition.clone(),
+                    hex(&blob.name),
+                    format!("chunk {chunk} checksum mismatch"),
+                ));
+            }
             let w0 = (cursor - chunk_start) as usize;
             let w1 = (stretch_end - chunk_start) as usize;
             let d0 = (cursor - data_base) as usize;
@@ -749,7 +812,10 @@ async fn plan_stretch<S: crate::Storage>(
             buf.put_bytes(0, exact - span_len as usize);
             buf.as_mut()[w0..w1].copy_from_slice(data.slice(d0..d1).as_ref());
 
-            let crc = Crc32::checksum(buf.as_ref());
+            let state = ChunkState {
+                crc: Crc32::checksum(buf.as_ref()),
+                verified: true,
+            };
             let last_span = (chunk, buf.as_ref().to_vec());
 
             Ok(Stretch {
@@ -764,7 +830,7 @@ async fn plan_stretch<S: crate::Storage>(
                         born: seq,
                     },
                 ),
-                crcs: vec![(chunk, crc)],
+                crcs: vec![(chunk, state)],
                 last_span,
                 bytes: buf.freeze(),
                 replaced: Some(Extent {
@@ -781,6 +847,10 @@ async fn plan_stretch<S: crate::Storage>(
 /// Source the first affected chunk's committed prefix `[base, fill_from)`:
 /// from an in-memory tail buffer when one describes this chunk, otherwise a
 /// read-back (rare: mid-run in-place overwrites of unfrozen chunks).
+///
+/// The second element reports whether the prefix came from process memory:
+/// a disk read-back is spliced unchecked, leaving the assembled chunk
+/// unverified (see [`ChunkState`]).
 async fn read_span_prefix<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
@@ -789,10 +859,10 @@ async fn read_span_prefix<S: crate::Storage>(
     run_logical: u64,
     base: u64,
     fill_from: u64,
-) -> Result<Vec<u8>, Error> {
+) -> Result<(Vec<u8>, bool), Error> {
     let prefix_len = (fill_from - base) as usize;
     if prefix_len == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), true));
     }
     let chunk = chunk_of(base);
     {
@@ -803,31 +873,32 @@ async fn read_span_prefix<S: crate::Storage>(
                 // published tail is valid only for untouched chunks.
                 if let Some((tail_chunk, tail)) = &st.tail {
                     if *tail_chunk == chunk && tail.len() >= prefix_len {
-                        return Ok(tail[..prefix_len].to_vec());
+                        return Ok((tail[..prefix_len].to_vec(), true));
                     }
                 }
                 if !st.crcs.contains_key(&chunk)
                     && inner.tail_chunk == chunk
                     && inner.tail.len() >= prefix_len
                 {
-                    return Ok(inner.tail[..prefix_len].to_vec());
+                    return Ok((inner.tail[..prefix_len].to_vec(), true));
                 }
             }
             None => {
                 if inner.tail_chunk == chunk && inner.tail.len() >= prefix_len {
-                    return Ok(inner.tail[..prefix_len].to_vec());
+                    return Ok((inner.tail[..prefix_len].to_vec(), true));
                 }
             }
         }
     }
     let phys = run.physical + (base - run_logical);
-    Ok(ready
+    let prefix = ready
         .file
         .read_at(phys, prefix_len)
         .await?
         .coalesce()
         .as_ref()
-        .to_vec())
+        .to_vec();
+    Ok((prefix, false))
 }
 
 /// Publish a completed stretch. Caller holds the blob write lock.
@@ -851,8 +922,8 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
         }
     }
 
-    for (chunk, crc) in stretch.crcs {
-        inner.crcs.insert(chunk, crc);
+    for (chunk, state) in stretch.crcs {
+        inner.crcs.insert(chunk, state);
         inner.dirty_chunks.insert(chunk);
     }
     // Refresh the tail buffer if this stretch reaches the write frontier.
@@ -892,8 +963,8 @@ fn publish_staged(inner: &BlobInner, staged: &mut StagedBlob, stretch: Stretch) 
         }
     }
 
-    for (chunk, crc) in stretch.crcs {
-        staged.crcs.insert(chunk, crc);
+    for (chunk, state) in stretch.crcs {
+        staged.crcs.insert(chunk, state);
     }
     // Refresh the staged tail if this stretch reaches the staged frontier.
     let (chunk, span) = stretch.last_span;
@@ -990,26 +1061,45 @@ fn cow_remap(inner: &mut BlobInner, chunk_start: u64, fresh: RunMeta) {
 const MAX_READ_SPAN: u64 = 1 << 20;
 
 /// Verified read of `[offset, offset + len)`.
+///
+/// Chunks already verified this process (see [`ChunkState`]) are read
+/// exactly — no span widening, no CRC pass — and the relocation `generation`
+/// is re-checked after the read, so backing that relocated (and may have
+/// been recycled) mid-read forces a retry instead of serving stale bytes.
+/// Unverified chunks keep the full protocol (widened span read, per-chunk
+/// CRC, quiesce and generation retries) and are marked verified on success.
+/// When the whole request is one contiguous verified stretch, the inner
+/// read buffer is returned directly (zero copy).
 pub(super) async fn read_verified<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
     offset: u64,
     len: usize,
-) -> Result<Vec<u8>, Error> {
+) -> Result<IoBufsMut, Error> {
     ready.check_poisoned()?;
     let end = offset
         .checked_add(len as u64)
         .ok_or(Error::OffsetOverflow)?;
 
     'retry: loop {
-        /// Physically contiguous chunks served by ONE inner read: chunk `i`
-        /// of the group occupies `[i * BLOCK, i * BLOCK + span)` of the read.
-        struct Group {
-            physical: u64,
-            /// (chunk logical start, span len, expected crc) per chunk. Only
-            /// the last chunk's span may be short (a run's tail), so the
-            /// group's read length is contiguous by construction.
-            chunks: Vec<(u64, u64, u32)>,
+        /// Physically contiguous bytes served by ONE inner read.
+        enum Group {
+            /// Already-verified chunks: exactly the requested bytes
+            /// `[logical, logical + len)`, no CRC pass.
+            Verified {
+                physical: u64,
+                logical: u64,
+                len: u64,
+            },
+            /// Whole chunk spans, verified per chunk: chunk `i` of the
+            /// group occupies `[i * BLOCK, i * BLOCK + span)` of the read.
+            /// Entries are (chunk logical start, span len, expected crc);
+            /// only the last chunk's span may be short (a run's tail), so
+            /// the read length is contiguous by construction.
+            Unverified {
+                physical: u64,
+                chunks: Vec<(u64, u64, u32)>,
+            },
         }
         let (generation, groups) = {
             let inner = blob.inner.lock();
@@ -1017,108 +1107,207 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 return Err(Error::BlobInsufficientLength);
             }
             if len == 0 {
-                return Ok(Vec::new());
+                return Ok(IoBufsMut::default());
             }
             let mut groups: Vec<Group> = Vec::new();
             for chunk in chunk_of(offset)..=chunk_of(end - 1) {
                 let Some((phys, span)) = inner.chunk_span(chunk) else {
                     continue; // hole: zeros already in place
                 };
-                let crc = *inner.crcs.get(&chunk).expect("backed chunk has crc");
-                // Coalesce with the previous group when its chunks are all
-                // full blocks ending exactly where this chunk's span begins,
-                // bounded by the per-I/O cap.
-                match groups.last_mut() {
-                    Some(g)
-                        if g.chunks.last().is_some_and(|&(_, s, _)| s == BLOCK)
-                            && g.physical + g.chunks.len() as u64 * BLOCK == phys
-                            && (g.chunks.len() as u64 + 1) * BLOCK <= MAX_READ_SPAN =>
-                    {
-                        g.chunks.push((chunk * BLOCK, span, crc));
+                let state = *inner.crcs.get(&chunk).expect("backed chunk has crc");
+                let chunk_start = chunk * BLOCK;
+                if state.verified {
+                    // Exactly the requested bytes of this chunk's span;
+                    // bytes past the span are holes (zeros already in
+                    // place). Coalesce with the previous verified group
+                    // when logically and physically contiguous, bounded by
+                    // the per-I/O cap.
+                    let lo = offset.max(chunk_start);
+                    let hi = end.min(chunk_start + span);
+                    if hi <= lo {
+                        continue;
                     }
-                    _ => groups.push(Group {
-                        physical: phys,
-                        chunks: vec![(chunk * BLOCK, span, crc)],
-                    }),
+                    let physical = phys + (lo - chunk_start);
+                    match groups.last_mut() {
+                        Some(Group::Verified {
+                            physical: p,
+                            logical: l,
+                            len: n,
+                        }) if *p + *n == physical
+                            && *l + *n == lo
+                            && *n + (hi - lo) <= MAX_READ_SPAN =>
+                        {
+                            *n += hi - lo;
+                        }
+                        _ => groups.push(Group::Verified {
+                            physical,
+                            logical: lo,
+                            len: hi - lo,
+                        }),
+                    }
+                } else {
+                    // Coalesce with the previous unverified group when its
+                    // chunks are all full blocks ending exactly where this
+                    // chunk's span begins, bounded by the per-I/O cap.
+                    match groups.last_mut() {
+                        Some(Group::Unverified {
+                            physical: p,
+                            chunks,
+                        }) if chunks.last().is_some_and(|&(_, s, _)| s == BLOCK)
+                            && *p + chunks.len() as u64 * BLOCK == phys
+                            && (chunks.len() as u64 + 1) * BLOCK <= MAX_READ_SPAN =>
+                        {
+                            chunks.push((chunk_start, span, state.crc));
+                        }
+                        _ => groups.push(Group::Unverified {
+                            physical: phys,
+                            chunks: vec![(chunk_start, span, state.crc)],
+                        }),
+                    }
                 }
             }
             (inner.generation, groups)
         };
 
-        let mut out = vec![0u8; len];
+        // Zero-copy fast path: the whole request is one verified stretch —
+        // return the inner read buffer directly.
+        if let [Group::Verified {
+            physical,
+            logical,
+            len: read_len,
+        }] = groups.as_slice()
+        {
+            if *logical == offset && *read_len == len as u64 {
+                let bufs = ready.file.read_at(*physical, len).await?;
+                if blob.inner.lock().generation == generation {
+                    return Ok(bufs);
+                }
+                // The backing relocated (and may have been recycled) while
+                // the read was in flight.
+                continue 'retry;
+            }
+        }
+
+        let mut out = ready.pool.alloc_zeroed(len);
+        // Chunks this read verified, with the CRC each was checked against
+        // (published under the inner lock below).
+        let mut checked: Vec<(u64, u32)> = Vec::new();
+        let mut skipped = false;
         for group in &groups {
-            let (_, last_span, _) = *group.chunks.last().expect("group is nonempty");
-            let read_len = (group.chunks.len() as u64 - 1) * BLOCK + last_span;
-            let bytes = ready
-                .file
-                .read_at(group.physical, read_len as usize)
-                .await?
-                .coalesce()
-                .freeze();
-            for (i, &(chunk_start, span, crc)) in group.chunks.iter().enumerate() {
-                let s = i * BLOCK as usize;
-                let mut chunk_bytes = bytes.slice(s..s + span as usize);
-                let mut chunk_span = span;
-                if Crc32::checksum(chunk_bytes.as_ref()) != crc {
-                    {
-                        let inner = blob.inner.lock();
-                        if inner.generation != generation {
-                            continue 'retry;
-                        }
-                    }
-                    // Not a relocation. A writer may legally have rewritten
-                    // this chunk in place (uncommitted bytes and young
-                    // extents are not frozen), which moves neither the
-                    // generation nor, mid-write, the expected CRC: quiesce
-                    // the (single) writer and re-verify the chunk against
-                    // its now-stable state before reporting corruption.
-                    let chunk = chunk_of(chunk_start);
-                    let _quiesce = blob.write_lock.lock().await;
-                    let source = {
-                        let inner = blob.inner.lock();
-                        if inner.generation != generation {
-                            continue 'retry;
-                        }
-                        inner.chunk_span(chunk).map(|(phys, span)| {
-                            (
-                                phys,
-                                span,
-                                *inner.crcs.get(&chunk).expect("backed chunk has crc"),
-                            )
-                        })
-                    };
-                    let Some((phys, stable_span, stable_crc)) = source else {
-                        continue 'retry;
-                    };
-                    let reread = ready
+            match group {
+                Group::Verified {
+                    physical,
+                    logical,
+                    len: read_len,
+                } => {
+                    skipped = true;
+                    let bytes = ready
                         .file
-                        .read_at(phys, stable_span as usize)
+                        .read_at(*physical, *read_len as usize)
+                        .await?
+                        .coalesce();
+                    let at = (logical - offset) as usize;
+                    out.as_mut()[at..at + *read_len as usize].copy_from_slice(bytes.as_ref());
+                }
+                Group::Unverified { physical, chunks } => {
+                    let (_, last_span, _) = *chunks.last().expect("group is nonempty");
+                    let read_len = (chunks.len() as u64 - 1) * BLOCK + last_span;
+                    let bytes = ready
+                        .file
+                        .read_at(*physical, read_len as usize)
                         .await?
                         .coalesce()
                         .freeze();
-                    if Crc32::checksum(reread.as_ref()) != stable_crc {
-                        return Err(Error::BlobCorrupt(
-                            blob.partition.clone(),
-                            hex(&blob.name),
-                            format!("chunk {chunk} checksum mismatch"),
-                        ));
+                    for (i, &(chunk_start, span, crc)) in chunks.iter().enumerate() {
+                        let s = i * BLOCK as usize;
+                        let mut chunk_bytes = bytes.slice(s..s + span as usize);
+                        let mut chunk_span = span;
+                        let mut chunk_crc = crc;
+                        if Crc32::checksum(chunk_bytes.as_ref()) != crc {
+                            {
+                                let inner = blob.inner.lock();
+                                if inner.generation != generation {
+                                    continue 'retry;
+                                }
+                            }
+                            // Not a relocation. A writer may legally have
+                            // rewritten this chunk in place (uncommitted
+                            // bytes and young extents are not frozen), which
+                            // moves neither the generation nor, mid-write,
+                            // the expected CRC: quiesce the (single) writer
+                            // and re-verify the chunk against its now-stable
+                            // state before reporting corruption.
+                            let chunk = chunk_of(chunk_start);
+                            let _quiesce = blob.write_lock.lock().await;
+                            let source = {
+                                let inner = blob.inner.lock();
+                                if inner.generation != generation {
+                                    continue 'retry;
+                                }
+                                inner.chunk_span(chunk).map(|(phys, span)| {
+                                    (
+                                        phys,
+                                        span,
+                                        inner.crcs.get(&chunk).expect("backed chunk has crc").crc,
+                                    )
+                                })
+                            };
+                            let Some((phys, stable_span, stable_crc)) = source else {
+                                continue 'retry;
+                            };
+                            let reread = ready
+                                .file
+                                .read_at(phys, stable_span as usize)
+                                .await?
+                                .coalesce()
+                                .freeze();
+                            if Crc32::checksum(reread.as_ref()) != stable_crc {
+                                return Err(Error::BlobCorrupt(
+                                    blob.partition.clone(),
+                                    hex(&blob.name),
+                                    format!("chunk {chunk} checksum mismatch"),
+                                ));
+                            }
+                            chunk_bytes = reread;
+                            chunk_span = stable_span;
+                            chunk_crc = stable_crc;
+                        }
+                        checked.push((chunk_of(chunk_start), chunk_crc));
+                        // Copy the requested slice of this chunk's span;
+                        // bytes past the span within the chunk are holes
+                        // (zeros).
+                        let r_start = offset.max(chunk_start);
+                        let copy_end = end.min(chunk_start + chunk_span);
+                        if copy_end > r_start {
+                            out.as_mut()[(r_start - offset) as usize..(copy_end - offset) as usize]
+                                .copy_from_slice(
+                                    &chunk_bytes.as_ref()[(r_start - chunk_start) as usize
+                                        ..(copy_end - chunk_start) as usize],
+                                );
+                        }
                     }
-                    chunk_bytes = reread;
-                    chunk_span = stable_span;
-                }
-                // Copy the requested slice of this chunk's span; bytes past
-                // the span within the chunk are holes (zeros).
-                let r_start = offset.max(chunk_start);
-                let copy_end = end.min(chunk_start + chunk_span);
-                if copy_end > r_start {
-                    out[(r_start - offset) as usize..(copy_end - offset) as usize].copy_from_slice(
-                        &chunk_bytes.as_ref()
-                            [(r_start - chunk_start) as usize..(copy_end - chunk_start) as usize],
-                    );
                 }
             }
         }
-        return Ok(out);
+
+        // Publish what this read verified — only where the state it checked
+        // against still stands — and distrust what it skipped if a
+        // relocation (whose extent may have been recycled) raced the read.
+        {
+            let mut inner = blob.inner.lock();
+            if inner.generation == generation {
+                for &(chunk, crc) in &checked {
+                    if let Some(state) = inner.crcs.get_mut(&chunk) {
+                        if state.crc == crc {
+                            state.verified = true;
+                        }
+                    }
+                }
+            } else if skipped {
+                continue 'retry;
+            }
+        }
+        return Ok(out.into());
     }
 }
 
@@ -1216,7 +1405,13 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                 .await?
                 .coalesce();
             let mut inner = blob.inner.lock();
-            inner.crcs.insert(boundary, Crc32::checksum(bytes.as_ref()));
+            // Recomputed from an unchecked read-back: the boundary chunk
+            // stays unverified (see [`ChunkState`]).
+            let state = ChunkState {
+                crc: Crc32::checksum(bytes.as_ref()),
+                verified: false,
+            };
+            inner.crcs.insert(boundary, state);
             inner.tail_chunk = boundary;
             inner.tail = bytes.as_ref().to_vec();
         }

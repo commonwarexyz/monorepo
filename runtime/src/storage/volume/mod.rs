@@ -11,8 +11,10 @@
 //! > on blob creation/removal, and on [`Batch::apply_sync`]. It atomically
 //! > covers the CAPTURED blobs: the synced blob (or the applying batch's
 //! > blobs), expanded across applied-batch groups so an applied [`Batch`]
-//! > is never split across commits. Every read verifies a CRC32C; a
-//! > mismatch is loud corruption, never silent truncation.
+//! > is never split across commits. Reads are CRC32C-verified: each chunk
+//! > is checked on its first read every process lifetime (chunks written
+//! > this process are verified by construction), and a mismatch is loud
+//! > corruption, never silent truncation.
 //!
 //! Every runtime serves ALL storage through a volume over its platform
 //! backend, so this is the crash contract of every runtime context.
@@ -84,7 +86,8 @@ use std::{
 };
 
 /// Alignment unit and checksum granularity: writes tear at (at most) this
-/// granularity, and every read is verified per this granularity.
+/// granularity, and reads are verified per this granularity (once per chunk
+/// per process lifetime).
 pub(crate) const BLOCK: u64 = 4096;
 
 /// Location and growth policy of the volume file within the inner storage.
@@ -544,8 +547,7 @@ fn unlink(state: &mut core::State, id: u64) {
 
 impl<S: crate::Storage> crate::Blob for Blob<S> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.ready.pool.alloc(len))
-            .await
+        core::read_verified(&self.ready, &self.core, offset, len).await
     }
 
     async fn read_at_buf(
@@ -555,10 +557,12 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
         bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let mut bufs = bufs.into();
-        let data = core::read_verified(&self.ready, &self.core, offset, len).await?;
+        let data = core::read_verified(&self.ready, &self.core, offset, len)
+            .await?
+            .coalesce();
         // SAFETY: `len` bytes are filled via copy_from_slice below.
         unsafe { bufs.set_len(len) };
-        bufs.copy_from_slice(&data);
+        bufs.copy_from_slice(data.as_ref());
         Ok(bufs)
     }
 

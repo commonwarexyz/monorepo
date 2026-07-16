@@ -44,7 +44,10 @@
 use super::{
     alloc::Extent,
     commit,
-    core::{chunk_of, stage_write, BlobCore, BlobInner, Ready, RunMeta, StagedBlob, StagedRun},
+    core::{
+        chunk_of, stage_write, BlobCore, BlobInner, ChunkState, Ready, RunMeta, StagedBlob,
+        StagedRun,
+    },
     unlink, Blob, Shared, BLOCK,
 };
 use crate::{Blob as _, Error, IoBuf, IoBufs};
@@ -224,10 +227,13 @@ impl<S: crate::Storage> Batch<S> {
                     .read_at(phys, span_len as usize)
                     .await?
                     .coalesce();
-                staged
-                    .overlay
-                    .crcs
-                    .insert(boundary, Crc32::checksum(bytes.as_ref()));
+                // Recomputed from an unchecked read-back: the boundary chunk
+                // stays unverified (see `ChunkState`).
+                let state = ChunkState {
+                    crc: Crc32::checksum(bytes.as_ref()),
+                    verified: false,
+                };
+                staged.overlay.crcs.insert(boundary, state);
                 staged.overlay.tail = Some((boundary, bytes.as_ref().to_vec()));
             }
         }
@@ -392,8 +398,8 @@ fn publish_overlay(inner: &mut BlobInner, overlay: StagedBlob) {
     for (l, sr) in overlay.runs {
         inner.runs.insert(l, sr.meta);
     }
-    for (&chunk, &crc) in &overlay.crcs {
-        inner.crcs.insert(chunk, crc);
+    for (&chunk, &state) in &overlay.crcs {
+        inner.crcs.insert(chunk, state);
         inner.dirty_chunks.insert(chunk);
     }
     inner.size = overlay.size;

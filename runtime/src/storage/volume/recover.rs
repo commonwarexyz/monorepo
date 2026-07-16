@@ -25,7 +25,7 @@
 
 use super::{
     alloc::{block_align, Allocator, Extent},
-    core::{chunk_of, BlobInner, Ready, RunMeta, State},
+    core::{chunk_of, BlobInner, ChunkState, Ready, RunMeta, State},
     layout::{Entry, Superblock, Table},
     Config, BLOCK,
 };
@@ -511,19 +511,33 @@ pub(super) async fn hydrate<S: crate::Storage>(
                     )
                 })?
             };
-            inner.crcs.insert(chunk, crc);
+            // Every chunk starts unverified: its first read this process
+            // runs the full verification.
+            inner.crcs.insert(
+                chunk,
+                ChunkState {
+                    crc,
+                    verified: false,
+                },
+            );
         }
         // Load + verify the frontier span into the tail buffer.
         let (phys, span) = entry_chunk_span(entry, last).unwrap();
         let bytes = ready.file.read_at(phys, span as usize).await?.coalesce();
         let expected = inner.crcs.get(&last).copied().unwrap();
-        if Crc32::checksum(bytes.as_ref()) != expected {
+        if Crc32::checksum(bytes.as_ref()) != expected.crc {
             return Err(Error::BlobCorrupt(
                 partition.into(),
                 commonware_formatting::hex(&entry.name),
                 "frontier chunk checksum mismatch".into(),
             ));
         }
+        // Hydration itself verified the frontier chunk.
+        inner
+            .crcs
+            .get_mut(&last)
+            .expect("frontier chunk has crc")
+            .verified = true;
         inner.tail_chunk = last;
         inner.tail = bytes.as_ref().to_vec();
     }

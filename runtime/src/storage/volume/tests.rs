@@ -863,6 +863,182 @@ async fn test_volume_detects_bit_rot() {
     }
 }
 
+/// Captures a clone of the last inner blob it opened, letting a test mutate
+/// the SAME shared content the volume reads (memory blob clones share
+/// content, while independent opens copy it).
+#[derive(Clone)]
+struct Capturing {
+    inner: memory::Storage,
+    handle: Arc<Mutex<Option<(memory::Blob, u64)>>>,
+}
+
+impl crate::Storage for Capturing {
+    type Blob = memory::Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (blob, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        *self.handle.lock() = Some((blob.clone(), len));
+        Ok((blob, len, version))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Chunks are verified once per process lifetime: corruption landing AFTER
+/// a chunk was verified is served without error by later reads in the same
+/// process (pinned deliberately — re-verifying kernel-cached bytes has near
+/// zero detection value), while a reopen starts unverified and must catch
+/// it loudly.
+#[tokio::test]
+async fn test_volume_stale_verified_read_caught_on_reopen() {
+    let pool = test_pool();
+    let capturing = Capturing {
+        inner: memory::Storage::new(pool.clone()),
+        handle: Arc::new(Mutex::new(None)),
+    };
+    let volume = Volume::new(capturing.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"data").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![42u8; 3 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    // A second commit, so the 42-blocks leave the newest commit's delta
+    // manifest (rot inside the newest delta rolls back at recovery instead
+    // of surfacing as an error — the documented trade-off).
+    let (other, _) = volume.open("p", b"other").await.unwrap();
+    other
+        .write_at(0, IoBuf::copy_from_slice(b"x"))
+        .await
+        .unwrap();
+    other.sync().await.unwrap();
+    drop(other);
+    drop(blob);
+    drop(volume);
+
+    // Reopen: every chunk starts unverified, so this process's first read
+    // runs (and records) the full verification.
+    let volume = Volume::new(capturing.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"data").await.unwrap();
+    let got = blob
+        .read_at(0, 3 * BLOCK as usize)
+        .await
+        .unwrap()
+        .coalesce();
+    assert!(got.as_ref().iter().all(|&b| b == 42));
+
+    // Flip one byte in the middle 42-block of the volume file while the
+    // volume is open, through the volume's own (shared-content) inner
+    // handle. Locate the data extent as test_volume_detects_bit_rot does.
+    let (file, len) = capturing.handle.lock().clone().expect("volume file open");
+    let image = file.read_at(0, len as usize).await.unwrap().coalesce();
+    let target = image
+        .as_ref()
+        .windows(2 * BLOCK as usize)
+        .position(|w| w.iter().all(|&b| b == 42))
+        .expect("data blocks present")
+        + BLOCK as usize
+        + BLOCK as usize / 2;
+    file.write_at(target as u64, IoBuf::copy_from_slice(&[43u8]))
+        .await
+        .unwrap();
+    file.sync().await.unwrap();
+    drop(file);
+
+    // The chunk is already verified: reads skip the CRC pass and serve the
+    // stale-verified (now corrupt) bytes without error.
+    let got = blob
+        .read_at(0, 3 * BLOCK as usize)
+        .await
+        .unwrap()
+        .coalesce();
+    assert_eq!(
+        got.as_ref().iter().filter(|&&b| b == 43).count(),
+        1,
+        "verified chunks must be served without re-verification"
+    );
+    drop(blob);
+    drop(volume);
+
+    // A new process starts unverified: the corruption is loud.
+    let volume = Volume::new(capturing, pool, Config::default());
+    match volume.open("p", b"data").await {
+        Err(Error::BlobCorrupt(_, _, _)) => {}
+        Err(e) => panic!("unexpected open error: {e:?}"),
+        Ok((blob, _)) => {
+            let result = blob.read_at(0, 3 * BLOCK as usize).await;
+            assert!(
+                matches!(result, Err(Error::BlobCorrupt(_, _, _))),
+                "bit rot must be loud after reopen: {result:?}"
+            );
+        }
+    }
+}
+
+/// Freshly written chunks are verified by construction: reading them back
+/// issues exactly the requested byte range against the inner blob (no
+/// widened span read, no whole-block read).
+#[tokio::test]
+async fn test_volume_written_chunks_read_exact_range() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+
+    // A partial chunk and a multi-block value.
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![7u8; 300]))
+        .await
+        .unwrap();
+    blob.write_at(
+        BLOCK,
+        IoBuf::copy_from_slice(&vec![8u8; 2 * BLOCK as usize]),
+    )
+    .await
+    .unwrap();
+    blob.sync().await.unwrap();
+
+    // Sub-range of the partial chunk: exactly 100 bytes, not the 300-byte
+    // written span, not a whole block.
+    let before = recording.log.lock().iter().filter(|(w, _, _)| !*w).count();
+    let got = blob.read_at(50, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[7u8; 100][..]);
+    {
+        let log = recording.log.lock();
+        let new: Vec<_> = log.iter().filter(|(w, _, _)| !*w).skip(before).collect();
+        assert_eq!(new.len(), 1, "one exact inner read: {new:?}");
+        assert_eq!(new[0].2, 100, "read must not be widened: {new:?}");
+    }
+
+    // Sub-range of the multi-block value, crossing a chunk boundary.
+    let before = recording.log.lock().iter().filter(|(w, _, _)| !*w).count();
+    let got = blob
+        .read_at(BLOCK + 500, BLOCK as usize)
+        .await
+        .unwrap()
+        .coalesce();
+    assert_eq!(got.as_ref(), &vec![8u8; BLOCK as usize][..]);
+    {
+        let log = recording.log.lock();
+        let new: Vec<_> = log.iter().filter(|(w, _, _)| !*w).skip(before).collect();
+        assert_eq!(new.len(), 1, "one exact inner read: {new:?}");
+        assert_eq!(
+            new[0].2, BLOCK as usize,
+            "read must not be widened: {new:?}"
+        );
+    }
+}
+
 /// A one-shot pause point for inner I/O: while armed, the next matching
 /// operation signals `reached` and blocks until released. Later operations
 /// pass through untouched.
@@ -1125,6 +1301,52 @@ async fn test_volume_read_races_in_place_overwrite() {
     // A disjoint-range in-place overwrite of the same chunk publishes a new
     // CRC while the reader is in flight.
     blob.write_at(200, IoBuf::copy_from_slice(&[0x22u8; 50]))
+        .await
+        .unwrap();
+
+    gated.read_gate.release();
+    let got = reader
+        .await
+        .unwrap()
+        .expect("in-place overwrite must never surface as corruption")
+        .coalesce();
+    assert_eq!(got.as_ref(), &[0x11u8; 100]);
+}
+
+/// The quiesce-retry protocol is preserved for UNVERIFIED chunks: a partial
+/// in-place overwrite that read back disk bytes for its CRC assembly leaves
+/// its chunk unverified, so a reader racing a second in-place overwrite of
+/// that chunk takes the full verification path and must re-verify against
+/// the quiesced writer state, never report false corruption.
+#[tokio::test]
+async fn test_volume_unverified_read_races_in_place_overwrite() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    // Three fresh chunks (verified by construction), then a partial
+    // overwrite of chunk 0: its prefix and suffix are disk read-backs (the
+    // tail buffer describes chunk 2), leaving chunk 0 unverified.
+    let (blob, _) = volume.open("p", b"d").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 3 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.write_at(100, IoBuf::copy_from_slice(&[0x33u8; 100]))
+        .await
+        .unwrap();
+
+    // The reader snapshots chunk 0's expected CRC, then parks on the inner
+    // (widened, whole-span) read.
+    gated.read_gate.arm();
+    let reader = {
+        let blob = blob.clone();
+        tokio::spawn(async move { blob.read_at(0, 100).await })
+    };
+    gated.read_gate.wait_reached().await;
+
+    // A disjoint-range in-place overwrite of chunk 0 publishes a new CRC
+    // while the reader is in flight.
+    blob.write_at(300, IoBuf::copy_from_slice(&[0x22u8; 50]))
         .await
         .unwrap();
 

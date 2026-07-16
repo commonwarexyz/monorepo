@@ -604,8 +604,11 @@ stability_scope!(BETA {
     /// contract structures may build on: after a crash, each blob reads back
     /// exactly the state captured by one commit (its last successful
     /// [`Blob::sync`], or a newer fully-landed commit), an applied [Batchable]
-    /// batch is never split across commits, and corruption is loud (every
-    /// read is checksum-verified), never silent truncation.
+    /// batch is never split across commits, and corruption is loud, never
+    /// silent truncation: chunks are checksum-verified on their first read
+    /// each process lifetime (chunks written this process are verified by
+    /// construction), and recovery separately verifies the newest commit's
+    /// delta before adopting it.
     ///
     /// Loudness has one bounded exception: media corruption (bit rot) that
     /// lands inside the NEWEST commit's metadata is indistinguishable from a
