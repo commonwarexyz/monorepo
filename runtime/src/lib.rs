@@ -3325,6 +3325,97 @@ mod tests {
         }
 
         #[test]
+        fn test_iouring_network_recv_timeout() {
+            // Exercise a network deadline expiring while the executor drives
+            // the ring (turn/park path): the recv must report a timeout close
+            // to the configured budget instead of stalling.
+            let op_timeout = Duration::from_millis(100);
+            let cfg = iouring::Config::default().with_read_write_timeout(op_timeout);
+            iouring::Runner::new(cfg).start(|context| async move {
+                let mut listener = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let addr = listener.local_addr().unwrap();
+
+                let server = context.child("server").spawn(move |_| async move {
+                    let (_, sink, mut stream) = listener.accept().await.unwrap();
+                    let result = stream.recv(1).await;
+                    assert!(matches!(result, Err(Error::Timeout)));
+                    // Keep the connection alive until the recv resolves.
+                    drop(sink);
+                });
+
+                // Dial but never send, so the server's recv can only expire.
+                let start = std::time::Instant::now();
+                let (_sink, _stream) = context.dial(addr).await.unwrap();
+                server.await.unwrap();
+                let elapsed = start.elapsed();
+                assert!(elapsed >= op_timeout);
+                assert!(elapsed < op_timeout * 30, "recv timeout took {elapsed:?}");
+            });
+        }
+
+        #[test]
+        fn test_iouring_fast_teardown_with_inflight_recv() {
+            // A recv still in flight when the root task returns must not delay
+            // teardown until its (60s) deadline: teardown cancels operations
+            // whose tasks were dropped.
+            let start = std::time::Instant::now();
+            let cfg = iouring::Config::default().with_read_write_timeout(Duration::from_secs(60));
+            iouring::Runner::new(cfg).start(|context| async move {
+                let mut listener = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let addr = listener.local_addr().unwrap();
+
+                context.child("server").spawn(move |_| async move {
+                    let (_, _sink, mut stream) = listener.accept().await.unwrap();
+                    // Never receives data; aborted when the root returns.
+                    let _ = stream.recv(1).await;
+                });
+
+                let (_sink, _stream) = context.dial(addr).await.unwrap();
+                // Give the server's recv a chance to reach the kernel.
+                context.sleep(Duration::from_millis(50)).await;
+            });
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "teardown took {:?}",
+                start.elapsed()
+            );
+        }
+
+        #[test]
+        fn test_iouring_accept_survives_reissue() {
+            // An accept that waits longer than the read/write timeout is
+            // transparently reissued: a connection arriving after several
+            // reissue cycles must still be accepted.
+            let op_timeout = Duration::from_millis(50);
+            let cfg = iouring::Config::default().with_read_write_timeout(op_timeout);
+            iouring::Runner::new(cfg).start(|context| async move {
+                let mut listener = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let addr = listener.local_addr().unwrap();
+
+                let server = context.child("server").spawn(move |_| async move {
+                    let (_, _sink, mut stream) = listener.accept().await.unwrap();
+                    let msg = stream.recv(4).await.unwrap();
+                    assert_eq!(msg.coalesce(), b"ping");
+                });
+
+                // Wait through multiple accept deadlines before connecting.
+                context.sleep(op_timeout * 4).await;
+                let (mut sink, _stream) = context.dial(addr).await.unwrap();
+                sink.send(IoBuf::from(b"ping")).await.unwrap();
+                server.await.unwrap();
+            });
+        }
+
+        #[test]
         fn test_iouring_cross_thread_wake() {
             // Verify a task on a dedicated thread can wake the runtime thread
             // out of its park: the sleep gives the runtime time to park (so

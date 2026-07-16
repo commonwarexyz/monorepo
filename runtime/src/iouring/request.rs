@@ -1838,4 +1838,123 @@ mod tests {
             .expect_err("sync timeout should be an error");
         assert!(matches!(err, Error::Timeout));
     }
+
+    #[test]
+    fn test_raw_socket_addr_round_trip() {
+        // Verify encode/decode preserves v4 and v6 addresses end to end.
+        let v4: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let raw = RawSocketAddr::from_socket_addr(&v4);
+        assert_eq!(raw.to_socket_addr(), Some(v4));
+
+        let v6 = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            443,
+            7,
+            9,
+        ));
+        let raw = RawSocketAddr::from_socket_addr(&v6);
+        assert_eq!(raw.to_socket_addr(), Some(v6));
+
+        // Zeroed scratch (family AF_UNSPEC) has no decodable address.
+        assert_eq!(RawSocketAddr::new_zeroed().to_socket_addr(), None);
+    }
+
+    fn make_accept() -> AcceptRequest {
+        AcceptRequest {
+            fd: make_socket_fd(),
+            addr: RawSocketAddr::zeroed(),
+            deadline: None,
+            result: None,
+            sender: oneshot::channel().0,
+        }
+    }
+
+    #[test]
+    fn test_active_accept_paths() {
+        // Transient results retry with another SQE.
+        let mut accept = make_accept();
+        assert!(!accept.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
+
+        // Hard errors are terminal connection failures.
+        assert!(accept.on_cqe(WaiterState::Active { target_tick: None }, -libc::ECONNABORTED));
+        assert!(matches!(accept.result, Some(Err(Error::ConnectionFailed))));
+
+        // Cancellation after a timeout maps to a logical timeout.
+        let mut accept = make_accept();
+        assert!(accept.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
+        assert!(matches!(accept.result, Some(Err(Error::Timeout))));
+
+        // A success CQE takes ownership of the descriptor and decodes the
+        // peer address, even when cancellation raced the completion.
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let (left, _right) = UnixStream::pair().unwrap();
+        let raw_fd = left.into_raw_fd();
+        let mut accept = make_accept();
+        accept.addr = RawSocketAddr::boxed_from_socket_addr(&peer);
+        assert!(accept.on_cqe(WaiterState::CancelRequested, raw_fd));
+        let (owned, addr) = accept
+            .result
+            .take()
+            .expect("missing accept result")
+            .expect("racing accept success should win over cancellation");
+        assert_eq!(addr, peer);
+        assert_eq!(owned.as_raw_fd(), raw_fd);
+
+        // An undecodable peer address still takes (and releases) ownership of
+        // the accepted descriptor.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let raw_fd = left.into_raw_fd();
+        let mut accept = make_accept();
+        assert!(accept.on_cqe(WaiterState::Active { target_tick: None }, raw_fd));
+        assert!(matches!(accept.result, Some(Err(Error::ConnectionFailed))));
+    }
+
+    #[test]
+    fn test_accept_build_sqe_resets_addr_len() {
+        // The kernel treats the address length as an in/out parameter, so a
+        // reissued accept must restore it to the scratch capacity.
+        let mut accept = make_accept();
+        accept.addr.len = 0;
+        let _ = accept.build_sqe();
+        assert_eq!(
+            accept.addr.len as usize,
+            size_of::<libc::sockaddr_storage>()
+        );
+    }
+
+    #[test]
+    fn test_active_connect_paths() {
+        let target: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let make_connect = || ConnectRequest {
+            fd: make_socket_fd(),
+            addr: RawSocketAddr::boxed_from_socket_addr(&target),
+            deadline: None,
+            result: None,
+            sender: oneshot::channel().0,
+        };
+
+        // A zero result is a successful connect.
+        let mut connect = make_connect();
+        assert!(connect.on_cqe(WaiterState::Active { target_tick: None }, 0));
+        assert!(matches!(connect.result, Some(Ok(()))));
+
+        // Transient results retry with another SQE, and a reissued connect
+        // may observe the previous attempt still in progress or already
+        // established.
+        let mut connect = make_connect();
+        assert!(!connect.on_cqe(WaiterState::Active { target_tick: None }, -libc::EINTR));
+        assert!(!connect.on_cqe(WaiterState::Active { target_tick: None }, -libc::EALREADY));
+        assert!(connect.on_cqe(WaiterState::Active { target_tick: None }, -libc::EISCONN));
+        assert!(matches!(connect.result, Some(Ok(()))));
+
+        // Refused connections are terminal failures.
+        let mut connect = make_connect();
+        assert!(connect.on_cqe(WaiterState::Active { target_tick: None }, -libc::ECONNREFUSED));
+        assert!(matches!(connect.result, Some(Err(Error::ConnectionFailed))));
+
+        // Cancellation after a timeout maps to a logical timeout.
+        let mut connect = make_connect();
+        assert!(connect.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
+        assert!(matches!(connect.result, Some(Err(Error::Timeout))));
+    }
 }

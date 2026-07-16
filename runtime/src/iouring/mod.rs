@@ -122,7 +122,8 @@
 //! loop enters a drain phase:
 //! 1. Stops accepting new requests
 //! 2. Waits for all in-flight requests to complete or be cancelled
-//! 3. If `shutdown_timeout` is configured, abandons remaining requests after the timeout
+//! 3. If `shutdown_timeout` is configured, cancels all remaining requests after the
+//!    timeout and waits for the kernel to retire them (buffers stay owned until then)
 //! 4. Cleans up and exits. Dropping the last submitter latches one wake and, if a
 //!    target is currently armed, signals it immediately so shutdown is observed
 //!    promptly whether the loop is already blocked or about to sleep.
@@ -168,19 +169,19 @@
 //!   later queued requests, otherwise the loop can deadlock.
 
 use crate::{
+    telemetry::metrics::{raw, Gauge, Register},
     Error, IoBufMut, IoBufs,
-    telemetry::metrics::{Gauge, Register, raw},
 };
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
 };
 use io_uring::{
-    IoUring,
     cqueue::Entry as CqueueEntry,
     opcode::AsyncCancel,
     squeue::SubmissionQueue,
     types::{SubmitArgs, Timespec},
+    IoUring,
 };
 pub(crate) use request::RawSocketAddr;
 use request::{
@@ -204,7 +205,7 @@ use timeout::{Tick, TimeoutWheel};
 mod waiter;
 use waiter::{CompletionOutcome, StageOutcome, WaiterId, Waiters};
 mod waker;
-use waker::{HALF_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA, Waker};
+use waker::{Waker, HALF_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 mod spinner;
 pub use spinner::Config as SpinnerConfig;
 use spinner::Spinner;
@@ -273,6 +274,12 @@ pub struct RingConfig {
     /// If None, the event loop will wait indefinitely for in-flight requests
     /// to complete during that drain phase. In this case, the caller should be
     /// careful to ensure that submitted requests will eventually complete.
+    ///
+    /// If Some, every request still outstanding when the budget expires is
+    /// cancelled. The drain then waits for the kernel to retire the cancelled
+    /// requests: a request is never dropped while the kernel may still
+    /// reference its buffers, so operations that cannot be cancelled (e.g. an
+    /// executing disk write) are awaited regardless of the budget.
     pub shutdown_timeout: Option<Duration>,
     /// Tick granularity used by the userspace timeout wheel.
     ///
@@ -1172,19 +1179,48 @@ impl IoUringLoop {
         }
     }
 
+    /// Request cancellation of every active waiter, optionally restricted to
+    /// waiters whose callers have disappeared.
+    ///
+    /// Cancelled waiters leave the timeout wheel, in-flight waiters get an
+    /// async-cancel SQE queued, and waiters parked in the ready queue retire
+    /// locally when restaged.
+    fn cancel_active(&mut self, only_orphans: bool) {
+        for (waiter_id, target_tick, in_flight) in self.waiters.cancel_active(only_orphans) {
+            if let Some(tick) = target_tick {
+                self.timeout_wheel.remove(tick);
+            }
+            if in_flight {
+                self.pending_cancels.push_back(waiter_id);
+            }
+        }
+    }
+
+    /// Request cancellation of requests whose callers have disappeared.
+    ///
+    /// The runtime calls this at teardown, after every task has been dropped,
+    /// so abandoned operations (e.g. a recv whose task was aborted) release
+    /// their waiter slots promptly instead of waiting out their deadlines.
+    /// Storage writes and syncs never orphan, so durability is unaffected.
+    pub(crate) fn cancel_orphans(&mut self) {
+        self.cancel_active(true);
+    }
+
     /// Drain in-flight requests during shutdown.
     ///
-    /// Keeps draining CQEs until all waiters complete or shutdown budget is
-    /// exhausted.
+    /// Keeps draining CQEs until all waiters complete.
     ///
-    /// If `shutdown_timeout` is `None`, this waits until all waiters complete or are cancelled.
-    /// If `shutdown_timeout` is `Some`, this waits until completion or timeout,
-    /// then abandons any remaining waiters.
+    /// If `shutdown_timeout` is `None`, this waits until all waiters complete
+    /// or are cancelled by their own deadlines. If `shutdown_timeout` is
+    /// `Some`, every request still outstanding when the budget expires is
+    /// cancelled, and the drain then waits for the kernel to retire it: a
+    /// request must never be dropped while the kernel may still reference its
+    /// buffers, so operations that cannot be cancelled (e.g. an executing disk
+    /// write) are awaited regardless of the budget.
     fn drain(&mut self, ring: &mut IoUring) {
         let mut remaining = self.cfg.shutdown_timeout;
 
-        // Keep driving completions until all in-flight waiters finish or the
-        // shutdown budget is exhausted.
+        // Keep driving completions until all in-flight waiters finish.
         loop {
             // Always drain CQEs first, even after a timed wait: completions can
             // race with timeout expiry and still be pending in the queue.
@@ -1198,10 +1234,12 @@ impl IoUringLoop {
                 break;
             }
 
-            // Once shutdown budget is exhausted, abandon any remaining waiters
-            // immediately instead of advancing more deadlines or staging new cancels.
+            // Once the shutdown budget is exhausted, request cancellation of
+            // every remaining operation instead of abandoning it: an abandoned
+            // request would free buffers the kernel may still write into.
             if remaining.is_some_and(|t| t.is_zero()) {
-                break;
+                remaining = None;
+                self.cancel_active(false);
             }
 
             // Keep userspace deadline processing alive during shutdown so
@@ -1331,8 +1369,8 @@ pub(crate) fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IoBuf, IoBufMut, telemetry::metrics::Registry};
-    use commonware_utils::channel::oneshot::{self, error::RecvError};
+    use crate::{telemetry::metrics::Registry, IoBuf, IoBufMut};
+    use commonware_utils::channel::oneshot;
     use futures::future::{join, join_all};
     use request::{RecvRequest, SendRequest, SyncRequest};
     use std::{
@@ -2642,7 +2680,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_timeout() {
-        // Verify a bounded shutdown abandons requests that never complete.
+        // Verify a bounded shutdown cancels requests that never complete.
         let cfg = RingConfig {
             shutdown_timeout: Some(Duration::from_secs(1)),
             ..Default::default()
@@ -2674,10 +2712,10 @@ mod tests {
         // Drop submission channel to trigger shutdown.
         drop(submitter);
 
-        // The event loop should shut down before the recv completes,
-        // dropping `tx` and causing `rx` to return RecvError.
-        let err = rx.await.unwrap_err();
-        assert!(matches!(err, RecvError { .. }));
+        // Once the shutdown budget expires, the recv is cancelled and reports
+        // a timeout result.
+        let result = rx.await.expect("missing cancelled completion");
+        assert!(matches!(result, Err((_, crate::Error::Timeout))));
         handle.join().unwrap();
     }
 
@@ -2724,11 +2762,11 @@ mod tests {
         // waiter-full state into shutdown rather than sleeping forever.
         drop(submitter);
 
-        let err = tokio::time::timeout(Duration::from_secs(2), rx)
+        let result = tokio::time::timeout(Duration::from_secs(2), rx)
             .await
-            .expect("shutdown abandonment timed out")
-            .unwrap_err();
-        assert!(matches!(err, RecvError { .. }));
+            .expect("shutdown cancellation timed out")
+            .expect("missing cancelled completion");
+        assert!(matches!(result, Err((_, crate::Error::Timeout))));
 
         drop(pipe_right);
         handle.join().unwrap();
@@ -2863,9 +2901,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_shutdown_timeout_abandons_timed_op_after_cutoff() {
-        // Verify a bounded shutdown abandons even deadline-bearing requests
-        // once the shutdown cutoff expires before the request deadline.
+    async fn test_shutdown_timeout_cancels_timed_op_after_cutoff() {
+        // Verify a bounded shutdown cancels even deadline-bearing requests
+        // once the shutdown cutoff expires before the request deadline. The
+        // request must be driven to a cancelled completion (not dropped with
+        // buffers the kernel may still reference).
         let cfg = RingConfig {
             max_request_timeout: Duration::from_millis(750),
             timeout_wheel_tick: Duration::from_millis(5),
@@ -2898,13 +2938,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         drop(submitter);
 
-        // The request should be abandoned once shutdown times out, which drops
-        // the oneshot sender instead of returning a logical timeout result.
-        let err = tokio::time::timeout(Duration::from_secs(2), rx)
+        // The request should be cancelled once the shutdown budget expires,
+        // delivering a timeout result well before the 500ms request deadline.
+        let result = tokio::time::timeout(Duration::from_millis(400), rx)
             .await
-            .expect("shutdown abandonment timed out")
-            .unwrap_err();
-        assert!(matches!(err, RecvError { .. }));
+            .expect("shutdown cancellation timed out")
+            .expect("missing cancelled completion");
+        assert!(matches!(result, Err((_, crate::Error::Timeout))));
         handle.join().unwrap();
     }
 

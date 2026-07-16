@@ -260,6 +260,28 @@ impl Waiters {
         }
     }
 
+    /// Request cancellation for every active waiter, optionally restricted to
+    /// waiters whose callers have disappeared.
+    ///
+    /// Returns, for each transitioned waiter, its id, its deadline tick (so
+    /// the caller can release timeout-wheel accounting), and whether it has an
+    /// operation SQE in flight (requiring an async-cancel SQE). Waiters that
+    /// are not in flight retire locally when restaged.
+    pub fn cancel_active(&mut self, only_orphans: bool) -> Vec<(WaiterId, Option<Tick>, bool)> {
+        let mut cancelled = Vec::new();
+        for slot in self.entries.iter_mut().filter_map(Option::as_mut) {
+            let WaiterState::Active { target_tick } = slot.state else {
+                continue;
+            };
+            if only_orphans && !slot.request.is_orphaned() {
+                continue;
+            }
+            slot.state = WaiterState::CancelRequested;
+            cancelled.push((slot.id, target_tick, slot.in_flight));
+        }
+        cancelled
+    }
+
     /// Stage the next SQE for a waiter.
     ///
     /// This either returns the next SQE to issue, or removes the waiter from

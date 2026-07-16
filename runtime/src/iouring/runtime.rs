@@ -9,11 +9,14 @@
 //! producer enqueues work, or another thread wakes a task.
 //!
 //! Tasks spawned with [crate::Spawner::dedicated] or
-//! [crate::Spawner::shared] with `blocking == true` run on their own detached
-//! OS threads (driven by `futures::executor::block_on`) so they cannot starve
-//! the executor thread. They interact with the runtime through the same
-//! thread-safe primitives as executor tasks: ring submissions travel over the
-//! submission channel and task wakes latch the loop's wake state.
+//! [crate::Spawner::shared] with `blocking == true` run on their own
+//! runtime-owned OS threads (driven by `futures::executor::block_on`) so they
+//! cannot starve the executor thread. They interact with the runtime through
+//! the same thread-safe primitives as executor tasks: ring submissions travel
+//! over the submission channel and task wakes latch the loop's wake state.
+//! These threads are joined when the runtime shuts down (after their tasks
+//! are aborted), so a task that blocks its thread indefinitely without
+//! reaching an await point prevents [crate::Runner::start] from returning.
 
 #[cfg(feature = "external")]
 use crate::Pacer;
@@ -59,7 +62,7 @@ use std::{
     sync::{Arc, Weak},
     task::{self, Poll, Waker},
     thread::JoinHandle,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 cfg_if::cfg_if! {
@@ -71,6 +74,12 @@ cfg_if::cfg_if! {
         const DEFAULT_RING_SIZE: u32 = 1024;
     }
 }
+
+/// Far-future cap for sleep durations so conversions to [Instant] cannot
+/// overflow (e.g. when sleeping until [SystemTime::limit]).
+///
+/// [SystemTime::limit]: commonware_utils::SystemTimeExt::limit
+const MAX_SLEEP: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
 
 #[derive(Debug)]
 struct Metrics {
@@ -300,7 +309,7 @@ impl Executor {
     }
 
     /// Wake any sleepers whose deadlines have elapsed.
-    fn wake_ready_sleepers(&self, current: SystemTime) {
+    fn wake_ready_sleepers(&self, current: Instant) {
         let mut sleeping = self.sleeping.lock();
         while let Some(next) = sleeping.peek() {
             if next.time <= current {
@@ -315,12 +324,9 @@ impl Executor {
     /// Return the delay until the next sleeper alarm, if any.
     fn next_alarm(&self) -> Option<Duration> {
         let sleeping = self.sleeping.lock();
-        sleeping.peek().map(|alarm| {
-            alarm
-                .time
-                .duration_since(SystemTime::now())
-                .unwrap_or(Duration::ZERO)
-        })
+        sleeping
+            .peek()
+            .map(|alarm| alarm.time.saturating_duration_since(Instant::now()))
     }
 }
 
@@ -432,7 +438,7 @@ impl crate::Runner for Runner {
             &executor.tasks,
             Box::pin(process.collect(move |duration| Sleeper {
                 executor: process_executor.clone(),
-                time: SystemTime::now() + duration,
+                time: Instant::now() + duration.min(MAX_SLEEP),
                 registered: false,
             })),
         );
@@ -515,7 +521,7 @@ impl crate::Runner for Runner {
             ioloop.turn(&mut ring);
 
             // Wake sleepers whose deadlines have elapsed.
-            executor.wake_ready_sleepers(SystemTime::now());
+            executor.wake_ready_sleepers(Instant::now());
 
             // If any task became ready, keep polling instead of parking.
             if executor.tasks.ready() != 0 {
@@ -527,7 +533,7 @@ impl crate::Runner for Runner {
             ioloop.park(&mut ring, executor.next_alarm());
 
             // Fire any sleepers that became due while parked.
-            executor.wake_ready_sleepers(SystemTime::now());
+            executor.wake_ready_sleepers(Instant::now());
         }));
 
         // Abort every task spawned under the root context. This wakes tasks
@@ -570,10 +576,13 @@ impl crate::Runner for Runner {
             }
         }
 
-        // Drop the runtime's own submission handle and drain in-flight ring
-        // work (bounded by the ring's `shutdown_timeout`) so kernel-owned
-        // buffers and descriptors are released before the ring is destroyed.
+        // Drop the runtime's own submission handle, cancel operations whose
+        // callers were just dropped (so e.g. an idle recv does not hold its
+        // waiter slot until its deadline), and drain in-flight ring work so
+        // kernel-owned buffers and descriptors are released before the ring
+        // is destroyed.
         drop(io);
+        ioloop.cancel_orphans();
         ioloop.drain(&mut ring);
 
         // Assert the context doesn't escape the start() function (behavior
@@ -623,6 +632,16 @@ impl ArcWake for TaskWaker {
     }
 }
 
+/// All running tasks, plus whether the executor has shut down.
+struct Running {
+    /// Tasks tracked by id.
+    tasks: BTreeMap<u128, Arc<Task>>,
+    /// Set once the executor clears the arena at teardown. Registrations that
+    /// race teardown from other threads are rejected (dropping their futures)
+    /// instead of leaking into an arena nothing will ever poll again.
+    closed: bool,
+}
+
 /// A collection of [Task]s that are being executed by the [Executor].
 struct Tasks {
     /// The next task id.
@@ -630,7 +649,7 @@ struct Tasks {
     /// Tasks ready to be polled.
     ready: Mutex<Vec<u128>>,
     /// All running tasks.
-    running: Mutex<BTreeMap<u128, Arc<Task>>>,
+    running: Mutex<Running>,
     /// Wakes the runtime thread when a task becomes ready.
     ///
     /// Latches the event loop's out-of-band wake state so a parked executor
@@ -644,7 +663,10 @@ impl Tasks {
         Self {
             counter: Mutex::new(0),
             ready: Mutex::new(Vec::new()),
-            running: Mutex::new(BTreeMap::new()),
+            running: Mutex::new(Running {
+                tasks: BTreeMap::new(),
+                closed: false,
+            }),
             unpark,
         }
     }
@@ -678,9 +700,20 @@ impl Tasks {
     }
 
     /// Register a new task to be executed.
+    ///
+    /// Registrations racing executor teardown from another thread are dropped:
+    /// the arena has already been cleared, so inserting would leak the future
+    /// (nothing polls or clears the arena again). Dropping the task's future
+    /// releases its resources and resolves its handle with [Error::Closed].
     fn register(&self, id: u128, task: Arc<Task>) {
         // Track as running until completion
-        self.running.lock().insert(id, task);
+        {
+            let mut running = self.running.lock();
+            if running.closed {
+                return;
+            }
+            running.tasks.insert(id, task);
+        }
 
         // Add to ready
         self.queue(id);
@@ -713,25 +746,27 @@ impl Tasks {
     /// deadlock if [Self::register_work] is called).
     fn get(&self, id: u128) -> Option<Arc<Task>> {
         let running = self.running.lock();
-        running.get(&id).cloned()
+        running.tasks.get(&id).cloned()
     }
 
     /// Remove a task.
     fn remove(&self, id: u128) {
-        self.running.lock().remove(&id);
+        self.running.lock().tasks.remove(&id);
     }
 
-    /// Clear all tasks.
+    /// Clear all tasks and reject future registrations.
     fn clear(&self) -> Vec<Arc<Task>> {
         // Clear ready
         self.ready.lock().clear();
 
-        // Clear running tasks
-        let running: BTreeMap<u128, Arc<Task>> = {
+        // Clear running tasks and close the arena so registrations racing
+        // teardown from other threads are dropped rather than leaked.
+        let tasks: BTreeMap<u128, Arc<Task>> = {
             let mut running = self.running.lock();
-            take(&mut *running)
+            running.closed = true;
+            take(&mut running.tasks)
         };
-        running.into_values().collect()
+        tasks.into_values().collect()
     }
 }
 
@@ -816,7 +851,12 @@ impl crate::Spawner for Context {
                 let thread = utils::thread::spawn(executor.thread_stack_size, move || {
                     futures::executor::block_on(f);
                 });
-                executor.threads.lock().push(thread);
+                let mut threads = executor.threads.lock();
+                // Reap finished threads so completed tasks release their
+                // (joinable) thread resources promptly instead of accumulating
+                // them until shutdown.
+                threads.retain(|thread| !thread.is_finished());
+                threads.push(thread);
             }
         }
 
@@ -929,15 +969,19 @@ impl crate::Metrics for Context {
     }
 }
 
-/// A future that resolves once a wall-clock deadline has passed.
+/// A future that resolves once a deadline has passed.
+///
+/// Deadlines are tracked on the monotonic clock: wall-clock inputs (e.g.
+/// [Clock::sleep_until]) are converted once at creation, so a system clock
+/// step can neither strand a sleeper nor fire it early.
 struct Sleeper {
     executor: Weak<Executor>,
-    time: SystemTime,
+    time: Instant,
     registered: bool,
 }
 
 struct Alarm {
-    time: SystemTime,
+    time: Instant,
     waker: Waker,
 }
 
@@ -966,7 +1010,7 @@ impl Future for Sleeper {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        if SystemTime::now() >= self.time {
+        if Instant::now() >= self.time {
             return Poll::Ready(());
         }
         if !self.registered {
@@ -987,19 +1031,20 @@ impl Clock for Context {
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        let deadline = self
-            .current()
-            .checked_add(duration)
-            .expect("overflow when setting wake time");
-        self.sleep_until(deadline)
+        Sleeper {
+            executor: self.executor.clone(),
+            time: Instant::now() + duration.min(MAX_SLEEP),
+            registered: false,
+        }
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        Sleeper {
-            executor: self.executor.clone(),
-            time: deadline,
-            registered: false,
-        }
+        // Convert the wall-clock deadline to a monotonic one exactly once so
+        // later system clock steps do not move the wakeup.
+        let delay = deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or_default();
+        self.sleep(delay)
     }
 }
 
@@ -1109,5 +1154,44 @@ impl crate::BufferPooler for Context {
 
     fn storage_buffer_pool(&self) -> &BufferPool {
         &self.storage_buffer_pool
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Runner as _;
+
+    #[test]
+    fn test_finished_threads_reaped_on_next_spawn() {
+        // Completed blocking/dedicated tasks must release their (joinable)
+        // thread resources on the next thread spawn instead of accumulating
+        // them until shutdown.
+        Runner::default().start(|context| async move {
+            context
+                .child("first")
+                .shared(true)
+                .spawn(|_| async {})
+                .await
+                .unwrap();
+
+            // Wait for the first task's thread to finish. Completion of the
+            // task's handle slightly precedes thread exit, so poll.
+            let executor = context.executor();
+            loop {
+                {
+                    let threads = executor.threads.lock();
+                    if threads.iter().all(JoinHandle::is_finished) {
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Spawning the next thread reaps the finished one.
+            let handle = context.child("second").dedicated().spawn(|_| async {});
+            assert_eq!(executor.threads.lock().len(), 1);
+            handle.await.unwrap();
+        });
     }
 }
