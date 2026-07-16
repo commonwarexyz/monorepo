@@ -8,22 +8,22 @@
 //! parks via [IoUringLoop::park] until a completion arrives, a timer fires, a
 //! producer enqueues work, or another thread wakes a task.
 //!
-//! Tasks spawned with [crate::Spawner::dedicated] or
-//! [crate::Spawner::shared] with `blocking == true` run on their own
-//! runtime-owned OS threads (driven by `futures::executor::block_on`) so they
-//! cannot starve the executor thread. They interact with the runtime through
-//! the same thread-safe primitives as executor tasks: ring submissions travel
-//! over the submission channel and task wakes latch the loop's wake state.
-//! These threads are joined when the runtime shuts down (after their tasks
-//! are aborted), so a task that blocks its thread indefinitely without
-//! reaching an await point prevents [crate::Runner::start] from returning.
+//! Every task runs inline on the executor thread. Tasks spawned with
+//! [crate::Spawner::dedicated] or [crate::Spawner::shared] with
+//! `blocking == true` are temporarily unsupported and panic at spawn: the
+//! single-threaded executor cannot absorb blocking work, and the runtime
+//! manages no worker threads to offload it to. Support is planned to return
+//! with a blocking pool. Cross-thread interactions that do not submit ring
+//! operations (waking a task from a helper thread, registering a sleeper
+//! alarm, delivering a stop signal) remain supported through the loop's
+//! latched wake state.
 
 use super::{IoUringLoop, RingConfig, new_ring, waker::Waker as RingWaker};
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    Spawner as _, StreamOf, Supervisor as _, child_label,
+    StreamOf, child_label,
     network::{
         iouring::{Config as NetworkConfig, Network as IoUringNetwork},
         metered::Network as MeteredNetwork,
@@ -45,8 +45,6 @@ use commonware_utils::{channel::oneshot, sync::Mutex, sys_rng};
 use futures::task::{ArcWake, waker};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
-#[stability(BETA)]
-use rayon::ThreadPoolBuilder;
 use std::{
     collections::{BTreeMap, BinaryHeap},
     convert::Infallible,
@@ -60,7 +58,6 @@ use std::{
     pin::Pin,
     sync::{Arc, Weak},
     task::{self, Poll, Waker},
-    thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -282,9 +279,6 @@ pub struct Executor {
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
-    /// Runtime-owned threads (dedicated and blocking tasks), joined at
-    /// shutdown after their tasks have been aborted.
-    threads: Mutex<Vec<JoinHandle<()>>>,
     thread_stack_size: usize,
 }
 
@@ -423,7 +417,6 @@ impl crate::Runner for Runner {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
-            threads: Mutex::new(Vec::new()),
             thread_stack_size: self.cfg.thread_stack_size,
         });
 
@@ -537,14 +530,12 @@ impl crate::Runner for Runner {
             }
         }));
 
-        // Abort every task spawned under the root context. This wakes tasks
-        // parked on dedicated threads so their `block_on` calls observe the
-        // abort and return.
+        // Abort every task spawned under the root context so registrations
+        // racing teardown observe the abort.
         root_tree.abort();
 
-        // Clear remaining tasks from the executor before joining threads:
-        // dropping task futures releases resources (e.g. rayon pools) that
-        // runtime-owned threads may be blocked on.
+        // Clear remaining tasks from the executor: dropping task futures
+        // releases the resources they hold (e.g. rayon pools).
         //
         // It is critical that we wait to drop the strong reference to executor
         // until after we have dropped all tasks (as they may attempt to
@@ -560,22 +551,6 @@ impl crate::Runner for Runner {
 
         // Drop the root task to release any Context references it may still hold.
         drop(root);
-
-        // Join runtime-owned threads. Threads spawned while joining (e.g. by a
-        // dedicated task that spawns another dedicated task while shutting
-        // down) are joined as well.
-        loop {
-            let threads = {
-                let mut threads = executor.threads.lock();
-                take(&mut *threads)
-            };
-            if threads.is_empty() {
-                break;
-            }
-            for thread in threads {
-                let _ = thread.join();
-            }
-        }
 
         // Drop the runtime's own submission handle, cancel operations whose
         // callers were just dropped (so e.g. an idle recv does not hold its
@@ -845,19 +820,13 @@ impl crate::Spawner for Context {
             Execution::Shared(false) => {
                 Tasks::register_work(&executor.tasks, Box::pin(f));
             }
-            // The single-threaded executor cannot absorb blocking work, so
-            // blocking-hinted and dedicated tasks each run on their own
-            // runtime-owned thread.
+            // The single-threaded executor cannot absorb blocking work, and the
+            // runtime manages no worker threads to offload it to. Support is
+            // planned to return with a blocking pool.
             Execution::Shared(true) | Execution::Dedicated => {
-                let thread = utils::thread::spawn(executor.thread_stack_size, move || {
-                    futures::executor::block_on(f);
-                });
-                let mut threads = executor.threads.lock();
-                // Reap finished threads so completed tasks release their
-                // (joinable) thread resources promptly instead of accumulating
-                // them until shutdown.
-                threads.retain(|thread| !thread.is_finished());
-                threads.push(thread);
+                panic!(
+                    "blocking and dedicated tasks are temporarily unsupported on the io_uring runtime"
+                );
             }
         }
 
@@ -895,22 +864,18 @@ impl crate::Spawner for Context {
     }
 }
 
+/// The runtime manages no worker threads, so the pool has no background workers: the
+/// executor thread registers itself as its sole member and all work executes inline.
+/// The requested parallelism still controls adaptive decisions and manual partitioning
+/// hints while Rayon executes on the sole registered thread.
 #[stability(BETA)]
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(parallelism.get())
-            .spawn_handler(move |thread| {
-                // Tasks spawned in a thread pool are expected to run longer than any single
-                // task and thus should be provisioned as a dedicated thread.
-                self.child("rayon_thread")
-                    .dedicated()
-                    .spawn(move |_| async move { thread.run() });
-                Ok(())
-            })
-            .build()
-            .expect("failed to create io_uring Rayon thread pool");
-        Rayon::with_pool(Arc::new(pool))
+        Rayon::with_pool(
+            crate::utils::rayon::shared_thread_pool()
+                .expect("failed to create io_uring Rayon thread pool"),
+        )
+        .with_parallelism(parallelism)
     }
 }
 
@@ -1161,38 +1126,21 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Runner as _;
+    use crate::{Runner as _, Spawner as _, Supervisor as _};
 
     #[test]
-    fn test_finished_threads_reaped_on_next_spawn() {
-        // Completed blocking/dedicated tasks must release their (joinable)
-        // thread resources on the next thread spawn instead of accumulating
-        // them until shutdown.
+    #[should_panic(expected = "temporarily unsupported on the io_uring runtime")]
+    fn test_spawn_blocking_panics() {
         Runner::default().start(|context| async move {
-            context
-                .child("first")
-                .shared(true)
-                .spawn(|_| async {})
-                .await
-                .unwrap();
+            context.child("blocking").shared(true).spawn(|_| async {});
+        });
+    }
 
-            // Wait for the first task's thread to finish. Completion of the
-            // task's handle slightly precedes thread exit, so poll.
-            let executor = context.executor();
-            loop {
-                {
-                    let threads = executor.threads.lock();
-                    if threads.iter().all(JoinHandle::is_finished) {
-                        break;
-                    }
-                }
-                context.sleep(Duration::from_millis(10)).await;
-            }
-
-            // Spawning the next thread reaps the finished one.
-            let handle = context.child("second").dedicated().spawn(|_| async {});
-            assert_eq!(executor.threads.lock().len(), 1);
-            handle.await.unwrap();
+    #[test]
+    #[should_panic(expected = "temporarily unsupported on the io_uring runtime")]
+    fn test_spawn_dedicated_panics() {
+        Runner::default().start(|context| async move {
+            context.child("dedicated").dedicated().spawn(|_| async {});
         });
     }
 }

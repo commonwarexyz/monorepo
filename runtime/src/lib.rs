@@ -3417,22 +3417,23 @@ mod tests {
 
         #[test]
         fn test_iouring_cross_thread_wake() {
-            // Verify a task on a dedicated thread can wake the runtime thread
-            // out of its park: the sleep gives the runtime time to park (so
-            // the alarm is registered from another thread against a parked
-            // runtime), and the oneshot send must then unblock the root task.
+            // Verify a foreign thread can wake the runtime thread out of its
+            // park: the sleep gives the runtime time to park (so the alarm is
+            // registered from another thread against a parked runtime), and
+            // the oneshot send must then unblock the root task.
             let executor = iouring::Runner::default();
             executor.start(|context| async move {
                 let start = std::time::Instant::now();
                 let (tx, rx) = oneshot::channel();
-                context
-                    .child("worker")
-                    .dedicated()
-                    .spawn(move |context| async move {
-                        context.sleep(Duration::from_millis(50)).await;
-                        tx.send(42).unwrap();
-                    });
+                let thread = std::thread::spawn(move || {
+                    futures::executor::block_on(context.sleep(Duration::from_millis(50)));
+                    tx.send(42).unwrap();
+                });
                 assert_eq!(rx.await.unwrap(), 42);
+
+                // Join so the thread's context clone drops before teardown
+                // asserts that no context escaped the runtime.
+                thread.join().unwrap();
 
                 // The wake must arrive promptly after the 50ms sleep, not at
                 // the runtime's next unrelated park deadline.
@@ -3699,12 +3700,6 @@ mod tests {
         }
 
         #[test]
-        fn test_iouring_spawn_dedicated() {
-            let executor = iouring::Runner::default();
-            test_spawn_dedicated(executor);
-        }
-
-        #[test]
         fn test_iouring_spawn() {
             let runner = iouring::Runner::default();
             test_spawn(runner);
@@ -3746,39 +3741,9 @@ mod tests {
             test_spawn_sparse_clone_chain(runner);
         }
 
-        #[test]
-        fn test_iouring_spawn_blocking() {
-            for dedicated in [false, true] {
-                let executor = iouring::Runner::default();
-                test_spawn_blocking(executor, dedicated);
-            }
-        }
-
-        #[test]
-        #[should_panic(expected = "blocking task panicked")]
-        fn test_iouring_spawn_blocking_panic() {
-            for dedicated in [false, true] {
-                let executor = iouring::Runner::default();
-                test_spawn_blocking_panic(executor, dedicated);
-            }
-        }
-
-        #[test]
-        fn test_iouring_spawn_blocking_panic_caught() {
-            for dedicated in [false, true] {
-                let cfg = iouring::Config::default().with_catch_panics(true);
-                let executor = iouring::Runner::new(cfg);
-                test_spawn_blocking_panic_caught(executor, dedicated);
-            }
-        }
-
-        #[test]
-        fn test_iouring_spawn_blocking_abort() {
-            for (dedicated, blocking) in [(false, true), (true, false)] {
-                let executor = iouring::Runner::default();
-                test_spawn_abort(executor, dedicated, blocking);
-            }
-        }
+        // Blocking and dedicated spawns are temporarily unsupported on the
+        // io_uring runtime: the panic behavior is covered by
+        // `iouring::runtime::tests::{test_spawn_blocking_panics, test_spawn_dedicated_panics}`.
 
         #[test]
         fn test_iouring_circular_reference_prevents_cleanup() {
