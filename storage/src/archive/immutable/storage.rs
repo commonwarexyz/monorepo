@@ -270,19 +270,22 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
 
     #[boxed]
     async fn destroy(self) -> Result<(), Error> {
-        // Destroy ordinal
-        self.ordinal.destroy().await?;
+        // ONE batch stages every partition removal (ordinal, freezer, and the commit
+        // record's), so destruction is all-or-nothing.
+        let mut batch = self.context.batch().await?;
 
-        // Destroy freezer
-        self.freezer.destroy().await?;
+        // Stage the ordinal's destruction
+        self.ordinal.destroy_into(&mut batch).await?;
 
-        // Destroy the commit record
+        // Stage the freezer's destruction
+        self.freezer.destroy_into(&mut batch).await?;
+
+        // Stage the commit record's destruction (its partition always exists: the blob is
+        // created at initialization)
         drop(self.commit);
-        self.context
-            .remove(&self.partition, Some(COMMIT_BLOB_NAME))
-            .await?;
-        self.context.remove(&self.partition, None).await?;
+        batch.remove(&self.partition, None);
 
+        batch.apply_sync().await?;
         Ok(())
     }
 }

@@ -185,11 +185,14 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         self.indices.contains_key(&index)
     }
 
-    /// Prune [Cache] to the provided `min`.
+    /// Prune [Cache] to the provided `min`, in ONE atomic commit.
     ///
     /// If this is called with a min lower than the last pruned, nothing
     /// will happen.
-    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+    pub async fn prune(&mut self, min: u64) -> Result<(), Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         // Update `min` to reflect section mask
         let min = self.section(min);
 
@@ -286,8 +289,11 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         self.sync().await
     }
 
-    /// Remove all persistent data created by this [Cache].
-    pub async fn destroy(self) -> Result<(), Error> {
+    /// Remove all persistent data created by this [Cache], in ONE atomic commit.
+    pub async fn destroy(self) -> Result<(), Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.journal.destroy().await.map_err(Error::Journal)
     }
 }

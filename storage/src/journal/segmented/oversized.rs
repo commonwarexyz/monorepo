@@ -46,7 +46,7 @@ use super::{
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{Batchable, BufferPooler, Handle, Metrics, Storage, WriteBatch as _};
-use futures::{future::try_join, stream::Stream};
+use futures::stream::Stream;
 use std::{collections::BTreeSet, num::NonZeroUsize};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -394,17 +394,22 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
 
     /// Destroy all underlying storage.
     ///
-    /// Every blob's removal is staged in ONE atomic commit, so a crash can never leave
-    /// index sections whose value store was already removed. The emptied partitions
-    /// are then removed.
-    pub async fn destroy(mut self) -> Result<(), Error> {
+    /// Every blob's removal and both partitions' land in ONE atomic commit, so
+    /// destruction is all-or-nothing.
+    pub async fn destroy(self) -> Result<(), Error> {
         let mut batch = self.context.batch().await?;
-        self.index.clear_into(&mut batch).await?;
-        self.values.clear_into(&mut batch).await?;
-        batch.apply_sync().await?;
-        try_join(self.index.destroy(), self.values.destroy())
-            .await
-            .map(|_| ())
+        self.destroy_into(&mut batch).await?;
+        batch.apply_sync().await.map_err(Error::Runtime)
+    }
+
+    /// [Self::destroy], staged with `batch` (see
+    /// [super::manager::Manager::destroy_into] for the caller contract).
+    pub(crate) async fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.index.destroy_into(batch).await?;
+        self.values.destroy_into(batch).await
     }
 }
 

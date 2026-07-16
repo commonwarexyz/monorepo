@@ -532,8 +532,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         self.manager.sync_all().await
     }
 
-    /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
-    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
+    /// Prunes all `sections` less than `min`, in ONE atomic commit. Returns true if any
+    /// sections were pruned.
+    pub async fn prune(&mut self, min: u64) -> Result<bool, Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.manager.prune(min).await
     }
 
@@ -557,15 +561,22 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         self.manager.num_sections()
     }
 
-    /// Removes any underlying blobs created by the journal.
-    pub async fn destroy(self) -> Result<(), Error> {
+    /// Removes any underlying blobs created by the journal (and its partition), in ONE
+    /// atomic commit.
+    pub async fn destroy(self) -> Result<(), Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.manager.destroy().await
     }
 
-    /// Clear all data, resetting the journal to an empty state.
+    /// Clear all data, resetting the journal to an empty state, in ONE atomic commit.
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
-    pub async fn clear(&mut self) -> Result<(), Error> {
+    pub async fn clear(&mut self) -> Result<(), Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.manager.clear().await
     }
 }

@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_macros::boxed;
-use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::GaugeExt};
+use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::GaugeExt, WriteBatch as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -341,10 +341,20 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     }
 
     /// Durably persist the queue, guaranteeing the current state will survive a crash, and
-    /// prune acknowledged items.
+    /// prune acknowledged items: the sync and the prune land in ONE atomic commit.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.journal.sync().await?;
-        self.journal.prune(self.ack_floor).await?;
+        let mut batch = self
+            .journal
+            .context()
+            .batch()
+            .await
+            .map_err(crate::journal::Error::Runtime)?;
+        self.journal.sync_into(&mut batch).await?;
+        self.journal.prune_into(self.ack_floor, &mut batch).await?;
+        batch
+            .apply_sync()
+            .await
+            .map_err(crate::journal::Error::Runtime)?;
         Ok(())
     }
 

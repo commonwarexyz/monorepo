@@ -30,7 +30,7 @@ use commonware_runtime::{
         metrics::{CounterFamily, Histogram, MetricsExt as _},
         traces::TracedExt as _,
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    Batchable, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::AbortablePool};
@@ -109,7 +109,7 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: BufferPooler + Clock + CryptoRng + Spawner + Batchable + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -142,7 +142,7 @@ pub struct Actor<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+        E: BufferPooler + Clock + CryptoRng + Spawner + Batchable + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,

@@ -294,7 +294,6 @@ pub(crate) mod test {
 
     use crate::{
         index::Unordered as UnorderedIndex,
-        journal::contiguous::Mutable,
         merkle::mmr,
         qmdb::any::{
             db::Db as AnyDb,
@@ -317,7 +316,7 @@ pub(crate) mod test {
     where
         E: crate::Context,
         U: UpdateTrait,
-        C: Mutable<Item = AnyOperation<mmr::Family, U>>,
+        C: crate::journal::authenticated::Inner<E, Item = AnyOperation<mmr::Family, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         AnyOperation<mmr::Family, U>: Codec,

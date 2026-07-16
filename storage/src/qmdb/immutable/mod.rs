@@ -222,6 +222,37 @@ where
         Ok(())
     }
 
+    /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
+    /// affect retrieval of any keys that were set prior to `prune_loc`.
+    ///
+    /// Pruning is irreversible and requires no prior commit. After a crash, the database remains
+    /// recoverable; uncommitted operations are not guaranteed to survive.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::merkle::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
+    #[tracing::instrument(name = "qmdb.immutable.db.prune", level = "info", skip_all)]
+    pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
+        let _timer = self.metrics.prune_timer();
+        self.metrics.prune_calls.inc();
+        if loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+        self.journal.prune(loc).await?;
+        self.update_metrics();
+        Ok(())
+    }
+
+    /// Destroy the db, removing all data from disk.
+    #[boxed]
+    pub async fn destroy(self) -> Result<(), Error<F>> {
+        Ok(self.journal.destroy().await?)
+    }
+
     /// Initialize from a pre-constructed authenticated journal.
     ///
     /// Seeds an initial commit if the journal is empty, builds the in-memory snapshot,
@@ -515,31 +546,6 @@ where
         self.historical_proof(op_count, start_index, max_ops).await
     }
 
-    /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
-    /// affect retrieval of any keys that were set prior to `prune_loc`.
-    ///
-    /// Pruning is irreversible and requires no prior commit. After a crash, the database remains
-    /// recoverable; uncommitted operations are not guaranteed to survive.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::merkle::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
-    #[tracing::instrument(name = "qmdb.immutable.db.prune", level = "info", skip_all)]
-    pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
-        let _timer = self.metrics.prune_timer();
-        self.metrics.prune_calls.inc();
-        if loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-        self.journal.prune(loc).await?;
-        self.update_metrics();
-        Ok(())
-    }
-
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
     /// This rewinds both the operations journal and its Merkle structure to the historical
@@ -654,12 +660,6 @@ where
             .pinned_nodes_at(loc)
             .await
             .map_err(Into::into)
-    }
-
-    /// Destroy the db, removing all data from disk.
-    #[boxed]
-    pub async fn destroy(self) -> Result<(), Error<F>> {
-        Ok(self.journal.destroy().await?)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.

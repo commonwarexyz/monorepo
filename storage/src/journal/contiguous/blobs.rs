@@ -119,6 +119,7 @@ impl<E: Context> Partition<E> {
     }
 
     /// Remove an entire partition by name, treating "already missing" as success.
+    #[cfg(test)]
     pub(super) async fn remove_all(context: &E, name: &str) -> Result<(), Error> {
         match context.remove(name, None).await {
             Ok(()) | Err(RError::PartitionMissing(_)) => Ok(()),
@@ -530,14 +531,12 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
-    /// Remove every blob and the partition itself.
-    pub(super) async fn destroy(self) -> Result<(), Error> {
-        let tail_blob = self.tail_blob_index();
+    /// Stage the removal of the whole data partition (every blob) with `batch`.
+    ///
+    /// The partition always exists: the tail blob is created at initialization.
+    pub(super) fn stage_destroy(self, batch: &mut E::Batch) {
         drop(self.tail);
-        for blob in self.oldest_blob_index..=tail_blob {
-            self.partition.remove(blob).await?;
-        }
-        Partition::remove_all(&self.partition.context, &self.partition.name).await
+        commonware_runtime::WriteBatch::remove(batch, &self.partition.name, None);
     }
 }
 

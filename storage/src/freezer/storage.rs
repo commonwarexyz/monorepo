@@ -1001,17 +1001,30 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(checkpoint)
     }
 
-    /// Close and remove any underlying blobs created by the [Freezer].
+    /// Close and remove any underlying blobs created by the [Freezer], in ONE atomic commit.
     pub async fn destroy(self) -> Result<(), Error> {
-        // Destroy oversized journal
-        self.oversized.destroy().await?;
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        self.destroy_into(&mut batch).await?;
+        commonware_runtime::WriteBatch::apply_sync(batch)
+            .await
+            .map_err(Error::Runtime)
+    }
 
-        // Destroy the table
+    /// [Self::destroy], staged with `batch`: every partition removal (both the oversized
+    /// journal's and the table's) lands when the caller applies the batch with `apply_sync`,
+    /// atomically with everything else it stages.
+    ///
+    /// The table partition always exists: the table blob is created at initialization.
+    pub(crate) async fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        // Stage the oversized journal's destruction
+        self.oversized.destroy_into(batch).await?;
+
+        // Stage the table's destruction
         drop(self.table);
-        self.context
-            .remove(&self.table_partition, Some(TABLE_BLOB_NAME))
-            .await?;
-        self.context.remove(&self.table_partition, None).await?;
+        batch.remove(&self.table_partition, None);
 
         Ok(())
     }

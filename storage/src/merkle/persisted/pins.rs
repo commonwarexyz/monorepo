@@ -2,10 +2,9 @@
 //!
 //! Pruning removes journal blobs holding nodes that root and proof generation still need. The
 //! `Pins` record preserves exactly that set: the pruning boundary and the digests of
-//! [`Family::nodes_to_pin`] at that boundary. It is written durably BEFORE the journal prunes
-//! to the boundary, so a crash between the two leaves the record ahead of the journal — a
-//! state init reconciles by finishing the prune (the reverse order could discard digests
-//! permanently).
+//! [`Family::nodes_to_pin`] at that boundary. Every owner stages the record rewrite in the
+//! SAME batch as the journal prune it describes (or writes it alone, for owners with no
+//! journal), so record and journal can never describe different histories.
 //!
 //! # Format
 //!
@@ -22,7 +21,7 @@ use crate::{
 };
 use commonware_codec::{FixedSize as _, ReadExt as _, Write as _};
 use commonware_cryptography::Digest;
-use commonware_runtime::{Blob as _, Buf as _};
+use commonware_runtime::{Blob as _, Buf as _, WriteBatch as _};
 use std::collections::BTreeMap;
 
 /// Name of the blob holding the encoded record.
@@ -96,17 +95,13 @@ impl<F: Family, E: Context, D: Digest> Pins<F, E, D> {
         self.nodes.get(&pos)
     }
 
-    /// Durably rewrite the record wholesale: `nodes` must hold exactly the digests of
+    /// Encode the record wholesale: `nodes` must hold exactly the digests of
     /// `F::nodes_to_pin(pruned_to)`.
     ///
     /// # Panics
     ///
     /// Panics if `nodes` does not hold exactly the pinned positions for `pruned_to`.
-    pub(crate) async fn write(
-        &mut self,
-        pruned_to: Location<F>,
-        nodes: BTreeMap<Position<F>, D>,
-    ) -> Result<(), Error<F>> {
+    fn encode(pruned_to: Location<F>, nodes: &BTreeMap<Position<F>, D>) -> Vec<u8> {
         // Digests are encoded in `nodes_to_pin` order (which decode mirrors), not map order.
         let mut bytes = Vec::with_capacity(u64::SIZE + nodes.len() * D::SIZE);
         pruned_to.as_u64().write(&mut bytes);
@@ -123,6 +118,16 @@ impl<F: Family, E: Context, D: Digest> Pins<F, E, D> {
             nodes.len(),
             "nodes must hold exactly the pinned positions"
         );
+        bytes
+    }
+
+    /// Durably rewrite the record wholesale (see [Self::encode] for the `nodes` contract).
+    pub(crate) async fn write(
+        &mut self,
+        pruned_to: Location<F>,
+        nodes: BTreeMap<Position<F>, D>,
+    ) -> Result<(), Error<F>> {
+        let bytes = Self::encode(pruned_to, &nodes);
 
         // Trim any longer previous record before the sync publishes the new one atomically.
         self.blob
@@ -138,6 +143,28 @@ impl<F: Family, E: Context, D: Digest> Pins<F, E, D> {
         Ok(())
     }
 
+    /// [Self::write], staged with `batch`: the rewrite lands when the caller applies the
+    /// batch with `apply_sync`, atomically with everything else it stages.
+    pub(crate) async fn write_into(
+        &mut self,
+        pruned_to: Location<F>,
+        nodes: BTreeMap<Position<F>, D>,
+        batch: &mut E::Batch,
+    ) -> Result<(), Error<F>> {
+        let bytes = Self::encode(pruned_to, &nodes);
+        batch
+            .resize(&self.blob, bytes.len() as u64)
+            .await
+            .map_err(Error::Runtime)?;
+        batch
+            .write_at(&self.blob, 0, bytes)
+            .await
+            .map_err(Error::Runtime)?;
+        self.pruned_to = pruned_to;
+        self.nodes = nodes;
+        Ok(())
+    }
+
     /// Remove the record's partition.
     pub(crate) async fn destroy(self) -> Result<(), Error<F>> {
         drop(self.blob);
@@ -145,6 +172,14 @@ impl<F: Family, E: Context, D: Digest> Pins<F, E, D> {
             .remove(&self.partition, None)
             .await
             .map_err(Error::Runtime)
+    }
+
+    /// Stage the removal of the record's partition with `batch`.
+    ///
+    /// The partition always exists: the record blob is created at open.
+    pub(crate) fn destroy_into(self, batch: &mut E::Batch) {
+        drop(self.blob);
+        batch.remove(&self.partition, None);
     }
 }
 

@@ -34,7 +34,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    Batchable, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
@@ -60,7 +60,7 @@ struct Verify<C: PublicKey, D: Digest> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + CryptoRng + Storage + Metrics,
+    E: BufferPooler + Clock + Spawner + CryptoRng + Batchable + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
@@ -198,7 +198,7 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + CryptoRng + Storage + Metrics,
+        E: BufferPooler + Clock + Spawner + CryptoRng + Batchable + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,

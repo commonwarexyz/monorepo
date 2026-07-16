@@ -3,8 +3,8 @@
 use crate::{
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
-    Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Spawner, Storage, Supervisor,
+    Batchable, Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
+    Metrics, Name, Spawner, Storage, Supervisor,
 };
 use bytes::{Bytes, BytesMut};
 use commonware_utils::{
@@ -622,11 +622,115 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
     }
 }
 
-impl<E: Storage + Clone + Send + Sync + 'static> crate::Batchable for DelayedSyncContext<E> {
-    type Batch = SequentialBatch<Self>;
+impl<E: Batchable + Send + Sync + 'static> crate::Batchable for DelayedSyncContext<E> {
+    type Batch = DelayedSyncBatch<E>;
 
     async fn batch(&self) -> Result<Self::Batch, Error> {
-        Ok(SequentialBatch::new(self.clone()))
+        Ok(DelayedSyncBatch {
+            ops: Vec::new(),
+            inner: self.inner.batch().await?,
+            pending: self.pending.clone(),
+            namespace_ops: 0,
+        })
+    }
+}
+
+/// A [SequentialBatch]-style batch for [DelayedSyncContext], whose inner
+/// context may not be [Clone] (e.g. a runtime context): blob operations
+/// stage against the WRAPPER's blobs so replay preserves the sync gating,
+/// while namespace removals and creations stage on an inner batch.
+///
+/// Like [SequentialBatch], this delivers NO cross-blob atomicity: apply
+/// replays writes and resizes in staging order, apply_sync then syncs every
+/// staged blob through the wrapper (in staging order) and finally applies
+/// the inner batch (removals and creations last). A staged write against a
+/// blob created in the same batch is NOT supported (the creation lands only
+/// when the inner batch applies); no consumer stages both.
+pub struct DelayedSyncBatch<E: Batchable> {
+    ops: Vec<SequentialOp<DelayedSyncBlob<E::Blob>>>,
+    inner: E::Batch,
+    pending: PendingSyncs,
+    namespace_ops: usize,
+}
+
+impl<E: Batchable + Send + Sync + 'static> crate::WriteBatch for DelayedSyncBatch<E> {
+    type Blob = DelayedSyncBlob<E::Blob>;
+
+    async fn write_at(
+        &mut self,
+        blob: &Self::Blob,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.ops
+            .push(SequentialOp::Write(blob.clone(), offset, bufs.into()));
+        Ok(())
+    }
+
+    async fn resize(&mut self, blob: &Self::Blob, len: u64) -> Result<(), Error> {
+        self.ops.push(SequentialOp::Resize(blob.clone(), len));
+        Ok(())
+    }
+
+    fn sync(&mut self, blob: &Self::Blob) {
+        self.ops.push(SequentialOp::Sync(blob.clone()));
+    }
+
+    fn remove(&mut self, partition: &str, name: Option<&[u8]>) {
+        self.namespace_ops += 1;
+        self.inner.remove(partition, name);
+    }
+
+    async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+        self.namespace_ops += 1;
+        let inner = self.inner.create(partition, name).await?;
+        Ok(DelayedSyncBlob {
+            inner,
+            pending: self.pending.clone(),
+        })
+    }
+
+    async fn apply(mut self) -> Result<(), Error> {
+        assert!(
+            self.namespace_ops == 0,
+            "staged removals and creations require apply_sync"
+        );
+        for op in &mut self.ops {
+            match op {
+                SequentialOp::Write(blob, offset, bufs) => {
+                    blob.write_at(*offset, mem::take(bufs)).await?;
+                }
+                SequentialOp::Resize(blob, len) => blob.resize(*len).await?,
+                SequentialOp::Sync(_) | SequentialOp::Remove(..) => {}
+            }
+        }
+        self.inner.apply().await
+    }
+
+    async fn apply_sync(mut self) -> Result<(), Error> {
+        // Replay writes and resizes in staging order.
+        for op in &mut self.ops {
+            match op {
+                SequentialOp::Write(blob, offset, bufs) => {
+                    blob.write_at(*offset, mem::take(bufs)).await?;
+                }
+                SequentialOp::Resize(blob, len) => blob.resize(*len).await?,
+                SequentialOp::Sync(_) | SequentialOp::Remove(..) => {}
+            }
+        }
+        // Durability pass through the wrapper blobs (sync gating applies).
+        for op in &self.ops {
+            match op {
+                SequentialOp::Write(blob, ..)
+                | SequentialOp::Resize(blob, _)
+                | SequentialOp::Sync(blob) => {
+                    blob.sync().await?;
+                }
+                SequentialOp::Remove(..) => {}
+            }
+        }
+        // Namespace ops last, matching [SequentialBatch].
+        self.inner.apply_sync().await
     }
 }
 

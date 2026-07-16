@@ -68,6 +68,8 @@ impl Read for Record {
 
 /// The journal's durable recovery checkpoint.
 pub(super) struct Checkpoint<E: Context> {
+    /// Retained only for test helpers that build their own batches.
+    #[cfg(test)]
     context: E,
     partition: String,
     blob: E::Blob,
@@ -95,6 +97,7 @@ impl<E: Context> Checkpoint<E> {
         };
 
         Ok(Self {
+            #[cfg(test)]
             context,
             partition,
             blob,
@@ -159,13 +162,12 @@ impl<E: Context> Checkpoint<E> {
         Ok(())
     }
 
-    /// Remove the checkpoint's partition.
-    pub(super) async fn destroy(self) -> Result<(), Error> {
+    /// Stage the removal of the checkpoint's partition with `batch`.
+    ///
+    /// The partition always exists: the record blob is created at open.
+    pub(super) fn destroy_into(self, batch: &mut E::Batch) {
         drop(self.blob);
-        self.context
-            .remove(&self.partition, None)
-            .await
-            .map_err(Error::Runtime)
+        batch.remove(&self.partition, None);
     }
 }
 

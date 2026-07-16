@@ -30,9 +30,12 @@ use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::telemetry::metrics::{
-    histogram::{ScopedTimer, Timed},
-    Counter, Gauge, GaugeExt as _, MetricsExt as _,
+use commonware_runtime::{
+    telemetry::metrics::{
+        histogram::{ScopedTimer, Timed},
+        Counter, Gauge, GaugeExt as _, MetricsExt as _,
+    },
+    WriteBatch as _,
 };
 use commonware_utils::{
     bitmap::{self, Readable as _},
@@ -784,14 +787,18 @@ where
         Ok(())
     }
 
-    /// Destroy the db, removing all data from disk.
+    /// Destroy the db, removing all data from disk: every partition removal (the pruning
+    /// metadata's, the ops journal's, and the Merkle structure's) lands in ONE atomic commit.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
         // Destructure before the await boundary to avoid stack growth from
         // retaining the entire `self` in the future.
         let Self { any, metadata, .. } = self;
-        metadata.destroy().await?;
-        any.destroy().await
+        let mut batch = any.log.context().batch().await?;
+        metadata.destroy_into(&mut batch);
+        any.destroy_into(&mut batch);
+        batch.apply_sync().await?;
+        Ok(())
     }
 }
 

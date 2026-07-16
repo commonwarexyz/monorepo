@@ -134,6 +134,35 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
+    /// Prune historical operations prior to `loc`. This does not affect the db's root.
+    ///
+    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
+    /// uncommitted operations are not guaranteed to survive.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor.
+    #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
+    pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
+        let _timer = self.metrics.prune_timer();
+        self.metrics.prune_calls.inc();
+        if loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+        self.journal.prune(loc).await?;
+        self.update_metrics();
+        Ok(())
+    }
+
+    /// Destroy the db, removing all data from disk.
+    #[boxed]
+    pub async fn destroy(self) -> Result<(), Error<F>> {
+        Ok(self.journal.destroy().await?)
+    }
+
     #[boxed]
     pub(crate) async fn init_from_journal(
         mut journal: authenticated::Journal<F, E, C, H, S>,
@@ -392,29 +421,6 @@ where
             .map_err(Into::into)
     }
 
-    /// Prune historical operations prior to `loc`. This does not affect the db's root.
-    ///
-    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
-    /// uncommitted operations are not guaranteed to survive.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor.
-    #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
-    pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
-        let _timer = self.metrics.prune_timer();
-        self.metrics.prune_calls.inc();
-        if loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-        self.journal.prune(loc).await?;
-        self.update_metrics();
-        Ok(())
-    }
-
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
     /// This rewinds both the operations journal and its Merkle structure to the historical state
@@ -472,12 +478,6 @@ where
         self.root = self.journal.root(inactive_peaks)?;
         self.update_metrics();
         Ok(())
-    }
-
-    /// Destroy the db, removing all data from disk.
-    #[boxed]
-    pub async fn destroy(self) -> Result<(), Error<F>> {
-        Ok(self.journal.destroy().await?)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.

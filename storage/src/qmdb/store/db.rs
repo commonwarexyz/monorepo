@@ -95,6 +95,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
+use commonware_runtime::WriteBatch as _;
 use commonware_utils::Array;
 use core::{num::NonZeroUsize, ops::Range};
 use std::collections::BTreeMap;
@@ -322,14 +323,15 @@ where
             ));
         }
 
-        // The floor justifying the boundary may exist only in buffered operations (it
-        // advances before its batch is durable), and pruning does not guarantee buffered
-        // appends are durable. Sync so the justification survives the prune.
-        self.log.sync().await?;
-
-        // Prune the log. The log will prune at section boundaries, so the actual oldest retained
-        // location may be less than requested.
-        if !self.log.prune(*prune_loc).await? {
+        // ONE batch stages the sync and the prune: the floor justifying the boundary may
+        // exist only in buffered operations (it advances before its batch is durable), so the
+        // removals must not become durable without it. The log prunes at section boundaries,
+        // so the actual oldest retained location may be less than requested.
+        let mut batch = self.log.context().batch().await?;
+        self.log.sync_into(&mut batch).await?;
+        let pruned = self.log.prune_into(*prune_loc, &mut batch).await?;
+        batch.apply_sync().await?;
+        if !pruned {
             return Ok(());
         }
 

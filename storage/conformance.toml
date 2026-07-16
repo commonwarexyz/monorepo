@@ -24,7 +24,7 @@ hash = "18b1108f18520078e2eb5bb29c6a4cdf3bded6b52d8efda19d45c0f10be27207"
 
 ["commonware_storage::cache::conformance::StorageConformance<CacheWorkload>"]
 n_cases = 256
-hash = "1b440a3849af754dc25c3ba0164959cc68a9c9f7494321cf1d1246ca655f1477"
+hash = "8c9f2268fb9ebbea4a627631a6fa6c6b30cb301dfbe2bceecc39b84de1b111b6"
 
 ["commonware_storage::cache::storage::conformance::CodecConformance<Record<u64>>"]
 n_cases = 65536
@@ -52,11 +52,11 @@ hash = "13b3e99a8c74b50dc18150194a92306de670b94e6642758feb6d9b6e9881f827"
 
 ["commonware_storage::journal::conformance::StorageConformance<AuthenticatedMmbWorkload>"]
 n_cases = 256
-hash = "6257a527af1394448248147b9c55a928aa20cce13251c1c10e82d16b0a2d3eb3"
+hash = "650b1ca0e438bb3a34f1b613a6f70a1d702fb073615ba4344b4f537f6f49ed3e"
 
 ["commonware_storage::journal::conformance::StorageConformance<AuthenticatedMmrWorkload>"]
 n_cases = 256
-hash = "7f2508d7f4a8cf4998a5de0624d463600b64e19f98f80c1f899410b771fa52b0"
+hash = "040a404f75488e7605a5148f0eee77f3a5c58ba2ed2a3f391169f512bbb61fdd"
 
 ["commonware_storage::journal::conformance::StorageConformance<ContiguousFixedWorkload>"]
 n_cases = 512
@@ -92,11 +92,11 @@ hash = "4078ce1f5e242f8edb1d41575d51e166af620404036124f8094fc74d4b401047"
 
 ["commonware_storage::merkle::conformance::tests::StorageConformance<MmbFullWorkload>"]
 n_cases = 256
-hash = "2366fea8940b8e6ed6a5661695baa7e1f061c64f427af85b609d28cc82ea99c5"
+hash = "9c4a7ca19ea0f079cbfc32f7a9de8691b60ed4066762fffb8a81c88ff78ce146"
 
 ["commonware_storage::merkle::conformance::tests::StorageConformance<MmrFullWorkload>"]
 n_cases = 256
-hash = "3cfef10774084c68be858437d744c36809a98cc4b9aa4ef6b51c7cf662dcc634"
+hash = "3593a4a154b691ac7513e7562573423a4e6d46cac4d10ee0b612faec78945561"
 
 ["commonware_storage::merkle::mmr::proof::tests::conformance::CodecConformance<Proof<Family,Sha256Digest>>"]
 n_cases = 65536
@@ -108,7 +108,7 @@ hash = "7b6242c33dd2248eed5bd3b2f5369f2e510a6699c88743dde2c097f368cff7c1"
 
 ["commonware_storage::ordinal::conformance::StorageConformance<OrdinalWorkload>"]
 n_cases = 256
-hash = "69114d54584b784c3d84657867a3e8f87e43a4b24686b7b53933321ee4f92dc8"
+hash = "b9532be4a42aa433a134fd22c065dfcde80c86f8df74ee3ec9460c855502dd0f"
 
 ["commonware_storage::ordinal::storage::conformance::CodecConformance<Record<u32>>"]
 n_cases = 65536

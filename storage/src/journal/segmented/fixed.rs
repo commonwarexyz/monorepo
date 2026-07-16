@@ -384,8 +384,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.sync_all().await
     }
 
-    /// Prune all sections less than `min`. Returns true if any were pruned.
-    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
+    /// Prune all sections less than `min`, in ONE atomic commit. Returns true if any were
+    /// pruned.
+    pub async fn prune(&mut self, min: u64) -> Result<bool, Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.manager.prune(min).await
     }
 
@@ -397,15 +401,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         batch: &mut T,
     ) -> Result<bool, Error> {
         self.manager.prune_into(min, batch).await
-    }
-
-    /// [Self::clear], staged with `batch` (see
-    /// [super::manager::Manager::clear_into] for the caller contract).
-    pub(crate) async fn clear_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
-        &mut self,
-        batch: &mut T,
-    ) -> Result<(), Error> {
-        self.manager.clear_into(batch).await
     }
 
     /// Returns the oldest section number, if any blobs exist.
@@ -449,15 +444,30 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.rewind_section(section, size).await
     }
 
-    /// Remove all underlying blobs.
-    pub async fn destroy(self) -> Result<(), Error> {
+    /// Remove all underlying blobs and the partition, in ONE atomic commit.
+    pub async fn destroy(self) -> Result<(), Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.manager.destroy().await
     }
 
-    /// Clear all data, resetting the journal to an empty state.
+    /// [Self::destroy], staged with `batch` (see
+    /// [super::manager::Manager::destroy_into] for the caller contract).
+    pub(crate) async fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.manager.destroy_into(batch).await
+    }
+
+    /// Clear all data, resetting the journal to an empty state, in ONE atomic commit.
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
-    pub async fn clear(&mut self) -> Result<(), Error> {
+    pub async fn clear(&mut self) -> Result<(), Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.manager.clear().await
     }
 }

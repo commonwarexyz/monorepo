@@ -191,8 +191,11 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         self.manager.rewind_section(section, size).await
     }
 
-    /// Prune sections before min.
-    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
+    /// Prune sections before min, in ONE atomic commit.
+    pub async fn prune(&mut self, min: u64) -> Result<bool, Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.manager.prune(min).await
     }
 
@@ -204,15 +207,6 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         batch: &mut T,
     ) -> Result<bool, Error> {
         self.manager.prune_into(min, batch).await
-    }
-
-    /// Stage the removal of every section's blob with `batch` (see
-    /// [super::manager::Manager::clear_into] for the caller contract).
-    pub(crate) async fn clear_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
-        &mut self,
-        batch: &mut T,
-    ) -> Result<(), Error> {
-        self.manager.clear_into(batch).await
     }
 
     /// Returns the number of the oldest section.
@@ -230,9 +224,21 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         self.manager.sections()
     }
 
-    /// Destroy all blobs.
-    pub async fn destroy(self) -> Result<(), Error> {
+    /// Destroy all blobs and the partition, in ONE atomic commit.
+    pub async fn destroy(self) -> Result<(), Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.manager.destroy().await
+    }
+
+    /// [Self::destroy], staged with `batch` (see
+    /// [super::manager::Manager::destroy_into] for the caller contract).
+    pub(crate) async fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.manager.destroy_into(batch).await
     }
 }
 

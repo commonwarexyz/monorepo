@@ -4,12 +4,12 @@ use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Blob, BufMut, Error as RError, IoBufMut,
+    Blob, BufMut, IoBufMut, WriteBatch as _,
 };
 use commonware_utils::Span;
 use futures::future::try_join_all;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
@@ -497,23 +497,23 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         Ok(())
     }
 
-    /// Remove the underlying blobs for this [Metadata].
+    /// Remove the underlying blobs for this [Metadata], in ONE atomic commit.
     pub async fn destroy(self) -> Result<(), Error> {
-        let state = self.state;
-        for (i, wrapper) in state.blobs.into_iter().enumerate() {
-            drop(wrapper.blob);
-            self.context
-                .remove(&self.partition, Some(BLOB_NAMES[i]))
-                .await?;
-            debug!(blob = i, "destroyed blob");
-        }
-        match self.context.remove(&self.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
-                // Partition already removed or never existed.
-            }
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-        Ok(())
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        self.destroy_into(&mut batch);
+        batch.apply_sync().await.map_err(Error::Runtime)
+    }
+
+    /// [Self::destroy], staged with `batch`: the partition's removal (covering both
+    /// double-buffered blobs) lands when the caller applies the batch with `apply_sync`,
+    /// atomically with everything else it stages.
+    ///
+    /// The partition always exists: both blobs are created at initialization.
+    pub(crate) fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        self,
+        batch: &mut T,
+    ) {
+        drop(self.state);
+        batch.remove(&self.partition, None);
     }
 }

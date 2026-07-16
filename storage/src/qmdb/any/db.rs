@@ -7,7 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated::{self, Inner},
-        contiguous::{Contiguous, Mutable},
+        contiguous::Contiguous,
         Error as JournalError,
     },
     merkle::{Family, Location, Proof},
@@ -387,7 +387,7 @@ where
     F: Family,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<F, U>>,
+    C: Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -848,5 +848,12 @@ where
         // retaining the entire `self` in the future.
         let Self { log, .. } = self;
         log.destroy().await.map_err(Into::into)
+    }
+
+    /// [Self::destroy], staged with `batch`: every partition removal lands when the caller
+    /// applies the batch with `apply_sync`, atomically with everything else it stages.
+    pub(crate) fn destroy_into(self, batch: &mut E::Batch) {
+        let Self { log, .. } = self;
+        log.destroy_into(batch);
     }
 }

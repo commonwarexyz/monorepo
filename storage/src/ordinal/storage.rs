@@ -378,7 +378,8 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         self.intervals.missing_items(start, max)
     }
 
-    /// Prune indices older than `min` by removing entire blobs.
+    /// Prune indices older than `min` by removing entire blobs: every removal lands in ONE
+    /// atomic commit.
     ///
     /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
     /// all possible indices in that blob are less than `min`.
@@ -393,23 +394,30 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             .copied()
             .collect();
 
-        // Remove the collected sections
-        for section in sections_to_remove {
-            if let Some(blob) = self.blobs.remove(&section) {
+        // Stage the collected sections' removals in one batch
+        if !sections_to_remove.is_empty() {
+            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+            for &section in &sections_to_remove {
+                let blob = self.blobs.remove(&section).expect("collected from keys");
                 drop(blob);
-                self.context
-                    .remove(&self.config.partition, Some(&section.to_be_bytes()))
-                    .await?;
+                commonware_runtime::WriteBatch::remove(
+                    &mut batch,
+                    &self.config.partition,
+                    Some(&section.to_be_bytes()),
+                );
 
                 // Remove the corresponding index range from intervals
                 let start_index = section * items_per_blob;
                 let end_index = (section + 1) * items_per_blob - 1;
                 self.intervals.remove(start_index, end_index);
                 debug!(section, start_index, end_index, "pruned blob");
-            }
 
-            // Update metrics
-            self.pruned.inc();
+                // Update metrics
+                self.pruned.inc();
+            }
+            commonware_runtime::WriteBatch::apply_sync(batch)
+                .await
+                .map_err(Error::Runtime)?;
         }
 
         // Clean pending entries that fall into pruned sections.
@@ -463,20 +471,28 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Destroy [Ordinal] and remove all data.
+    /// Destroy [Ordinal] and remove all data, in ONE atomic commit.
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
-            drop(blob);
-            self.context
-                .remove(&self.config.partition, Some(&i.to_be_bytes()))
-                .await?;
-            debug!(section = i, "destroyed blob");
-        }
-        match self.context.remove(&self.config.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
-                // Partition already removed or never existed.
-            }
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        self.destroy_into(&mut batch).await?;
+        commonware_runtime::WriteBatch::apply_sync(batch)
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// [Self::destroy], staged with `batch`: every blob's removal and the partition's land
+    /// when the caller applies the batch with `apply_sync`, atomically with everything else
+    /// it stages.
+    pub(crate) async fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        drop(self.blobs);
+        // The partition may never have been created (an ordinal that never held a record);
+        // staging its removal would then fail the whole batch.
+        match self.context.scan(&self.config.partition).await {
+            Ok(_) => batch.remove(&self.config.partition, None),
+            Err(RError::PartitionMissing(_)) => {}
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())

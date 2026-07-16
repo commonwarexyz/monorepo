@@ -25,7 +25,7 @@ use crate::{
 use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::paged::CacheRef;
+use commonware_runtime::{buffer::paged::CacheRef, WriteBatch as _};
 use commonware_utils::range::NonEmptyRange;
 use std::{
     collections::BTreeMap,
@@ -248,6 +248,13 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let pins = Pins::open(context.child("merkle_pins"), cfg.metadata_partition).await?;
 
         if journal_size == 0 {
+            // An empty journal has nothing pruned, so a record claiming otherwise describes
+            // nodes that never existed.
+            if pins.pruned_to() != Location::new(0) {
+                return Err(Error::DataCorrupted(
+                    "pins record is non-zero but the journal is empty",
+                ));
+            }
             let mem = Mem::init(MemConfig {
                 nodes: vec![],
                 pruning_boundary: Location::new(0),
@@ -263,51 +270,29 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             });
         }
 
-        // Make sure the journal's oldest retained node is as expected based on the last pruning
-        // boundary in the pins record. If they don't match, prune the journal to the appropriate
-        // location.
+        // The pins record rewrite and the journal prune it describes commit in ONE batch (as
+        // do the record and the journal clear during sync initialization), so the journal's
+        // blob-aligned boundary can trail the leaf-aligned record only within one blob — and
+        // can never lead it or outrun the journal's size. Verify instead of repairing: any
+        // other pairing is corruption. The record is the pruning boundary.
         let record_prune_pos = Position::try_from(pins.pruned_to())?;
         let journal_bounds_start = journal.bounds().start;
-        if *record_prune_pos > journal_bounds_start {
-            // The record is ahead of the journal, which is normal (the journal prunes at blob
-            // granularity) but can also mean a crash interrupted the last prune. Finish it.
-            journal.prune(*record_prune_pos).await?;
-            if journal.bounds().start != journal_bounds_start {
-                // This should only happen in the event of some failure during the last attempt to
-                // prune the journal.
-                warn!(
-                    journal_bounds_start,
-                    ?record_prune_pos,
-                    "journal pruned to match pins record"
-                );
-            }
-        } else if *record_prune_pos < journal_bounds_start {
-            // The record is stale (e.g., from before the journal was cleared for sync).
-            // Use the journal's state as authoritative.
-            warn!(
-                ?record_prune_pos,
-                journal_bounds_start, "pins record stale, using journal pruning boundary"
-            );
+        if *record_prune_pos < journal_bounds_start {
+            return Err(Error::DataCorrupted(
+                "pins record is behind the journal's pruning boundary",
+            ));
         }
-
-        // Use the more restrictive (higher) pruning boundary between the record and journal.
-        // This handles both cases: record ahead (crash during prune) and record stale.
-        //
-        // The journal boundary may not be leaf-aligned (it's blob-aligned), so round up to the
-        // position of the first leaf after the boundary.
-        let journal_boundary_pos = Position::<F>::new(journal_bounds_start);
-        let journal_boundary_floor = F::to_nearest_size(journal_boundary_pos);
-        let journal_boundary_leaf_aligned_pos = if journal_boundary_floor == journal_boundary_pos {
-            // `to_nearest_size` rounds down, so equality means the boundary is already
-            // leaf-aligned.
-            journal_boundary_floor
-        } else {
-            // If flooring backed up over the boundary, round up to the next leaf position, which
-            // is guaranteed to be above it.
-            Position::try_from(Location::try_from(journal_boundary_floor)? + 1)?
-        };
-        let effective_prune_pos =
-            std::cmp::max(record_prune_pos, journal_boundary_leaf_aligned_pos);
+        if *record_prune_pos - journal_bounds_start >= cfg.items_per_blob.get() {
+            return Err(Error::DataCorrupted(
+                "pins record is more than one blob ahead of the journal's pruning boundary",
+            ));
+        }
+        if record_prune_pos > journal_size {
+            return Err(Error::DataCorrupted(
+                "pins record is beyond the journal's size",
+            ));
+        }
+        let effective_prune_pos = record_prune_pos;
 
         let last_valid_size = F::to_nearest_size(journal_size);
         let mut orphaned_leaf: Option<D> = None;
@@ -429,16 +414,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         if journal_size > *end_pos {
             return Err(crate::journal::Error::ItemOutOfRange(*journal_size).into());
         }
-        if journal_size <= *prune_pos && *prune_pos != 0 {
-            journal.clear_to_size(*prune_pos).await?;
-            journal_size = Position::new(journal.size());
-        }
 
         // Determine the pinned node set for the sync range's pruning boundary. The set of
         // pinned nodes depends only on the prune boundary, not on the total structure size, so
         // we validate against `nodes_to_pin(prune_loc)` alone.
         let prune_loc = Location::try_from(prune_pos)?;
-        let journal_leaves = Location::try_from(journal_size)?;
         let mut pins =
             Pins::open(context.child("merkle_pins"), cfg.config.metadata_partition).await?;
         let mut record_nodes = BTreeMap::new();
@@ -460,12 +440,24 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             }
         }
 
-        // Persist the record before pruning the journal so the pinned nodes survive a crash.
-        pins.write(prune_loc, record_nodes).await?;
+        // ONE batch stages the whole transition to the sync range's boundary: the record
+        // rewrite plus either the journal's clear (existing data at or behind the boundary)
+        // or its prune (existing data straddling it), so no crash can leave the record and
+        // the journal describing different boundaries.
+        let mut batch = context.batch().await.map_err(JError::Runtime)?;
+        let cleared = if journal_size <= *prune_pos && *prune_pos != 0 {
+            journal.stage_clear(*prune_pos, &mut batch).await?;
+            journal_size = prune_pos;
+            true
+        } else {
+            false
+        };
+        pins.write_into(prune_loc, record_nodes, &mut batch).await?;
 
-        // Create the in-memory structure with the pinned nodes required for its size. This must be
-        // performed *before* pruning the journal to range.start to ensure all pinned nodes are
-        // present.
+        // Create the in-memory structure with the pinned nodes required for its size. This is
+        // performed before the prune is staged (staging updates the journal's bounds
+        // immediately) so all pinned nodes are still readable.
+        let journal_leaves = Location::try_from(journal_size)?;
         let mut mem_pinned_nodes = Vec::new();
         for pos in F::nodes_to_pin(journal_leaves) {
             let digest = Self::get_from_pins_or_journal(&pins, &journal, pos).await?;
@@ -473,18 +465,21 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
         let mut mem = Mem::init(MemConfig {
             nodes: vec![],
-            pruning_boundary: Location::try_from(journal_size)?,
+            pruning_boundary: journal_leaves,
             pinned_nodes: mem_pinned_nodes,
         })?;
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
-        // This must also be done before pruning.
+        // This must also be done before the prune is staged.
         if prune_pos < journal_size {
             Self::add_extra_pinned_nodes(&mut mem, &pins, &journal, prune_pos).await?;
+            journal.prune_into(*prune_pos, &mut batch).await?;
         }
 
-        // Prune the journal to range.start.
-        journal.prune(*prune_pos).await?;
+        batch.apply_sync().await.map_err(JError::Runtime)?;
+        if cleared {
+            journal.finish_clear(*prune_pos).await?;
+        }
 
         Ok(Self {
             mem: Arc::new(mem),
@@ -496,10 +491,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         })
     }
 
-    /// Compute the required nodes for the given pruning point and durably rewrite the pins
-    /// record with them. Return the computed set of required nodes.
-    async fn update_pins(
-        &mut self,
+    /// Compute the pinned nodes required for the given pruning point.
+    async fn compute_pins(
+        &self,
         prune_to_pos: Position<F>,
     ) -> Result<BTreeMap<Position<F>, D>, Error<F>> {
         assert!(prune_to_pos >= self.pruned_to_pos);
@@ -512,7 +506,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             );
             pinned_nodes.insert(pos, digest);
         }
-        self.pins.write(prune_loc, pinned_nodes.clone()).await?;
 
         Ok(pinned_nodes)
     }
@@ -626,32 +619,60 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
     /// Prune all nodes up to but not including the given leaf location and update the pinned nodes.
     ///
-    /// This implementation ensures that no failure can leave the structure in an unrecoverable
-    /// state, requiring it sync the structure to write any potential unsynced updates.
+    /// The flushed nodes' durability, the pins record rewrite, and the journal prune land in
+    /// ONE atomic commit, so no crash can leave the record and the journal describing
+    /// different boundaries.
     ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
+        let mut batch = self
+            .journal
+            .context()
+            .batch()
+            .await
+            .map_err(|err| Error::Journal(JError::Runtime(err)))?;
+        if !self.prune_into(loc, &mut batch).await? {
+            return Ok(());
+        }
+        batch
+            .apply_sync()
+            .await
+            .map_err(|err| Error::Journal(JError::Runtime(err)))
+    }
+
+    /// [Self::prune], staged with `batch`: the caller applies the batch. Returns true if a
+    /// prune was staged.
+    pub(crate) async fn prune_into(
+        &mut self,
+        loc: Location<F>,
+        batch: &mut E::Batch,
+    ) -> Result<bool, Error<F>> {
         let pos = Position::try_from(loc)?;
         if loc > self.mem.leaves() {
             return Err(Error::LeafOutOfBounds(loc));
         }
         if pos <= self.pruned_to_pos {
-            return Ok(());
+            return Ok(false);
         }
 
-        // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        self.sync().await?;
+        // Stage the durability of nodes cached in the mem: the prune boundary may only be
+        // justified by them.
+        self.sync_into(batch).await?;
 
-        // Update the pins record to reflect the desired pruning boundary, allowing for recovery
-        // in the event of a pruning failure.
-        let pinned_nodes = self.update_pins(pos).await?;
+        // Stage the pins record rewrite for the new boundary. The nodes are read BEFORE the
+        // journal prune is staged (staging updates the journal's bounds immediately).
+        let pinned_nodes = self.compute_pins(pos).await?;
+        let prune_loc = Location::try_from(pos).expect("valid pos");
+        self.pins
+            .write_into(prune_loc, pinned_nodes.clone(), batch)
+            .await?;
 
-        self.journal.prune(*pos).await?;
+        self.journal.prune_into(*pos, batch).await?;
         Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
-        Ok(())
+        Ok(true)
     }
 
     /// Compute the root of the structure using `inactive_peaks` and the bagging carried by `hasher`.
@@ -673,12 +694,27 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         Ok(())
     }
 
-    /// Close and permanently remove any disk resources.
+    /// Close and permanently remove any disk resources: every partition removal (the
+    /// journal's and the pins record's) lands in ONE atomic commit.
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.journal.destroy().await?;
-        self.pins.destroy().await?;
+        let mut batch = self
+            .journal
+            .context()
+            .batch()
+            .await
+            .map_err(|err| Error::Journal(JError::Runtime(err)))?;
+        self.destroy_into(&mut batch);
+        batch
+            .apply_sync()
+            .await
+            .map_err(|err| Error::Journal(JError::Runtime(err)))
+    }
 
-        Ok(())
+    /// [Self::destroy], staged with `batch`: every partition removal lands when the caller
+    /// applies the batch with `apply_sync`, atomically with everything else it stages.
+    pub(crate) fn destroy_into(self, batch: &mut E::Batch) {
+        self.journal.destroy_into(batch);
+        self.pins.destroy_into(batch);
     }
 
     #[cfg(any(test, feature = "fuzzing"))]
@@ -714,19 +750,17 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     #[cfg(test)]
-    /// Simulate a crash after the pins record is written but before the journal is pruned.
-    pub async fn simulate_pruning_failure(mut self, prune_to: Location<F>) -> Result<(), Error<F>> {
+    /// Plant a pins record at `prune_to` without pruning the journal, a record/journal skew
+    /// that production paths (record and prune commit in one batch) can no longer produce.
+    pub async fn plant_pins_without_prune(mut self, prune_to: Location<F>) -> Result<(), Error<F>> {
         let prune_to_pos = Position::try_from(prune_to)?;
         assert!(prune_to_pos <= self.mem.size());
 
-        // Flush items cached in the mem to disk to ensure the current state is recoverable.
+        // Flush items cached in the mem to disk so the planted record's nodes are readable.
         self.sync().await?;
 
-        // Update the pins record to reflect the desired pruning boundary, allowing for recovery
-        // in the event of a pruning failure.
-        self.update_pins(prune_to_pos).await?;
-
-        // Don't actually prune the journal to simulate failure
+        let pinned_nodes = self.compute_pins(prune_to_pos).await?;
+        self.pins.write(prune_to, pinned_nodes).await?;
         Ok(())
     }
 
@@ -1767,10 +1801,6 @@ mod tests {
             let start_size = mmr.size();
             let start_leaves = *mmr.leaves();
             let prune_loc = Location::<F>::new(std::cmp::min(i as u64 * 50, start_leaves));
-            if i % 5 == 0 {
-                mmr.simulate_pruning_failure(prune_loc).await.unwrap();
-                continue;
-            }
             mmr.prune(prune_loc).await.unwrap();
 
             // add new elements, simulating a partial write after each.
@@ -1820,6 +1850,52 @@ mod tests {
     fn test_full_recovery_with_pruning_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_recovery_with_pruning_inner::<mmb::Family>);
+    }
+
+    /// A pins record ahead of the journal's pruning boundary by more than one blob (a skew
+    /// production paths can no longer produce: the record and the prune commit in one batch)
+    /// must surface as corruption, not be repaired.
+    async fn full_pins_ahead_is_corruption_inner<F: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("build"),
+            &hasher,
+            test_config(&context),
+        )
+        .await
+        .unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..100usize {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
+        mmr.sync().await.unwrap();
+
+        // Plant a record far ahead of the never-pruned journal's boundary.
+        mmr.plant_pins_without_prune(Location::new(50))
+            .await
+            .unwrap();
+
+        let result = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("reopen"),
+            &hasher,
+            test_config(&context),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::DataCorrupted(_))));
+    }
+
+    #[test_traced]
+    fn test_full_pins_ahead_is_corruption_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_pins_ahead_is_corruption_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_pins_ahead_is_corruption_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_pins_ahead_is_corruption_inner::<mmb::Family>);
     }
 
     async fn full_historical_proof_basic_inner<F: Family>(context: deterministic::Context) {
@@ -2357,10 +2433,9 @@ mod tests {
         executor.start(full_init_sync_rejects_extra_pinned_nodes_inner::<mmb::Family>);
     }
 
-    // Regression test that init() handles a stale pins record (lower pruning boundary than
-    // journal). Before the fix, this would panic with an assertion failure. After the fix, it
-    // returns a MissingNode error (which is expected when the record is stale and pinned nodes
-    // are lost).
+    // A pins record behind the journal's pruning boundary (a skew production paths can no
+    // longer produce: the record and the prune commit in one batch) must surface as
+    // corruption, not be repaired or misread.
     async fn full_init_stale_pins_returns_error_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
@@ -2397,22 +2472,15 @@ mod tests {
         pins.write(Location::new(0), BTreeMap::new()).await.unwrap();
         drop(pins);
 
-        // Reopen the structure - before the fix, this would panic with assertion failure
-        // After the fix, it returns MissingNode error (pinned nodes for the lower
-        // boundary don't exist since they were pruned from journal and aren't
-        // in the stale record)
+        // Reopen the structure: the boundary mismatch must trip the record/journal
+        // verification before any node is read.
         let result = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
             test_config(&context),
         )
         .await;
-
-        match result {
-            Err(Error::MissingNode(_)) => {} // expected
-            Ok(_) => panic!("expected MissingNode error, got Ok"),
-            Err(e) => panic!("expected MissingNode error, got {:?}", e),
-        }
+        assert!(matches!(result, Err(Error::DataCorrupted(_))));
     }
 
     #[test_traced("WARN")]

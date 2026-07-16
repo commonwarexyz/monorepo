@@ -567,6 +567,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         checkpoint.clear_into(target, batch).await
     }
 
+    /// The storage context the journal operates on.
+    pub(crate) const fn context(&self) -> &E {
+        self.blobs.context()
+    }
+
     /// Stage the durability of every dirty blob and the checkpoint's pruning
     /// boundary with `batch`, so blob data and the boundary record land in
     /// ONE batch.
@@ -899,7 +904,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Stage a prune with `batch`: the caller applies the batch. Returns true if a prune
     /// was staged.
-    pub(super) async fn prune_into(
+    pub(crate) async fn prune_into(
         &mut self,
         min_item_pos: u64,
         batch: &mut E::Batch,
@@ -940,17 +945,19 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(true)
     }
 
-    /// Remove any persisted data created by the journal.
-    ///
-    /// # Crash Safety
-    ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same partition may observe partially removed state. Use [Self::init_at_size]
-    /// for a recoverable reset.
+    /// Remove any persisted data created by the journal: the data partition's removal and
+    /// the checkpoint's land in ONE atomic commit, so destruction is all-or-nothing.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.blobs.destroy().await?;
-        self.checkpoint.destroy().await?;
-        Ok(())
+        let mut batch = self.context().batch().await.map_err(Error::Runtime)?;
+        self.destroy_into(&mut batch);
+        batch.apply_sync().await.map_err(Error::Runtime)
+    }
+
+    /// [Self::destroy], staged with `batch`: both partition removals land when the caller
+    /// applies the batch with `apply_sync`, atomically with everything else it stages.
+    pub(crate) fn destroy_into(self, batch: &mut E::Batch) {
+        self.blobs.stage_destroy(batch);
+        self.checkpoint.destroy_into(batch);
     }
 
     /// Clear all data and reset the journal to a new starting position.
@@ -979,7 +986,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// cleared-boundary record. The caller applies the batch, then resets RAM state with
     /// [Self::finish_clear].
     #[commonware_macros::stability(ALPHA)]
-    pub(super) async fn stage_clear(
+    pub(crate) async fn stage_clear(
         &mut self,
         new_size: u64,
         batch: &mut E::Batch,
@@ -991,7 +998,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Reset RAM state to the cleared journal and open the new tail (the staged clear must
     /// have been applied).
     #[commonware_macros::stability(ALPHA)]
-    pub(super) async fn finish_clear(&mut self, new_size: u64) -> Result<(), Error> {
+    pub(crate) async fn finish_clear(&mut self, new_size: u64) -> Result<(), Error> {
         self.blobs
             .finish_clear(super::position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
@@ -1346,6 +1353,14 @@ impl<E: Context, A: CodecFixedShared> authenticated::Inner<E> for Journal<E, A> 
 
     async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
         Self::sync_into(self, batch).await
+    }
+
+    async fn prune_into(&mut self, min_position: u64, batch: &mut E::Batch) -> Result<bool, Error> {
+        Self::prune_into(self, min_position, batch).await
+    }
+
+    fn destroy_into(self, batch: &mut E::Batch) {
+        Self::destroy_into(self, batch);
     }
 }
 

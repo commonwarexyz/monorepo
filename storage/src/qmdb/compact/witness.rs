@@ -14,7 +14,10 @@
 //! entry is never pruned.
 
 use crate::{
-    journal::contiguous::{variable, Contiguous},
+    journal::{
+        contiguous::{variable, Contiguous},
+        Error as JError,
+    },
     merkle::{
         self, compact, Family, Location, Proof, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT,
     },
@@ -24,6 +27,7 @@ use crate::{
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
+use commonware_runtime::WriteBatch as _;
 use commonware_utils::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -280,8 +284,18 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         let pos = Self::first_at_or_above(&self.journal, pruning_boundary)
             .await?
             .min(bounds.end - 1);
-        self.journal.prune(pos).await?;
-        self.journal.sync().await?;
+
+        // ONE batch stages the prune and the journal's durability (buffered appends
+        // included), so everything is durable on return with a single commit.
+        let mut batch = self
+            .journal
+            .context()
+            .batch()
+            .await
+            .map_err(JError::Runtime)?;
+        self.journal.prune_into(pos, &mut batch).await?;
+        self.journal.sync_into(&mut batch).await?;
+        batch.apply_sync().await.map_err(JError::Runtime)?;
         Ok(())
     }
 

@@ -11,7 +11,7 @@ use commonware_runtime::{
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Blob, BufferPool, Error as RError, Handle, Metrics, Storage, WriteBatch,
+    Batchable, Blob, BufferPool, Error as RError, Handle, Metrics, Storage, WriteBatch,
 };
 use futures::future::{join_all, try_join_all};
 use std::{
@@ -407,38 +407,18 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    /// Prune all sections less than `min`. Returns true if any were pruned.
-    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        // Prune any blobs that are smaller than the minimum
-        let mut pruned = false;
-        while let Some((&section, _)) = self.blobs.first_key_value() {
-            // Stop pruning if we reach the minimum
-            if section >= min {
-                break;
-            }
-
-            // Remove blob from map
-            let mut blob = self.blobs.remove(&section).unwrap();
-            blob.wait_for_sync().await?;
-            let size = blob.size();
-            drop(blob);
-
-            // Remove blob from storage
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-            pruned = true;
-
-            debug!(section, size, "pruned blob");
-            self.tracked.dec();
-            self.pruned.inc();
+    /// Prune all sections less than `min`: every pruned section's removal
+    /// lands in ONE atomic commit. Returns true if any were pruned.
+    pub async fn prune(&mut self, min: u64) -> Result<bool, Error>
+    where
+        E: Batchable,
+    {
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        if !self.prune_into(min, &mut batch).await? {
+            return Ok(false);
         }
-
-        if pruned {
-            self.oldest_retained_section = min;
-        }
-
-        Ok(pruned)
+        batch.apply_sync().await.map_err(Error::Runtime)?;
+        Ok(true)
     }
 
     /// [Self::prune], staged with `batch` instead of removed directly: every
@@ -515,43 +495,49 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.blobs.keys().copied()
     }
 
-    /// Remove all underlying blobs.
-    pub async fn destroy(mut self) -> Result<(), Error> {
-        Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        for (section, blob) in self.blobs.into_iter() {
-            let size = blob.size();
-            drop(blob);
-            debug!(section, size, "destroyed blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-        }
-        match self.context.remove(&self.partition, None).await {
-            Ok(()) => {}
-            // Partition already removed or never existed.
+    /// Remove all underlying blobs and the partition itself, in ONE atomic
+    /// commit.
+    pub async fn destroy(self) -> Result<(), Error>
+    where
+        E: Batchable,
+    {
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        self.destroy_into(&mut batch).await?;
+        batch.apply_sync().await.map_err(Error::Runtime)
+    }
+
+    /// [Self::destroy], staged with `batch`: every blob's removal and the
+    /// partition's land when the caller applies the batch with
+    /// [WriteBatch::apply_sync], atomically with everything else it stages.
+    ///
+    /// The caller must apply the batch: a batch dropped without apply leaves
+    /// the blobs on disk untracked.
+    pub async fn destroy_into<T: WriteBatch<Blob = E::Blob>>(
+        mut self,
+        batch: &mut T,
+    ) -> Result<(), Error> {
+        self.clear_into(batch).await?;
+        // The partition may never have been created (a manager that never
+        // held a blob); staging its removal would then fail the whole batch.
+        match self.context.scan(&self.partition).await {
+            Ok(_) => batch.remove(&self.partition, None),
             Err(RError::PartitionMissing(_)) => {}
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())
     }
 
-    /// Clear all blobs, resetting the manager to an empty state.
+    /// Clear all blobs, resetting the manager to an empty state, in ONE
+    /// atomic commit.
     ///
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
-    pub async fn clear(&mut self) -> Result<(), Error> {
-        Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        let blobs = take(&mut self.blobs);
-        for (section, blob) in blobs {
-            let size = blob.size();
-            drop(blob);
-            debug!(section, size, "cleared blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-        }
-        let _ = self.tracked.try_set(0);
-        self.oldest_retained_section = 0;
-        Ok(())
+    pub async fn clear(&mut self) -> Result<(), Error>
+    where
+        E: Batchable,
+    {
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        self.clear_into(&mut batch).await?;
+        batch.apply_sync().await.map_err(Error::Runtime)
     }
 
     /// [Self::clear], staged with `batch` instead of removed directly: every

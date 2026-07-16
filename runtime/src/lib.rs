@@ -813,9 +813,9 @@ stability_scope!(BETA {
     /// the crash windows between staged operations as nonexistent, and
     /// conforming implementations must uphold the same atomicity. One
     /// documented exception exists: the test-only context wrappers in
-    /// [crate::mocks] satisfy this trait with [crate::mocks::SequentialBatch],
-    /// which replays staged operations in order WITHOUT cross-blob
-    /// atomicity (see its docs).
+    /// [crate::mocks] satisfy this trait with [crate::mocks::SequentialBatch]
+    /// (or a wrapper-specific equivalent), which replays staged operations
+    /// in order WITHOUT cross-blob atomicity (see its docs).
     pub trait Batchable: Storage {
         /// The staged-batch type.
         type Batch: WriteBatch<Blob = Self::Blob>;

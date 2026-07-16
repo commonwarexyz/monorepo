@@ -25,7 +25,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    Batchable, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -68,7 +68,7 @@ struct DigestRequest<D: Digest> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
+    E: BufferPooler + Clock + Spawner + Batchable + Metrics + CryptoRng,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -151,7 +151,7 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
+        E: BufferPooler + Clock + Spawner + Batchable + Metrics + CryptoRng,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Height, Digest = D>,

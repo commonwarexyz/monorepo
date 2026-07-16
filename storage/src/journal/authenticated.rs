@@ -29,7 +29,7 @@ use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
-use futures::{try_join, Stream, TryFutureExt as _};
+use futures::Stream;
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -376,6 +376,62 @@ where
             .await
             .map_err(|err| Error::Journal(JournalError::Runtime(err)))
     }
+
+    /// Prune both the Merkle structure and journal to the given location.
+    ///
+    /// # Returns
+    /// The new pruning boundary, which may be less than the requested `prune_loc`.
+    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<Location<F>, Error<F>> {
+        self.prune_inner(prune_loc)
+            .await
+            .map(|(boundary, _)| boundary)
+    }
+
+    async fn prune_inner(
+        &mut self,
+        prune_loc: Location<F>,
+    ) -> Result<(Location<F>, bool), Error<F>> {
+        if self.merkle.size() == 0 {
+            // DB is empty, nothing to prune.
+            return Ok((Location::new(self.journal.bounds().start), false));
+        }
+
+        // ONE batch stages the whole prune: both sides' durability (the prune target may be
+        // justified by a buffered append, e.g. a commit operation), the item journal's prune,
+        // and the Merkle structure's prune (its pins record plus its journal's prune). No
+        // crash can leave the two sides describing different histories.
+        let mut batch = self
+            .journal
+            .context()
+            .batch()
+            .await
+            .map_err(|err| Error::Journal(JournalError::Runtime(err)))?;
+        self.journal
+            .sync_into(&mut batch)
+            .await
+            .map_err(Error::Journal)?;
+        self.merkle
+            .sync_into(&mut batch)
+            .await
+            .map_err(Error::Merkle)?;
+
+        let journal_pruned = self.journal.prune_into(*prune_loc, &mut batch).await?;
+        let bounds = self.journal.bounds();
+        let boundary = Location::new(bounds.start);
+        let merkle_boundary = self.merkle.bounds().start;
+
+        if boundary > merkle_boundary {
+            debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
+            self.merkle.prune_into(boundary, &mut batch).await?;
+        }
+
+        batch
+            .apply_sync()
+            .await
+            .map_err(|err| Error::Journal(JournalError::Runtime(err)))?;
+
+        Ok((boundary, journal_pruned || boundary > merkle_boundary))
+    }
 }
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
@@ -553,48 +609,6 @@ where
 
         Ok(())
     }
-
-    /// Prune both the Merkle structure and journal to the given location.
-    ///
-    /// # Returns
-    /// The new pruning boundary, which may be less than the requested `prune_loc`.
-    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<Location<F>, Error<F>> {
-        self.prune_inner(prune_loc)
-            .await
-            .map(|(boundary, _)| boundary)
-    }
-
-    async fn prune_inner(
-        &mut self,
-        prune_loc: Location<F>,
-    ) -> Result<(Location<F>, bool), Error<F>> {
-        if self.merkle.size() == 0 {
-            // DB is empty, nothing to prune.
-            return Ok((Location::new(self.journal.bounds().start), false));
-        }
-
-        // Sync the Merkle structure before pruning the journal, otherwise its last element could
-        // end up behind the journal's first element after a crash, and there would be no way to
-        // replay the items between the structure's last element and the journal's first element.
-        // Sync the journal alongside: the prune target may be justified by a buffered append
-        // (e.g. a commit operation), and pruning does not guarantee buffered appends are durable.
-        try_join!(
-            self.journal.sync().map_err(Error::Journal),
-            self.merkle.sync().map_err(Error::Merkle)
-        )?;
-
-        let journal_pruned = self.journal.prune(*prune_loc).await?;
-        let bounds = self.journal.bounds();
-        let boundary = Location::new(bounds.start);
-        let merkle_boundary = self.merkle.bounds().start;
-
-        if boundary > merkle_boundary {
-            debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
-            self.merkle.prune(boundary).await?;
-        }
-
-        Ok((boundary, journal_pruned || boundary > merkle_boundary))
-    }
 }
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
@@ -680,24 +694,40 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item: EncodeShared>,
+    C: Inner<E, Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
-    /// Destroy the authenticated journal, removing all data from disk.
+    /// Destroy the authenticated journal, removing all data from disk: every partition
+    /// removal (both the item journal's and the Merkle structure's) lands in ONE atomic
+    /// commit.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        // `try_join!` contains an await boundary, so destructure first to avoid
-        // stack growth from retaining the entire `self` in the future.
+        let mut batch = self
+            .context()
+            .batch()
+            .await
+            .map_err(|err| Error::Journal(JournalError::Runtime(err)))?;
+        self.destroy_into(&mut batch);
+        batch
+            .apply_sync()
+            .await
+            .map_err(|err| Error::Journal(JournalError::Runtime(err)))
+    }
+
+    /// [Self::destroy], staged with `batch`: every partition removal lands when the caller
+    /// applies the batch with `apply_sync`, atomically with everything else it stages.
+    pub(crate) fn destroy_into(self, batch: &mut E::Batch) {
         let Self {
             journal, merkle, ..
         } = self;
-        try_join!(
-            journal.destroy().map_err(Error::Journal),
-            merkle.destroy().map_err(Error::Merkle),
-        )?;
+        journal.destroy_into(batch);
+        merkle.destroy_into(batch);
+    }
 
-        Ok(())
+    /// The storage context the journal operates on.
+    pub(crate) fn context(&self) -> &E {
+        self.journal.context()
     }
 }
 
@@ -995,6 +1025,21 @@ pub trait Inner<E: Context>: Mutable {
         &mut self,
         batch: &mut E::Batch,
     ) -> impl core::future::Future<Output = Result<(), JournalError>> + Send;
+
+    /// Stage [Mutable::prune] with `batch`: the staged mutations land when the caller applies
+    /// the batch with `apply_sync`, atomically with everything else it stages. Returns true
+    /// if a prune was staged.
+    fn prune_into(
+        &mut self,
+        min_position: u64,
+        batch: &mut E::Batch,
+    ) -> impl core::future::Future<Output = Result<bool, JournalError>> + Send;
+
+    /// Stage [Mutable::destroy] with `batch`: every partition removal lands when the caller
+    /// applies the batch with `apply_sync`, atomically with everything else it stages.
+    fn destroy_into(self, batch: &mut E::Batch)
+    where
+        Self: Sized;
 }
 
 #[cfg(test)]

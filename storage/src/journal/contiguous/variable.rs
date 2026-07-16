@@ -1458,6 +1458,27 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
+        if !self.prune_into(min_position, &mut batch).await? {
+            return Ok(false);
+        }
+        batch.apply_sync().await.map_err(Error::Runtime)?;
+        Ok(true)
+    }
+
+    /// Stage a prune with `batch`: the caller applies the batch. Returns true if a prune
+    /// was staged.
+    ///
+    /// The batch stages everything the prune must commit atomically: dirty retained data
+    /// blobs (the prune target may be justified by an appended-but-unflushed item, e.g. a
+    /// consumer's commit record), the data-blob removals, and the offsets journal's own
+    /// staged prune (its dirty blobs, blob removals, and boundary record). No crash can
+    /// separate the data boundary from the offsets boundary.
+    pub(crate) async fn prune_into(
+        &mut self,
+        min_position: u64,
+        batch: &mut E::Batch,
+    ) -> Result<bool, Error> {
         let items_per_blob = self.items_per_blob.get();
 
         // Calculate the blob that would contain min_position, capped to the tail (which is
@@ -1472,22 +1493,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
 
-        // ONE batch stages everything the prune must commit atomically: dirty retained data
-        // blobs (the prune target may be justified by an appended-but-unflushed item, e.g. a
-        // consumer's commit record), the data-blob removals, and the offsets journal's own
-        // staged prune (its dirty blobs, blob removals, and boundary record). No crash can
-        // separate the data boundary from the offsets boundary.
-        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
         if let Some(dirty) = self.dirty_from_blob {
             self.blobs
-                .sync_from_into(dirty.max(min_blob), &mut batch)
+                .sync_from_into(dirty.max(min_blob), batch)
                 .await?;
             self.dirty_from_blob = None;
         }
-        self.blobs.prune_into(min_blob, &mut batch);
+        self.blobs.prune_into(min_blob, batch);
         self.bounds.start = new_boundary;
-        self.offsets.prune_into(new_boundary, &mut batch).await?;
-        batch.apply_sync().await.map_err(Error::Runtime)?;
+        self.offsets.prune_into(new_boundary, batch).await?;
 
         self.metrics.update(
             self.bounds.end,
@@ -1505,12 +1519,17 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// test-only mock fallback) preserves the data-then-offsets ordering
     /// that keeps durable offsets at or behind the durable data bytes they
     /// index.
-    async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
+    pub(crate) async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
         if let Some(start_blob) = self.dirty_from_blob {
             self.blobs.sync_from_into(start_blob, batch).await?;
             self.dirty_from_blob = None;
         }
         self.offsets.sync_into(batch).await
+    }
+
+    /// The storage context the journal operates on.
+    pub(crate) const fn context(&self) -> &E {
+        self.blobs.context()
     }
 
     /// Durably persist the journal: dirty data blobs and the offsets
@@ -1525,16 +1544,19 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Remove any underlying blobs created by the journal.
     ///
-    /// This destroys both the data blobs and the offsets journal.
-    ///
-    /// # Crash Safety
-    ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same partitions may observe partially removed state. Use [Self::init_at_size]
-    /// for a recoverable reset.
+    /// This destroys both the data blobs and the offsets journal: every partition's removal
+    /// lands in ONE atomic commit, so destruction is all-or-nothing.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.blobs.destroy().await?;
-        self.offsets.destroy().await
+        let mut batch = self.context().batch().await.map_err(Error::Runtime)?;
+        self.destroy_into(&mut batch);
+        batch.apply_sync().await.map_err(Error::Runtime)
+    }
+
+    /// [Self::destroy], staged with `batch`: every partition removal lands when the caller
+    /// applies the batch with `apply_sync`, atomically with everything else it stages.
+    pub(crate) fn destroy_into(self, batch: &mut E::Batch) {
+        self.blobs.stage_destroy(batch);
+        self.offsets.destroy_into(batch);
     }
 
     /// Clear all data and reset the journal to a new starting position.
@@ -1750,6 +1772,14 @@ impl<E: Context, V: CodecShared> authenticated::Inner<E> for Journal<E, V> {
 
     async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
         Self::sync_into(self, batch).await
+    }
+
+    async fn prune_into(&mut self, min_position: u64, batch: &mut E::Batch) -> Result<bool, Error> {
+        Self::prune_into(self, min_position, batch).await
+    }
+
+    fn destroy_into(self, batch: &mut E::Batch) {
+        Self::destroy_into(self, batch);
     }
 }
 

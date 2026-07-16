@@ -261,8 +261,8 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// - If `min_position > bounds.end`, the prune is capped to `bounds.end` (no error is returned)
     /// - Some items with positions less than `min_position` may be retained due to
     ///   section/blob alignment
-    /// - This operation is not atomic, but implementations guarantee the journal is left in a
-    ///   recoverable state if a crash occurs during pruning
+    /// - The prune commits atomically: a crash leaves the journal either in its prior state or
+    ///   fully pruned
     ///
     /// # Errors
     ///
@@ -304,13 +304,8 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// Destroy the journal, removing all associated storage.
     ///
     /// This method consumes the journal and deletes all persisted data, leaving behind no storage
-    /// artifacts. This can be used to clean up disk resources in tests.
-    ///
-    /// # Crash Safety
-    ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same storage may observe partially removed state. Use a reset operation
-    /// provided by the concrete type when the journal must remain recoverable.
+    /// artifacts. The removals commit atomically: a crash leaves the journal either in its prior
+    /// state or fully destroyed.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send
     where
         Self: Sized;
