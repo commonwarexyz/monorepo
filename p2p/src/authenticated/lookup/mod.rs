@@ -212,25 +212,25 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{
+        Address, AddressableManager, CheckedSender as _, Ingress, LimitedSender as _, Provider,
+        Receiver, Recipients, Sender,
         authenticated::{
             lookup::actors::router::{Actor as RouterActor, Config as RouterConfig},
             relay::Relay,
         },
-        Address, AddressableManager, CheckedSender as _, Ingress, LimitedSender as _, Provider,
-        Receiver, Recipients, Sender,
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::{ed25519, Signer as _};
+    use commonware_cryptography::{Signer as _, ed25519};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock, IoBuf,
-        Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
+        BufferPooler, Clock, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner,
+        Supervisor as _, deterministic, telemetry::metrics::count_running_tasks, tokio,
     };
     use commonware_utils::{
+        Hostname, NZU32, NZUsize, TryCollect,
         channel::mpsc,
         hostname,
         ordered::{Map, Set},
-        Hostname, NZUsize, TryCollect, NZU32,
     };
     use rand_core::{CryptoRng, Rng};
     use std::{

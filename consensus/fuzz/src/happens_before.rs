@@ -491,12 +491,11 @@ pub mod capture {
             let mut s = Summary::new();
             let mut snapshots: BTreeMap<(u32, EventKind, u64), NodeHistory> = BTreeMap::new();
             for &ev in self.0.lock().iter() {
-                if let Some(send) = ev.kind.matching_send() {
-                    if let Some(sender) = ev.sender.filter(|&sender| sender != ev.node) {
-                        if let Some(history) = snapshots.get(&(sender, send, ev.view)) {
-                            s.merge_history(ev.node, history);
-                        }
-                    }
+                if let Some(send) = ev.kind.matching_send()
+                    && let Some(sender) = ev.sender.filter(|&sender| sender != ev.node)
+                    && let Some(history) = snapshots.get(&(sender, send, ev.view))
+                {
+                    s.merge_history(ev.node, history);
                 }
                 s.observe(ev);
                 if ev.kind.is_matchable_send() {
@@ -600,10 +599,10 @@ pub mod capture {
             }
         }
         fn event(&self, event: &tracing::Event<'_>) {
-            if let Some(inner) = &self.inner {
-                if inner.enabled(event.metadata()) {
-                    inner.event(event);
-                }
+            if let Some(inner) = &self.inner
+                && inner.enabled(event.metadata())
+            {
+                inner.event(event);
             }
             let target = event.metadata().target();
             if !target.contains("commonware_consensus::simplex") {
@@ -705,10 +704,10 @@ pub mod capture {
 #[cfg(test)]
 mod capture_tests {
     use super::{
-        capture::{EventLog, NodeSubscriber},
         Event, EventKind,
+        capture::{EventLog, NodeSubscriber},
     };
-    use tracing::{dispatcher, Dispatch};
+    use tracing::{Dispatch, dispatcher};
 
     const T: &str = "commonware_consensus::simplex::actors::voter::actor";
 
@@ -738,9 +737,10 @@ mod capture_tests {
         let toks = summary.tokens();
         // node 0's recv-proposal -> send-notarize pair is present (view extracted
         // from both the plain field and the nested `View(2)`).
-        assert!(toks
-            .iter()
-            .any(|t| t.contains("recv_proposal") && t.contains("send_notarize")));
+        assert!(
+            toks.iter()
+                .any(|t| t.contains("recv_proposal") && t.contains("send_notarize"))
+        );
         // node 0 (recv/send) diverges from node 1 (timeout only) -> dispersion > 0.
         assert!(summary.dispersion() > 0.0);
     }
@@ -915,9 +915,11 @@ mod capture_tests {
             "expected the real sender's history, got {toks:?}"
         );
         // ...node 2's propose is not, despite being the latest (kind, view) match.
-        assert!(!toks
-            .iter()
-            .any(|t| t.starts_with("hb:propose") && t.contains("->recv_notarization")));
+        assert!(
+            !toks
+                .iter()
+                .any(|t| t.starts_with("hb:propose") && t.contains("->recv_notarization"))
+        );
     }
 
     #[test]
@@ -931,9 +933,11 @@ mod capture_tests {
 
         let toks = log.summary().tokens();
         assert!(toks.contains("hb:send_notarization@new->recv_notarization@new"));
-        assert!(!toks
-            .iter()
-            .any(|t| t.contains("send_finalization") && t.contains("->recv_notarization")));
+        assert!(
+            !toks
+                .iter()
+                .any(|t| t.contains("send_finalization") && t.contains("->recv_notarization"))
+        );
     }
 
     #[test]
@@ -950,9 +954,11 @@ mod capture_tests {
 
         let toks = log.summary().tokens();
         assert!(toks.contains("hb:send_nullify@new->recv_nullify@new"));
-        assert!(!toks
-            .iter()
-            .any(|t| t.contains("timeout") && t.contains("->recv_nullify")));
+        assert!(
+            !toks
+                .iter()
+                .any(|t| t.contains("timeout") && t.contains("->recv_nullify"))
+        );
     }
 
     #[test]
@@ -992,9 +998,11 @@ mod capture_tests {
         rec(&log, 1, 1, EventKind::ReceiveNotarization, None);
 
         let toks = log.summary().tokens();
-        assert!(!toks
-            .iter()
-            .any(|t| t.contains("send_notarization") && t.contains("->recv_notarization")));
+        assert!(
+            !toks
+                .iter()
+                .any(|t| t.contains("send_notarization") && t.contains("->recv_notarization"))
+        );
     }
 }
 
@@ -1129,13 +1137,17 @@ mod tests {
         // The buggy interleaving produces a pair with a `Behind` receive that the
         // safe one does not.
         let buggy_toks = buggy.tokens();
-        assert!(buggy_toks
-            .iter()
-            .any(|t| t.contains("->recv_notarization@old")));
-        assert!(!safe
-            .tokens()
-            .iter()
-            .any(|t| t.contains("recv_notarization@old")));
+        assert!(
+            buggy_toks
+                .iter()
+                .any(|t| t.contains("->recv_notarization@old"))
+        );
+        assert!(
+            !safe
+                .tokens()
+                .iter()
+                .any(|t| t.contains("recv_notarization@old"))
+        );
         // ...so the two interleavings have different coverage.
         assert_ne!(safe.fingerprint(), buggy.fingerprint());
     }

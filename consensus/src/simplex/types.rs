@@ -1,15 +1,15 @@
 //! Types used in [crate::simplex].
 
 use crate::{
+    Epochable, Viewable,
     simplex::scheme::{self, CertificateVerifier},
     types::{Epoch, Participant, Round, View},
-    Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::{
-    certificate::{Attestation, Scheme},
     Digest, PublicKey,
+    certificate::{Attestation, Scheme},
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
@@ -2625,11 +2625,11 @@ mod tests {
     use crate::simplex::{
         quorum,
         scheme::{
-            bls12381_multisig,
+            Scheme, bls12381_multisig,
             bls12381_threshold::{
                 standard as bls12381_threshold_std, vrf as bls12381_threshold_vrf,
             },
-            ed25519, secp256r1, Scheme,
+            ed25519, secp256r1,
         },
     };
     use bytes::Bytes;
@@ -2640,7 +2640,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, TestRng};
+    use commonware_utils::{Faults, N3f1, TestRng, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 

@@ -1,11 +1,11 @@
 //! Different variants of the BLS signature scheme.
 
 use super::{
-    group::{
-        Scalar, SmallScalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
-        G2_PROOF_OF_POSSESSION, GT,
-    },
     Error,
+    group::{
+        DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, GT,
+        Scalar, SmallScalar,
+    },
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -323,7 +323,7 @@ mod tests {
     use crate::bls12381::primitives::{group::Scalar, ops};
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, NZUsize};
+    use commonware_utils::{NZUsize, test_rng};
 
     fn batch_verify_correct<V: Variant>() {
         let mut rng = test_rng();

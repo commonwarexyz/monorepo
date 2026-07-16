@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_consensus_fuzz::{fuzz, CodeCoverage, FaultyMessaging, FuzzInput, SimplexSecp256r1};
+use commonware_consensus_fuzz::{CodeCoverage, FaultyMessaging, FuzzInput, SimplexSecp256r1, fuzz};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: FuzzInput| {

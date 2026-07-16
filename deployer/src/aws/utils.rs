@@ -6,7 +6,7 @@ use tokio::{
     fs::File,
     io::AsyncWriteExt,
     process::Command,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 use tracing::{info, warn};
 

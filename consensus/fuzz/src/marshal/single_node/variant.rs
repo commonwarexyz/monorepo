@@ -8,13 +8,13 @@
 //! cache locally-sent messages, so single-validator publication still
 //! makes the block discoverable through marshal's variant integration.
 
-use commonware_broadcast::{buffered, Broadcaster as _};
+use commonware_broadcast::{Broadcaster as _, buffered};
 use commonware_codec::Codec;
 use commonware_coding::Scheme as CodingScheme;
 use commonware_consensus::{
+    CertifiableBlock,
     marshal::coding::{shards, types::CodedBlock},
     types::Round,
-    CertifiableBlock,
 };
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;

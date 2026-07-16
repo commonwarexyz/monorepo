@@ -5,11 +5,11 @@
 //! falling back to local +/-1 or +/-2 edits. Certificate and resolver process
 //! faults are omit-only, so their byte mutators must not run.
 
-use crate::{byzzfuzz::observed::ObservedState, strategy::Strategy, EPOCH};
+use crate::{EPOCH, byzzfuzz::observed::ObservedState, strategy::Strategy};
 use commonware_consensus::{
+    Viewable,
     simplex::types::Proposal,
     types::{Epoch, Round, View},
-    Viewable,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use rand::{Rng, RngExt as _};
@@ -267,10 +267,10 @@ impl Strategy for ByzzFuzzMutator {
                     .map(|parent| proposal_with_parent(proposal, parent)),
                 _ => self.pool.random_proposal_at(rng, proposal.view().get()),
             };
-            if let Some(c) = candidate {
-                if c != *proposal {
-                    return c;
-                }
+            if let Some(c) = candidate
+                && c != *proposal
+            {
+                return c;
             }
         }
         match rng.random_range(0..5) {
@@ -339,12 +339,11 @@ impl Strategy for ByzzFuzzMutator {
         );
 
         // Bias toward an observed nullify target before local view edits.
-        if rng.random_bool(0.5) {
-            if let Some(v) = self.pool.random_nullify_target_view(rng) {
-                if v != last_vote_view {
-                    return v;
-                }
-            }
+        if rng.random_bool(0.5)
+            && let Some(v) = self.pool.random_nullify_target_view(rng)
+            && v != last_vote_view
+        {
+            return v;
         }
         nearby_context_value_except(
             rng,

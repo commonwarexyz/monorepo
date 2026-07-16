@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_consensus_fuzz::{fuzz, FuzzInput, HappensBeforeCoverage, SimplexId, TwinsCampaign};
+use commonware_consensus_fuzz::{FuzzInput, HappensBeforeCoverage, SimplexId, TwinsCampaign, fuzz};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: FuzzInput| {

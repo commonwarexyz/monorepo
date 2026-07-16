@@ -1,17 +1,17 @@
 use super::{Config, Error};
-use crate::{rmap::RMap, Context};
+use crate::{Context, rmap::RMap};
 use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_cryptography::{crc32, Crc32};
+use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
+    Blob, Buf, BufMut, BufferPooler, Error as RError,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
-    Blob, Buf, BufMut, BufferPooler, Error as RError,
 };
 use commonware_utils::bitmap::BitMap;
 use futures::future::try_join_all;
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
 };
 use tracing::{debug, warn};
@@ -197,10 +197,10 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
             // Rebuild intervals from the committed records
             for (section, bits) in bits {
-                if let Some(bits) = bits {
-                    if bits.count_ones() == 0 {
-                        continue;
-                    }
+                if let Some(bits) = bits
+                    && bits.count_ones() == 0
+                {
+                    continue;
                 }
 
                 let Some((blob, size)) = blobs.get(section) else {
@@ -229,12 +229,12 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                     // A committed record that is missing or invalid cannot be recovered
                     replay_blob.seek_to(offset)?;
                     let mut record_buf = replay_blob.read(Record::<V>::SIZE).await?;
-                    if let Ok(record) = Record::<V>::read(&mut record_buf) {
-                        if record.is_valid() {
-                            items += 1;
-                            intervals.insert(index);
-                            continue;
-                        }
+                    if let Ok(record) = Record::<V>::read(&mut record_buf)
+                        && record.is_valid()
+                    {
+                        items += 1;
+                        intervals.insert(index);
+                        continue;
                     }
                     return Err(Error::MissingRecord(index));
                 }

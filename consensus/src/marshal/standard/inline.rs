@@ -43,35 +43,34 @@
 //! - You are willing to perform full application verification before casting a notarize vote.
 
 use crate::{
+    Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
     marshal::{
+        Update,
         application::gates::{self, Gates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
-            relay,
+            Standard, relay,
             validation::{
-                await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
-                ParentCheck,
+                Decision, ParentCheck, await_and_validate_parent, precheck_epoch_and_reproposal,
+                run_app_verify,
             },
-            Standard,
         },
-        Update,
     },
-    simplex::{types::Context, Plan},
+    simplex::{Plan, types::Context},
     types::{Epocher, Round},
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{
+    Clock, Metrics, Spawner,
     telemetry::{
         metrics::{
-            histogram::{Buckets, Timed},
             MetricsExt as _,
+            histogram::{Buckets, Timed},
         },
         traces::TracedExt as _,
     },
-    Clock, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -79,7 +78,7 @@ use commonware_utils::{
 };
 use rand_core::Rng;
 use std::sync::Arc;
-use tracing::{debug, info_span, Instrument as _};
+use tracing::{Instrument as _, debug, info_span};
 
 /// Waits for a marshal block subscription while allowing consensus to cancel the work.
 async fn await_block_subscription<T, D>(
@@ -596,7 +595,10 @@ where
                 if let Some(task) = task {
                     let result = select! {
                         _ = tx.closed() => {
-                            debug!(reason = "consensus dropped receiver", "skipping certification");
+                            debug!(
+                                reason = "consensus dropped receiver",
+                                "skipping certification"
+                            );
                             return;
                         },
                         result = task => result,
@@ -676,26 +678,26 @@ where
 mod tests {
     use super::Inline;
     use crate::{
+        Application, Automaton, Block, CertifiableAutomaton, Relay,
         marshal::mocks::{
             harness::{
-                default_leader, make_raw_block, setup_network_with_participants, Ctx,
-                StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                B, BLOCKS_PER_EPOCH, Ctx, NAMESPACE, NUM_VALIDATORS, S, StandardHarness,
+                TestHarness, V, default_leader, make_raw_block, setup_network_with_participants,
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
         types::{Epoch, FixedEpocher, Height, Round, View},
-        Application, Automaton, Block, CertifiableAutomaton, Relay,
     };
     use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Scheme},
-        sha256::Sha256,
         Digestible, Hasher as _,
+        certificate::{ConstantProvider, Scheme, mocks::Fixture},
+        sha256::Sha256,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner, Supervisor as _};
-    use commonware_utils::{channel::fallible::OneshotExt, NZUsize};
+    use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor as _, deterministic};
+    use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
     use rand::Rng;
     use std::time::Duration;
 

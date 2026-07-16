@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
-    group::{Private, Scalar, ScalarReadCfg, Share, SmallScalar, G1, G1_MESSAGE, G2, G2_MESSAGE},
+    group::{G1, G1_MESSAGE, G2, G2_MESSAGE, Private, Scalar, ScalarReadCfg, Share, SmallScalar},
     ops,
     variant::{MinPk, MinSig, Variant},
 };
@@ -14,7 +14,7 @@ use commonware_math::{
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::Participant;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use std::{collections::HashSet, num::NonZeroUsize};
 
 #[derive(Debug, Clone)]

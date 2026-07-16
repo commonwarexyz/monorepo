@@ -47,16 +47,16 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
+    Viewable,
     simplex::{
         scheme::Scheme,
         types::{Certificate, Vote},
     },
-    Viewable,
 };
-use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
+use commonware_cryptography::{PublicKey, sha256::Digest as Sha256Digest};
 use commonware_p2p::{
-    simulated::{SplitForwarder, SplitOrigin},
     Recipients,
+    simulated::{SplitForwarder, SplitOrigin},
 };
 use commonware_runtime::IoBuf;
 use commonware_utils::{channel::mpsc::UnboundedSender, sync::Mutex};
@@ -128,11 +128,7 @@ fn filter_by_partition<P: PublicKey>(
             })
             .collect()
     };
-    if kept.is_empty() {
-        None
-    } else {
-        Some(kept)
-    }
+    if kept.is_empty() { None } else { Some(kept) }
 }
 
 /// Compact log representation for a recipient set.
@@ -259,7 +255,8 @@ pub fn make_vote<S: Scheme<Sha256Digest>>(
                 None => {
                     log::push(format!(
                         "byzzfuzz: drop channel=Vote kind={:?} view={view} message_view={message_view} sender={sender_idx} recipients={:?} reason=partition",
-                        kind, idx_of(&expanded, &participants),
+                        kind,
+                        idx_of(&expanded, &participants),
                     ));
                     return None;
                 }
@@ -356,7 +353,8 @@ where
                 None => {
                     log::push(format!(
                         "byzzfuzz: drop channel=Cert kind={:?} view={view} message_view={message_view} sender={sender_idx} recipients={:?} reason=partition",
-                        kind, idx_of(&expanded, &participants),
+                        kind,
+                        idx_of(&expanded, &participants),
                     ));
                     return None;
                 }

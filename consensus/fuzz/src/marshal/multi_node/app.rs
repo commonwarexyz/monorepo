@@ -16,13 +16,13 @@
 
 use commonware_codec::Codec;
 use commonware_consensus::{
+    Application, Epochable, Heightable,
     marshal::{
         ancestry::Ancestry,
         mocks::{block::Block, harness::S},
     },
-    Application, Epochable, Heightable,
 };
-use commonware_cryptography::{sha256::Digest as Sha256Digest, Digestible, Sha256};
+use commonware_cryptography::{Digestible, Sha256, sha256::Digest as Sha256Digest};
 use commonware_runtime::deterministic;
 use futures::StreamExt;
 use std::marker::PhantomData;

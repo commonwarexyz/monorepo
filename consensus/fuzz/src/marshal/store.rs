@@ -2,31 +2,31 @@
 
 use arbitrary::Arbitrary;
 use commonware_consensus::{
+    Heightable,
     marshal::{
+        Identifier,
         mocks::harness::{
-            setup_network_with_participants, StandardHarness, TestHarness, ValidatorHandle, B, D,
-            NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, QUORUM, S, V,
+            B, D, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, QUORUM, S,
+            StandardHarness, TestHarness, V, ValidatorHandle, setup_network_with_participants,
         },
         store::{Blocks as StoreBlocks, Certificates as StoreCertificates},
-        Identifier,
     },
     simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Finalization, Proposal},
     },
     types::{Epoch, Height, Round, View},
-    Heightable,
 };
 use commonware_cryptography::{
-    certificate::{mocks::Fixture, Verifier as _},
     Digestible,
+    certificate::{Verifier as _, mocks::Fixture},
 };
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Runner, Supervisor as _};
+use commonware_runtime::{Clock, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    archive::{self, prunable, Identifier as ArchiveIdentifier},
+    archive::{self, Identifier as ArchiveIdentifier, prunable},
     translator::EightCap,
 };
-use commonware_utils::{FuzzRng, NZUsize, NZU64};
+use commonware_utils::{FuzzRng, NZU64, NZUsize};
 use std::time::Duration;
 
 const NUM_BLOCKS: u64 = 16;
@@ -359,18 +359,18 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                     } else {
                         handle.mailbox.get_info(block.height()).await
                     };
-                    if let Some((height, digest)) = returned {
-                        if height.get() != 0 {
-                            let Some(expected) = canonical.get((height.get() - 1) as usize) else {
-                                panic!("GetInfo returned unexpected height {}", height.get());
-                            };
-                            assert_eq!(
-                                digest,
-                                expected.digest(),
-                                "GetInfo returned wrong digest for height {}",
-                                height.get(),
-                            );
-                        }
+                    if let Some((height, digest)) = returned
+                        && height.get() != 0
+                    {
+                        let Some(expected) = canonical.get((height.get() - 1) as usize) else {
+                            panic!("GetInfo returned unexpected height {}", height.get());
+                        };
+                        assert_eq!(
+                            digest,
+                            expected.digest(),
+                            "GetInfo returned wrong digest for height {}",
+                            height.get(),
+                        );
                     }
                 }
                 StoreOp::GetFinalization { block_idx } => {

@@ -17,7 +17,7 @@ use super::IoBuf;
 use crate::iobuf::pool::{BufferPoolThreadCache, SizeClassLease};
 use bytes::Bytes;
 use std::{
-    alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
+    alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
     mem::ManuallyDrop,
     ops::{Bound, RangeBounds},
     ptr::NonNull,
@@ -831,13 +831,13 @@ mod tests {
     use super::*;
     use crate::{
         iobuf::{
-            cache_line_size, page_size, pool::BufferPoolThreadCacheConfig, BufferPool,
-            BufferPoolConfig,
+            BufferPool, BufferPoolConfig, cache_line_size, page_size,
+            pool::BufferPoolThreadCacheConfig,
         },
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
-    use commonware_utils::{NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize};
     use std::ops::Bound;
 
     fn test_pool(config: BufferPoolConfig) -> BufferPool {

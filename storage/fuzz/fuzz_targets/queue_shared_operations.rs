@@ -1,8 +1,8 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
-use commonware_storage::queue::{shared, Config};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_storage::queue::{Config, shared};
 use commonware_utils::FuzzRng;
 use libfuzzer_sys::fuzz_target;
 use std::{

@@ -6,38 +6,37 @@
 //! height the reporters must reach.
 
 use crate::{
-    aggregation_certificate_mock as cert_mock,
-    utils::{link_peers, Action, Partition, SetPartition},
-    MAX_SLEEP_DURATION,
+    MAX_SLEEP_DURATION, aggregation_certificate_mock as cert_mock,
+    utils::{Action, Partition, SetPartition, link_peers},
 };
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::Encode;
 use commonware_consensus::{
     aggregation::{
+        Config, Engine,
         mocks::{self, ReporterMailbox},
         scheme::Scheme,
         types::{Ack, Item, TipAck},
-        Config, Engine,
     },
     types::{Epoch, EpochDelta, Height, HeightDelta},
 };
 use commonware_cryptography::{
+    Hasher, Sha256, Signer as _,
     certificate::mocks::Fixture,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest as Sha256Digest,
-    Hasher, Sha256, Signer as _,
 };
 use commonware_macros::select;
 use commonware_p2p::{
-    simulated::{Link, Network, Oracle, Receiver, Sender},
     Manager as _, Recipients, Sender as _,
+    simulated::{Link, Network, Oracle, Receiver, Sender},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, Quota, Runner, Spawner, Supervisor as _,
+    Clock, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_utils::{
-    ordered::Set, sequence::U64, FuzzRng, NZUsize, NonZeroDuration, NZU16, NZU64,
+    FuzzRng, NZU16, NZU64, NZUsize, NonZeroDuration, ordered::Set, sequence::U64,
 };
 use futures::future::join_all;
 use std::{

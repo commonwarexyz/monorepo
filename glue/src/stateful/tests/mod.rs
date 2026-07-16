@@ -8,7 +8,7 @@ use crate::simulate::{
     processed::ProcessedHeight,
     property::Property,
 };
-use commonware_cryptography::{ed25519, PublicKey};
+use commonware_cryptography::{PublicKey, ed25519};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::deterministic;

@@ -4,29 +4,29 @@ use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_broadcast::Broadcaster as _;
 use commonware_consensus::{
-    marshal::{
-        ancestry::Ancestry,
-        mocks::harness::{
-            setup_network_with_participants, StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, D,
-            K, NAMESPACE, NUM_VALIDATORS, S, V,
-        },
-        standard::Inline,
-        Update,
-    },
-    simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context, Plan},
-    types::{Epoch, FixedEpocher, Height, Round, View},
     Application as ConsensusApplication, Automaton, Block, CertifiableAutomaton, Heightable, Relay,
     Reporter,
+    marshal::{
+        Update,
+        ancestry::Ancestry,
+        mocks::harness::{
+            B, BLOCKS_PER_EPOCH, D, K, NAMESPACE, NUM_VALIDATORS, S, StandardHarness, TestHarness,
+            V, setup_network_with_participants,
+        },
+        standard::Inline,
+    },
+    simplex::{Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
+    types::{Epoch, FixedEpocher, Height, Round, View},
 };
 use commonware_cryptography::{
-    certificate::{mocks::Fixture, ConstantProvider},
-    sha256::Sha256,
     Digestible, Hasher as _,
+    certificate::{ConstantProvider, mocks::Fixture},
+    sha256::Sha256,
 };
 use commonware_macros::select;
 use commonware_p2p::Recipients;
-use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
-use commonware_utils::{channel::oneshot, FuzzRng, NZUsize};
+use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
+use commonware_utils::{FuzzRng, NZUsize, channel::oneshot};
 use futures::StreamExt;
 use std::time::Duration;
 

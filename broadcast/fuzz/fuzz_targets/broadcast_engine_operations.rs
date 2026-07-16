@@ -2,21 +2,21 @@
 
 use arbitrary::Arbitrary;
 use commonware_broadcast::{
-    buffered::{Config, Engine, Mailbox},
     Broadcaster,
+    buffered::{Config, Engine, Mailbox},
 };
 use commonware_codec::{Encode, RangeCfg, ReadRangeExt};
 use commonware_cryptography::{
+    Digestible, Hasher, Sha256, Signer,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{simulated::Network, Manager as _, Recipients, Sender as _, TrackedPeers};
+use commonware_p2p::{Manager as _, Recipients, Sender as _, TrackedPeers, simulated::Network};
 use commonware_runtime::{
-    deterministic, Buf, BufMut, Clock, IoBuf, Quota, Runner, Spawner as _, Supervisor as _,
+    Buf, BufMut, Clock, IoBuf, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
 };
 use commonware_utils::{
-    channel::oneshot, futures::Pool, ordered::Set, vec::Bounded, FuzzRng, NZUsize, TestRng,
+    FuzzRng, NZUsize, TestRng, channel::oneshot, futures::Pool, ordered::Set, vec::Bounded,
 };
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
@@ -469,10 +469,10 @@ fn fuzz(input: FuzzInput) {
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
-                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        if let Some(message) = mailbox.get(digest).await {
-                            assert_eq!(message.digest(), digest);
-                        }
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned()
+                        && let Some(message) = mailbox.get(digest).await
+                    {
+                        assert_eq!(message.digest(), digest);
                     }
                 }
                 BroadcastAction::SubscribeDropped {

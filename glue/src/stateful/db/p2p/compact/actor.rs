@@ -1,13 +1,13 @@
 //! Actor for compact QMDB sync over P2P.
 
-use super::{handler, mailbox, Mailbox};
+use super::{Mailbox, handler, mailbox};
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
-use commonware_resolver::{p2p, Resolver as _};
-use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_resolver::{Resolver as _, p2p};
+use commonware_runtime::{BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_storage::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
     qmdb::{self, sync::compact},
@@ -346,20 +346,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519, sha256, Sha256};
+    use commonware_cryptography::{Sha256, ed25519, sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_storage::{
         merkle::Proof,
         mmr,
         qmdb::keyless::fixed::{self as keyless_fixed, Operation as KeylessOp},
     };
     use commonware_utils::{
+        NZUsize,
         channel::{mpsc, oneshot},
         sequence::U64,
         sync::TracedAsyncRwLock,
-        NZUsize,
     };
     use std::{sync::Arc, time::Duration};
 

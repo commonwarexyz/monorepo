@@ -1,6 +1,8 @@
 use super::round::Round;
 use crate::{
+    Viewable,
     simplex::{
+        Floor,
         elector::{Config as ElectorConfig, Elector},
         interesting,
         metrics::{Leader, Timeout, TimeoutReason},
@@ -10,15 +12,13 @@ use crate::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal,
         },
-        Floor,
     },
     types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
-    Viewable,
 };
-use commonware_cryptography::{certificate, Digest};
+use commonware_cryptography::{Digest, certificate};
 use commonware_runtime::{
-    telemetry::metrics::{CounterFamily, Gauge, GaugeExt, MetricsExt as _},
     Clock, Metrics,
+    telemetry::metrics::{CounterFamily, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::futures::Aborter;
 use rand_core::CryptoRng;
@@ -27,7 +27,7 @@ use std::{
     mem::{replace, take},
     time::{Duration, SystemTime},
 };
-use tracing::{debug, warn, Span};
+use tracing::{Span, debug, warn};
 
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = View::zero();
@@ -808,7 +808,7 @@ mod tests {
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner, Supervisor as _};
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::futures::AbortablePool;
     use std::time::Duration;
 
@@ -2223,12 +2223,14 @@ mod tests {
             assert_eq!(state.last_finalized(), stale_view);
 
             // The stale round still looks certifiable without the finalized-view filter.
-            assert!(state
-                .views
-                .get_mut(&stale_view)
-                .expect("stale round must exist")
-                .try_certify()
-                .is_some());
+            assert!(
+                state
+                    .views
+                    .get_mut(&stale_view)
+                    .expect("stale round must exist")
+                    .try_certify()
+                    .is_some()
+            );
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);

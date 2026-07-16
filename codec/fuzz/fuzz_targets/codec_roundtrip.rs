@@ -1,12 +1,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::{buf::UninitSlice, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut, buf::UninitSlice};
 use commonware_codec::{
-    types::lazy::Lazy,
-    varint::{SInt, UInt},
     BufsMut, Decode, DecodeExt, DecodeRangeExt, Encode, EncodeFixed, EncodeSize, Error, IsUnit,
     RangeCfg, Read, ReadRangeExt, Write,
+    types::lazy::Lazy,
+    varint::{SInt, UInt},
 };
 use commonware_utils::sync::Once;
 use libfuzzer_sys::fuzz_target;
@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::{Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize},
+    num::{NonZeroU8, NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::{
         Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive,
     },

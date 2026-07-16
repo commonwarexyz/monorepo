@@ -14,11 +14,11 @@
 //! baselines would need ~40+ GB at that size).
 
 use commonware_runtime::{
-    telemetry::metrics::{Metric, Registered, Registration},
     Metrics, Name, Supervisor,
+    telemetry::metrics::{Metric, Registered, Registration},
 };
 use commonware_storage::{
-    index::{ordered, partitioned, unordered, Unordered},
+    index::{Unordered, ordered, partitioned, unordered},
     translator::{Cap, EightCap},
 };
 use commonware_utils::TestRng;

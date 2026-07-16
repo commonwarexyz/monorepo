@@ -2,7 +2,7 @@
 
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::freezer::{Checkpoint, Config, Freezer};
-use commonware_utils::{sequence::FixedBytes, NZUsize, TestRng, NZU16};
+use commonware_utils::{NZU16, NZUsize, TestRng, sequence::FixedBytes};
 use rand::Rng;
 use std::num::{NonZeroU16, NonZeroUsize};
 

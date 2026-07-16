@@ -31,27 +31,27 @@
 
 use super::{adversary, fault, lifecycle, log, multiplexer, network, policy, state};
 use crate::{
-    build_validator, build_validator_with_reporter, happens_before, invariants, simplex::Simplex,
-    sniff_sink, CertCfgOf, CertifyChoice, ManagedValidator, PublicKeyOf, SniffChannel,
-    SniffingReceiver, ValidatorLifecycle, BYZANTINE_IDX, N4F0C4, POST_GST_WINDOW,
+    BYZANTINE_IDX, CertCfgOf, CertifyChoice, ManagedValidator, N4F0C4, POST_GST_WINDOW,
+    PublicKeyOf, SniffChannel, SniffingReceiver, ValidatorLifecycle, build_validator,
+    build_validator_with_reporter, happens_before, invariants, simplex::Simplex, sniff_sink,
 };
 use commonware_consensus::{
+    Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
     types::View,
-    Monitor as _,
 };
 use commonware_cryptography::{
     certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{Oracle, Receiver as SimReceiver};
-use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor};
+use commonware_runtime::{Clock, Runner, Spawner, Supervisor, deterministic};
 use commonware_utils::{
+    FuzzRng,
     channel::{
         mpsc::{self, Receiver as ViewReceiver},
         oneshot,
     },
-    FuzzRng,
 };
 use futures::future::{join_all, select_all};
 use rand::{Rng, RngExt as _};
@@ -61,7 +61,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tracing::{dispatcher, Dispatch};
+use tracing::{Dispatch, dispatcher};
 
 /// Base episode step count and the container-mode step floor: container mode allows
 /// `max(MALLORY_EPISODE_STEPS, required_containers)` steps so it can attempt the
@@ -1524,8 +1524,8 @@ fn run_inner<P: Simplex>(
 mod tests {
     use super::*;
     use crate::{
-        simplex::SimplexId, strategy::StrategyChoice, utils::Partition, CertifyChoice, FuzzInput,
-        ReporterWiring, N4F0C4,
+        CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
+        strategy::StrategyChoice, utils::Partition,
     };
     use commonware_consensus::simplex::ForwardingPolicy;
     use std::num::NonZeroUsize;

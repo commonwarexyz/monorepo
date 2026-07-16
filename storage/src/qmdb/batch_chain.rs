@@ -106,7 +106,7 @@ where
 pub(crate) fn parent_and_ancestors<T, P, I>(
     parent: Option<&Arc<T>>,
     mut ancestors_of: P,
-) -> impl Iterator<Item = Arc<T>>
+) -> impl Iterator<Item = Arc<T>> + use<T, P, I>
 where
     P: FnMut(&Arc<T>) -> I,
     I: IntoIterator<Item = Arc<T>>,

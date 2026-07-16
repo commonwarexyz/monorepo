@@ -9,7 +9,7 @@
 use crate::{Consumer, Delivery};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
-use std::collections::{hash_map::Entry as HashMapEntry, HashMap};
+use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
 
 /// Completed consumer validation for a delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -271,13 +271,15 @@ where
             }
         });
         let entry = self.entries.get_mut(&key).expect("delivery entry");
-        assert!(entry
-            .delivery
-            .replace(ActiveDelivery {
-                generation,
-                _aborter: aborter,
-            })
-            .is_none());
+        assert!(
+            entry
+                .delivery
+                .replace(ActiveDelivery {
+                    generation,
+                    _aborter: aborter,
+                })
+                .is_none()
+        );
     }
 }
 
@@ -301,7 +303,7 @@ mod tests {
     use super::*;
     use crate::p2p::mocks::{Consumer as MockConsumer, Key as MockKey};
     use bytes::Bytes;
-    use commonware_runtime::{deterministic::Runner, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic::Runner};
     use commonware_utils::{
         channel::{fallible::FallibleExt, mpsc, oneshot},
         non_empty_vec,

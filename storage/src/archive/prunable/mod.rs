@@ -223,22 +223,22 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
+        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
         deterministic,
         mocks::{
-            fail_pending_syncs, release_next_pending_syncs, release_pending_syncs,
-            DelayedSyncContext, PendingSyncs,
+            DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_next_pending_syncs,
+            release_pending_syncs,
         },
         telemetry::metrics::has_metric_value,
-        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroU64},
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -1448,10 +1448,12 @@ mod tests {
             archive.prune(4).await.unwrap();
             assert!(!archive.has(Identifier::Key(&key)).await.unwrap());
             assert!(!archive.has(Identifier::Key(&collision)).await.unwrap());
-            assert!(archive
-                .has(Identifier::Key(&test_key("cccc")))
-                .await
-                .unwrap());
+            assert!(
+                archive
+                    .has(Identifier::Key(&test_key("cccc")))
+                    .await
+                    .unwrap()
+            );
 
             archive.destroy().await.unwrap();
         });

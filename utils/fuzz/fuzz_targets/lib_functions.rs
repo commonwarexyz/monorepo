@@ -5,8 +5,8 @@ use bytes::BytesMut;
 use commonware_codec::{EncodeSize, ReadExt, Write};
 use commonware_formatting::{from_hex, hex, hex_literal};
 use commonware_utils::{
-    modulo, union, union_unique, Faults, N3f1, N5f1, NZDuration, NZUsize, NonZeroDuration,
-    Participant, SystemTimeExt, NZU16, NZU32, NZU64, NZU8,
+    Faults, N3f1, N5f1, NZDuration, NZU8, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration,
+    Participant, SystemTimeExt, modulo, union, union_unique,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::{Duration, SystemTime};

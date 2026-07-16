@@ -64,12 +64,11 @@ impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<D
     where
         P: FnMut(Message<DB, F, Op, D>) -> Option<Message<DB, F, Op, D>>,
     {
-        if let Some(database) = self.database.take() {
-            if let Some(Message::AttachDatabase(database)) = push(Message::AttachDatabase(database))
-            {
-                self.database = Some(database);
-                return;
-            }
+        if let Some(database) = self.database.take()
+            && let Some(Message::AttachDatabase(database)) = push(Message::AttachDatabase(database))
+        {
+            self.database = Some(database);
+            return;
         }
 
         while let Some(message) = self.messages.pop_front() {
@@ -192,9 +191,9 @@ where
 mod tests {
     use super::*;
     use commonware_cryptography::sha256;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
     use commonware_storage::mmr;
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZU64, NZUsize};
 
     #[test]
     fn get_operations_cancellation_sends_cancel_message() {

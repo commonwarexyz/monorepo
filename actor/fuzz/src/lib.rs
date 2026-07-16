@@ -1,15 +1,15 @@
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_actor::{mailbox, Feedback, Unreliable};
-use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner, Supervisor};
+use commonware_actor::{Feedback, Unreliable, mailbox};
+use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
 use commonware_utils::{
-    sync::{Mutex, Once},
     FuzzRng,
+    sync::{Mutex, Once},
 };
 use rand::RngExt as _;
 use std::{
     collections::{BTreeSet, VecDeque},
     num::NonZeroUsize,
-    sync::{mpsc::TryRecvError, Arc},
+    sync::{Arc, mpsc::TryRecvError},
     time::Duration,
 };
 
@@ -265,10 +265,12 @@ impl FifoState {
             Unreliable::Outcome(Feedback::Ok) | Unreliable::Outcome(Feedback::Backoff) => {
                 assert!(feedback.accepted());
                 assert!(!feedback.is_rejected());
-                assert!(feedback
-                    .outcome()
-                    .expect("accepted feedback has an outcome")
-                    .accepted());
+                assert!(
+                    feedback
+                        .outcome()
+                        .expect("accepted feedback has an outcome")
+                        .accepted()
+                );
                 self.expected[message.sender as usize].push_back(message.sequence);
                 self.next_sequence[message.sender as usize] += 1;
                 if feedback == Unreliable::new(Feedback::Backoff) {
@@ -426,29 +428,29 @@ where
                 }
             }
             Operation::ParkedRecv { sender, extra } => {
-                if !senders.is_empty() {
-                    if let Some(mut parked) = receiver.take() {
-                        drain_recv_fifo(&mut parked, &mut state, usize::MAX).await;
-                        let handle = context
-                            .child("parked")
-                            .spawn(move |_| async move { (parked.recv().await, parked) });
-                        context
-                            .sleep(Duration::from_millis(PARK_SLEEP_DURATION))
-                            .await;
-                        let first = EnqueueInput {
-                            sender,
-                            kind: Kind::Retain,
-                        };
-                        send_fifo(&senders, &mut state, round, first);
-                        for (offset, input) in extra.into_iter().enumerate() {
-                            send_fifo(&senders, &mut state, round + offset + 1, input);
-                        }
-                        let (received, returned) = handle.await.expect("parked recv failed");
-                        if let Some(message) = received {
-                            state.observe(message);
-                        }
-                        receiver = Some(returned);
+                if !senders.is_empty()
+                    && let Some(mut parked) = receiver.take()
+                {
+                    drain_recv_fifo(&mut parked, &mut state, usize::MAX).await;
+                    let handle = context
+                        .child("parked")
+                        .spawn(move |_| async move { (parked.recv().await, parked) });
+                    context
+                        .sleep(Duration::from_millis(PARK_SLEEP_DURATION))
+                        .await;
+                    let first = EnqueueInput {
+                        sender,
+                        kind: Kind::Retain,
+                    };
+                    send_fifo(&senders, &mut state, round, first);
+                    for (offset, input) in extra.into_iter().enumerate() {
+                        send_fifo(&senders, &mut state, round + offset + 1, input);
                     }
+                    let (received, returned) = handle.await.expect("parked recv failed");
+                    if let Some(message) = received {
+                        state.observe(message);
+                    }
+                    receiver = Some(returned);
                 }
             }
             Operation::CloneSender { index } => {
@@ -555,13 +557,13 @@ impl mailbox::Policy for CoalesceMessage {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) {
-        if message.kind == CoalesceKind::Coalesce {
-            if let Some(index) = overflow.iter().rposition(|pending| {
+        if message.kind == CoalesceKind::Coalesce
+            && let Some(index) = overflow.iter().rposition(|pending| {
                 pending.sender == message.sender && pending.kind == CoalesceKind::Coalesce
-            }) {
-                let old = overflow.remove(index).expect("coalesced message missing");
-                message.discarded.lock().push(old.id);
-            }
+            })
+        {
+            let old = overflow.remove(index).expect("coalesced message missing");
+            message.discarded.lock().push(old.id);
         }
         overflow.push_back(message);
     }

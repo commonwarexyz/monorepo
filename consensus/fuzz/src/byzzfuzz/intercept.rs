@@ -26,13 +26,13 @@
 use crate::byzzfuzz::fault::ProcessAction;
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
+    Viewable,
     simplex::{
         scheme::Scheme,
         types::{Certificate, Vote},
     },
-    Viewable,
 };
-use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
+use commonware_cryptography::{PublicKey, sha256::Digest as Sha256Digest};
 use commonware_p2p::{Message, Receiver};
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_utils::{
@@ -42,8 +42,8 @@ use commonware_utils::{
 use std::{
     fmt::{self, Debug},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 

@@ -3,24 +3,24 @@
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
     Signer,
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_p2p::{
-    simulated::{Error as NetworkError, Link, Network},
     Manager as _,
+    simulated::{Error as NetworkError, Link, Network},
 };
 use commonware_resolver::{
-    p2p::{
-        mocks::{Consumer, Key, Producer},
-        Config, Engine,
-    },
     Resolver, TargetedResolver,
+    p2p::{
+        Config, Engine,
+        mocks::{Consumer, Key, Producer},
+    },
 };
 use commonware_runtime::{
-    deterministic, telemetry::metrics::count_running_tasks, Clock, Quota, Runner, Supervisor as _,
+    Clock, Quota, Runner, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{ordered::Set, vec::NonEmptyVec, FuzzRng, NZUsize};
+use commonware_utils::{FuzzRng, NZUsize, ordered::Set, vec::NonEmptyVec};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -509,9 +509,11 @@ fn run(input: FuzzInput) -> String {
         .await;
         network.start();
         let mut manager = oracle.manager();
-        assert!(manager
-            .track(0, Set::try_from(peers.clone()).unwrap())
-            .accepted());
+        assert!(
+            manager
+                .track(0, Set::try_from(peers.clone()).unwrap())
+                .accepted()
+        );
         make_reliable(
             &oracle,
             &peers,
@@ -586,9 +588,11 @@ fn run(input: FuzzInput) -> String {
                 }
                 Operation::FetchAll { peer, keys } => {
                     let index = peer % mailboxes.len();
-                    assert!(mailboxes[index]
-                        .fetch_all(keys.into_iter().map(Key).collect())
-                        .accepted());
+                    assert!(
+                        mailboxes[index]
+                            .fetch_all(keys.into_iter().map(Key).collect())
+                            .accepted()
+                    );
                 }
                 Operation::FetchTargeted {
                     peer,
@@ -598,9 +602,11 @@ fn run(input: FuzzInput) -> String {
                 } => {
                     let index = peer % mailboxes.len();
                     let targets = targets(&peers, target, target_mask);
-                    assert!(mailboxes[index]
-                        .fetch_targeted(Key(key), targets)
-                        .accepted());
+                    assert!(
+                        mailboxes[index]
+                            .fetch_targeted(Key(key), targets)
+                            .accepted()
+                    );
                 }
                 Operation::FetchAllTargeted { peer, requests } => {
                     let index = peer % mailboxes.len();
@@ -620,9 +626,11 @@ fn run(input: FuzzInput) -> String {
                 }
                 Operation::Cancel { peer, key } => {
                     let index = peer % mailboxes.len();
-                    assert!(mailboxes[index]
-                        .retain(move |fetch_key, _| fetch_key != &Key(key))
-                        .accepted());
+                    assert!(
+                        mailboxes[index]
+                            .retain(move |fetch_key, _| fetch_key != &Key(key))
+                            .accepted()
+                    );
                 }
                 Operation::Clear { peer } => {
                     let index = peer % mailboxes.len();
@@ -634,9 +642,11 @@ fn run(input: FuzzInput) -> String {
                     remainder,
                 } => {
                     let index = peer % mailboxes.len();
-                    assert!(mailboxes[index]
-                        .retain(move |key, _| key.0 % divisor == remainder % divisor)
-                        .accepted());
+                    assert!(
+                        mailboxes[index]
+                            .retain(move |key, _| key.0 % divisor == remainder % divisor)
+                            .accepted()
+                    );
                 }
                 Operation::Sleep { duration_ms } => {
                     context.sleep(Duration::from_millis(duration_ms)).await;
@@ -698,12 +708,16 @@ fn run(input: FuzzInput) -> String {
                     )
                     .await;
                     let mut manager = oracle.manager();
-                    assert!(manager
-                        .track(TRACK_ALL_ID, Set::try_from(peers.clone()).unwrap())
-                        .accepted());
-                    assert!(manager
-                        .track(0, Set::try_from(peers.clone()).unwrap())
-                        .accepted());
+                    assert!(
+                        manager
+                            .track(TRACK_ALL_ID, Set::try_from(peers.clone()).unwrap())
+                            .accepted()
+                    );
+                    assert!(
+                        manager
+                            .track(0, Set::try_from(peers.clone()).unwrap())
+                            .accepted()
+                    );
                     let index = peer % mailboxes.len();
                     let quota_window_ms =
                         (peers.len() as u64 * 1_000).div_ceil(input.quota_per_second as u64);
@@ -725,16 +739,20 @@ fn run(input: FuzzInput) -> String {
                     context.sleep(settle).await;
                     drain_outputs(&mut outputs, &expected, &mut delivered);
                     let canceled = key.clone();
-                    assert!(mailboxes[index]
-                        .retain(move |fetch_key, _| fetch_key != &canceled)
-                        .accepted());
+                    assert!(
+                        mailboxes[index]
+                            .retain(move |fetch_key, _| fetch_key != &canceled)
+                            .accepted()
+                    );
                     context.sleep(settle).await;
                     drain_outputs(&mut outputs, &expected, &mut delivered);
                     let mut oracle_window = vec![BTreeSet::new(); peers.len()];
                     let holder = remote_holder(&key, index, peers.len());
-                    assert!(mailboxes[index]
-                        .fetch_targeted(key.clone(), NonEmptyVec::new(peers[holder].clone()))
-                        .accepted());
+                    assert!(
+                        mailboxes[index]
+                            .fetch_targeted(key.clone(), NonEmptyVec::new(peers[holder].clone()))
+                            .accepted()
+                    );
                     context.sleep(settle).await;
                     drain_outputs(&mut outputs, &expected, &mut oracle_window);
                     for (peer_idx, keys) in oracle_window.iter().enumerate() {
@@ -765,14 +783,18 @@ fn run(input: FuzzInput) -> String {
                         assert!(mailbox.fetch(base.clone()).accepted());
                     }
                     // Same-key targeted/untargeted fetches drive every metadata-merge branch.
-                    assert!(mailbox
-                        .fetch_targeted(base.clone(), NonEmptyVec::new(peers[0].clone()))
-                        .accepted());
+                    assert!(
+                        mailbox
+                            .fetch_targeted(base.clone(), NonEmptyVec::new(peers[0].clone()))
+                            .accepted()
+                    );
                     assert!(mailbox.fetch_targeted(base.clone(), overlapping).accepted());
                     assert!(mailbox.fetch(base.clone()).accepted());
-                    assert!(mailbox
-                        .fetch_targeted(base.clone(), NonEmptyVec::new(peers[0].clone()))
-                        .accepted());
+                    assert!(
+                        mailbox
+                            .fetch_targeted(base.clone(), NonEmptyVec::new(peers[0].clone()))
+                            .accepted()
+                    );
                     // Extra keys keep the overflow non-empty so the drain re-push paths run, and
                     // the two retains exercise retain-on-overflow (keep and drop) plus push_front.
                     assert!(mailbox.fetch(Key(key.wrapping_add(1))).accepted());

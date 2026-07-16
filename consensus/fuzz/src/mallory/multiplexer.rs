@@ -31,12 +31,12 @@
 //! (`ambiguous = [0]`, safety excludes `BYZANTINE_IDX`). An Honest<->Byzantine mid-episode
 //! transition is out of scope (it would need an amnesia-style oracle flip).
 
-use super::adversary::{spawn_adversary, AdversaryRole};
-use crate::{simplex::Simplex, NetworkChannels, PublicKeyOf};
+use super::adversary::{AdversaryRole, spawn_adversary};
+use crate::{NetworkChannels, PublicKeyOf, simplex::Simplex};
 use commonware_consensus::simplex::mocks::relay;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_p2p::simulated::Oracle;
-use commonware_runtime::{deterministic, Handle, Supervisor as _};
+use commonware_runtime::{Handle, Supervisor as _, deterministic};
 use std::sync::Arc;
 
 /// Owns `BYZANTINE_IDX`'s Byzantine identity for a byzantine Mallory episode and swaps its

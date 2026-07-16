@@ -3,8 +3,8 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Encode, RangeCfg, Read};
 use commonware_utils::{
-    ordered::{BiMap, Error as OrderedError, Map, Quorum, Set},
     N3f1, TryFromIterator,
+    ordered::{BiMap, Error as OrderedError, Map, Quorum, Set},
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::{BTreeMap, BTreeSet};

@@ -3,17 +3,17 @@
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
     Signer,
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_resolver::{
-    opaque::{self, Fetcher},
     Consumer, Delivery, Fetch, Resolver, TargetedResolver,
+    opaque::{self, Fetcher},
 };
 use commonware_runtime::{
-    deterministic, telemetry::metrics::count_running_tasks, Clock, Runner, Supervisor as _,
+    Clock, Runner, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{channel::oneshot, sync::Mutex, vec::NonEmptyVec, FuzzRng};
+use commonware_utils::{FuzzRng, channel::oneshot, sync::Mutex, vec::NonEmptyVec};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, VecDeque},
@@ -258,13 +258,15 @@ fn run(input: FuzzInput) -> String {
         for operation in input.operations {
             match operation {
                 Operation::Fetch { key, sub } => {
-                    assert!(resolver
-                        .fetch(Fetch {
-                            key,
-                            subscriber: sub,
-                            span: tracing::Span::none(),
-                        })
-                        .accepted());
+                    assert!(
+                        resolver
+                            .fetch(Fetch {
+                                key,
+                                subscriber: sub,
+                                span: tracing::Span::none(),
+                            })
+                            .accepted()
+                    );
                 }
                 Operation::FetchAll { items } => {
                     let fetches: Vec<Fetch<u8, u16>> = items
@@ -279,16 +281,18 @@ fn run(input: FuzzInput) -> String {
                 }
                 Operation::FetchTargeted { key, sub } => {
                     // Opaque resolvers ignore target hints; this exercises that delegation.
-                    assert!(resolver
-                        .fetch_targeted(
-                            Fetch {
-                                key,
-                                subscriber: sub,
-                                span: tracing::Span::none(),
-                            },
-                            NonEmptyVec::new(target.clone()),
-                        )
-                        .accepted());
+                    assert!(
+                        resolver
+                            .fetch_targeted(
+                                Fetch {
+                                    key,
+                                    subscriber: sub,
+                                    span: tracing::Span::none(),
+                                },
+                                NonEmptyVec::new(target.clone()),
+                            )
+                            .accepted()
+                    );
                 }
                 Operation::FetchAllTargeted { items } => {
                     let requests: Vec<(Fetch<u8, u16>, NonEmptyVec<PublicKey>)> = items
@@ -307,9 +311,11 @@ fn run(input: FuzzInput) -> String {
                     assert!(resolver.fetch_all_targeted(requests).accepted());
                 }
                 Operation::Retain { sub } => {
-                    assert!(resolver
-                        .retain(move |_, subscriber| *subscriber == sub)
-                        .accepted());
+                    assert!(
+                        resolver
+                            .retain(move |_, subscriber| *subscriber == sub)
+                            .accepted()
+                    );
                 }
                 Operation::Clear => {
                     assert!(resolver.retain(|_, _| false).accepted());
@@ -330,13 +336,15 @@ fn run(input: FuzzInput) -> String {
                     // they pile into the ingress overflow policy (effective when size-1): the
                     // unit metadata merge runs and merge_subscribers pushes new subscribers.
                     for sub in 0..BURST_SUBSCRIBERS {
-                        assert!(resolver
-                            .fetch(Fetch {
-                                key,
-                                subscriber: sub,
-                                span: tracing::Span::none(),
-                            })
-                            .accepted());
+                        assert!(
+                            resolver
+                                .fetch(Fetch {
+                                    key,
+                                    subscriber: sub,
+                                    span: tracing::Span::none(),
+                                })
+                                .accepted()
+                        );
                     }
                     assert!(resolver.retain(|_, sub| *sub % 2 == 0).accepted());
                     assert!(resolver.retain(|_, _| true).accepted());

@@ -1,11 +1,11 @@
 use crate::{
-    utils::SetPartition, EPOCH, FAULT_INJECTION_RATIO, MAX_HONEST_MESSAGES_DROP_RATIO,
-    MIN_HONEST_MESSAGES_DROP_RATIO,
+    EPOCH, FAULT_INJECTION_RATIO, MAX_HONEST_MESSAGES_DROP_RATIO, MIN_HONEST_MESSAGES_DROP_RATIO,
+    utils::SetPartition,
 };
 use commonware_consensus::{
+    Viewable,
     simplex::types::Proposal,
     types::{Epoch, Round, View},
-    Viewable,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use rand::{Rng, RngExt as _};

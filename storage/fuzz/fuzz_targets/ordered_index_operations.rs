@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, deterministic};
 use commonware_storage::{
-    index::{ordered::Index, partitioned, Cursor as _, Factory, Ordered},
+    index::{Cursor as _, Factory, Ordered, ordered::Index, partitioned},
     translator::TwoCap,
 };
 use commonware_utils::FuzzRng;
@@ -161,18 +161,18 @@ fn run<I: Factory<TwoCap> + Ordered<Value = u64>>(
             }
 
             IndexOperation::CursorUpdate { key, new_value } => {
-                if let Some(mut cursor) = index.get_mut(key) {
-                    if cursor.next().is_some() {
-                        cursor.update(*new_value);
-                    }
+                if let Some(mut cursor) = index.get_mut(key)
+                    && cursor.next().is_some()
+                {
+                    cursor.update(*new_value);
                 }
             }
 
             IndexOperation::CursorDelete { key } => {
-                if let Some(mut cursor) = index.get_mut(key) {
-                    if cursor.next().is_some() {
-                        cursor.delete();
-                    }
+                if let Some(mut cursor) = index.get_mut(key)
+                    && cursor.next().is_some()
+                {
+                    cursor.delete();
                 }
             }
 

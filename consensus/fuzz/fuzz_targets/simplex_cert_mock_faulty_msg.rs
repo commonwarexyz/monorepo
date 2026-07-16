@@ -3,7 +3,7 @@
 #[cfg(feature = "mocks")]
 mod fuzz {
     use commonware_consensus_fuzz::{
-        fuzz, CodeCoverage, FaultyMessaging, FuzzInput, SimplexCertificateMock,
+        CodeCoverage, FaultyMessaging, FuzzInput, SimplexCertificateMock, fuzz,
     };
     use libfuzzer_sys::fuzz_target;
 

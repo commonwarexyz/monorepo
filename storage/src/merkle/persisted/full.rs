@@ -7,21 +7,20 @@
 //! This module is generic over [`Family`], so it works for both MMR and MMB.
 
 use crate::{
+    Context,
     journal::{
-        contiguous::{
-            fixed::{Config as JConfig, Journal},
-            Contiguous, Many,
-        },
         Error as JError,
+        contiguous::{
+            Contiguous, Many,
+            fixed::{Config as JConfig, Journal},
+        },
     },
     merkle::{
-        batch,
+        Error, Family, Location, Position, Proof, Readable, batch,
         hasher::Hasher,
         mem::{Config as MemConfig, Mem},
-        Error, Family, Location, Position, Proof, Readable,
     },
     metadata::{Config as MConfig, Metadata},
-    Context,
 };
 use commonware_codec::{DecodeExt, Write};
 use commonware_cryptography::Digest;
@@ -1041,21 +1040,21 @@ mod tests {
     use crate::{
         journal::contiguous::fixed::{Config as JConfig, Journal},
         merkle::{
-            hasher::Standard, mmb, mmr, Bagging::ForwardFold, Location, LocationRangeExt as _,
-            Position, Proof,
+            Bagging::ForwardFold, Location, LocationRangeExt as _, Position, Proof,
+            hasher::Standard, mmb, mmr,
         },
         metadata::{Config as MConfig, Metadata},
     };
     use commonware_cryptography::{
-        sha256::{self, Digest},
         Hasher as _, Sha256,
+        sha256::{self, Digest},
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{non_empty_range, sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::prefixed_u64::U64};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
@@ -1732,10 +1731,12 @@ mod tests {
         assert_eq!(bounds.start, Location::<F>::try_from(size).unwrap());
 
         // Make sure pruning to older location is a no-op.
-        assert!(pruned_mmr
-            .prune(Location::<F>::try_from(size).unwrap() - 1)
-            .await
-            .is_ok());
+        assert!(
+            pruned_mmr
+                .prune(Location::<F>::try_from(size).unwrap() - 1)
+                .await
+                .is_ok()
+        );
         assert_eq!(
             pruned_mmr.bounds().start,
             Location::<F>::try_from(size).unwrap()

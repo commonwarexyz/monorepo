@@ -1,6 +1,7 @@
 //! Batch mutation API for Any QMDBs.
 
 use crate::{
+    Context,
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
         authenticated,
@@ -9,10 +10,10 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{
-            db::Db,
-            operation::{update, Operation},
-            ordered::{find_next_key, find_next_key_ascending, find_prev_key},
             ValueEncoding,
+            db::Db,
+            operation::{Operation, update},
+            ordered::{find_next_key, find_next_key_ascending, find_prev_key},
         },
         batch_chain::{self, Bounds},
         bitmap::Shared,
@@ -20,7 +21,6 @@ use crate::{
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
     },
-    Context,
 };
 use ahash::{AHashMap, AHashSet};
 use commonware_codec::{Codec, CodecShared};
@@ -518,10 +518,10 @@ impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
             while *cursor < diff.len() && diff[*cursor].0 < *key {
                 *cursor += 1;
             }
-            if let Some((k, entry)) = diff.get(*cursor) {
-                if k == key {
-                    return Some(entry);
-                }
+            if let Some((k, entry)) = diff.get(*cursor)
+                && k == key
+            {
+                return Some(entry);
             }
         }
         None
@@ -994,11 +994,11 @@ where
         let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
         let mut creates = Vec::new();
         mutations.retain(|key, value| {
-            if let Some(DiffEntry::Deleted { base_old_loc }) = ancestors.resolve(key) {
-                if let Some(v) = value.take() {
-                    creates.push((key.clone(), v, *base_old_loc));
-                    return false;
-                }
+            if let Some(DiffEntry::Deleted { base_old_loc }) = ancestors.resolve(key)
+                && let Some(v) = value.take()
+            {
+                creates.push((key.clone(), v, *base_old_loc));
+                return false;
             }
             true
         });
@@ -2625,7 +2625,7 @@ where
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
     /// Weak ref fails to upgrade (ancestor was freed).
-    pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+    pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, U, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 }
@@ -3085,17 +3085,17 @@ mod tests {
     use crate::{
         mmr,
         qmdb::any::{
+            BITMAP_CHUNK_BYTES,
             ordered::fixed::Db as OrderedFixedDb,
             test::{colliding_digest, fixed_db_config},
             unordered::fixed::Db as UnorderedFixedDb,
             value::FixedEncoding,
-            BITMAP_CHUNK_BYTES,
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
 
@@ -3260,12 +3260,11 @@ mod tests {
         let floor = *floor;
         let bitmap_len = bitmap::Readable::<N>::len(bitmap);
         let committed_end = bitmap_len.min(tip);
-        if floor < committed_end {
-            if let Some(idx) = bitmap.next_one_from(floor) {
-                if idx < committed_end {
-                    return Some(Location::new(idx));
-                }
-            }
+        if floor < committed_end
+            && let Some(idx) = bitmap.next_one_from(floor)
+            && idx < committed_end
+        {
+            return Some(Location::new(idx));
         }
         let candidate = floor.max(bitmap_len);
         (candidate < tip).then(|| Location::new(candidate))
@@ -3544,10 +3543,10 @@ mod tests {
         let creates: Vec<_> = mutations
             .iter()
             .filter_map(|(key, value)| {
-                if let Some(DiffEntry::Deleted { base_old_loc }) = lookup_sorted(base_diff, key) {
-                    if let Some(value) = value {
-                        return Some((key.clone(), value.clone(), *base_old_loc));
-                    }
+                if let Some(DiffEntry::Deleted { base_old_loc }) = lookup_sorted(base_diff, key)
+                    && let Some(value) = value
+                {
+                    return Some((key.clone(), value.clone(), *base_old_loc));
                 }
                 None
             })

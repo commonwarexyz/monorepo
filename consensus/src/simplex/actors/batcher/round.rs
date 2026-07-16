@@ -1,5 +1,6 @@
-use super::{verifier::offload, Verifier};
+use super::{Verifier, verifier::offload};
 use crate::{
+    Reporter,
     simplex::{
         actors::span::ViewSpan,
         scheme::Scheme,
@@ -9,16 +10,15 @@ use crate::{
         },
     },
     types::{Participant, Round as Rnd},
-    Reporter,
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::{ordered::Quorum, N3f1};
+use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::sync::Arc;
-use tracing::{info_span, Span};
+use tracing::{Span, info_span};
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -55,11 +55,11 @@ pub struct Round<
 }
 
 impl<
-        S: Scheme<D>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        R: Reporter<Activity = Activity<S, D>>,
-    > Round<S, B, D, R>
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    R: Reporter<Activity = Activity<S, D>>,
+> Round<S, B, D, R>
 {
     pub fn new(round: Rnd, scheme: Arc<S>, blocker: B, reporter: R) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();

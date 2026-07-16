@@ -38,7 +38,7 @@ pub mod multi_node;
 pub mod single_node;
 pub mod store;
 
-pub use inline::{fuzz_marshal_inline, MarshalInlineInput};
-pub use multi_node::{fuzz_marshal_liveness, MarshalLivenessInput};
-pub use single_node::{fuzz_marshal_single_node, MarshalEvent, MarshalFuzzInput, VariantPublish};
-pub use store::{fuzz_marshal_store, MarshalStoreInput};
+pub use inline::{MarshalInlineInput, fuzz_marshal_inline};
+pub use multi_node::{MarshalLivenessInput, fuzz_marshal_liveness};
+pub use single_node::{MarshalEvent, MarshalFuzzInput, VariantPublish, fuzz_marshal_single_node};
+pub use store::{MarshalStoreInput, fuzz_marshal_store};

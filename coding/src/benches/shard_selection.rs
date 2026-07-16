@@ -24,11 +24,7 @@ impl ShardSelection {
             Self::Interleaved => (0..min)
                 .map(|i| {
                     let k = i / 2;
-                    if i % 2 == 0 {
-                        k
-                    } else {
-                        min + k
-                    }
+                    if i % 2 == 0 { k } else { min + k }
                 })
                 .collect(),
         }

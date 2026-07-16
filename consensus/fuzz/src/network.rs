@@ -16,7 +16,7 @@
 
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
-use commonware_p2p::{simulated::SplitTarget, Message, Receiver};
+use commonware_p2p::{Message, Receiver, simulated::SplitTarget};
 use commonware_utils::sync::Mutex;
 use rand::RngExt as _;
 use rand_core::CryptoRng;

@@ -1,15 +1,16 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256, Digest, Sha256};
+use commonware_cryptography::{Digest, Sha256, sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, deterministic};
 use commonware_storage::{
-    merkle::{storage::Storage as MerkleStorage, Bagging::ForwardFold, Family as MerkleFamily},
+    Context, MerkleizedBitMap, UnmerkleizedBitMap,
+    merkle::{Bagging::ForwardFold, Family as MerkleFamily, storage::Storage as MerkleStorage},
     metadata::{Config as MetadataConfig, Metadata},
-    mmr, Context, MerkleizedBitMap, UnmerkleizedBitMap,
+    mmr,
 };
-use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, FuzzRng};
+use commonware_utils::{FuzzRng, bitmap::BitMap, sequence::prefixed_u64::U64};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 100;

@@ -1,15 +1,15 @@
 use super::{
-    ingress::{Mailbox, Message, Messenger},
     Config,
+    ingress::{Mailbox, Message, Messenger},
 };
 use crate::{
-    authenticated::{data::EncodedData, discovery::channels::Channels, relay::Relay},
     Recipients,
+    authenticated::{data::EncodedData, discovery::channels::Channels, relay::Relay},
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{BufferPooler, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::channel::ring;
 use futures::Sink;
 use std::{collections::BTreeMap, pin::Pin};
@@ -146,7 +146,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
 mod tests {
     use super::*;
     use commonware_cryptography::ed25519::PublicKey;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::NZUsize;
 
     #[test]

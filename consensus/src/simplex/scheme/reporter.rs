@@ -19,11 +19,11 @@
 //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
 
 use crate::{
-    simplex::{scheme::Scheme, types::Activity},
     Reporter,
+    simplex::{scheme::Scheme, types::Activity},
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{certificate, Digest};
+use commonware_cryptography::{Digest, certificate};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::Mutex;
 use rand_core::CryptoRng;
@@ -54,12 +54,12 @@ pub struct AttributableReporter<
 }
 
 impl<
-        E: CryptoRng + Send + 'static,
-        S: certificate::Scheme + Clone,
-        D: Digest,
-        T: Strategy,
-        R: Reporter<Activity = Activity<S, D>>,
-    > Clone for AttributableReporter<E, S, D, T, R>
+    E: CryptoRng + Send + 'static,
+    S: certificate::Scheme + Clone,
+    D: Digest,
+    T: Strategy,
+    R: Reporter<Activity = Activity<S, D>>,
+> Clone for AttributableReporter<E, S, D, T, R>
 {
     fn clone(&self) -> Self {
         Self {
@@ -73,12 +73,12 @@ impl<
 }
 
 impl<
-        E: CryptoRng + Send + 'static,
-        S: certificate::Scheme,
-        D: Digest,
-        T: Strategy,
-        R: Reporter<Activity = Activity<S, D>>,
-    > AttributableReporter<E, S, D, T, R>
+    E: CryptoRng + Send + 'static,
+    S: certificate::Scheme,
+    D: Digest,
+    T: Strategy,
+    R: Reporter<Activity = Activity<S, D>>,
+> AttributableReporter<E, S, D, T, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
     pub fn new(rng: E, scheme: S, reporter: R, strategy: T, verify: bool) -> Self {
@@ -93,12 +93,12 @@ impl<
 }
 
 impl<
-        E: CryptoRng + Send + 'static,
-        S: Scheme<D>,
-        D: Digest,
-        T: Strategy,
-        R: Reporter<Activity = Activity<S, D>>,
-    > Reporter for AttributableReporter<E, S, D, T, R>
+    E: CryptoRng + Send + 'static,
+    S: Scheme<D>,
+    D: Digest,
+    T: Strategy,
+    R: Reporter<Activity = Activity<S, D>>,
+> Reporter for AttributableReporter<E, S, D, T, R>
 {
     type Activity = Activity<S, D>;
 
@@ -148,14 +148,14 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
+        Hasher, Sha256,
         bls12381::primitives::variant::MinPk,
-        certificate::{self, mocks::Fixture, Scheme as _},
+        certificate::{self, Scheme as _, mocks::Fixture},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
-        Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{sync::Mutex, test_rng, N3f1};
+    use commonware_utils::{N3f1, sync::Mutex, test_rng};
     use std::sync::Arc;
 
     const NAMESPACE: &[u8] = b"test-reporter";

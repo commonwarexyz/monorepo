@@ -4,25 +4,25 @@ use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Decode, Encode, Error as CodecError, ReadExt};
 use commonware_consensus::{
+    Epochable,
     marshal::core::Variant,
     simplex::{
         scheme::Scheme,
         types::{Finalization, Proposal},
     },
     types::Epoch,
-    Epochable,
 };
 use commonware_cryptography::{
-    certificate::{Provider, Verifier},
     PublicKey,
+    certificate::{Provider, Verifier},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
     Faults, N3f1, NonZeroDuration,
+    channel::{fallible::OneshotExt, oneshot},
 };
 use futures::future::{self, Either};
 use rand_core::CryptoRng;

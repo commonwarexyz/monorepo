@@ -6,22 +6,22 @@ use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_collector::{
-    p2p::{Config, Engine, Mailbox},
     Handler, Monitor, Originator,
+    p2p::{Config, Engine, Mailbox},
 };
 use commonware_cryptography::{
+    Committable, Digestible, Hasher, Sha256, Signer,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{
-    deterministic, Buf, BufMut, Clock, Handle, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _,
+    Buf, BufMut, Clock, Handle, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
 };
 use commonware_utils::{
+    FuzzRng,
     channel::{mpsc, oneshot},
     sync::Mutex,
-    FuzzRng,
 };
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, RngExt as _};
@@ -684,10 +684,10 @@ fn fuzz(input: FuzzInput) {
                         };
                         let recorded =
                             model_recipients(&recipients, &public_keys[idx], &public_keys);
-                        if mailbox.send(recipients, request).accepted() {
-                            if let Some(model) = state.models.get(&idx) {
-                                record_request(model, commitment, recorded);
-                            }
+                        if mailbox.send(recipients, request).accepted()
+                            && let Some(model) = state.models.get(&idx)
+                        {
+                            record_request(model, commitment, recorded);
                         }
                     }
                 }
@@ -804,10 +804,10 @@ fn fuzz(input: FuzzInput) {
             // events first, then apply the model cancel so only future events are
             // rejected.
             validate_monitor_events(&state.all_models);
-            if let Some((idx, commitment)) = processed_cancel {
-                if let Some(model) = state.models.get(&idx) {
-                    record_cancel(model, &commitment);
-                }
+            if let Some((idx, commitment)) = processed_cancel
+                && let Some(model) = state.models.get(&idx)
+            {
+                record_cancel(model, &commitment);
             }
         }
 

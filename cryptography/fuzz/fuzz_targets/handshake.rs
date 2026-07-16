@@ -4,13 +4,13 @@ use arbitrary::Arbitrary;
 use bytes::Bytes;
 use commonware_codec::{Encode, Read};
 use commonware_cryptography::{
+    Signer,
     ed25519::{PrivateKey, Signature as Ed25519Signature},
     handshake::{
-        dial_end, dial_start, listen_end, listen_start, Ack, Context, RecvCipher, SendCipher, Syn,
-        SynAck,
+        Ack, Context, RecvCipher, SendCipher, Syn, SynAck, dial_end, dial_start, listen_end,
+        listen_start,
     },
     transcript::Transcript,
-    Signer,
 };
 use commonware_utils::FuzzRng;
 use libfuzzer_sys::fuzz_target;

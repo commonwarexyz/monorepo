@@ -1,19 +1,19 @@
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::{Contiguous as _, Mutable},
     },
     merkle::{
-        full::{self, Merkle},
         Family, Location,
+        full::{self, Merkle},
     },
     qmdb::{
         self,
         any::value::ValueEncoding,
-        keyless::{operation::Codec, CompactDb, Keyless, Metrics, Operation},
+        keyless::{CompactDb, Keyless, Metrics, Operation, operation::Codec},
         sync,
     },
-    Context,
 };
 use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Hasher;

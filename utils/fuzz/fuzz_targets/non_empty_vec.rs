@@ -3,8 +3,8 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Encode, Error as CodecError, RangeCfg, Read, Write};
 use commonware_utils::{
-    vec::{Bounded, Error as NonEmptyVecError, NonEmptyVec},
     TryFromIterator,
+    vec::{Bounded, Error as NonEmptyVecError, NonEmptyVec},
 };
 use libfuzzer_sys::fuzz_target;
 use std::{collections::VecDeque, num::NonZeroUsize};

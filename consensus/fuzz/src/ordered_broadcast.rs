@@ -6,30 +6,29 @@
 //! height the reporters must reach.
 
 use crate::{
-    ordered_broadcast_certificate_mock as cert_mock,
-    utils::{link_peers, Action, Partition, SetPartition},
-    MAX_SLEEP_DURATION,
+    MAX_SLEEP_DURATION, ordered_broadcast_certificate_mock as cert_mock,
+    utils::{Action, Partition, SetPartition, link_peers},
 };
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_consensus::{
     ordered_broadcast::{
+        Config, Engine,
         mocks::{self, ReporterMailbox},
         scheme::Scheme,
         types::{ChunkSigner, ChunkVerifier},
-        Config, Engine,
     },
     types::{Epoch, EpochDelta, Height, HeightDelta},
 };
 use commonware_cryptography::{
-    certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest, Hasher, Sha256,
+    Hasher, Sha256, certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, Quota, Runner, Spawner, Supervisor as _,
+    Clock, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZUsize, NZU16, NZU64};
+use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize};
 use futures::future::join_all;
 use std::{
     collections::BTreeMap,

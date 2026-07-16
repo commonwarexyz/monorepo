@@ -1,9 +1,9 @@
-use crate::{marshal::Update, types::Height, Block, Reporter};
+use crate::{Block, Reporter, marshal::Update, types::Height};
 use commonware_actor::Feedback;
 use commonware_utils::{
+    Acknowledgement,
     acknowledgement::Exact,
     sync::{Mutex, Notify},
-    Acknowledgement,
 };
 use std::{
     collections::{BTreeMap, VecDeque},

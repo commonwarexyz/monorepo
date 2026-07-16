@@ -64,7 +64,7 @@
 //! depends on the rate-limiting configuration of the underlying P2P network.
 
 use bytes::Bytes;
-use commonware_utils::{channel::oneshot, Span};
+use commonware_utils::{Span, channel::oneshot};
 
 mod config;
 pub use config::Config;
@@ -92,30 +92,30 @@ pub trait Producer: Clone + Send + 'static {
 #[cfg(test)]
 mod tests {
     use super::{
-        mocks::{Consumer, Key, Producer},
         Config, Engine, Mailbox,
+        mocks::{Consumer, Key, Producer},
     };
     use crate::{Delivery, Fetch, Resolver, TargetedResolver};
     use bytes::Bytes;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager as _, Provider, TrackedPeers,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics as _, Quota, Runner,
-        Spawner as _, Supervisor as _,
+        Clock, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
+        telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
+        NZU32, NZUsize,
         channel::{fallible::FallibleExt, mpsc, oneshot},
         non_empty_vec,
         ordered::Set,
         sync::Mutex,
-        NZUsize, NZU32,
     };
     use std::{
         collections::{HashMap, VecDeque},

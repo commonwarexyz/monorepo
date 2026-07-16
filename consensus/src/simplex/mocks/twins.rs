@@ -77,7 +77,7 @@ use crate::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
-use rand::{seq::SliceRandom, Rng, RngExt as _};
+use rand::{Rng, RngExt as _, seq::SliceRandom};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -1231,8 +1231,8 @@ mod tests {
         },
         types::Epoch,
     };
-    use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-    use commonware_utils::{ordered::Set, test_rng, TestRng};
+    use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};
+    use commonware_utils::{TestRng, ordered::Set, test_rng};
     use std::collections::HashSet;
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {

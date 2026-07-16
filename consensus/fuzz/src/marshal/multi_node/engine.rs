@@ -12,24 +12,24 @@
 //! Engine p2p channels live at ids 3/4/5 because marshal hardcodes backfill=1
 //! and broadcast=2 in `setup_validator_with`.
 
-use super::{app::BlockBuilderApp, ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE};
+use super::{ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, app::BlockBuilderApp};
 use commonware_consensus::{
     marshal::{
         coding::{Marshaled, MarshaledConfig},
         core::Mailbox,
         mocks::harness::{
-            CodingCtx, CodingHarness, Ctx, StandardHarness, TestHarness, BLOCKS_PER_EPOCH, K,
-            PAGE_CACHE_SIZE, PAGE_SIZE, S, TEST_QUOTA,
+            BLOCKS_PER_EPOCH, CodingCtx, CodingHarness, Ctx, K, PAGE_CACHE_SIZE, PAGE_SIZE, S,
+            StandardHarness, TEST_QUOTA, TestHarness,
         },
         standard::Deferred,
     },
-    simplex::{config, elector::RoundRobin, Engine, Floor, ForwardingPolicy},
+    simplex::{Engine, Floor, ForwardingPolicy, config, elector::RoundRobin},
     types::{Delta, Epoch, FixedEpocher},
 };
-use commonware_cryptography::{certificate::ConstantProvider, Sha256};
+use commonware_cryptography::{Sha256, certificate::ConstantProvider};
 use commonware_p2p::simulated::Oracle;
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Supervisor as _};
+use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_utils::NZUsize;
 use std::{future::Future, time::Duration};
 

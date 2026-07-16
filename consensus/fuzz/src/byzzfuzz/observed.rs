@@ -9,10 +9,10 @@
 //! deliberately does not retain raw cert bytes or resolver request views.
 
 use commonware_consensus::{
-    simplex::types::{Certificate, Proposal, Vote},
     Viewable,
+    simplex::types::{Certificate, Proposal, Vote},
 };
-use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
+use commonware_cryptography::{PublicKey, sha256::Digest as Sha256Digest};
 use commonware_utils::sync::Mutex;
 use rand::RngExt as _;
 use std::{

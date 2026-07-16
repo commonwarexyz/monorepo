@@ -1,22 +1,22 @@
 use arbitrary::Arbitrary;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{ed25519, Signer};
+use commonware_cryptography::{Signer, ed25519};
 use commonware_p2p::{
+    Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
     authenticated::{
         discovery,
         lookup::{self, Network as LookupNetwork},
     },
-    Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    deterministic::{self, Context},
     Clock, Handle, IoBuf, Quota, Runner, Supervisor as _,
+    deterministic::{self, Context},
 };
 use commonware_utils::{
+    NZU32, NZUsize, TryCollect,
     ordered::{Map, Set},
-    NZUsize, TryCollect, NZU32,
 };
-use rand::{seq::SliceRandom, RngExt as _};
+use rand::{RngExt as _, seq::SliceRandom};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,

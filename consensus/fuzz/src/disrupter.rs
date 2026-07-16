@@ -1,17 +1,17 @@
-use crate::{strategy::Strategy, types::Message, EPOCH};
+use crate::{EPOCH, strategy::Strategy, types::Message};
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
+    Viewable,
     simplex::{
         scheme::Scheme,
         types::{Certificate, Finalize, Notarize, Nullify, Proposal, Vote},
     },
     types::{Epoch, Participant, Round, View},
-    Viewable,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, IoBuf, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, IoBuf, Spawner, spawn_cell};
 use rand::{Rng, RngExt as _};
 use rand_core::CryptoRng;
 use std::{collections::VecDeque, time::Duration};

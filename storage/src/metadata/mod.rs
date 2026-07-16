@@ -91,7 +91,7 @@ mod tests {
     use super::*;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Metrics as _, Runner, Storage, Supervisor as _};
+    use commonware_runtime::{Blob, Metrics as _, Runner, Storage, Supervisor as _, deterministic};
     use commonware_utils::sequence::U64;
     use rand::{Rng, RngExt as _};
 
@@ -1198,10 +1198,10 @@ mod tests {
                 if context.random_bool(0.1) {
                     let selected_index = context.random_range(0..=i);
                     let mut_key = U64::new(selected_index as u64);
-                    if let Some(value) = metadata.get_mut(&mut_key) {
-                        if !value.is_empty() {
-                            value[0] = value[0].wrapping_add(1);
-                        }
+                    if let Some(value) = metadata.get_mut(&mut_key)
+                        && !value.is_empty()
+                    {
+                        value[0] = value[0].wrapping_add(1);
                     }
                 }
             }

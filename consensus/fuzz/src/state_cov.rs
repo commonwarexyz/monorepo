@@ -1112,10 +1112,15 @@ simplex_voter_timeouts{leader="d",reason="IgnoredProposal"} 1
         assert!(
             tokens.contains(&"warn_event_count:voter:proposal_failed_certification:1".to_string())
         );
-        assert!(tokens
-            .contains(&"warn_event_view_bucket:voter:proposal_failed_certification:4".to_string()));
+        assert!(
+            tokens.contains(
+                &"warn_event_view_bucket:voter:proposal_failed_certification:4".to_string()
+            )
+        );
         assert!(tokens.contains(&"warn_event:resolver:invalid_signature".to_string()));
-        assert!(tokens.contains(&"warn_event_view_bucket:resolver:invalid_signature:4".to_string()));
+        assert!(
+            tokens.contains(&"warn_event_view_bucket:resolver:invalid_signature:4".to_string())
+        );
         assert!(tokens.contains(&"warn_event:batcher:other".to_string()));
         assert!(tokens.contains(&"warn_event_view_bucket:batcher:other:5".to_string()));
         assert!(!tokens.contains(&"warn_event:voter:consensus_initialized".to_string()));
@@ -1324,8 +1329,10 @@ simplex_voter_timeouts{leader="d",reason="IgnoredProposal"} 1
 
         let tokens = trace_event_tokens(&events);
         assert!(tokens.contains(&"trace_event:resolver_backfill_notarization".to_string()));
-        assert!(tokens
-            .contains(&"trace_event_view_bucket:resolver_backfill_notarization:4".to_string()));
+        assert!(
+            tokens
+                .contains(&"trace_event_view_bucket:resolver_backfill_notarization:4".to_string())
+        );
         assert!(tokens.contains(&"trace_event:certification_attempt".to_string()));
         assert!(tokens.contains(&"trace_event_view_bucket:certification_attempt:2".to_string()));
         assert!(!tokens.contains(&"trace_event:other".to_string()));

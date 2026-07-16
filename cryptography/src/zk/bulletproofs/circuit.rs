@@ -136,7 +136,7 @@ use crate::transcript::Transcript;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, Read, Write};
 use commonware_math::{
-    algebra::{powers, Additive, CryptoGroup, Field, HashToGroup, Random, Ring, Space},
+    algebra::{Additive, CryptoGroup, Field, HashToGroup, Random, Ring, Space, powers},
     synthetic::Synthetic,
 };
 use commonware_parallel::{Sequential, Strategy};
@@ -2110,7 +2110,7 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod test {
-    use super::{fuzz, prove, verify, Circuit, Setup, SparseMatrix, Witness};
+    use super::{Circuit, Setup, SparseMatrix, Witness, fuzz, prove, verify};
     use crate::{transcript::Transcript, zk::circuit as zk};
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;

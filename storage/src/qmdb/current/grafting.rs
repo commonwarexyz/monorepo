@@ -62,8 +62,8 @@
 
 use crate::{
     merkle::{
-        self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
-        Location, Position, Readable,
+        self, Family, Graftable, Location, Position, Readable, hasher::Hasher as HasherTrait,
+        storage::Storage as StorageTrait,
     },
     qmdb,
 };
@@ -389,12 +389,12 @@ pub(super) struct Storage<
 }
 
 impl<
-        'a,
-        F: Graftable,
-        H: Hasher,
-        G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
-        S: StorageTrait<F, Digest = H::Digest>,
-    > Storage<'a, F, H, G, S>
+    'a,
+    F: Graftable,
+    H: Hasher,
+    G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
+    S: StorageTrait<F, Digest = H::Digest>,
+> Storage<'a, F, H, G, S>
 {
     /// Creates a new [Storage] instance.
     pub(super) const fn new(grafted_tree: &'a G, grafting_height: u32, ops_tree: &'a S) -> Self {
@@ -442,11 +442,11 @@ impl<
 }
 
 impl<
-        F: Graftable,
-        H: Hasher,
-        G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
-        S: StorageTrait<F, Digest = H::Digest>,
-    > StorageTrait<F> for Storage<'_, F, H, G, S>
+    F: Graftable,
+    H: Hasher,
+    G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
+    S: StorageTrait<F, Digest = H::Digest>,
+> StorageTrait<F> for Storage<'_, F, H, G, S>
 {
     type Digest = H::Digest;
 
@@ -471,14 +471,15 @@ mod tests {
         merkle::conformance::build_test_mmr,
         mmb, mmr,
         mmr::{
-            iterator::{pos_to_height, PeakIterator},
+            Location, Position, StandardHasher,
+            iterator::{PeakIterator, pos_to_height},
             mem::Mmr,
-            verification, Location, Position, StandardHasher,
+            verification,
         },
     };
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     /// MMR has no pending state, so every supplied chunk should be treated as graftable during
     /// verification. Tests use this sentinel to avoid threading the actual chunk count through

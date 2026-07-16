@@ -1,9 +1,8 @@
 #![no_main]
 
 use commonware_consensus_fuzz::{
-    fuzz_node,
+    SimplexSecp256r1, fuzz_node,
     simplex_node::{NodeFuzzInput, WithoutRecovery},
-    SimplexSecp256r1,
 };
 use libfuzzer_sys::fuzz_target;
 

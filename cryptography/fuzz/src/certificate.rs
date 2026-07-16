@@ -10,8 +10,9 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
-use commonware_codec::{types::lazy::Lazy, Decode, Encode};
+use commonware_codec::{Decode, Encode, types::lazy::Lazy};
 use commonware_cryptography::{
+    Signer as _,
     bls12381::primitives::{
         group::Private,
         ops::{aggregate, compute_public},
@@ -21,13 +22,12 @@ use commonware_cryptography::{
     ed25519::{self, PrivateKey as Ed25519PrivateKey},
     secp256r1::standard::PrivateKey as SecpPrivateKey,
     sha256::Digest as Sha256Digest,
-    Signer as _,
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_utils::{
-    ordered::{BiMap, Set},
     Faults, FuzzRng, N3f1, Participant, TryCollect,
+    ordered::{BiMap, Set},
 };
 use core::marker::PhantomData;
 use std::collections::BTreeSet;
@@ -376,9 +376,11 @@ where
     for op in &ops {
         match op {
             Op::Sign { signer, message } => {
-                assert!(signers[*signer as usize % n]
-                    .sign::<Sha256Digest>(F::subject(message))
-                    .is_some());
+                assert!(
+                    signers[*signer as usize % n]
+                        .sign::<Sha256Digest>(F::subject(message))
+                        .is_some()
+                );
             }
             Op::VerifyAttestation {
                 signer,
@@ -448,9 +450,11 @@ where
                     .filter_map(|i| signers[i].sign::<Sha256Digest>(F::subject(message)))
                     .collect();
                 if attestations.len() < quorum {
-                    assert!(signers[0]
-                        .assemble::<_, N3f1>(attestations, &Sequential)
-                        .is_none());
+                    assert!(
+                        signers[0]
+                            .assemble::<_, N3f1>(attestations, &Sequential)
+                            .is_none()
+                    );
                 } else {
                     let certificate = signers[0]
                         .assemble::<_, N3f1>(attestations, &Sequential)
@@ -505,13 +509,15 @@ where
             }
             Op::BisectStoredCertificates => {
                 let none: Vec<Item<'_, F>> = Vec::new();
-                assert!(verifier
-                    .verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-                        &mut rng,
-                        &none,
-                        &Sequential
-                    )
-                    .is_empty());
+                assert!(
+                    verifier
+                        .verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+                            &mut rng,
+                            &none,
+                            &Sequential
+                        )
+                        .is_empty()
+                );
                 if certs.is_empty() {
                     continue;
                 }

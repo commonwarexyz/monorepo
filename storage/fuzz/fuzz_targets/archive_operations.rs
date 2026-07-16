@@ -1,16 +1,16 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     archive::{
+        Archive as ArchiveTrait, Error as ArchiveError, Identifier, MultiArchive as _,
         immutable::{Archive as ImmutableArchive, Config as ImmutableConfig},
         prunable::{Archive as PrunableArchive, Config as PrunableConfig},
-        Archive as ArchiveTrait, Error as ArchiveError, Identifier, MultiArchive as _,
     },
     translator::{EightCap, FourCap, Translator},
 };
-use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU16, NZU64};
+use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashSet,
@@ -455,10 +455,13 @@ async fn run_archive<A: ArchiveHarness>(
 
                     if !found_match {
                         panic!(
-                                "Value mismatch for key {key_data:?}. Got {:?}, but expected one of: {:?}",
-                                value_bytes,
-                                matching_items.iter().map(|(idx, _, v)| (idx, v)).collect::<Vec<_>>()
-                            );
+                            "Value mismatch for key {key_data:?}. Got {:?}, but expected one of: {:?}",
+                            value_bytes,
+                            matching_items
+                                .iter()
+                                .map(|(idx, _, v)| (idx, v))
+                                .collect::<Vec<_>>()
+                        );
                     }
                 } else {
                     // If archive doesn't have it, we shouldn't have it either (or it was pruned)
@@ -580,17 +583,19 @@ async fn run_archive<A: ArchiveHarness>(
                     );
 
                     // If pruned, gap should be above threshold
-                    if let Some(threshold) = oldest_allowed {
-                        if gap_index < threshold {
-                            panic!("Warning: next_gap returned gap {gap_index} below pruning threshold {threshold}");
-                        }
+                    if let Some(threshold) = oldest_allowed
+                        && gap_index < threshold
+                    {
+                        panic!(
+                            "Warning: next_gap returned gap {gap_index} below pruning threshold {threshold}"
+                        );
                     }
                 }
 
-                if let Some(next_index) = next_written {
-                    if next_index < *start {
-                        panic!("Warning: next_written {next_index} is before start {start}");
-                    }
+                if let Some(next_index) = next_written
+                    && next_index < *start
+                {
+                    panic!("Warning: next_written {next_index} is before start {start}");
                 }
             }
 

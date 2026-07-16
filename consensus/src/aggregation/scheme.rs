@@ -16,7 +16,7 @@
 //!   certificates regardless of committee size.
 
 use super::types::Item;
-use commonware_cryptography::{certificate, Digest};
+use commonware_cryptography::{Digest, certificate};
 
 /// Marker trait for signing schemes compatible with `aggregation`.
 ///

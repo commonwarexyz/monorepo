@@ -1,10 +1,10 @@
 //! Interfaces for stores of finalized certificates and blocks.
 
-use crate::{simplex::types::Finalization, types::Height, Block};
-use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
+use crate::{Block, simplex::types::Finalization, types::Height};
+use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
 use commonware_runtime::{BufferPooler, Clock, Handle, Metrics, Storage};
 use commonware_storage::{
-    archive::{self, immutable, prunable, Archive, Identifier},
+    archive::{self, Archive, Identifier, immutable, prunable},
     translator::Translator,
 };
 use std::{error::Error, future::Future};

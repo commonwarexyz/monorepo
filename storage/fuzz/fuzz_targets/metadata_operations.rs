@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, deterministic};
 use commonware_storage::metadata::{Config, Error as MetadataError, Metadata};
-use commonware_utils::{sequence::U64, FuzzRng};
+use commonware_utils::{FuzzRng, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 

@@ -2,7 +2,7 @@
 
 #[cfg(feature = "mocks")]
 mod fuzz {
-    use commonware_consensus_fuzz::marshal::{fuzz_marshal_store, MarshalStoreInput};
+    use commonware_consensus_fuzz::marshal::{MarshalStoreInput, fuzz_marshal_store};
     use libfuzzer_sys::fuzz_target;
 
     fuzz_target!(|input: MarshalStoreInput| {

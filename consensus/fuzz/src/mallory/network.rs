@@ -29,14 +29,14 @@
 //! `(node, channel)` matches its own.
 
 use crate::{
-    utils::{apply_partition, SetPartition},
-    SniffChannel, BYZANTINE_IDX,
+    BYZANTINE_IDX, SniffChannel,
+    utils::{SetPartition, apply_partition},
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
-    simulated::{Error, Link, Oracle},
     Message,
+    simulated::{Error, Link, Oracle},
 };
 use commonware_runtime::{Clock, IoBuf};
 use commonware_utils::{
@@ -47,8 +47,8 @@ use std::{
     collections::VecDeque,
     fmt,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -456,10 +456,10 @@ pub(crate) async fn pump<P, R, E>(
                         }
                     }
                     PumpDecision::Reorder { buffer: cap } => {
-                        if let Some(release) = reorder_step(&mut buffer, &mut toggle, message, cap) {
-                            if internal_tx.send(release).is_err() {
-                                break;
-                            }
+                        if let Some(release) = reorder_step(&mut buffer, &mut toggle, message, cap)
+                            && internal_tx.send(release).is_err()
+                        {
+                            break;
                         }
                     }
                 }
@@ -503,11 +503,11 @@ impl<P: PublicKey> commonware_p2p::Receiver for PacketFaultReceiver<P> {
 mod tests {
     use super::*;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
         Signer as _,
+        ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
     };
     use commonware_p2p::Receiver as _;
-    use commonware_runtime::{deterministic, IoBuf, Runner, Spawner, Supervisor as _};
+    use commonware_runtime::{IoBuf, Runner, Spawner, Supervisor as _, deterministic};
 
     const NODE: usize = 1;
 

@@ -1,7 +1,7 @@
 use crate::encrypted::Error;
 use commonware_codec::{
-    varint::{Decoder, UInt, MAX_U32_VARINT_SIZE},
     Encode, EncodeSize, Write,
+    varint::{Decoder, MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Buf, IoBuf, IoBufMut, IoBufs, Sink, Stream};
 
@@ -129,7 +129,7 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error>
 mod tests {
     use super::*;
     use commonware_runtime::{
-        deterministic, mocks, BufMut, IoBufMut, Runner, Spawner, Supervisor as _,
+        BufMut, IoBufMut, Runner, Spawner, Supervisor as _, deterministic, mocks,
     };
     use rand::RngExt as _;
 

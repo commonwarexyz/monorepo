@@ -7,6 +7,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
+    Signer as _,
     bls12381::{
         certificate::threshold::Certificate,
         dkg::feldman_desmedt as dkg,
@@ -19,11 +20,10 @@ use commonware_cryptography::{
     ed25519::{self, PrivateKey as Ed25519PrivateKey},
     impl_certificate_bls12381_threshold,
     sha256::Digest as Sha256Digest,
-    Signer as _,
 };
 use commonware_math::algebra::{Additive, Random};
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, Faults, N3f1, Participant, TestRng, TryCollect};
+use commonware_utils::{Faults, N3f1, Participant, TestRng, TryCollect, ordered::Set};
 use libfuzzer_sys::fuzz_target;
 use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc};
 
@@ -167,9 +167,11 @@ where
     for op in ops {
         match op {
             Op::Sign { signer, message } => {
-                assert!(signers[*signer as usize % n]
-                    .sign::<Sha256Digest>(subject(message))
-                    .is_some());
+                assert!(
+                    signers[*signer as usize % n]
+                        .sign::<Sha256Digest>(subject(message))
+                        .is_some()
+                );
             }
             Op::VerifyAttestation {
                 signer,
@@ -234,9 +236,11 @@ where
                     .filter_map(|i| signers[i].sign::<Sha256Digest>(subject(message)))
                     .collect();
                 if attestations.len() < quorum {
-                    assert!(signers[0]
-                        .assemble::<_, N3f1>(attestations, &Sequential)
-                        .is_none());
+                    assert!(
+                        signers[0]
+                            .assemble::<_, N3f1>(attestations, &Sequential)
+                            .is_none()
+                    );
                 } else {
                     // Exactly a quorum of valid, distinct partials must assemble.
                     attestations.truncate(quorum);
@@ -297,13 +301,15 @@ where
             Op::BisectStoredCertificates => {
                 // Empty input exercises the length-zero early return.
                 let none: Vec<(TestSubject<'_>, &Certificate<V>)> = Vec::new();
-                assert!(verifier
-                    .verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-                        &mut rng,
-                        &none,
-                        &Sequential
-                    )
-                    .is_empty());
+                assert!(
+                    verifier
+                        .verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+                            &mut rng,
+                            &none,
+                            &Sequential
+                        )
+                        .is_empty()
+                );
 
                 // Valid stored certificates plus one corrupt entry drive both the
                 // batch-pass fill and the bisection split/singleton-fail paths.

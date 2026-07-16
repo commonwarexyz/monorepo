@@ -6,7 +6,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{util::at_least, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write, util::at_least};
 use core::{
     fmt::{self, Formatter, Write as _},
     iter,
@@ -797,11 +797,7 @@ impl<const N: usize> Index<u64> for BitMap<N> {
     fn index(&self, bit: u64) -> &Self::Output {
         self.assert_bit(bit);
         let value = self.get(bit);
-        if value {
-            &true
-        } else {
-            &false
-        }
+        if value { &true } else { &false }
     }
 }
 
@@ -1258,7 +1254,7 @@ mod tests {
         // Manually corrupt the last chunk to have trailing bits set
         let last_chunk = bv_dirty.chunks.back_mut().unwrap();
         last_chunk[3] |= 0xF0; // Set some high bits in the last byte
-                               // Should return true since we had invalid trailing bits
+        // Should return true since we had invalid trailing bits
         assert!(bv_dirty.clear_trailing_bits());
         // After clearing, should return false
         assert!(!bv_dirty.clear_trailing_bits());
@@ -2303,7 +2299,7 @@ mod tests {
         // Test truncated buffer (not enough chunks)
         let mut buf = BytesMut::new();
         100u64.write(&mut buf); // bits length requiring 4 chunks (3 full + partially filled)
-                                // Only write 3 chunks
+        // Only write 3 chunks
         [0u8; 4].write(&mut buf);
         [0u8; 4].write(&mut buf);
         [0u8; 4].write(&mut buf);

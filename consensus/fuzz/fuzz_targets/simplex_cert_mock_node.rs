@@ -3,9 +3,8 @@
 #[cfg(feature = "mocks")]
 mod fuzz {
     use commonware_consensus_fuzz::{
-        fuzz_node,
+        SimplexCertificateMock, fuzz_node,
         simplex_node::{NodeFuzzInput, WithoutRecovery},
-        SimplexCertificateMock,
     };
     use libfuzzer_sys::fuzz_target;
 

@@ -1,13 +1,13 @@
-use commonware_cryptography::{sha256, Sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_runtime::{
+    Strategizer,
     benchmarks::{context, tokio},
     tokio::Config,
-    Strategizer,
 };
-use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family, Location};
-use commonware_utils::{test_rng, NZUsize};
-use criterion::{criterion_group, Criterion};
+use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, Location, mem::Mem};
+use commonware_utils::{NZUsize, test_rng};
+use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
 use std::{collections::HashMap, num::NonZeroUsize, time::Instant};
 

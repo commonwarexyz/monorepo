@@ -12,15 +12,15 @@
 
 use crate::{
     byzzfuzz::{
+        BYZANTINE_IDX,
         fault::{NetworkFault, ProcessAction, ProcessFault},
         scope::{self, MessageScope},
-        BYZANTINE_IDX,
     },
     utils::SetPartition,
 };
 use commonware_consensus::types::View;
 use commonware_cryptography::PublicKey;
-use rand::{seq::SliceRandom, Rng, RngExt as _};
+use rand::{Rng, RngExt as _, seq::SliceRandom};
 
 pub(crate) fn receiver_candidates<P: PublicKey>(participants: &[P]) -> Vec<P> {
     participants

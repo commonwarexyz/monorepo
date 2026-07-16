@@ -4,10 +4,11 @@ use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, FixedSize, Read};
 use commonware_coding::Config as CodingConfig;
 use commonware_consensus::{
+    Epochable, Viewable,
     simplex::{
         scheme::{
-            bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-            secp256r1, Scheme as SimplexScheme,
+            Scheme as SimplexScheme, bls12381_multisig,
+            bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
         },
         types::{
             Activity, Artifact, Attributable, Backfiller, Certificate, ConflictingFinalize,
@@ -17,10 +18,9 @@ use commonware_consensus::{
         },
     },
     types::{
-        coding::Commitment, Epoch, EpochDelta, EpochInfo, EpochPhase, Epocher, FixedEpocher,
-        Height, HeightDelta, Round, View, ViewDelta,
+        Epoch, EpochDelta, EpochInfo, EpochPhase, Epocher, FixedEpocher, Height, HeightDelta,
+        Round, View, ViewDelta, coding::Commitment,
     },
-    Epochable, Viewable,
 };
 use commonware_consensus_fuzz::id_mock;
 #[cfg(feature = "mocks")]
@@ -33,7 +33,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
-use commonware_utils::{sequence::U64, TestRng};
+use commonware_utils::{TestRng, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::hash_map::DefaultHasher,

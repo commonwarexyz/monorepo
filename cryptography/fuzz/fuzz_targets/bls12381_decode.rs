@@ -4,8 +4,8 @@ use arbitrary::Arbitrary;
 use blst::min_pk::{PublicKey as RefPublicKey, Signature as RefSignature};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::{PrivateKey as BlsPrivateKey, PublicKey, Signature},
     Signer as _,
+    bls12381::{PrivateKey as BlsPrivateKey, PublicKey, Signature},
 };
 use libfuzzer_sys::fuzz_target;
 

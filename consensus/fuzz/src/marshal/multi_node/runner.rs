@@ -50,29 +50,29 @@
 //! that target number of ordered blocks.
 
 use super::{
-    engine::LiveMarshal, input::MarshalLivenessInput, invariant, ENGINE_CERTIFICATE,
-    ENGINE_RESOLVER, ENGINE_VOTE, MAX_REQUIRED,
+    ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, MAX_REQUIRED, engine::LiveMarshal,
+    input::MarshalLivenessInput, invariant,
 };
 use crate::{
+    BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW, SimplexBls12381MinPk,
     simplex::Simplex,
     start_disrupter_with_epoch,
-    utils::{apply_partition, SetPartition},
-    SimplexBls12381MinPk, BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW,
+    utils::{SetPartition, apply_partition},
 };
 use commonware_consensus::{
+    Block,
     marshal::mocks::{
         application::Application,
         harness::{
-            setup_network_links, setup_network_with_participants, K, LINK, NUM_VALIDATORS, S,
-            TEST_QUOTA,
+            K, LINK, NUM_VALIDATORS, S, TEST_QUOTA, setup_network_links,
+            setup_network_with_participants,
         },
     },
     types::Epoch,
-    Block,
 };
 use commonware_cryptography::certificate::ConstantProvider;
 use commonware_p2p::simulated::Link;
-use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
+use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize};
 use std::{fmt::Write as _, num::NonZeroUsize, time::Duration};
 

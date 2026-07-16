@@ -4,7 +4,7 @@ use arbitrary::Unstructured;
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::{
     primitives::{
-        group::{Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH},
+        group::{G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, Share},
         variant::{MinPk, MinSig, PartialSignature, Variant},
     },
     tle::{Block, Ciphertext},

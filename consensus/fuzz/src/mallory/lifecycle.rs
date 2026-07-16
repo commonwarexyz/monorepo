@@ -20,7 +20,7 @@
 //! module owns only the abort mechanics, the fixed downtime, and the amnesia
 //! partition name.
 
-use crate::{simplex::Simplex, ManagedValidator};
+use crate::{ManagedValidator, simplex::Simplex};
 use std::{fmt::Display, time::Duration};
 
 /// The fixed downtime a durable or amnesia restart waits between abort and rejoin.

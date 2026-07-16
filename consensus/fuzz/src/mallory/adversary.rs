@@ -36,14 +36,14 @@
 //! second owner).
 
 use crate::{
-    disrupter::Disrupter, simplex::Simplex, strategy::AnyScope, NetworkChannels, PublicKeyOf,
+    NetworkChannels, PublicKeyOf, disrupter::Disrupter, simplex::Simplex, strategy::AnyScope,
 };
 use commonware_consensus::{
     simplex::mocks::{conflicter, equivocator, impersonator, nuller, outdated, relay},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
-use commonware_runtime::{deterministic, Handle, Supervisor as _};
+use commonware_cryptography::{Sha256, sha256::Digest as Sha256Digest};
+use commonware_runtime::{Handle, Supervisor as _, deterministic};
 use commonware_utils::sync::Mutex;
 use rand::{Rng, RngExt as _};
 use std::sync::{Arc, OnceLock};

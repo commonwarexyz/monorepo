@@ -1,19 +1,19 @@
 use crate::utils::fnv1a_hash_slices;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    types::lazy::Lazy, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write,
+    EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write, types::lazy::Lazy,
 };
 use commonware_consensus::simplex::{scheme::Namespace, types::Subject};
 use commonware_cryptography::{
-    certificate::{self, Attestation, Signers, Subject as CertificateSubject},
     Digest,
+    certificate::{self, Attestation, Signers, Subject as CertificateSubject},
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{
+    Array, Faults, Participant, Span, TryCollect,
     ordered::{Quorum, Set},
     sequence::U32,
     sync::Mutex,
-    Array, Faults, Participant, Span, TryCollect,
 };
 use core::{
     fmt::{Display, Formatter},

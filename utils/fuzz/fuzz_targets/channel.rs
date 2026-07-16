@@ -2,15 +2,15 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::{
+    NZUsize,
     channel::{
         fallible::{AsyncFallibleExt, FallibleExt},
         mpsc,
         reservation::ReservationExt,
         ring, tracked,
     },
-    NZUsize,
 };
-use futures::{executor::block_on, stream::FusedStream, SinkExt};
+use futures::{SinkExt, executor::block_on, stream::FusedStream};
 use libfuzzer_sys::fuzz_target;
 
 const BUFFER_SIZE: usize = 2;

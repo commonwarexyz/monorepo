@@ -1,9 +1,9 @@
 use crate::{
-    authenticated::data::{Data, EncodedData},
     Channel, Ingress,
+    authenticated::data::{Data, EncodedData},
 };
 use commonware_codec::{
-    config::RangeCfg, varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, config::RangeCfg, varint::UInt,
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::{Buf, BufMut, BufferPool, Clock, IoBufs};
@@ -396,7 +396,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, Clock, IoBuf, Runner};
+    use commonware_runtime::{Clock, IoBuf, Runner, deterministic};
     use commonware_utils::{hostname, test_rng};
     use std::{net::SocketAddr, time::Duration};
 

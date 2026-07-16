@@ -18,22 +18,22 @@
 //! than being funneled through a single per-fault `u64` seed.
 
 use crate::{
+    EPOCH,
     byzzfuzz::{
         fault::ProcessAction,
         intercept::{Intercept, InterceptChannel},
         log,
     },
     strategy::Strategy,
-    EPOCH,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
+    Viewable,
     simplex::{
         scheme::Scheme,
         types::{Finalize, Notarize, Nullify, Vote},
     },
     types::{Epoch, Round, View},
-    Viewable,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_runtime::{Clock, Handle, IoBuf, Spawner};

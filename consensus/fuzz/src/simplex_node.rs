@@ -1,30 +1,29 @@
 use crate::{
-    simplex,
+    FuzzInput, MAX_REQUIRED_CONTAINERS, N4F3C1, PublicKeyOf, StrategyChoice, simplex,
     strategy::{SmallScope, Strategy},
     utils::Partition,
-    FuzzInput, PublicKeyOf, StrategyChoice, MAX_REQUIRED_CONTAINERS, N4F3C1,
 };
 use arbitrary::Arbitrary;
 use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
+    Monitor, Viewable,
     simplex::{
+        ForwardingPolicy,
         elector::{Config as ElectorConfig, Elector, RoundRobin, RoundRobinElector},
         scheme::Scheme as SimplexScheme,
         types::{
             Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
             Proposal, Vote,
         },
-        ForwardingPolicy,
     },
     types::{Epoch, Round, View},
-    Monitor, Viewable,
 };
-use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest, Sha256};
-use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
+use commonware_cryptography::{Sha256, certificate::Scheme as _, sha256::Digest as Sha256Digest};
+use commonware_p2p::{Receiver as _, Recipients, Sender as _, simulated};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Clock, Runner, Supervisor};
-use commonware_utils::{channel::mpsc::Receiver, NZUsize};
+use commonware_runtime::{Clock, Runner, Supervisor, deterministic};
+use commonware_utils::{NZUsize, channel::mpsc::Receiver};
 use futures::FutureExt;
 use rand::RngExt as _;
 use std::{
@@ -578,14 +577,14 @@ where
         proposal: &Proposal<Sha256Digest>,
         prefer_honest_vote: bool,
     ) -> Option<(Notarization<S, Sha256Digest>, bool)> {
-        if prefer_honest_vote {
-            if let Some(honest_vote) = self.honest_notarize_votes.get(proposal).cloned() {
-                let byz_vote_0 = Notarize::sign(&self.schemes[0], proposal.clone())?;
-                let byz_vote_1 = Notarize::sign(&self.schemes[1], proposal.clone())?;
-                let votes = vec![honest_vote, byz_vote_0, byz_vote_1];
-                let cert = Notarization::from_notarizes(&self.schemes[0], &votes, &Sequential)?;
-                return Some((cert, true));
-            }
+        if prefer_honest_vote
+            && let Some(honest_vote) = self.honest_notarize_votes.get(proposal).cloned()
+        {
+            let byz_vote_0 = Notarize::sign(&self.schemes[0], proposal.clone())?;
+            let byz_vote_1 = Notarize::sign(&self.schemes[1], proposal.clone())?;
+            let votes = vec![honest_vote, byz_vote_0, byz_vote_1];
+            let cert = Notarization::from_notarizes(&self.schemes[0], &votes, &Sequential)?;
+            return Some((cert, true));
         }
 
         let cert = self.build_notarization_from_byz(proposal, &BYZANTINE_IDS)?;
@@ -597,14 +596,14 @@ where
         proposal: &Proposal<Sha256Digest>,
         prefer_honest_vote: bool,
     ) -> Option<(Finalization<S, Sha256Digest>, bool)> {
-        if prefer_honest_vote {
-            if let Some(honest_vote) = self.honest_finalize_votes.get(proposal).cloned() {
-                let byz_vote_0 = Finalize::sign(&self.schemes[0], proposal.clone())?;
-                let byz_vote_1 = Finalize::sign(&self.schemes[1], proposal.clone())?;
-                let votes = vec![honest_vote, byz_vote_0, byz_vote_1];
-                let cert = Finalization::from_finalizes(&self.schemes[0], &votes, &Sequential)?;
-                return Some((cert, true));
-            }
+        if prefer_honest_vote
+            && let Some(honest_vote) = self.honest_finalize_votes.get(proposal).cloned()
+        {
+            let byz_vote_0 = Finalize::sign(&self.schemes[0], proposal.clone())?;
+            let byz_vote_1 = Finalize::sign(&self.schemes[1], proposal.clone())?;
+            let votes = vec![honest_vote, byz_vote_0, byz_vote_1];
+            let cert = Finalization::from_finalizes(&self.schemes[0], &votes, &Sequential)?;
+            return Some((cert, true));
         }
 
         let cert = self.build_finalization_from_byz(proposal, &BYZANTINE_IDS)?;

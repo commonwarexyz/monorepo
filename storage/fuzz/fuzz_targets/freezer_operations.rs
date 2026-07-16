@@ -2,9 +2,9 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, FixedSize};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::freezer::{Checkpoint, Config, Cursor, Freezer, Identifier};
-use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU16};
+use commonware_utils::{FuzzRng, NZU16, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,

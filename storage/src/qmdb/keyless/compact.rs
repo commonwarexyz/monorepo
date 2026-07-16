@@ -24,10 +24,11 @@
 
 use super::operation::Operation;
 use crate::{
+    Context,
     journal::contiguous::variable::{self, Config as JournalConfig},
-    merkle::{batch, compact as compact_merkle, Family, Location},
+    merkle::{Family, Location, batch, compact as compact_merkle},
     qmdb::{
-        self,
+        self, Error,
         any::value::ValueEncoding,
         batch_chain::{self, Bounds},
         compact::{
@@ -35,9 +36,7 @@ use crate::{
             witness::{self, VerifiedWitness, Witness},
         },
         sync::compact as compact_sync,
-        Error,
     },
-    Context,
 };
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
@@ -114,7 +113,7 @@ impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, 
 where
     Operation<F, V>: EncodeShared,
 {
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
@@ -584,13 +583,13 @@ mod tests {
         merkle::mmr,
         qmdb::{any::value::FixedEncoding, compact::witness},
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256, (), Sequential>;

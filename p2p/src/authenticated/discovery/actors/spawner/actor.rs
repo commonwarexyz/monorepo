@@ -1,5 +1,6 @@
-use super::{ingress::Message, Config};
+use super::{Config, ingress::Message};
 use crate::authenticated::{
+    Mailbox,
     discovery::{
         actors::{
             peer, router,
@@ -8,15 +9,13 @@ use crate::authenticated::{
         metrics,
         types::InfoVerifier,
     },
-    Mailbox,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
 use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
@@ -162,16 +161,16 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sink, I: Stream
 mod tests {
     use super::*;
     use crate::authenticated::discovery::types;
-    use commonware_actor::{mailbox, Feedback, Unreliable};
+    use commonware_actor::{Feedback, Unreliable, mailbox};
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer as _,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, mocks, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::encrypted::{
-        dial, listen, Config as StreamConfig, Receiver as EncryptedReceiver,
-        Sender as EncryptedSender,
+        Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
+        listen,
     };
     use commonware_utils::{NZUsize, SystemTimeExt};
     use std::{

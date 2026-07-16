@@ -4,12 +4,12 @@
 //! block verification, and reconstruction.
 
 use crate::{
+    CertifiableBlock, Epochable,
     marshal::{
         application::validation::{has_contiguous_height, is_block_in_expected_epoch},
         coding::types::hash_context,
     },
-    types::{coding::Commitment, Epocher},
-    CertifiableBlock, Epochable,
+    types::{Epocher, coding::Commitment},
 };
 use commonware_codec::{EncodeSize, Write};
 use commonware_coding::Config as CodingConfig;
@@ -53,10 +53,10 @@ pub(crate) fn validate_proposal<H: Hasher, C: EncodeSize + Write>(
     if payload.config() != expected_config {
         return Err(ProposalError::CodingConfig);
     }
-    if let Some(context) = context {
-        if payload.context::<H::Digest>() != hash_context::<H, _>(context) {
-            return Err(ProposalError::ContextDigest);
-        }
+    if let Some(context) = context
+        && payload.context::<H::Digest>() != hash_context::<H, _>(context)
+    {
+        return Err(ProposalError::ContextDigest);
     }
     Ok(())
 }
@@ -139,7 +139,7 @@ mod tests {
     use bytes::{Buf, BufMut};
     use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
     use commonware_cryptography::{
-        sha256::Digest as Sha256Digest, Committable, Digestible, Hasher, Sha256,
+        Committable, Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest,
     };
     use commonware_utils::NZU64;
 

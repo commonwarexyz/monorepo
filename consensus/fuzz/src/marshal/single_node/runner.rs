@@ -6,49 +6,48 @@
 //! end of the run.
 
 use super::{
+    NUM_BLOCKS,
     input::{MarshalEvent, MarshalFuzzInput, QueryKind},
     invariant,
     variant::VariantPublish,
-    NUM_BLOCKS,
 };
 use commonware_consensus::{
+    Heightable, Reporter,
     marshal::{
+        Identifier,
         ancestry::{self, Ancestry as _, BlockProvider},
         core::{CommitmentFallback, DigestFallback, Mailbox, Variant},
         mocks::{
             application::Application,
             harness::{
-                setup_network_with_participants, TestHarness, ValidatorHandle, D, K, NAMESPACE,
-                NUM_VALIDATORS, QUORUM, S,
+                D, K, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TestHarness, ValidatorHandle,
+                setup_network_with_participants,
             },
         },
-        Identifier,
     },
     simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Activity, Proposal},
     },
     types::{Epoch, Height, Round, View},
-    Heightable, Reporter,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider},
     Digestible,
+    bls12381::primitives::variant::MinPk,
+    certificate::{ConstantProvider, mocks::Fixture},
 };
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{
-    deterministic,
+    Clock, Runner, Supervisor as _, deterministic,
     telemetry::metrics::{
-        histogram::{Buckets, Timed},
         MetricsExt as _,
+        histogram::{Buckets, Timed},
     },
-    Clock, Runner, Supervisor as _,
 };
 use commonware_storage::archive;
-use commonware_utils::{channel::oneshot, vec::NonEmptyVec, FuzzRng, NZUsize};
-use futures::{future::BoxFuture, task::noop_waker_ref, FutureExt, StreamExt};
+use commonware_utils::{FuzzRng, NZUsize, channel::oneshot, vec::NonEmptyVec};
+use futures::{FutureExt, StreamExt, future::BoxFuture, task::noop_waker_ref};
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
     future::Future,

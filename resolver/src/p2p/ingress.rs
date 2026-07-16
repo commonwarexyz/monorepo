@@ -1,7 +1,7 @@
-use crate::{ingress, Fetch, Resolver, TargetedResolver};
-use commonware_actor::{mailbox::Sender, Feedback};
+use crate::{Fetch, Resolver, TargetedResolver, ingress};
+use commonware_actor::{Feedback, mailbox::Sender};
 use commonware_cryptography::PublicKey;
-use commonware_utils::{vec::NonEmptyVec, Span};
+use commonware_utils::{Span, vec::NonEmptyVec};
 
 /// A key to fetch data for, optionally with target peers.
 pub type FetchKey<K, P, S> = ingress::FetchKey<K, S, Option<NonEmptyVec<P>>>;

@@ -31,42 +31,41 @@ use crate::{
     network::ByzantineFirstReceiver,
     simplex_node::NodeFuzzInput,
     strategy::{AnyScope, FutureScope, SmallScope, Strategy, StrategyChoice},
-    utils::{apply_partition, link_peers, register, Action, Partition, SetPartition},
+    utils::{Action, Partition, SetPartition, apply_partition, link_peers, register},
 };
 use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
+    Monitor, Reporter, Reporters, Viewable,
     simplex::{
-        config,
+        Engine, Floor, ForwardingPolicy, config,
         elector::Config as ElectorConfig,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
-        Engine, Floor, ForwardingPolicy,
     },
     types::{Delta, Epoch, View},
-    Monitor, Reporter, Reporters, Viewable,
 };
 use commonware_cryptography::{
-    certificate::Verifier, sha256::Digest as Sha256Digest, PublicKey as CryptoPublicKey, Sha256,
+    PublicKey as CryptoPublicKey, Sha256, certificate::Verifier, sha256::Digest as Sha256Digest,
 };
 use commonware_p2p::{
-    simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
     Recipients,
+    simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
 };
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{
+    Clock, Handle, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
-    Clock, Handle, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
 };
 use commonware_utils::{
+    FuzzRng, NZU16, NZUsize,
     channel::mpsc::{self, Receiver},
     sequence::U64,
     sync::Once,
-    FuzzRng, NZUsize, NZU16,
 };
 use futures::future::join_all;
 #[cfg(feature = "mocks")]
@@ -84,8 +83,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tracing::{dispatcher, Dispatch, Level};
-use tracing_subscriber::{filter::filter_fn, layer::SubscriberExt, Layer as _};
+use tracing::{Dispatch, Level, dispatcher};
+use tracing_subscriber::{Layer as _, filter::filter_fn, layer::SubscriberExt};
 pub const EPOCH: u64 = 333;
 
 const FUZZ_LOG_ENV: &str = "CONSENSUS_FUZZ_LOG";
@@ -1572,21 +1571,21 @@ where
 
     async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
         let (sender, payload) = self.inner.recv().await?;
-        if let Some(sniff) = &self.sink {
-            if let Some((view, kind)) = sniff_event::<P>(self.channel, &payload, &self.cert_cfg) {
-                let from = sniff
-                    .peers
-                    .iter()
-                    .position(|p| p == &sender)
-                    .map(|i| i as u32)
-                    .filter(|i| !sniff.ambiguous.contains(i));
-                sniff.log.record(happens_before::Event {
-                    node: sniff.node,
-                    view,
-                    kind,
-                    sender: from,
-                });
-            }
+        if let Some(sniff) = &self.sink
+            && let Some((view, kind)) = sniff_event::<P>(self.channel, &payload, &self.cert_cfg)
+        {
+            let from = sniff
+                .peers
+                .iter()
+                .position(|p| p == &sender)
+                .map(|i| i as u32)
+                .filter(|i| !sniff.ambiguous.contains(i));
+            sniff.log.record(happens_before::Event {
+                node: sniff.node,
+                view,
+                kind,
+                sender: from,
+            });
         }
         Ok((sender, payload))
     }

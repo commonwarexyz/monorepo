@@ -6,8 +6,8 @@
 //! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Writer},
     Storage,
+    buffer::paged::{CacheRef, Writer},
 };
 use commonware_utils::NZU16;
 use criterion::{criterion_group, criterion_main};

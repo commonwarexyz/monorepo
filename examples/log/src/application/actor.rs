@@ -1,12 +1,12 @@
 use super::{
+    Config, Scheme,
     ingress::{Mailbox, Message},
     reporter::Reporter,
-    Config, Scheme,
 };
 use commonware_actor::mailbox::{self, Receiver};
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use rand_core::Rng;
 use tracing::info;
 

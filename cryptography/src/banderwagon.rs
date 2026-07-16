@@ -8,8 +8,8 @@ use blst::blst_fr;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
-    msm_naive, Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring,
-    Space,
+    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
+    msm_naive,
 };
 use commonware_parallel::Strategy;
 use core::{

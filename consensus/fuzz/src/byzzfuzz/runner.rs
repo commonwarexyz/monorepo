@@ -6,7 +6,10 @@
 
 use super::BYZANTINE_IDX;
 use crate::{
+    CertifyChoice, EPOCH, FAULT_INJECTION_RATIO, FAULT_PHASE, N4F0C4, POST_GST_WINDOW, PublicKeyOf,
+    SniffChannel, SniffingReceiver,
     byzzfuzz::{
+        ByzzFuzz,
         fault::ProcessFault,
         forwarder,
         injector::ByzzFuzzInjector,
@@ -14,32 +17,29 @@ use crate::{
         log,
         mutator::ByzzFuzzMutator,
         observed::ObservedState,
-        ByzzFuzz,
     },
     happens_before, invariants,
     simplex::Simplex,
     sniff_sink, spawn_honest_validator,
     utils::Partition,
-    CertifyChoice, PublicKeyOf, SniffChannel, SniffingReceiver, EPOCH, FAULT_INJECTION_RATIO,
-    FAULT_PHASE, N4F0C4, POST_GST_WINDOW,
 };
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_consensus::{
+    Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
     types::{Epoch, View},
-    Monitor as _,
 };
 use commonware_cryptography::{
-    certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest, Hasher, Sha256,
+    Hasher, Sha256, certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
-use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor};
-use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, sync::Mutex, FuzzRng};
+use commonware_runtime::{Clock, Runner, Spawner, Supervisor, deterministic};
+use commonware_utils::{FuzzRng, channel::mpsc::Receiver as ViewReceiver, sync::Mutex};
 use futures::future::join_all;
 use rand::RngExt as _;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
-use tracing::{dispatcher, Dispatch};
+use tracing::{Dispatch, dispatcher};
 
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
@@ -566,8 +566,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        simplex::SimplexId, strategy::StrategyChoice, utils::Partition, CertifyChoice, FuzzInput,
-        ReporterWiring, N4F0C4,
+        CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
+        strategy::StrategyChoice, utils::Partition,
     };
     use commonware_consensus::simplex::ForwardingPolicy;
     use std::num::NonZeroUsize;

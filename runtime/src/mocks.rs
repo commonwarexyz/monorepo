@@ -1,10 +1,10 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
-    signal::Signal,
-    telemetry::metrics::{Metric, Registered},
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
     Spawner, Storage, Supervisor,
+    signal::Signal,
+    telemetry::metrics::{Metric, Registered},
 };
 use bytes::{Bytes, BytesMut};
 use commonware_utils::{
@@ -259,10 +259,10 @@ impl crate::Stream for Stream {
                 self.buffer.extend_from_slice(&data);
 
                 // Wake a blocked sender if the buffer drained below the limit.
-                if channel.buffer.len() <= channel.buffer_size {
-                    if let Some(sender) = channel.drain_waiter.take() {
-                        sender.send_lossy(());
-                    }
+                if channel.buffer.len() <= channel.buffer_size
+                    && let Some(sender) = channel.drain_waiter.take()
+                {
+                    sender.send_lossy(());
                 }
             }
 
@@ -799,7 +799,7 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Clock, Runner, Sink, Spawner, Stream};
+    use crate::{Clock, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 

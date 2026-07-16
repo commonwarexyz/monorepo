@@ -9,9 +9,9 @@
 //! lifecycle, and adversary-profile faults to the END of [`CATALOG`].
 
 use crate::{
+    N4F0C4, SniffChannel,
     mallory::{adversary::AdversaryRole, policy::ActionId},
     utils::SetPartition,
-    SniffChannel, N4F0C4,
 };
 use rand::{Rng, RngExt as _};
 use std::time::Duration;
@@ -253,7 +253,9 @@ impl FaultPlan {
                 node,
                 channel,
                 per_packet,
-            } => format!("packet_delay(node={node}, channel={channel:?}, per_packet={per_packet:?})"),
+            } => {
+                format!("packet_delay(node={node}, channel={channel:?}, per_packet={per_packet:?})")
+            }
             FaultPlan::PacketLoss {
                 node,
                 channel,

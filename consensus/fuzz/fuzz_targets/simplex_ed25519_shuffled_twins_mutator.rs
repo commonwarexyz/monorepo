@@ -1,7 +1,7 @@
 #![no_main]
 
 use commonware_consensus_fuzz::{
-    fuzz, CodeCoverage, FuzzInput, SimplexEd25519CustomRoundRobin, TwinsMutator,
+    CodeCoverage, FuzzInput, SimplexEd25519CustomRoundRobin, TwinsMutator, fuzz,
 };
 use libfuzzer_sys::fuzz_target;
 

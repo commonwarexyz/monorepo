@@ -5,16 +5,16 @@ use commonware_codec::Read;
 use commonware_consensus::simplex::{
     elector::{Config as ElectorConfig, Random, RoundRobin},
     scheme::{
-        bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
-        Scheme,
+        Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+        secp256r1,
     },
 };
 use commonware_cryptography::{
+    PublicKey, Sha256,
     bls12381::primitives::variant::{MinPk, MinSig, Variant},
     certificate,
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
-    PublicKey, Sha256,
 };
 use commonware_runtime::deterministic;
 
@@ -268,10 +268,10 @@ impl Simplex for SimplexSecp256r1 {
 mod tests {
     use super::*;
     use crate::{
-        fuzz, strategy::StrategyChoice, utils::Partition, CertifyChoice, CodeCoverage,
-        FaultyMessaging, FuzzInput, ReporterWiring, Standard, TwinsMutator, N4F1C3,
+        CertifyChoice, CodeCoverage, FaultyMessaging, FuzzInput, N4F1C3, ReporterWiring, Standard,
+        TwinsMutator, fuzz, strategy::StrategyChoice, utils::Partition,
     };
-    use commonware_consensus::simplex::{mocks::application::Certifier, ForwardingPolicy};
+    use commonware_consensus::simplex::{ForwardingPolicy, mocks::application::Certifier};
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
 

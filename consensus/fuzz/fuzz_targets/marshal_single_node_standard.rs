@@ -3,7 +3,7 @@
 #[cfg(feature = "mocks")]
 mod fuzz {
     use commonware_consensus::marshal::mocks::harness::StandardHarness;
-    use commonware_consensus_fuzz::marshal::{fuzz_marshal_single_node, MarshalFuzzInput};
+    use commonware_consensus_fuzz::marshal::{MarshalFuzzInput, fuzz_marshal_single_node};
     use libfuzzer_sys::fuzz_target;
 
     fuzz_target!(|input: MarshalFuzzInput| {

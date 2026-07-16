@@ -3,10 +3,12 @@
 use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_consensus::{
+    Reporter,
     simplex::{
         scheme::{
-            bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-            reporter::AttributableReporter, secp256r1, Scheme as SimplexScheme,
+            Scheme as SimplexScheme, bls12381_multisig,
+            bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+            reporter::AttributableReporter, secp256r1,
         },
         types::{
             Activity, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
@@ -14,16 +16,16 @@ use commonware_consensus::{
         },
     },
     types::{Epoch, Round, View},
-    Reporter,
 };
 use commonware_cryptography::{
+    Digest, Hasher, Sha256,
     bls12381::primitives::variant::{MinPk, MinSig},
-    certificate::{mocks::Fixture, Scheme as CertificateScheme},
+    certificate::{Scheme as CertificateScheme, mocks::Fixture},
     ed25519::PublicKey,
-    sha256, Digest, Hasher, Sha256,
+    sha256,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{sync::Mutex, FuzzRng};
+use commonware_utils::{FuzzRng, sync::Mutex};
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 

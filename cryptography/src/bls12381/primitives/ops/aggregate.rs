@@ -9,7 +9,7 @@
 //! Use [`batch`](super::batch) when you need to ensure each individual signature is valid.
 
 use super::{
-    super::{variant::Variant, Error},
+    super::{Error, variant::Variant},
     hash_with_namespace,
 };
 use bytes::{Buf, BufMut};
@@ -296,14 +296,14 @@ mod tests {
         *,
     };
     use crate::bls12381::primitives::{
+        Error,
         group::{G1_MESSAGE, G2_MESSAGE},
         variant::{MinPk, MinSig},
-        Error,
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, union_unique, NZUsize};
+    use commonware_utils::{NZUsize, test_rng, union_unique};
 
     fn blst_aggregate_verify_same_message<'a, V, I>(
         public: I,

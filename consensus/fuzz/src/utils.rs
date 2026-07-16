@@ -127,10 +127,10 @@ pub async fn link_peers<P: PublicKey, E: Clock>(
             if v2 == v1 {
                 continue;
             }
-            if let Some(p) = partition {
-                if !p.connected(i1, i2) {
-                    continue;
-                }
+            if let Some(p) = partition
+                && !p.connected(i1, i2)
+            {
+                continue;
             }
             match action {
                 Action::Update(_) | Action::Unlink => {

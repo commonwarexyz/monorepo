@@ -9,7 +9,7 @@
 //! libFuzzer's crash log is self-explanatory.
 
 use commonware_consensus::{
-    marshal::mocks::harness::{TestHarness, D},
+    marshal::mocks::harness::{D, TestHarness},
     types::Height,
 };
 use std::collections::{BTreeSet, HashSet};

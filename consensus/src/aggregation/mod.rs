@@ -100,9 +100,9 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, Config, Engine};
+    use super::{Config, Engine, mocks};
     use crate::{
-        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+        aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
@@ -115,13 +115,14 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
+        Clock, Quota, Runner, Spawner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock, Quota, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{
+        NZU16, NZUsize, NonZeroDuration, TestRng,
         channel::{fallible::OneshotExt, oneshot},
-        test_rng, NZUsize, NonZeroDuration, TestRng, NZU16,
+        test_rng,
     };
     use futures::future::join_all;
     use rand::RngExt as _;
@@ -550,10 +551,9 @@ mod tests {
                                 loop {
                                     if let Some(tip_height) =
                                         reporter_mailbox.get_contiguous_tip().await
+                                        && tip_height >= target_height
                                     {
-                                        if tip_height >= target_height {
-                                            break;
-                                        }
+                                        break;
                                     }
                                     context.sleep(Duration::from_millis(50)).await;
                                 }

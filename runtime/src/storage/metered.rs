@@ -1,12 +1,12 @@
 use crate::{
-    telemetry::metrics::{raw, Counter, Gauge, Register},
     Buf, Error, Handle, IoBufs, IoBufsMut,
+    telemetry::metrics::{Counter, Gauge, Register, raw},
 };
 use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
 };
-use tracing::{field::Empty, Instrument as _, Span};
+use tracing::{Instrument as _, Span, field::Empty};
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -245,9 +245,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
+        Blob, BufferPool, BufferPoolConfig, Storage as _,
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
-        Blob, BufferPool, BufferPoolConfig, Storage as _,
     };
 
     fn test_pool(scope: &mut impl Register) -> BufferPool {

@@ -1,9 +1,8 @@
 #![no_main]
 
 use commonware_consensus_fuzz::{
-    fuzz_node,
+    SimplexId, fuzz_node,
     simplex_node::{NodeFuzzInput, WithRecovery},
-    SimplexId,
 };
 use libfuzzer_sys::fuzz_target;
 

@@ -2,7 +2,7 @@
 //! at their view and do not use this type.
 
 use commonware_consensus::simplex::types::{Certificate, Vote};
-use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
+use commonware_cryptography::{PublicKey, sha256::Digest as Sha256Digest};
 use rand::{Rng, RngExt as _};
 
 /// `MessageScope::Any` weight in [`sample`].

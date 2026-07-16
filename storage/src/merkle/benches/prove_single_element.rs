@@ -1,8 +1,8 @@
-use commonware_cryptography::{sha256, Sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family, Location};
+use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, Location, mem::Mem};
 use commonware_utils::test_rng;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use futures::executor::block_on;
 use rand::seq::IndexedRandom;
 

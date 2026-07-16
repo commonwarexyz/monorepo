@@ -11,17 +11,17 @@ use super::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    simulated::{self, Link, Network},
     Manager as _,
+    simulated::{self, Link, Network},
 };
-use commonware_runtime::{deterministic, Clock, Runner as _, Spawner, Supervisor as _};
-use commonware_utils::{channel::mpsc, ordered::Set, NZUsize, TryCollect};
+use commonware_runtime::{Clock, Runner as _, Spawner, Supervisor as _, deterministic};
+use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set};
 use rand::seq::IndexedRandom;
 use std::{
     collections::HashSet,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -553,17 +553,16 @@ impl<D: EngineDefinition> Plan<D> {
                 }
 
                 // Start delayed validators after enough progress
-                if !delayed_started {
-                    if let Some((_, after)) = self.delay_crash() {
-                        if tracker.min_view() >= after {
-                            info!(target: "simulator", "starting delayed participants");
-                            for pk in &delayed {
-                                team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
-                                    .await;
-                            }
-                            delayed_started = true;
-                        }
+                if !delayed_started
+                    && let Some((_, after)) = self.delay_crash()
+                    && tracker.min_view() >= after
+                {
+                    info!(target: "simulator", "starting delayed participants");
+                    for pk in &delayed {
+                        team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
+                            .await;
                     }
+                    delayed_started = true;
                 }
             },
             _ = ctx.sleep(EXIT_POLL) => {
@@ -621,10 +620,8 @@ impl<D: EngineDefinition> Plan<D> {
                 };
                 let active = team.active_keys();
                 let crash_count = count.min(active.len());
-                let to_crash: Vec<D::PublicKey> = active
-                    .sample(&mut ctx, crash_count)
-                    .cloned()
-                    .collect();
+                let to_crash: Vec<D::PublicKey> =
+                    active.sample(&mut ctx, crash_count).cloned().collect();
                 for pk in to_crash {
                     if !team.crash(&pk) {
                         continue;
@@ -766,7 +763,7 @@ impl<D: EngineDefinition> Plan<D> {
 mod tests {
     use super::*;
     use commonware_consensus::types::View;
-    use commonware_cryptography::{ed25519, Signer as _};
+    use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{Clock, Handle, Quota, Spawner};
     use std::{
         future::Future,
