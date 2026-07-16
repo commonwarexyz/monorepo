@@ -103,10 +103,10 @@ aws-sdk-s3 = { version = "1.138.0", default-features = false, features = [
 	"rt-tokio",
 	"sigv4a",
 ] }
-bytes = { version = "1.12.1", default-features = false }
 axum = "0.8.9"
 blake3 = { version = "1.8.5", default-features = false }
 blst = { version = "0.3.16", default-features = false }
+bytes = { version = "1.12.1", default-features = false }
 cfg-if = "1.0.4"
 chacha20poly1305 = { version = "0.11.0", default-features = false }
 chrono = "0.4.45"
