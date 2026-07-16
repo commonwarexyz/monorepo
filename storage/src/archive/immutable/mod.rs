@@ -20,10 +20,12 @@
 //!
 //! `put` updates the underlying [crate::freezer::Freezer] and [crate::ordinal::Ordinal]
 //! eagerly, but data is not committed until `sync` succeeds. Sync first makes the freezer
-//! and ordinal data durable, then commits metadata that names the freezer checkpoint and ordinal
-//! section bits. On restart, this metadata is the source of truth: lower-layer data not described by
-//! metadata is treated as uncommitted and may be removed during initialization. If no freezer
-//! checkpoint has been committed yet, initialization starts from an empty archive.
+//! and ordinal data durable, then rewrites a single-blob commit record naming the freezer
+//! checkpoint and ordinal section bits. The storage backend syncs blobs atomically, so a
+//! crash leaves either the old or the new record. On restart, this record is the source of
+//! truth: lower-layer data not described by it is treated as uncommitted and is rolled back
+//! during initialization. If no record has been committed yet, initialization starts from an
+//! empty archive.
 //!
 //! # Querying for Gaps
 //!
@@ -82,7 +84,7 @@ pub use storage::Archive;
 /// Configuration for [Archive] storage.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The partition to use for the archive's metadata.
+    /// The partition to use for the archive's commit record.
     pub metadata_partition: String,
 
     /// The partition to use for the archive's freezer table.
@@ -140,9 +142,11 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive::Archive as ArchiveTrait;
+    use crate::archive::{Archive as ArchiveTrait, Identifier};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -214,6 +218,103 @@ mod tests {
                 Some(2001)
             );
         });
+    }
+
+    /// After a crash, the archive must restore exactly the last committed state: committed
+    /// items stay reachable by both index and key, uncommitted items vanish from both, and
+    /// the vanished indices can be re-put.
+    fn archive_crash_consistency(runner: deterministic::Runner) {
+        fn crash_cfg(pooler: &impl BufferPooler) -> Config<()> {
+            Config {
+                metadata_partition: "crash-metadata".into(),
+                freezer_table_partition: "crash-freezer-table".into(),
+                freezer_table_initial_size: 8,
+                freezer_table_resize_frequency: 4,
+                freezer_table_resize_chunk_size: 8,
+                freezer_key_partition: "crash-freezer-key".into(),
+                freezer_key_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_value_partition: "crash-freezer-value".into(),
+                freezer_value_target_size: 1024 * 1024,
+                freezer_value_compression: None,
+                ordinal_partition: "crash-ordinal".into(),
+                items_per_section: NZU64!(16),
+                freezer_key_write_buffer: NZUsize!(1024),
+                freezer_value_write_buffer: NZUsize!(1024),
+                ordinal_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+                codec_config: (),
+            }
+        }
+        let key = |i: u64| Sha256::hash(&i.to_be_bytes());
+
+        let (_, checkpoint) = runner.start_and_recover(|context| async move {
+            let mut archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("first"), crash_cfg(&context))
+                    .await
+                    .unwrap();
+
+            // Commit two items
+            archive.put(1, key(1), 10).await.unwrap();
+            archive.put(2, key(2), 20).await.unwrap();
+            archive.sync().await.unwrap();
+
+            // Add two more without committing
+            archive.put(3, key(3), 30).await.unwrap();
+            archive.put(4, key(4), 40).await.unwrap();
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let mut archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("second"), crash_cfg(&context))
+                    .await
+                    .unwrap();
+
+            // Committed items are reachable by index and key
+            for (index, value) in [(1u64, 10), (2, 20)] {
+                assert_eq!(
+                    archive.get(Identifier::Index(index)).await.unwrap(),
+                    Some(value)
+                );
+                assert_eq!(
+                    archive.get(Identifier::Key(&key(index))).await.unwrap(),
+                    Some(value)
+                );
+                assert!(archive.has(Identifier::Index(index)).await.unwrap());
+                assert!(archive.has(Identifier::Key(&key(index))).await.unwrap());
+            }
+
+            // Uncommitted items vanished from both views
+            for index in [3u64, 4] {
+                assert_eq!(archive.get(Identifier::Index(index)).await.unwrap(), None);
+                assert_eq!(
+                    archive.get(Identifier::Key(&key(index))).await.unwrap(),
+                    None
+                );
+                assert!(!archive.has(Identifier::Index(index)).await.unwrap());
+                assert!(!archive.has(Identifier::Key(&key(index))).await.unwrap());
+            }
+
+            // The vanished indices can be re-put and committed
+            archive.put_sync(3, key(3), 33).await.unwrap();
+            assert_eq!(archive.get(Identifier::Index(3)).await.unwrap(), Some(33));
+            assert_eq!(
+                archive.get(Identifier::Key(&key(3))).await.unwrap(),
+                Some(33)
+            );
+        });
+    }
+
+    #[test]
+    fn test_crash_consistency_memory() {
+        archive_crash_consistency(deterministic::Runner::default());
+    }
+
+    #[test]
+    fn test_crash_consistency_volume() {
+        archive_crash_consistency(deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_storage_volume(deterministic::VolumeConfig::default()),
+        ));
     }
 
     #[test]

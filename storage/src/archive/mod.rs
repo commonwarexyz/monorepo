@@ -30,12 +30,12 @@ pub enum Identifier<'a, K: Array> {
 /// Errors that can occur when interacting with the archive.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("runtime error: {0}")]
+    Runtime(#[from] commonware_runtime::Error),
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
     #[error("ordinal error: {0}")]
     Ordinal(#[from] crate::ordinal::Error),
-    #[error("metadata error: {0}")]
-    Metadata(#[from] crate::metadata::Error),
     #[error("freezer error: {0}")]
     Freezer(#[from] crate::freezer::Error),
     #[error("record corrupted")]

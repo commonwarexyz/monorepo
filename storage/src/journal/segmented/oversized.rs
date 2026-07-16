@@ -21,24 +21,19 @@
 //!
 //! # Crash Recovery
 //!
-//! On unclean shutdown, the index journal and glob may have different lengths:
-//! - Index entry pointing to non-existent glob data (dangerous)
-//! - Glob value without index entry (orphan - acceptable but cleaned up)
-//! - Glob sections without corresponding index sections (orphan sections - removed)
+//! The storage backend guarantees per-blob atomic sync, so neither journal can hold a
+//! torn write. A crash can still leave the two journals at different durable frontiers:
+//! - `sync` makes the glob durable before the index, but `start_sync` makes both durable
+//!   concurrently, so index entries may reference values that never landed. During
+//!   initialization, the index is rewound to the last entry whose value range fits the
+//!   durable glob (found by binary search: value offsets are appended in monotone order).
+//! - A crash during `prune` (index sections removed, glob sections not) leaves glob
+//!   sections with no index section. These orphan sections are removed during
+//!   initialization.
 //!
-//! During initialization, crash recovery is performed:
-//! 1. Each index entry's glob reference is validated (`value_offset + value_size <= glob_size`)
-//! 2. Invalid entries are skipped and the index journal is rewound
-//! 3. Orphan value sections (sections in glob but not in index) are removed
-//!
-//! This allows async writes (glob first, then index) while ensuring consistency
-//! after recovery.
-//!
-//! _Recovery only validates that index entries point to valid byte ranges
-//! within the glob. It does **not** verify value checksums during recovery (this would
-//! require reading all values). Value checksums are verified lazily when values are
-//! read via `get_value()`. If the underlying storage is corrupted, `get_value()` will
-//! return a checksum error even though the index entry exists._
+//! Glob bytes past the last indexed value (from a sync whose glob landed but whose index
+//! did not) are unreferenced and left in place: subsequent appends write after them and
+//! the space is reclaimed when the section is pruned.
 
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -49,12 +44,12 @@ use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{BufferPooler, Handle, Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
 use std::{collections::HashSet, num::NonZeroUsize};
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Trait for index entries that reference oversized values in glob storage.
 ///
-/// Implementations must provide access to the value location for crash recovery validation,
-/// and a way to set the location when appending.
+/// Implementations must provide access to the value location for cross-journal
+/// validation at initialization, and a way to set the location when appending.
 pub trait Record: CodecFixed<Cfg = ()> + Clone {
     /// Returns `(value_offset, value_size)` for crash recovery validation.
     fn value_location(&self) -> (u64, u32);
@@ -102,11 +97,10 @@ pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
 impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared>
     Oversized<E, I, V>
 {
-    /// Initialize with crash recovery validation.
+    /// Initialize with cross-journal validation.
     ///
-    /// Validates each index entry's glob reference during replay. Invalid entries
-    /// (pointing beyond glob size) are skipped, and the index journal is rewound
-    /// to exclude trailing invalid entries.
+    /// Index entries referencing bytes beyond the durable glob are rewound away, and
+    /// glob sections with no corresponding index section are removed.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize both journals
         let index_cfg = FixedConfig {
@@ -126,97 +120,72 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
         let mut oversized = Self { index, values };
 
-        // Perform crash recovery validation
-        oversized.recover().await?;
+        // Repair cross-journal divergence left by a crash
+        oversized.align().await?;
+        oversized.cleanup_orphan_value_sections().await?;
 
         Ok(oversized)
     }
 
-    /// Perform crash recovery by validating index entries against glob sizes.
+    /// Rewind index entries that reference bytes beyond the durable glob.
     ///
-    /// Only checks the last entry in each section. Since entries are appended sequentially
-    /// and value offsets are monotonically increasing within a section, if the last entry
-    /// is valid then all earlier entries must be valid too.
-    async fn recover(&mut self) -> Result<(), Error> {
+    /// `start_sync` makes the index and glob durable concurrently, so a crash can leave
+    /// index entries whose values never landed. Value offsets are appended in monotone
+    /// order within a section, so a binary search over entry ends finds the last entry
+    /// backed by the glob.
+    async fn align(&mut self) -> Result<(), Error> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
 
         for section in sections {
-            let index_size = self.index.size(section)?;
-            if index_size == 0 {
+            let entry_count = self.index.section_len(section)?;
+            if entry_count == 0 {
                 continue;
             }
+            let glob_size = self.values.size(section)?;
 
-            let glob_size = match self.values.size(section) {
-                Ok(size) => size,
-                Err(Error::AlreadyPrunedToSection(oldest)) => {
-                    // This shouldn't happen in normal operation: prune() prunes the index
-                    // first, then the glob. A crash between these would leave the glob
-                    // NOT pruned (opposite of this case). We handle this defensively in
-                    // case of external manipulation or future changes.
-                    warn!(
-                        section,
-                        oldest, "index has section that glob already pruned"
-                    );
-                    0
-                }
-                Err(e) => return Err(e),
+            // Compute the end of an entry's value range.
+            let entry_end = |entry: &I| {
+                let (offset, size) = entry.value_location();
+                offset.saturating_add(u64::from(size))
             };
 
-            // Truncate any trailing partial entry
-            let entry_count = index_size / chunk_size;
-            let aligned_size = entry_count * chunk_size;
-            if aligned_size < index_size {
-                warn!(
-                    section,
-                    index_size, aligned_size, "trailing bytes detected: truncating"
-                );
-                self.index.rewind_section(section, aligned_size).await?;
-            }
-
-            // If there is nothing, we can exit early and rewind values to 0
-            if entry_count == 0 {
-                warn!(
-                    section,
-                    index_size, "trailing bytes detected: truncating to 0"
-                );
-                self.values.rewind_section(section, 0).await?;
+            // Fast path: the last entry is backed by the glob, so (by monotonicity) all
+            // earlier entries are too.
+            let last = self.index.get(section, entry_count - 1).await?;
+            if entry_end(&last) <= glob_size {
                 continue;
             }
 
-            // Find last valid entry and target glob size
-            let (valid_count, glob_target) = self
-                .find_last_valid_entry(section, entry_count, glob_size)
-                .await;
-
-            // Rewind index if any entries are invalid
-            if valid_count < entry_count {
-                let valid_size = valid_count * chunk_size;
-                debug!(section, entry_count, valid_count, "rewinding index");
-                self.index.rewind_section(section, valid_size).await?;
+            // Binary search for the number of leading entries backed by the glob.
+            let (mut lo, mut hi) = (0, entry_count - 1);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let entry = self.index.get(section, mid).await?;
+                if entry_end(&entry) <= glob_size {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
             }
 
-            // Truncate glob trailing garbage (can occur when value was written but
-            // index entry wasn't, or when index was truncated but glob wasn't)
-            if glob_size > glob_target {
-                debug!(
-                    section,
-                    glob_size, glob_target, "truncating glob trailing garbage"
-                );
-                self.values.rewind_section(section, glob_target).await?;
-            }
+            warn!(
+                section,
+                entry_count,
+                valid = lo,
+                glob_size,
+                "index ahead of durable glob: rewinding"
+            );
+            self.index.rewind_section(section, lo * chunk_size).await?;
         }
-
-        // Clean up orphan value sections that don't exist in index
-        self.cleanup_orphan_value_sections().await?;
 
         Ok(())
     }
 
     /// Remove any value sections that don't have corresponding index sections.
     ///
-    /// This can happen if a crash occurs after writing to values but before
-    /// writing to index for a new section. Since sections don't have to be
+    /// This can happen if a crash occurs during `prune` after the index section is
+    /// removed but before the glob section is. Since sections don't have to be
     /// contiguous, we compare the actual sets of sections rather than just
     /// comparing the newest section numbers.
     async fn cleanup_orphan_value_sections(&mut self) -> Result<(), Error> {
@@ -239,42 +208,6 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         Ok(())
     }
 
-    /// Find the number of valid entries and the corresponding glob target size.
-    ///
-    /// Scans backwards from the last entry until a valid one is found.
-    /// Returns `(valid_count, glob_target)` where `glob_target` is the end offset
-    /// of the last valid entry's value.
-    async fn find_last_valid_entry(
-        &self,
-        section: u64,
-        entry_count: u64,
-        glob_size: u64,
-    ) -> (u64, u64) {
-        for pos in (0..entry_count).rev() {
-            match self.index.get(section, pos).await {
-                Ok(entry) => {
-                    let (offset, size) = entry.value_location();
-                    let entry_end = offset.saturating_add(u64::from(size));
-                    if entry_end <= glob_size {
-                        return (pos + 1, entry_end);
-                    }
-                    if pos == entry_count - 1 {
-                        warn!(
-                            section,
-                            pos, glob_size, entry_end, "invalid entry: glob truncated"
-                        );
-                    }
-                }
-                Err(_) => {
-                    if pos == entry_count - 1 {
-                        warn!(section, pos, "corrupted last entry, scanning backwards");
-                    }
-                }
-            }
-        }
-        (0, 0)
-    }
-
     /// Append entry + value.
     ///
     /// Writes value to glob first, then writes index entry with the value location.
@@ -282,7 +215,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// Returns `(position, offset, size)` where:
     /// - `position`: Position in the index journal
     /// - `offset`: Byte offset in glob
-    /// - `size`: Size of value in glob (including checksum)
+    /// - `size`: Size of value in glob
     pub async fn append(
         &mut self,
         section: u64,
@@ -339,17 +272,20 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 
     /// Sync both journals for the given `sections`.
+    ///
+    /// The glob is synced before the index so a crash between the two cannot leave
+    /// durable index entries referencing values that never landed.
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         let sections = sections.sections().collect::<Vec<_>>();
-        try_join(self.index.sync(&sections), self.values.sync(&sections))
-            .await
-            .map(|_| ())
+        self.values.sync(&sections).await?;
+        self.index.sync(&sections).await
     }
 
     /// Start syncing both journals for the given `sections`.
     ///
     /// The returned handle completes once both journals' syncs complete, failing with the first
-    /// error encountered.
+    /// error encountered. The two syncs land in no particular order: a crash may leave the index
+    /// durable ahead of the glob, which the cross-journal validation at initialization repairs.
     pub async fn start_sync(
         &mut self,
         sections: impl crate::Sections,
@@ -1915,17 +1851,11 @@ mod tests {
             // Size 0 - should fail
             assert!(oversized.get_value(1, offset, 0).await.is_err());
 
-            // Size < value size - should fail with codec error, checksum mismatch, or
-            // insufficient length (if size < 4 bytes for checksum)
+            // Size < value size - should fail with a codec error
             for size in 1..4u32 {
                 let result = oversized.get_value(1, offset, size).await;
                 assert!(
-                    matches!(
-                        result,
-                        Err(Error::Codec(_))
-                            | Err(Error::ChecksumMismatch(_, _))
-                            | Err(Error::Runtime(_))
-                    ),
+                    matches!(result, Err(Error::Codec(_))),
                     "expected error, got: {:?}",
                     result
                 );
@@ -1951,15 +1881,11 @@ mod tests {
                 .expect("Failed to append");
             oversized.sync(1).await.expect("Failed to sync");
 
-            // Size too small - will fail to decode or checksum mismatch
-            // (checksum mismatch can occur because we read wrong bytes as the checksum)
+            // Size too small - will fail to decode
             let result = oversized.get_value(1, offset, correct_size - 1).await;
             assert!(
-                matches!(
-                    result,
-                    Err(Error::Codec(_)) | Err(Error::ChecksumMismatch(_, _))
-                ),
-                "expected Codec or ChecksumMismatch error, got: {:?}",
+                matches!(result, Err(Error::Codec(_))),
+                "expected Codec error, got: {:?}",
                 result
             );
 
@@ -2382,10 +2308,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_recovery_glob_trailing_garbage_truncated() {
-        // Tests the bug fix: when value is written to glob but index entry isn't
-        // (crash after value write, before index write), recovery should truncate
-        // the glob trailing garbage so subsequent appends start at correct offset.
+    fn test_recovery_glob_trailing_bytes_retained() {
+        // When a value lands in the glob but its index entry doesn't (crash between the
+        // two syncs), the trailing bytes are unreferenced. Recovery leaves them in place
+        // and subsequent appends write after them.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -2435,7 +2361,7 @@ mod tests {
             assert_eq!(new_size, expected_next_offset + 100);
             drop(blob);
 
-            // Reinitialize - should truncate the trailing garbage
+            // Reinitialize - the trailing bytes are unreferenced and retained
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -2447,10 +2373,10 @@ mod tests {
                 assert_eq!(entry.id, i as u64);
             }
 
-            // Append new entry - should start at expected_next_offset, NOT at garbage end
+            // Append new entry - starts after the retained trailing bytes
             let new_value: TestValue = [99; 16];
             let new_entry = TestEntry::new(99, 0, 0);
-            let (pos, offset, _size) = oversized
+            let (pos, offset, size) = oversized
                 .append(1, new_entry, &new_value)
                 .await
                 .expect("Failed to append after recovery");
@@ -2458,12 +2384,17 @@ mod tests {
             // Verify position is 2 (after the 2 existing entries)
             assert_eq!(pos, 2);
 
-            // Verify offset is at expected_next_offset (garbage was truncated)
-            assert_eq!(offset, expected_next_offset);
+            // Verify offset is past the trailing bytes
+            assert_eq!(offset, expected_next_offset + 100);
 
-            // Verify we can read the new entry
+            // Verify we can read the new entry and its value
             let retrieved = oversized.get(1, 2).await.expect("Failed to get new entry");
             assert_eq!(retrieved.id, 99);
+            let retrieved_value = oversized
+                .get_value(1, offset, size)
+                .await
+                .expect("Failed to get new value");
+            assert_eq!(retrieved_value, new_value);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -2543,8 +2474,8 @@ mod tests {
 
             // Position should be 0 (corrupted entry was removed)
             assert_eq!(pos, 0);
-            // Offset should be 0 (glob was truncated to 0)
-            assert_eq!(new_offset, 0);
+            // Offset should be past the now-unreferenced original value bytes
+            assert_eq!(new_offset, 16);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -2649,60 +2580,6 @@ mod tests {
             // Section 2 should still be valid
             let entry = oversized.get(2, 0).await.expect("Failed to get section 2");
             assert_eq!(entry.id, 10);
-
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_get_value_size_equals_crc_size() {
-        // Tests the boundary condition where size = 4 (just CRC, no data).
-        // This should fail because there's no actual data to decode.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
-
-            let value: TestValue = [42; 16];
-            let entry = TestEntry::new(1, 0, 0);
-            let (_, offset, _) = oversized
-                .append(1, entry, &value)
-                .await
-                .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
-
-            // Size = 4 (exactly CRC_SIZE) means 0 bytes of actual data
-            // This should fail with ChecksumMismatch or decode error
-            let result = oversized.get_value(1, offset, 4).await;
-            assert!(result.is_err());
-
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_get_value_size_just_over_crc() {
-        // Tests size = 5 (CRC + 1 byte of data).
-        // This should fail because the data is too short to decode.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
-
-            let value: TestValue = [42; 16];
-            let entry = TestEntry::new(1, 0, 0);
-            let (_, offset, _) = oversized
-                .append(1, entry, &value)
-                .await
-                .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
-
-            // Size = 5 means 1 byte of actual data (after stripping CRC)
-            // This should fail with checksum mismatch since we're reading wrong bytes
-            let result = oversized.get_value(1, offset, 5).await;
-            assert!(result.is_err());
 
             oversized.destroy().await.expect("Failed to destroy");
         });

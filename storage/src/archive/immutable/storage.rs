@@ -1,98 +1,56 @@
 use crate::{
     archive::{immutable::Config, Error, Identifier},
     freezer::{self, Checkpoint, Cursor, Freezer},
-    metadata::{self, Metadata},
     ordinal::{self, Ordinal},
     Context,
 };
-use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    CodecShared, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write as CodecWrite,
+};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
-    Buf, BufMut, BufferPooler,
+    Blob, Buf, BufferPooler,
 };
-use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
+use commonware_utils::{bitmap::BitMap, Array};
 use futures::join;
 use std::collections::BTreeMap;
 use tracing::debug;
 
-/// Prefix for [Freezer] records.
-const FREEZER_PREFIX: u8 = 0;
+/// Name of the commit record blob.
+const COMMIT_BLOB_NAME: &[u8] = b"commit";
 
-/// Prefix for [Ordinal] records.
-const ORDINAL_PREFIX: u8 = 1;
+/// Ordinal section bitmaps committed alongside the freezer [Checkpoint].
+///
+/// `None` marks a fully-populated section (every record available).
+type SectionBits = BTreeMap<u64, Option<BitMap>>;
 
-/// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-enum Record {
-    Freezer(Checkpoint),
-    Ordinal(Option<BitMap>),
-}
-
-impl Record {
-    /// Get the [Freezer] [Checkpoint] from the [Record].
-    fn freezer(&self) -> &Checkpoint {
-        match self {
-            Self::Freezer(checkpoint) => checkpoint,
-            _ => panic!("incorrect record"),
-        }
-    }
-
-    /// Get the [Ordinal] [BitMap] from the [Record].
-    fn ordinal(&self) -> &Option<BitMap> {
-        match self {
-            Self::Ordinal(indices) => indices,
-            _ => panic!("incorrect record"),
-        }
-    }
-}
-
-impl Write for Record {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Freezer(checkpoint) => {
-                buf.put_u8(0);
-                checkpoint.write(buf);
-            }
-            Self::Ordinal(indices) => {
-                buf.put_u8(1);
-                indices.write(buf);
-            }
-        }
-    }
-}
-
-impl Read for Record {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),
-            1 => Ok(Self::Ordinal(Option::<BitMap>::read_cfg(
-                buf,
-                &(usize::MAX as u64),
-            )?)),
-            _ => Err(commonware_codec::Error::InvalidEnum(tag)),
-        }
-    }
-}
-
-impl EncodeSize for Record {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Freezer(_) => Checkpoint::SIZE,
-            Self::Ordinal(indices) => indices.encode_size(),
-        }
-    }
+/// Codec configuration for reading [SectionBits].
+fn section_bits_cfg() -> (RangeCfg<usize>, ((), u64)) {
+    (RangeCfg::new(..), ((), usize::MAX as u64))
 }
 
 /// An immutable key-value store for ordered data with a minimal memory footprint.
 pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared> {
+    /// Context for storage operations.
+    context: E,
+
     /// Number of items per section.
     items_per_section: u64,
 
-    /// Metadata for the archive.
-    metadata: Metadata<E, U64, Record>,
+    /// Partition holding the commit record blob.
+    partition: String,
+
+    /// Commit record blob for the archive.
+    ///
+    /// The record makes the freezer [Checkpoint] and the ordinal section bitmaps durable
+    /// atomically: it is encoded as the [Checkpoint] followed by [SectionBits], rewritten
+    /// wholesale, and synced last. The storage backend syncs blobs atomically, so a crash
+    /// leaves either the old or the new record, never a mix.
+    commit: E::Blob,
+
+    /// Ordinal section bitmaps to publish with the next commit record.
+    sections: SectionBits,
 
     /// Freezer for the archive.
     freezer: Freezer<E, K, V>,
@@ -109,24 +67,26 @@ pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared> {
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // Initialize metadata
-        let metadata = Metadata::<E, U64, Record>::init(
-            context.child("metadata"),
-            metadata::Config {
-                partition: cfg.metadata_partition,
-                codec_config: (),
-            },
-        )
-        .await?;
-
-        // Metadata is the commit record for lower-layer storage. If no checkpoint was committed,
-        // Freezer::init treats existing freezer blobs as uncommitted and starts empty.
-        let freezer_key = U64::new(FREEZER_PREFIX, 0);
-        let checkpoint = metadata.get(&freezer_key).map(|freezer| *freezer.freezer());
+        // Read the commit record. It is the source of truth for lower-layer storage: if
+        // no record was committed, Freezer::init treats existing freezer blobs as
+        // uncommitted and starts empty.
+        let (commit, commit_len) = context
+            .open(&cfg.metadata_partition, COMMIT_BLOB_NAME)
+            .await?;
+        let (checkpoint, sections) = if commit_len == 0 {
+            (None, SectionBits::new())
+        } else {
+            let mut buf = commit.read_at(0, commit_len as usize).await?;
+            let checkpoint = Checkpoint::read(&mut buf).map_err(|_| Error::RecordCorrupted)?;
+            let sections = SectionBits::read_cfg(&mut buf, &section_bits_cfg())
+                .map_err(|_| Error::RecordCorrupted)?;
+            if buf.remaining() != 0 {
+                return Err(Error::RecordCorrupted);
+            }
+            (Some(checkpoint), sections)
+        };
 
         // Initialize table
-        //
-        // TODO (#1227): Use sharded metadata to provide consistency
         let freezer = Freezer::init(
             context.child("freezer"),
             freezer::Config {
@@ -148,25 +108,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         )
         .await?;
 
-        // Collect committed ordinal sections. Ordinal::init removes stored sections that are not
-        // present in this map, so an empty map represents a committed empty ordinal.
-        let sections = metadata
-            .keys()
-            .filter(|k| k.prefix() == ORDINAL_PREFIX)
-            .collect::<Vec<_>>();
-        let mut section_bits = BTreeMap::new();
-        for section in sections {
-            // Get record
-            let bits = metadata.get(section).unwrap().ordinal();
-
-            // Get section
-            let section = section.value();
-            section_bits.insert(section, bits);
-        }
-
-        // Initialize ordinal
-        //
-        // TODO (#1227): Use sharded metadata to provide consistency
+        // Initialize ordinal. Ordinal::init removes stored sections that are not present
+        // in this map, so an empty map represents a committed empty ordinal.
+        let section_bits = sections.iter().map(|(&section, bits)| (section, bits));
         let ordinal = Ordinal::init(
             context.child("ordinal"),
             ordinal::Config {
@@ -175,7 +119,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
                 write_buffer: cfg.ordinal_write_buffer,
                 replay_buffer: cfg.replay_buffer,
             },
-            Some(section_bits),
+            Some(section_bits.collect()),
         )
         .await?;
 
@@ -185,8 +129,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         let syncs = context.counter("syncs", "Number of syncs called");
 
         Ok(Self {
+            context,
             items_per_section: cfg.items_per_section.get(),
-            metadata,
+            partition: cfg.metadata_partition,
+            commit,
+            sections,
             freezer,
             ordinal,
             gets,
@@ -220,17 +167,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         // Get value
         Ok(result)
     }
-
-    /// Initialize the section.
-    fn initialize_section(&mut self, section: u64) {
-        // Create active bit vector
-        let bits = BitMap::zeroes(self.items_per_section);
-
-        // Store record
-        let key = U64::new(ORDINAL_PREFIX, section);
-        self.metadata.put(key, Record::Ordinal(Some(bits)));
-        debug!(section, "initialized section");
-    }
 }
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archive
@@ -245,23 +181,18 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
             return Ok(());
         }
 
-        // Initialize section if it doesn't exist
+        // Update the section's pending bitmap, initializing it if needed
         let section = index / self.items_per_section;
-        let ordinal_key = U64::new(ORDINAL_PREFIX, section);
-        if self.metadata.get(&ordinal_key).is_none() {
-            self.initialize_section(section);
-        }
-        let record = self.metadata.get_mut(&ordinal_key).unwrap();
-
-        // Update active bits
-        let done = if let Record::Ordinal(Some(bits)) = record {
-            bits.set(index % self.items_per_section, true);
-            bits.count_ones() == self.items_per_section
-        } else {
-            false
-        };
-        if done {
-            *record = Record::Ordinal(None);
+        let items_per_section = self.items_per_section;
+        let bits = self.sections.entry(section).or_insert_with(|| {
+            debug!(section, "initialized section");
+            Some(BitMap::zeroes(items_per_section))
+        });
+        if let Some(active) = bits {
+            active.set(index % items_per_section, true);
+            if active.count_ones() == items_per_section {
+                *bits = None;
+            }
         }
 
         // Put in table
@@ -299,12 +230,15 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         let checkpoint = freezer_result?;
         ordinal_result?;
 
-        // Publish the freezer checkpoint with a single metadata sync after the
-        // freezer and ordinal state are durable.
-        let freezer_key = U64::new(FREEZER_PREFIX, 0);
-        self.metadata
-            .put_sync(freezer_key, Record::Freezer(checkpoint))
-            .await?;
+        // Publish the commit record with a single sync after the freezer and ordinal
+        // state are durable
+        let size = Checkpoint::SIZE + self.sections.encode_size();
+        let mut buf = self.context.storage_buffer_pool().alloc(size);
+        checkpoint.write(&mut buf);
+        self.sections.write(&mut buf);
+        self.commit.write_at(0, buf.freeze()).await?;
+        self.commit.resize(size as u64).await?;
+        self.commit.sync().await?;
 
         Ok(())
     }
@@ -341,19 +275,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         // Destroy freezer
         self.freezer.destroy().await?;
 
-        // Destroy metadata
-        self.metadata.destroy().await?;
+        // Destroy the commit record
+        drop(self.commit);
+        self.context
+            .remove(&self.partition, Some(COMMIT_BLOB_NAME))
+            .await?;
+        self.context.remove(&self.partition, None).await?;
 
         Ok(())
-    }
-}
-
-#[cfg(all(test, feature = "arbitrary"))]
-mod conformance {
-    use super::*;
-    use commonware_codec::conformance::CodecConformance;
-
-    commonware_conformance::conformance_tests! {
-        CodecConformance<Record>
     }
 }

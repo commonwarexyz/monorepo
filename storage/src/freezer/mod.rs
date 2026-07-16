@@ -43,24 +43,21 @@
 //! +-----------------------------------------------------------------+
 //! ```
 //!
-//! The table uses two fixed-size slots per entry to ensure consistency during updates. Each slot
-//! contains an epoch number that monotonically increases with each sync operation. During reads,
-//! the slot with the higher epoch is selected (provided it's not greater than the last committed
-//! epoch), ensuring consistency even if the system crashed during a write.
+//! Each table entry is a single fixed-size slot holding the head of that entry's collision
+//! chain. An occupancy tag distinguishes an empty slot (all zeros) from a chain head at
+//! section 0, position 0. The storage backend guarantees per-blob atomic sync, so slots are
+//! never torn: recovery only has to roll stale-ahead slots back to the committed
+//! [Checkpoint] (see Recovery below).
 //!
 //! ```text
 //! +-------------------------------------+
 //! |          Hash Table Entry           |
 //! +-------------------------------------+
-//! |     Slot 0      |      Slot 1       |
-//! +-----------------+-------------------+
-//! | epoch:    u64   | epoch:    u64     |
-//! | section:  u64   | section:  u64     |
-//! | offset:   u32   | offset:   u32     |
-//! | added:    u8    | added:    u8      |
-//! +-----------------+-------------------+
-//! | CRC32:    u32   | CRC32:    u32     |
-//! +-----------------+-------------------+
+//! | occupied:  u8                       |
+//! | section:   u64                      |
+//! | position:  u64                      |
+//! | added:     u8                       |
+//! +-------------------------------------+
 //! ```
 //!
 //! The key index journal stores fixed-size entries containing a key, a pointer to the value in the
@@ -162,9 +159,11 @@
 //! # Recovery
 //!
 //! [Freezer::sync] and [Freezer::close] return a [Checkpoint] for recovering existing data.
-//! When a checkpoint is provided, [Freezer::init] rewinds the journals to the checkpoint, resizes the
-//! table to the checkpointed table size, and clears invalid or newer table entries. Passing `None`
-//! or an empty checkpoint to [Freezer::init] deletes any existing freezer data and starts empty.
+//! When a checkpoint is provided, [Freezer::init] resizes the table to the checkpointed table
+//! size, restores every table slot to the chain head committed by the checkpoint (a slot
+//! referencing a newer journal record is walked down its collision chain until a committed
+//! record is found), and rewinds the journals to the checkpoint. Passing `None` or an empty
+//! checkpoint to [Freezer::init] deletes any existing freezer data and starts empty.
 //!
 //! # Example
 //!
@@ -804,7 +803,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_partial_table_entry_write() {
+    fn test_table_garbage_is_loud() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -838,99 +837,21 @@ mod tests {
                 freezer.close().await.unwrap()
             };
 
-            // Corrupt the table by writing partial entry
+            // Overwrite the first table slot with garbage. A crash cannot produce this
+            // (slots are synced atomically), so it is corruption.
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
-                // Write incomplete table entry (only 10 bytes instead of 24)
                 blob.write_at_sync(0, vec![0xFF; 10]).await.unwrap();
             }
 
-            // Reopen and verify it handles the corruption
-            {
-                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.child("second"),
-                    cfg.clone(),
-                    Some(checkpoint),
-                )
-                .await
-                .expect("Failed to initialize freezer");
-
-                // The key should still be retrievable from journal if table is corrupted
-                // but the table entry is zeroed out
-                let result = freezer
-                    .get(Identifier::Key(&test_key("key1")))
-                    .await
-                    .unwrap();
-                assert!(result.is_none() || result == Some(42));
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_table_entry_invalid_crc() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                key_partition: "test-key-index".into(),
-                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
-                value_compression: None,
-                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
-                table_partition: "test-table".into(),
-                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
-                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
-                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
-                codec_config: (),
-            };
-
-            // Create freezer with data
-            let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.child("first"),
-                    cfg.clone(),
-                    None,
-                )
-                .await
-                .expect("Failed to initialize freezer");
-
-                freezer.put(test_key("key1"), 42).await.unwrap();
-                freezer.sync().await.unwrap();
-                freezer.close().await.unwrap()
-            };
-
-            // Corrupt the CRC in the index entry
-            {
-                let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
-                // Read the first entry
-                let entry_data = blob.read_at(0, 24).await.unwrap();
-                let mut corrupted = entry_data.coalesce();
-                // Corrupt the CRC (last 4 bytes of the entry)
-                corrupted.as_mut()[20] ^= 0xFF;
-                blob.write_at_sync(0, corrupted).await.unwrap();
-            }
-
-            // Reopen and verify it handles invalid CRC
-            {
-                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.child("second"),
-                    cfg.clone(),
-                    Some(checkpoint),
-                )
-                .await
-                .expect("Failed to initialize freezer");
-
-                // With invalid CRC, the entry should be treated as invalid
-                let result = freezer
-                    .get(Identifier::Key(&test_key("key1")))
-                    .await
-                    .unwrap();
-                // The freezer should still work but may not find the key due to invalid table entry
-                assert!(result.is_none() || result == Some(42));
-            }
+            // Reopen: garbage in committed state is loud, never repaired
+            let result = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("second"),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::Codec(_))));
         });
     }
 
@@ -1358,7 +1279,7 @@ mod tests {
                 freezer.put(key, value).await.expect("Failed to put data");
             }
 
-            // Multiple syncs to test epoch progression
+            // Multiple syncs to test checkpoint progression
             for _ in 0..3 {
                 freezer.sync().await.expect("Failed to sync");
 

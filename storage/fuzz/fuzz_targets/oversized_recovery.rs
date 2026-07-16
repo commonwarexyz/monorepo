@@ -4,8 +4,9 @@
 //!
 //! This test creates valid data, randomly corrupts storage, and verifies that recovery either
 //! reports loud corruption (structural damage a crash cannot produce, e.g. a partial index
-//! entry) or leaves the journal in a consistent state. It never panics or repairs silently
-//! wrong state.
+//! entry) or leaves the journal in a consistent state: the index is rewound (by binary search
+//! over monotone value offsets) to the last entry backed by the durable glob, and the journal
+//! remains readable and appendable. It never panics.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
@@ -302,8 +303,9 @@ fn fuzz(input: FuzzInput) {
             };
 
         // Phase 4: Verify get operations don't panic
-        // Note: Value checksums are verified lazily on read, not during recovery.
-        // So an entry may exist but get_value() may return ChecksumMismatch - this is expected.
+        // Note: mid-file corruption can break the monotonicity the binary-search rewind
+        // relies on, leaving entries whose values are unreadable - get_value() may return
+        // an error, but must not panic.
         for section in 1u64..=3 {
             let mut pos = 0u64;
             while let Ok(entry) = recovered.get(section, pos).await {
