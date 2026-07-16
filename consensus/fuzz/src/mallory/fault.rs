@@ -396,7 +396,9 @@ impl Fault {
             // The role switch draws one target uniformly among the six Byzantine
             // roles (never Honest) from the runtime RNG, so the multiplexer applies a
             // deterministic swap on replay.
-            Fault::SwapByzantineRole => FaultPlan::SwapByzantineRole(AdversaryRole::sample_byzantine(rng)),
+            Fault::SwapByzantineRole => {
+                FaultPlan::SwapByzantineRole(AdversaryRole::sample_byzantine(rng))
+            }
         }
     }
 }
@@ -726,7 +728,9 @@ mod tests {
         let mut seen_disrupter = false;
         let mut seen_other = false;
         for _ in 0..256 {
-            let FaultPlan::SwapByzantineRole(role) = Fault::SwapByzantineRole.sample(&mut rng, true) else {
+            let FaultPlan::SwapByzantineRole(role) =
+                Fault::SwapByzantineRole.sample(&mut rng, true)
+            else {
                 panic!("SwapByzantineRole must sample a SwapByzantineRole plan");
             };
             assert!(
