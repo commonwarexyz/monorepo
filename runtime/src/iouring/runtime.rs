@@ -539,23 +539,28 @@ impl crate::Runner for Runner {
         // racing teardown observe the abort.
         root_tree.abort();
 
-        // Clear remaining tasks from the executor: dropping task futures
-        // releases the resources they hold (e.g. rayon pools).
+        // Clear remaining tasks and the root: task futures run arbitrary user
+        // drop code, and a panic here must not skip the drain below while the
+        // waiter slab still owns kernel-referenced buffers, so capture it and
+        // resume after the ring is quiesced.
         //
         // It is critical that we wait to drop the strong reference to executor
         // until after we have dropped all tasks (as they may attempt to
         // upgrade their weak reference to the executor during drop).
-        executor.sleeping.lock().clear();
-        let tasks = executor.tasks.clear();
-        for t in tasks {
-            let Mode::Work(future) = &t.mode else {
-                continue;
-            };
-            *future.lock() = None;
-        }
+        let teardown = catch_unwind(AssertUnwindSafe(|| {
+            executor.sleeping.lock().clear();
+            let tasks = executor.tasks.clear();
+            for t in tasks {
+                let Mode::Work(future) = &t.mode else {
+                    continue;
+                };
+                *future.lock() = None;
+            }
 
-        // Drop the root task to release any Context references it may still hold.
-        drop(root);
+            // Drop the root task to release any Context references it may
+            // still hold.
+            drop(root);
+        }));
 
         // Close the driver so late admissions fail with their kind-specific
         // error, then drain in-flight ring work so kernel-owned buffers and
@@ -563,11 +568,18 @@ impl crate::Runner for Runner {
         // tasks above already orphaned abandoned operations (eagerly
         // requesting their cancellation), so e.g. an idle recv does not hold
         // its waiter slot until its deadline.
+        //
+        // A panic inside the drain itself (an unrecoverable ring error) must
+        // not unwind past this point: the slab would be freed while the kernel
+        // may still write into its buffers, so abort instead.
         for waker in io.close() {
             waker.wake();
         }
         drop(io);
-        ioloop.drain(&mut ring);
+        if catch_unwind(AssertUnwindSafe(|| ioloop.drain(&mut ring))).is_err() {
+            eprintln!("io_uring drain panicked with operations in flight, aborting");
+            std::process::abort();
+        }
 
         // Assert the context doesn't escape the start() function (behavior
         // is undefined in this case)
@@ -576,10 +588,12 @@ impl crate::Runner for Runner {
             "executor still has weak references"
         );
 
-        // Handle the result — resume the original panic after cleanup if one was caught.
-        let output = match result {
-            Ok(output) => output,
-            Err(payload) => resume_unwind(payload),
+        // Handle the result — resume the original panic after cleanup if one
+        // was caught, preferring it over a panic from task teardown.
+        let output = match (result, teardown) {
+            (Err(payload), _) => resume_unwind(payload),
+            (Ok(_), Err(payload)) => resume_unwind(payload),
+            (Ok(output), Ok(())) => output,
         };
         gauge.dec();
 

@@ -706,6 +706,10 @@ mod tests {
             ..Default::default()
         });
         harness.block_on(tests::test_network_trait(move || network.clone()));
+
+        // The sub-tests share one driver, so a slot leaked by any of them
+        // would degrade the others: assert everything was reclaimed.
+        assert_eq!(harness.tracked(), 0, "trait suite leaked waiter slots");
     }
 
     #[test]
@@ -756,6 +760,7 @@ mod tests {
             },
         );
         harness.block_on(tests::stress_test_network_trait(move || network.clone()));
+        assert_eq!(harness.tracked(), 0, "stress suite leaked waiter slots");
     }
 
     #[test]
@@ -928,6 +933,43 @@ mod tests {
                 .ioloop
                 .park(&mut harness.ring, Some(Duration::from_millis(10)));
         }
+    }
+
+    #[test]
+    fn test_inflight_cancel_poisons_stream() {
+        // Verify cancelling a recv whose SQE already reached the kernel
+        // poisons the stream while the sink stays usable: the shared-suite
+        // variant drops its recv before the loop ever turns, so only this
+        // test exercises the kernel-in-flight cancel with stream poisoning.
+        let (mut harness, network) = test_network(Config::default());
+
+        // Keep the server halves alive so the connection stays open.
+        let (_server_halves, mut client_sink, mut client_stream) = harness.block_on(async {
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let accept = async { listener.accept().await.unwrap() };
+            let dial = async { network.dial(addr).await.unwrap() };
+            let (server_halves, (client_sink, client_stream)) = futures::join!(accept, dial);
+            (server_halves, client_sink, client_stream)
+        });
+
+        // Admit and submit the recv, then drop the future mid-flight.
+        {
+            let mut recv = Box::pin(client_stream.recv(1));
+            assert!(poll_once(&harness, &mut recv).is_pending());
+            harness.ioloop.turn(&mut harness.ring);
+        }
+
+        harness.block_on(async {
+            // The stream must be poisoned by the cancellation.
+            assert!(matches!(client_stream.recv(1).await, Err(Error::Closed)));
+
+            // The sink must remain usable.
+            client_sink
+                .send(crate::IoBuf::from(b"ok"))
+                .await
+                .expect("sink should remain usable after stream cancellation");
+        });
     }
 
     #[test]

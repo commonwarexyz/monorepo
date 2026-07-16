@@ -1034,7 +1034,11 @@ pub(crate) mod testing {
     }
 
     impl TestLoop {
-        pub(crate) fn new(cfg: RingConfig) -> Self {
+        pub(crate) fn new(mut cfg: RingConfig) -> Self {
+            // Mirror the runtime's startup behavior: production always runs
+            // with single issuer (and thus deferred task running), so the
+            // harness must exercise the same completion-delivery mode.
+            cfg.single_issuer = true;
             let mut registry = Registry::default();
             let (driver, ioloop) = IoUringLoop::new(cfg, &mut registry);
             let ring = new_ring(&ioloop.cfg).expect("unable to create io_uring instance");
@@ -1145,16 +1149,25 @@ mod tests {
     #[test]
     fn test_submit_and_wait_non_etime_error_is_not_misclassified() {
         // Verify only ETIME maps to a timed-out wait: other errno values from
-        // `io_uring_enter` must propagate as real errors.
-        let harness = TestLoop::new(RingConfig::default());
-        let err = std::io::Error::from_raw_os_error(libc::EBADF);
+        // `io_uring_enter` must propagate as real errors rather than being
+        // swallowed as transient.
+        let mut harness = TestLoop::new(RingConfig::default());
+
+        // Closing the ring fd out from under the loop makes the next enter
+        // fail with EBADF.
+        // SAFETY: the fd is intentionally invalidated; the harness issues no
+        // further ring operations after the failed wait.
+        unsafe {
+            libc::close(std::os::fd::AsRawFd::as_raw_fd(&harness.ring));
+        }
+        let err = harness
+            .ioloop
+            .submit_and_wait(&mut harness.ring, 1, Some(Duration::from_millis(1)))
+            .expect_err("enter on a closed ring must fail");
         assert_eq!(err.raw_os_error(), Some(libc::EBADF));
-        // EBADF is neither a retryable errno nor ETIME.
-        assert!(!matches!(
-            err.raw_os_error(),
-            Some(libc::ETIME | libc::EINTR | libc::EAGAIN | libc::EBUSY)
-        ));
-        drop(harness);
+
+        // The ring fd is gone, so skip the harness drain.
+        std::mem::forget(harness);
     }
 
     #[test]
@@ -1733,6 +1746,285 @@ mod tests {
 
         // Drop the recv before the harness so shutdown cancels it eagerly.
         drop(recv);
+    }
+
+    #[test]
+    fn test_fill_reports_sq_pressure_over_waiter_pressure() {
+        // Verify the staging-pressure dominance rule directly: a full SQ with
+        // staged work remaining must report submission-queue pressure (so the
+        // turn loop flushes and restages) even when the slab is also full,
+        // and only a full slab with nothing left to stage reports waiter
+        // pressure.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 2,
+            ..Default::default()
+        });
+        let (left_a, _right_a) = UnixStream::pair().unwrap();
+        let (left_b, _right_b) = UnixStream::pair().unwrap();
+
+        let driver = Arc::clone(&harness.driver);
+        let mut recv_a = Box::pin(driver.recv(
+            Arc::new(left_a.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        let mut recv_b = Box::pin(driver.recv(
+            Arc::new(left_b.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut recv_a).is_pending());
+        assert!(poll_once(&harness, &mut recv_b).is_pending());
+
+        // First pass: the wake-poll rearm plus one op fill the two-slot SQ
+        // while the second op stays staged, so SQ pressure must dominate the
+        // (also true) waiter-capacity pressure.
+        let driver_state = Arc::clone(&harness.driver);
+        let fill = driver_state.with(|shared| {
+            harness
+                .ioloop
+                .fill_submission_queue(shared, &mut harness.ring)
+        });
+        assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
+
+        // After flushing, the second op stages and nothing remains queued, so
+        // the full slab now reports waiter pressure.
+        harness.ioloop.submit(&mut harness.ring).unwrap();
+        let fill = driver_state.with(|shared| {
+            harness
+                .ioloop
+                .fill_submission_queue(shared, &mut harness.ring)
+        });
+        assert_eq!(fill, FillResult::AtWaiterCapacity);
+
+        drop(recv_a);
+        drop(recv_b);
+    }
+
+    #[test]
+    fn test_drain_retires_staged_cancelled_op_without_blocking() {
+        // Verify drain breaks after staging locally retires the last waiter:
+        // an op admitted but never submitted whose ticket dropped must not
+        // leave drain blocked in a kernel wait that nothing will complete.
+        let mut harness = TestLoop::new(RingConfig {
+            shutdown_timeout: None,
+            max_request_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let (left, _right) = UnixStream::pair().unwrap();
+
+        let driver = Arc::clone(&harness.driver);
+        let mut recv = Box::pin(driver.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(8),
+            0,
+            8,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        // Admit without turning the loop, then drop: the entry stays in the
+        // staged queue in cancel-requested state.
+        assert!(poll_once(&harness, &mut recv).is_pending());
+        drop(recv);
+
+        let start = Instant::now();
+        harness.shutdown();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "drain blocked on a locally-retired op: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(harness.pending(), 0);
+    }
+
+    #[test]
+    fn test_drain_restages_partial_recv_to_completion() {
+        // Verify requeued partial progress keeps advancing inside the drain
+        // loop: an exact recv that has consumed part of its target must be
+        // restaged by drain until the remaining bytes complete it.
+        let mut harness = TestLoop::new(RingConfig {
+            shutdown_timeout: None,
+            max_request_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let (left, right) = UnixStream::pair().unwrap();
+        (&right).write_all(&[1]).unwrap();
+
+        let driver = Arc::clone(&harness.driver);
+        let mut recv = Box::pin(driver.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(2),
+            0,
+            2,
+            true,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+        harness.ioloop.turn(&mut harness.ring);
+
+        // Supply the rest before shutdown so drain can finish the requeue.
+        (&right).write_all(&[2]).unwrap();
+
+        let start = Instant::now();
+        harness.shutdown();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "drain did not restage the partial recv: {:?}",
+            start.elapsed()
+        );
+
+        match poll_once(&harness, &mut recv) {
+            Poll::Ready(Ok((_, read))) => assert_eq!(read, 2),
+            other => panic!("expected completed exact recv after drain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_off_thread_drop_leaks_slot_until_shutdown() {
+        // Verify the documented off-thread drop behavior: the slot leaks
+        // (rather than freeing kernel-referenced buffers) and a bounded
+        // shutdown reclaims it.
+        let mut harness = TestLoop::new(RingConfig {
+            shutdown_timeout: Some(Duration::from_millis(200)),
+            max_request_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let (left, _right) = UnixStream::pair().unwrap();
+
+        let driver = Arc::clone(&harness.driver);
+        let mut recv = Box::pin(driver.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(8),
+            0,
+            8,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+        harness.ioloop.turn(&mut harness.ring);
+        assert_eq!(harness.tracked(), 1);
+
+        // Drop the admitted future on a foreign thread: the affinity check
+        // rejects the orphan path, so the slot must stay tracked.
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(recv)).join().unwrap();
+        });
+        harness.ioloop.turn(&mut harness.ring);
+        assert_eq!(
+            harness.tracked(),
+            1,
+            "off-thread drop must leak the slot, not free it"
+        );
+
+        // The shutdown budget force-cancels the leaked op promptly.
+        let start = Instant::now();
+        harness.shutdown();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "shutdown did not reclaim the leaked slot: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn test_closed_driver_fails_capacity_parked_admission() {
+        // Verify an admission parked on the capacity wait list observes a
+        // driver close and resolves with its kind-specific error instead of
+        // re-parking.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            max_request_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let (left_a, _right_a) = UnixStream::pair().unwrap();
+        let (left_b, _right_b) = UnixStream::pair().unwrap();
+
+        let driver = Arc::clone(&harness.driver);
+        let mut recv_a = Box::pin(driver.recv(
+            Arc::new(left_a.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        let mut recv_b = Box::pin(driver.recv(
+            Arc::new(left_b.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+
+        // Fill the single slot, then park the second admission.
+        assert!(poll_once(&harness, &mut recv_a).is_pending());
+        harness.ioloop.turn(&mut harness.ring);
+        assert!(poll_once(&harness, &mut recv_b).is_pending());
+
+        // Close the driver: the parked admission must fail on its next poll.
+        for waker in harness.driver.close() {
+            waker.wake();
+        }
+        match poll_once(&harness, &mut recv_b) {
+            Poll::Ready(Err((_, Error::RecvFailed))) => {}
+            other => panic!("expected closed-driver recv failure, got {other:?}"),
+        }
+
+        drop(recv_a);
+    }
+
+    #[test]
+    fn test_mass_timeout_cancel_burst_exceeds_sq_capacity() {
+        // Verify a timeout burst whose cancel SQEs exceed one SQ pass batches
+        // across submit cycles instead of stranding in-flight waiters.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 8,
+            max_request_timeout: Duration::from_secs(1),
+            timeout_wheel_tick: Duration::from_millis(5),
+            ..Default::default()
+        });
+
+        let driver = Arc::clone(&harness.driver);
+        let mut sockets = Vec::new();
+        let mut recvs = Vec::new();
+        for _ in 0..8 {
+            let (left, right) = UnixStream::pair().unwrap();
+            sockets.push(right);
+            recvs.push(Box::pin(driver.recv(
+                Arc::new(left.into()),
+                IoBufMut::with_capacity(1),
+                0,
+                1,
+                false,
+                Instant::now() + Duration::from_millis(60),
+            )));
+        }
+        for recv in &mut recvs {
+            assert!(poll_once(&harness, recv).is_pending());
+        }
+        harness.ioloop.turn(&mut harness.ring);
+
+        // Let every deadline expire, then drive all ops to their timeout
+        // results: the cancel burst plus the wake-poll rearm exceeds the
+        // eight-slot SQ and must batch.
+        std::thread::sleep(Duration::from_millis(100));
+        let start = Instant::now();
+        let results = harness.block_on(futures::future::join_all(recvs));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cancel burst did not batch: {:?}",
+            start.elapsed()
+        );
+        for result in results {
+            assert!(matches!(result, Err((_, Error::Timeout))));
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@ stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring"
 mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
     use commonware_utils::{channel::oneshot, sync::Barrier};
-    use futures::{FutureExt, future::join_all, join, poll};
+    use futures::{FutureExt, StreamExt, future::join_all, join, poll, stream::FuturesUnordered};
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
     const CLIENT_SEND_DATA: &[u8] = b"client_send_data";
@@ -156,10 +156,12 @@ mod tests {
         // Keep all sockets alive until every participant finishes.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
 
-        // Server branch: accept every client, then serve them concurrently.
+        // Server branch: accept every client, serving already-accepted
+        // connections concurrently with later accepts so the ring sees a
+        // mixed accept and recv/send workload.
         let server_barrier = barrier.clone();
         let server = async move {
-            let mut handlers = Vec::new();
+            let mut handlers = FuturesUnordered::new();
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
                 let barrier = server_barrier.clone();
@@ -176,8 +178,10 @@ mod tests {
                     // Hold the connection open until every peer has finished.
                     barrier.wait().await;
                 });
+                // Drive ready handlers without blocking the accept loop.
+                while let Some(Some(())) = handlers.next().now_or_never() {}
             }
-            join_all(handlers).await;
+            while handlers.next().await.is_some() {}
         };
 
         // Client branches
@@ -660,10 +664,12 @@ mod tests {
         // Keep every connection alive until both the client and server halves finish.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
 
-        // Server branch: accept every client, then echo concurrently.
+        // Server branch: accept every client, echoing on already-accepted
+        // connections concurrently with later accepts so the ring sees a
+        // mixed accept and recv/send workload.
         let server_barrier = barrier.clone();
         let server = async move {
-            let mut handlers = Vec::new();
+            let mut handlers = FuturesUnordered::new();
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
                 let barrier = server_barrier.clone();
@@ -677,8 +683,10 @@ mod tests {
                     // Hold the connection open until every peer has finished.
                     barrier.wait().await;
                 });
+                // Drive ready handlers without blocking the accept loop.
+                while let Some(Some(())) = handlers.next().now_or_never() {}
             }
-            join_all(handlers).await;
+            while handlers.next().await.is_some() {}
         };
 
         // Client branches.
