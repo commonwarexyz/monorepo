@@ -5,12 +5,11 @@ use crate::{
         Plan,
         actors::voter,
         config::ForwardingPolicy,
-        interesting,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Proposal, Vote},
     },
-    types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
+    types::{Epoch, Participant, Round as Rnd, TermLength, View},
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Digest;
@@ -27,9 +26,13 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::ordered::Quorum;
+use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 use tracing::{Instrument as _, Span, debug, info_span, trace};
 
 /// Tracks the current view, its leader, and whether the voter has
@@ -59,10 +62,15 @@ where
     relay: Rl,
     strategy: T,
 
-    activity_timeout: ViewDelta,
-    skip_timeout: ViewDelta,
+    skip_timeout: Duration,
     forwarding: ForwardingPolicy,
     epoch: Epoch,
+    term_length: TermLength,
+    floor: View,
+
+    /// Tracks the last activity time for each participant, indexed by
+    /// participant. `None` means no activity has been observed.
+    last_activity: Vec<Option<SystemTime>>,
 
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
@@ -70,7 +78,6 @@ where
     verified: Counter,
     inbound_messages: CounterFamily<Inbound>,
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
-    latest_seen: Vec<View>,
     batch_size: Histogram,
     verify_latency: histogram::Timed,
     recover_latency: histogram::Timed,
@@ -89,7 +96,6 @@ where
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
         let scheme = Arc::new(cfg.scheme);
         let participants = scheme.participants();
-        let participant_count = participants.len();
         let added = context.counter("added", "number of messages added to the verifier");
         let verified = context.counter("verified", "number of messages verified");
         let inbound_messages = context.family("inbound_messages", "number of inbound messages");
@@ -114,6 +120,7 @@ where
             Buckets::CRYPTOGRAPHY,
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
+        let last_activity = vec![None; participants.len()];
         (
             Self {
                 context: ContextCell::new(context),
@@ -125,10 +132,13 @@ where
                 relay: cfg.relay,
                 strategy: cfg.strategy,
 
-                activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 forwarding: cfg.forwarding,
                 epoch: cfg.epoch,
+                term_length: cfg.term_length,
+                floor: cfg.floor,
+
+                last_activity,
 
                 mailbox_receiver: receiver,
 
@@ -136,7 +146,6 @@ where
                 verified,
                 inbound_messages,
                 latest_vote,
-                latest_seen: vec![View::zero(); participant_count],
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency),
                 recover_latency: histogram::Timed::new(recover_latency),
@@ -154,37 +163,43 @@ where
         )
     }
 
-    /// Records the latest view message received from a participant.
+    /// Records the current time as the last activity time for a participant.
     ///
-    /// This mechanism is not resistant to malicious validators (nor is
-    /// it meant to be). If a peer sends us a certificate very far in the future,
-    /// we will record that as their latest activity (and not attempt to skip them).
-    fn record_activity(&mut self, sender: &S::PublicKey, view: View) {
-        let Some(participant) = self.scheme.participants().index(sender) else {
-            return;
-        };
-        let seen_view = &mut self.latest_seen[usize::from(participant)];
-        if *seen_view < view {
-            *seen_view = view;
+    /// This mechanism is not resistant to malicious validators (nor is it meant to be).
+    fn record_activity(&mut self, participant: Participant) {
+        self.last_activity[usize::from(participant)] = Some(self.context.current());
+    }
+
+    /// Records activity for a network sender, if it is a participant.
+    fn record_peer_activity(&mut self, sender: &S::PublicKey) {
+        if let Some(participant) = self.scheme.participants().index(sender) {
+            self.record_activity(participant);
         }
     }
 
-    /// Returns true if the participant has sent a recent message.
-    fn is_active(
-        &self,
-        work: &BTreeMap<View, Round<S, B, D, Re>>,
-        view: View,
-        participant: Participant,
-    ) -> bool {
-        // Until we have tracked `skip_timeout` views, everyone stays active so startup does not
-        // immediately skip leaders whose `latest_seen` entry is still at the default view. This is
-        // a work-entry heuristic: skipped or coalesced updates can make `work.len()` smaller than
-        // the elapsed view span.
-        if work.len() < self.skip_timeout.get() as usize {
+    /// Returns true if the participant has sent a recent message, or if fewer
+    /// than a quorum of participants have (fail-open).
+    fn is_active(&self, participant: Participant) -> bool {
+        // Track activity with wall-clock time rather than raw view deltas. Stable-leader terms can
+        // skip many view numbers at once, so we only fast-timeout when a quorum has been active
+        // within `skip_timeout`, and the selected leader has not.
+        let min_time = self
+            .context
+            .current()
+            .checked_sub(self.skip_timeout)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let recent =
+            |activity: &Option<SystemTime>| activity.is_some_and(|activity| activity >= min_time);
+
+        // If there is not a quorum of recently active participants, then we "fail-open" since we
+        // know the network is not expected to be responsive.
+        let active = self.last_activity.iter().filter(|a| recent(a)).count();
+        if active < self.scheme.participants().quorum::<N3f1>() as usize {
             return true;
         }
-        let seen_view = self.latest_seen[usize::from(participant)];
-        view.get().saturating_sub(seen_view.get()) < self.skip_timeout.get()
+
+        // Return true if we have recent activity from the participant.
+        recent(&self.last_activity[usize::from(participant)])
     }
 
     /// Maps `missing` participants to targeted forward recipients, excluding self.
@@ -273,7 +288,7 @@ where
             leader: None,
             timed_out: false,
         };
-        let mut finalized = View::zero();
+        let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
         select_loop! {
             self.context,
@@ -303,11 +318,12 @@ where
                         current: new_current,
                         leader,
                         finalized: new_finalized,
-                        forwardable_proposal,
+                        certified_proposal,
                     } => {
                         let process = process_span(span.clone());
                         let _guard = process.entered();
-                        let am_leader = self.scheme.me().is_some_and(|me| me == leader);
+                        let me = self.scheme.me();
+                        let am_leader = me.is_some_and(|me| me == leader);
                         current = Current {
                             view: new_current,
                             leader: Some(leader),
@@ -328,22 +344,28 @@ where
                         round.set_span(span);
                         round.set_leader(leader);
 
+                        let has_forwardable_proposal =
+                            me.is_some_and(|me| round.has_forwardable_proposal(me));
+
                         // If the leader nullified this view or has not been active
-                        // recently, tell the voter to reduce the leader timeout to now
-                        #[allow(clippy::collapsible_else_if)]
-                        let timeout_reason = if Self::leader_nullified(&current, &work) {
+                        // recently, tell the voter to reduce the leader timeout to now.
+                        //
+                        // Activity is a best-effort, wall-clock signal: leader messages
+                        // still queued inbound are not yet recorded, so a spurious
+                        // fast-timeout here is possible and tolerated.
+                        let timeout_reason = match Self::leader_nullified(&current, &work) {
                             // Leader already buffered a nullify for this now-current view
-                            // (allowed because we accept votes up to `current+1`)
-                            Some(TimeoutReason::LeaderNullify)
-                        } else {
-                            if am_leader {
+                            // (allowed because we accept votes at or below `current`, at
+                            // `current+1`, or at the next term start)
+                            true => Some(TimeoutReason::LeaderNullify),
+                            false => match am_leader {
                                 // If we are the leader, we should not timeout
-                                None
-                            } else {
-                                // If we are not the leader and the leader isn't active, we should timeout
-                                (!self.is_active(&work, current.view, leader))
+                                true => None,
+                                // If we are not the leader, don't have a proposal
+                                // to forward, and the leader isn't active, we should timeout.
+                                false => (!has_forwardable_proposal && !self.is_active(leader))
                                     .then_some(TimeoutReason::Inactivity)
-                            }
+                            },
                         };
                         if let Some(timeout_reason) = timeout_reason {
                             current.timed_out = true;
@@ -351,7 +373,7 @@ where
                         }
 
                         // Forward the proposal, if enabled and we have something to forward
-                        if let Some((proposal, round)) = forwardable_proposal
+                        if let Some((proposal, round)) = certified_proposal
                             .filter(|_| self.forwarding.is_enabled())
                             .and_then(|proposal| {
                                 work.get(&proposal.view()).map(|round| (proposal, round))
@@ -365,9 +387,13 @@ where
                         updated_view = current.view;
                     }
                     Message::Constructed(message) => {
-                        // If the view isn't interesting, we can skip
-                        if !interesting(self.activity_timeout, finalized, current.view, view, false)
-                        {
+                        // Record activity for ourselves.
+                        if let Some(me) = self.scheme.me() {
+                            self.record_activity(me);
+                        }
+
+                        // Ignore non-useful votes.
+                        if view <= finalized {
                             continue;
                         }
 
@@ -403,18 +429,15 @@ where
                     continue;
                 }
 
-                // Allow future certificates (they advance our view)
+                // Record activity from the sender even if we don't process the certificate.
                 let view = message.view();
-                if !interesting(
-                    self.activity_timeout,
-                    finalized,
-                    current.view,
-                    view,
-                    true, // allow future
-                ) {
+                self.record_peer_activity(&sender);
+
+                // Ignore certificates below the highest finalized view since they aren't useful.
+                // Allow certificates from arbitrarily-future views since they advance our view.
+                if view <= finalized {
                     continue;
                 }
-                self.record_activity(&sender, view);
 
                 // Skip certificates we already have for the view
                 let kind = message.kind();
@@ -520,12 +543,25 @@ where
                     continue;
                 }
 
-                // If the view isn't interesting, we can skip
+                // Any same-epoch traffic from a known peer counts as activity, even if the vote is
+                // later ignored. Skip-timeout is a liveness heuristic, not Byzantine evidence.
                 let view = message.view();
-                if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                self.record_peer_activity(&sender);
+
+                // Ignore votes at or below the finalized tip. Votes dropped here are
+                // never verified or reported: activity reports miss votes that arrive
+                // after finalization (relevant to reporters tracking participation),
+                // and equivocation at or below the tip is not detected or reported
+                // since fault evidence is only collected for views still in progress.
+                if view <= finalized {
                     continue;
                 }
-                self.record_activity(&sender, view);
+
+                // Ignore votes from arbitrarily-future views (DOS via memory
+                // exhaustion); see [`View::admits`] for the allowed window.
+                if !current.view.admits(view, self.term_length) {
+                    continue;
+                }
 
                 // Add the vote to the verifier
                 if work
@@ -572,10 +608,6 @@ where
                 }
 
                 // Skip verification and construction for views at or below finalized.
-                //
-                // We still use interesting() for filtering votes because we want to
-                // notify the reporter of all votes within the activity timeout (even
-                // if we don't need them in the voter).
                 if updated_view <= finalized {
                     continue;
                 }
@@ -677,11 +709,12 @@ where
                 .instrument(span)
                 .await;
 
-                // Drop any rounds that are no longer interesting
-                while work.first_key_value().is_some_and(|(&view, _)| {
-                    !interesting(self.activity_timeout, finalized, current.view, view, false)
-                }) {
-                    work.pop_first();
+                // Drop any rounds at or below the highest finalized view (votes
+                // for those views are no longer accepted). Guarded to avoid a
+                // tree split on every message: `finalized` only advances on
+                // view updates.
+                if work.first_key_value().is_some_and(|(&v, _)| v <= finalized) {
+                    work = work.split_off(&finalized.next());
                 }
             },
         }

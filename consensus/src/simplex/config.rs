@@ -1,10 +1,10 @@
 use super::{
-    elector::Config as Elector,
+    elector,
     types::{Activity, Context, Finalization},
 };
 use crate::{
     CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
-    types::{Epoch, ViewDelta},
+    types::{Epoch, View, ViewDelta},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_p2p::Blocker;
@@ -42,6 +42,12 @@ impl ForwardingPolicy {
 }
 
 /// The certified root from which a Simplex instance starts.
+///
+/// The floor must be durable and must never move backwards across restarts:
+/// the voter prunes its durable vote journal relative to the floor, so
+/// restarting with an earlier floor can re-enter views whose vote records
+/// were already discarded (risking equivocation). Derive the floor from
+/// application state that is persisted before the engine starts.
 #[derive(Clone, Debug)]
 pub enum Floor<S: Scheme, D: Digest> {
     /// Start from the epoch genesis payload at view 0.
@@ -51,6 +57,14 @@ pub enum Floor<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Floor<S, D> {
+    /// The finalized view the engine starts from (`View::zero()` for genesis).
+    pub(crate) fn view(&self) -> View {
+        match self {
+            Self::Genesis(_) => View::zero(),
+            Self::Finalized(finalization) => finalization.view(),
+        }
+    }
+
     fn assert<Rng>(&self, epoch: Epoch, rng: &mut Rng, scheme: &S, strategy: &impl Strategy)
     where
         Rng: CryptoRng,
@@ -78,7 +92,7 @@ impl<S: Scheme, D: Digest> Floor<S, D> {
 pub struct Config<S, L, B, D, A, R, F, T>
 where
     S: Scheme,
-    L: Elector<S>,
+    L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
@@ -118,9 +132,11 @@ where
 
     /// Reporter for the consensus engine.
     ///
-    /// All activity is exported for downstream applications that benefit from total observability,
-    /// consider wrapping with [`crate::simplex::scheme::reporter::AttributableReporter`] to
-    /// automatically filter and verify activities based on scheme attributability.
+    /// All activity for views still in progress is exported; votes that arrive at or below
+    /// the highest finalized view are dropped without being reported (see the completeness
+    /// note on [`crate::simplex::types::Activity`]). Consider wrapping with
+    /// [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter
+    /// and verify activities based on scheme attributability.
     pub reporter: F,
 
     /// Strategy for parallel operations.
@@ -154,28 +170,46 @@ where
 
     /// Amount of time to wait for certification progress in a view
     /// before attempting to skip the view.
+    ///
+    /// This timeout must be greater than the leader timeout.
     pub certification_timeout: Duration,
 
     /// Amount of time to wait before retrying a nullify broadcast if
     /// stuck in a view.
     pub timeout_retry: Duration,
 
-    /// Number of views behind finalized tip to track
-    /// and persist activity derived from validator messages.
+    /// Number of views behind the finalized tip to track (in memory and in the
+    /// journal) for recent activity.
     pub activity_timeout: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
-    /// for this many recent known views (we ignore views we don't have data for).
+    /// for at least this long.
     ///
-    /// This number should be less than or equal to `activity_timeout` (how
-    /// many views we are tracking below the finalized tip).
-    pub skip_timeout: ViewDelta,
+    /// This timeout must be greater than the certification timeout and timeout retry.
+    pub skip_timeout: Duration,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: NonZeroUsize,
+
+    /// Maximum time an entered view may remain unfinalized before we allow a
+    /// local nullify vote for the current view.
+    ///
+    /// With stable leaders, a Byzantine leader can keep every per-view timer
+    /// satisfied while preventing finality: each view notarizes and certifies
+    /// (so the leader and certification timeouts never fire), but no
+    /// finalization certificate forms. With a `term_length` of 1, leader
+    /// rotation bounds such a stall to a single view. With longer terms, this
+    /// timeout bounds it instead: it tracks the oldest entered, unfinalized
+    /// view in the current term and triggers a nullify vote for the current
+    /// view when it expires, skipping the rest of the term.
+    ///
+    /// This timeout must be greater than the certification timeout so normal
+    /// proposal and certification paths have a chance to complete before
+    /// term-level abandonment.
+    pub finalization_timeout: Duration,
 
     /// Policy for proactively forwarding certified blocks when entering the
     /// next view.
@@ -184,7 +218,7 @@ where
 
 impl<
     S: Scheme,
-    L: Elector<S>,
+    L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
@@ -205,17 +239,30 @@ impl<
             !self.scheme.participants().is_empty(),
             "there must be at least one participant"
         );
+
+        // Vote-to-nullify timeouts.
+        // finalization_timeout > certification_timeout > leader_timeout > 0.
+        // skip_timeout > certification_timeout and timeout_retry.
         assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"
         );
         assert!(
-            self.certification_timeout > Duration::default(),
-            "certification timeout must be greater than zero"
+            self.certification_timeout > self.leader_timeout,
+            "certification timeout must be greater than leader timeout"
         );
         assert!(
-            self.leader_timeout <= self.certification_timeout,
-            "leader timeout must be less than or equal to certification timeout"
+            self.finalization_timeout > self.certification_timeout,
+            "finalization timeout must be greater than certification timeout"
+        );
+
+        assert!(
+            self.skip_timeout > self.certification_timeout,
+            "skip timeout must be greater than certification timeout"
+        );
+        assert!(
+            self.skip_timeout > self.timeout_retry,
+            "skip timeout must be greater than timeout retry"
         );
         assert!(
             self.timeout_retry > Duration::default(),
@@ -224,14 +271,6 @@ impl<
         assert!(
             !self.activity_timeout.is_zero(),
             "activity timeout must be greater than zero"
-        );
-        assert!(
-            !self.skip_timeout.is_zero(),
-            "skip timeout must be greater than zero"
-        );
-        assert!(
-            self.skip_timeout <= self.activity_timeout,
-            "skip timeout must be less than or equal to activity timeout"
         );
         assert!(
             self.fetch_timeout > Duration::default(),
