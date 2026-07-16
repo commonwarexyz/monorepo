@@ -17,16 +17,25 @@ use std::collections::{BTreeSet, HashSet};
 /// Run every marshal invariant. Called from the driver at end of run.
 pub fn check_all<H: TestHarness>(
     ready_prefix: u64,
-    delivery_log: &[Height],
-    segment_bounds: &[usize],
+    application_segment_bounds: &[usize],
+    application_ordering_exclusions: &BTreeSet<usize>,
     segment_starts: &[u64],
     expected_redeliveries: &[Vec<Height>],
     application_delivered: &[(Height, D)],
     canonical: &[H::TestBlock],
 ) {
     check_ready_prefix_delivered(ready_prefix, application_delivered);
-    check_segment_ordering(segment_bounds, segment_starts, delivery_log);
-    check_redelivery_after_restart(expected_redeliveries, segment_bounds, delivery_log);
+    check_segment_ordering(
+        application_segment_bounds,
+        application_ordering_exclusions,
+        segment_starts,
+        application_delivered,
+    );
+    check_redelivery_after_restart(
+        expected_redeliveries,
+        application_segment_bounds,
+        application_delivered,
+    );
     check_digest_fidelity::<H>(application_delivered, canonical);
 }
 
@@ -55,12 +64,15 @@ pub fn check_ready_prefix_delivered(ready_prefix: u64, application_delivered: &[
 /// Within each actor instance (segment between restarts) marshal must
 /// deliver heights starting at `restored processed_height + 1` and
 /// advance strictly by one. The driver pre-populates `segment_starts`
-/// from each `setup.height` and `segment_bounds` from the delivery_log
-/// positions at restart boundaries.
+/// from each `setup.height` and `segment_bounds` from the application's
+/// append-only delivery log at restart boundaries. Ack-derived observations
+/// can skip stale handles orphaned by restart or floor changes, so they are
+/// not precise enough for this delivery-order invariant.
 pub fn check_segment_ordering(
     segment_bounds: &[usize],
+    ordering_exclusions: &BTreeSet<usize>,
     segment_starts: &[u64],
-    delivery_log: &[Height],
+    application_delivered: &[(Height, D)],
 ) {
     assert_eq!(
         segment_bounds.len(),
@@ -72,7 +84,16 @@ pub fn check_segment_ordering(
         if start_idx == end_idx {
             continue;
         }
-        let segment = &delivery_log[start_idx..end_idx];
+        let segment = application_delivered[start_idx..end_idx]
+            .iter()
+            .enumerate()
+            .filter(|(offset, _)| !ordering_exclusions.contains(&(start_idx + offset)))
+            .map(|(_, (height, _))| *height)
+            .filter(|height| height.get() != 0)
+            .collect::<Vec<_>>();
+        if segment.is_empty() {
+            continue;
+        }
         let expected_start = segment_starts[segment_idx];
         assert_eq!(
             segment[0].get(),
@@ -105,7 +126,7 @@ pub fn check_segment_ordering(
 pub fn check_redelivery_after_restart(
     expected_redeliveries: &[Vec<Height>],
     segment_bounds: &[usize],
-    delivery_log: &[Height],
+    application_delivered: &[(Height, D)],
 ) {
     assert_eq!(
         segment_bounds.len(),
@@ -117,9 +138,9 @@ pub fn check_redelivery_after_restart(
             continue;
         }
         let post_restart_start = segment_bounds[restart_idx + 1];
-        let post_restart: HashSet<u64> = delivery_log[post_restart_start..]
+        let post_restart: HashSet<u64> = application_delivered[post_restart_start..]
             .iter()
-            .map(|h| h.get())
+            .map(|(height, _)| height.get())
             .collect();
         for h in expected {
             assert!(

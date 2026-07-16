@@ -50,7 +50,7 @@ use commonware_storage::archive;
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec, FuzzRng, NZUsize};
 use futures::{future::BoxFuture, task::noop_waker_ref, FutureExt, StreamExt};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeSet, HashSet, VecDeque},
     future::Future,
     hint::black_box,
     num::NonZeroUsize,
@@ -153,15 +153,22 @@ fn block_available(
 /// application queue after already-stale handles are added to the stale queue.
 fn queue_floor_orphaned_acks(
     stale_to_skip: &mut VecDeque<Height>,
+    application_ordering_exclusions: &mut BTreeSet<usize>,
     pending_acks: &[Height],
+    pending_start_idx: usize,
     floor_height: u64,
     ready_prefix: u64,
 ) {
-    let mut pending_iter = pending_acks.iter().skip(stale_to_skip.len());
+    let stale_len = stale_to_skip.len();
+    let mut pending_iter = pending_acks.iter().enumerate().skip(stale_len);
     for expected in (floor_height..=ready_prefix).map(Height::new) {
-        if pending_iter.next().copied() != Some(expected) {
+        let Some((pending_offset, observed)) = pending_iter.next() else {
+            break;
+        };
+        if *observed != expected {
             break;
         }
+        application_ordering_exclusions.insert(pending_start_idx + pending_offset);
         stale_to_skip.push_back(expected);
     }
 }
@@ -501,11 +508,14 @@ where
         // repair.
         let mut processed_height: u64 = setup.height.map_or(0, |h| h.get());
         let mut delivery_log: Vec<Height> = Vec::new();
-        // segment_bounds[i]..segment_bounds[i+1] is the i-th segment of
-        // delivery_log. segment_starts[i] is the height the i-th actor
-        // instance is expected to begin delivery at (its restored
-        // processed height + 1).
+        let mut application_ordering_exclusions: BTreeSet<usize> = BTreeSet::new();
+        // segment_bounds split the ack-observation log for runner-local
+        // bookkeeping. application_segment_bounds split the append-only
+        // application delivery log for end-of-run delivery invariants.
+        // segment_starts[i] is the height the i-th actor instance is expected
+        // to begin delivery at (its restored processed height + 1).
         let mut segment_bounds: Vec<usize> = vec![0];
+        let mut application_segment_bounds: Vec<usize> = vec![0];
         let mut segment_starts: Vec<u64> = vec![setup.height.map_or(0, |h| h.get()) + 1];
         // For each restart, the heights pending ack at the moment of
         // restart. A later actor instance must redeliver each one.
@@ -1250,6 +1260,7 @@ where
                     }
                     expected_redeliveries.push(pending_real);
                     segment_bounds.push(delivery_log.len());
+                    application_segment_bounds.push(application.delivered().len());
 
                     actor_handle.abort();
                     let _ = actor_handle.await;
@@ -1316,9 +1327,12 @@ where
                 // (live). Observe the application queue after the drain so speculative
                 // floor bookkeeping does not create unmatched strict stale entries.
                 let pending_acks = application.pending_ack_heights();
+                let pending_start_idx = application.delivered().len() - pending_acks.len();
                 queue_floor_orphaned_acks(
                     &mut stale_to_skip,
+                    &mut application_ordering_exclusions,
                     &pending_acks,
+                    pending_start_idx,
                     floor_height,
                     ready_prefix_before,
                 );
@@ -1355,11 +1369,12 @@ where
             "stale ack bookkeeping retained unmatched entries: {stale_to_skip:?}",
         );
         segment_bounds.push(delivery_log.len());
+        application_segment_bounds.push(application.delivered().len());
 
         invariant::check_all::<H>(
             ready_prefix,
-            &delivery_log,
-            &segment_bounds,
+            &application_segment_bounds,
+            &application_ordering_exclusions,
             &segment_starts,
             &expected_redeliveries,
             &application.delivered(),
