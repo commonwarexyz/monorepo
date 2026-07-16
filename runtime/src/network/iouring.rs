@@ -82,7 +82,7 @@ impl Default for Config {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
-            dial_timeout: iouring_config.max_request_timeout,
+            dial_timeout: Duration::from_secs(10),
             read_write_timeout: iouring_config.max_request_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
@@ -135,7 +135,6 @@ impl Network {
         cfg.iouring_config.max_request_timeout = cfg
             .iouring_config
             .max_request_timeout
-            .max(cfg.dial_timeout)
             .max(cfg.read_write_timeout);
 
         // Create an io_uring instance to handle send operations.
