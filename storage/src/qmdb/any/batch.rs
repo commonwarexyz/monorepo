@@ -2625,7 +2625,7 @@ where
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
     /// Weak ref fails to upgrade (ancestor was freed).
-    pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+    pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, U, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 }
