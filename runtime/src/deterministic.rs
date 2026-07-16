@@ -73,7 +73,7 @@ use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::{
-    Cached, SystemTimeExt,
+    SystemTimeExt,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
 };
@@ -87,7 +87,7 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
@@ -416,6 +416,7 @@ pub struct Executor {
     panicker: Panicker,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     thread_stack_size: usize,
+    thread_pool: ThreadPool,
 }
 
 impl Executor {
@@ -577,34 +578,33 @@ impl Runner {
             State::Checkpoint(checkpoint) => checkpoint.thread_stack_size,
         };
         let dispatcher = tracing::dispatcher::get_default(Clone::clone);
-        std::thread::scope(|scope| {
-            let handle = std::thread::Builder::new()
-                .name("deterministic-rt-root".to_string())
+        let thread_pool = Arc::new(
+            ThreadPoolBuilder::new()
+                .num_threads(1)
+                .thread_name(|_| "deterministic-rt-root".to_string())
                 .stack_size(thread_stack_size)
-                .spawn_scoped(scope, move || {
-                    tracing::dispatcher::with_default(&dispatcher, || self.run(f))
-                })
-                .expect("failed to spawn thread");
-            match handle.join() {
-                Ok(result) => result,
-                Err(payload) => resume_unwind(payload),
-            }
+                .build()
+                .expect("failed to spawn thread"),
+        );
+        let executor_pool = Arc::clone(&thread_pool);
+        thread_pool.install(move || {
+            tracing::dispatcher::with_default(&dispatcher, || self.run(f, executor_pool))
         })
     }
 
     /// Run the runtime on the current thread and return a checkpoint.
     ///
-    /// Unlike [Self::start_and_recover], the root future runs on the current
-    /// thread instead of a runtime thread with the configured stack size.
-    fn run<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
+    /// `thread_pool` owns the current executor thread and backs every strategy
+    /// created by the runtime.
+    fn run<F, Fut>(self, f: F, thread_pool: ThreadPool) -> (Fut::Output, Checkpoint)
     where
         F: FnOnce(Context) -> Fut,
         Fut: Future,
     {
         // Setup context and return strong reference to executor
         let (context, executor, panicked) = match self.state {
-            State::Config(config) => Context::new(config),
-            State::Checkpoint(checkpoint) => Context::recover(checkpoint),
+            State::Config(config) => Context::new(config, thread_pool),
+            State::Checkpoint(checkpoint) => Context::recover(checkpoint, thread_pool),
         };
 
         // Pin root task to the heap
@@ -966,7 +966,7 @@ pub struct Context {
 }
 
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
+    fn new(cfg: Config, thread_pool: ThreadPool) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -1027,6 +1027,7 @@ impl Context {
             panicker,
             dns: Mutex::new(HashMap::new()),
             thread_stack_size: cfg.thread_stack_size,
+            thread_pool,
         });
 
         (
@@ -1057,7 +1058,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
+    fn recover(checkpoint: Checkpoint, thread_pool: ThreadPool) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -1090,6 +1091,7 @@ impl Context {
             time: checkpoint.time,
             dns: checkpoint.dns,
             thread_stack_size: checkpoint.thread_stack_size,
+            thread_pool,
 
             // New state for the new runtime
             registry,
@@ -1251,44 +1253,14 @@ impl crate::Spawner for Context {
     }
 }
 
-// Rayon permits one permanent registry registration per OS thread. Cache the pool that
-// registered the executor thread so later requests and runners reuse it.
-commonware_utils::thread_local_cache!(static THREAD_POOL: ThreadPool);
-
-/// Returns the single-threaded pool the executor thread registered with, created on first use.
+/// The executor thread is the sole member of its Rayon pool, so all work executes inline.
 ///
-/// All pool work executes inline on the executor thread, so a larger pool would only
-/// add permanently unstarted workers.
-fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
-    let pool = Cached::take(
-        &THREAD_POOL,
-        || {
-            ThreadPoolBuilder::new()
-                .num_threads(1)
-                .use_current_thread()
-                .build()
-                .map(Arc::new)
-        },
-        |_| Ok(()),
-    )?;
-    Ok(Arc::clone(&pool))
-}
-
-/// Spawning threads would be nondeterministic, so the pool has no background workers. The
-/// executor thread registers itself as its sole member and all work executes inline.
-///
-/// Rayon's current-thread registration is permanent and per-OS-thread, so only one pool
-/// can ever execute work on the executor thread. Every request (including from a later
-/// runner on the same thread) returns a strategy on that single-threaded pool with its
-/// planning parallelism set independently. This controls adaptive decisions and manual
-/// partitioning hints while Rayon executes on the sole registered thread. The returned
-/// strategy is therefore tied to the executor thread.
+/// Each request returns a strategy on that pool with its planning parallelism set independently.
+/// This controls adaptive decisions and manual partitioning hints while Rayon executes on the
+/// executor thread.
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        Rayon::with_pool(
-            shared_thread_pool().expect("failed to create deterministic Rayon thread pool"),
-        )
-        .with_parallelism(parallelism)
+        Rayon::with_pool(Arc::clone(&self.executor().thread_pool)).with_parallelism(parallelism)
     }
 }
 

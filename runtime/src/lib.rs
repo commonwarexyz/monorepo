@@ -3893,6 +3893,9 @@ mod tests {
     fn test_strategy_deterministic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // The runtime thread is also the sole Rayon worker.
+            assert_eq!(rayon::current_thread_index(), Some(0));
+
             // Create a strategy that plans for a parallelism of 4.
             let strategy = context.child("pool").strategy(NZUsize!(4));
             assert_eq!(strategy.manual().parallelism(), 4);
@@ -3917,8 +3920,8 @@ mod tests {
         });
     }
 
-    /// A strategy with parallelism greater than one must behave as configured under the
-    /// deterministic runtime even though no worker threads exist.
+    /// A strategy with parallelism greater than one must behave as configured
+    /// even though its pool contains only the executor thread.
     #[test]
     fn test_deterministic_parallel_strategy_spawn_completes() {
         let executor = deterministic::Runner::default();
@@ -3934,11 +3937,11 @@ mod tests {
         });
     }
 
-    /// Strategies share the pool registered with the executor thread, but each request must
-    /// retain its own planning parallelism and execute work. This covers multiple strategies
-    /// within one runner and a later runner on the same thread.
+    /// Strategies share their runtime's pool, but each request must retain its
+    /// own planning parallelism and execute work. A later runtime must
+    /// initialize and use its own pool.
     #[test]
-    fn test_deterministic_strategies_reuse_pool_across_runners() {
+    fn test_deterministic_strategies_share_runtime_pool() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
@@ -3973,9 +3976,8 @@ mod tests {
         });
     }
 
-    /// Tasks may suspend while a pool exists: pools have no worker tasks for the executor
-    /// to poll (a polled rayon worker loop would block or abort the runtime), so suspension
-    /// must leave the pool usable.
+    /// Tasks may suspend while a pool exists, so suspension must leave the pool
+    /// usable.
     #[test]
     fn test_deterministic_pool_survives_suspension() {
         let executor = deterministic::Runner::default();
