@@ -1,5 +1,6 @@
 use crate::{
-    ITEM_SIZE, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, append_fixed_random_data, get_fixed_journal, };
+    ITEM_SIZE, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, append_fixed_random_data, get_fixed_journal,
+};
 use commonware_runtime::{
     Runner as _, Supervisor as _,
     benchmarks::{context, tokio},

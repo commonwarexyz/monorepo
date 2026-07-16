@@ -470,7 +470,7 @@ mod tests {
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_pending_syncs},
     };
-    use commonware_utils::{NZU16, sequence::FixedBytes, NZUsize};
+    use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
     use core::num::NonZeroU16;
     use futures::{StreamExt, pin_mut};
     use std::sync::{

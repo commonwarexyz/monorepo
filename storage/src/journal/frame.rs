@@ -5,7 +5,9 @@
 
 use super::Error;
 use commonware_codec::{
-    Codec, Decode as _, EncodeSize, Read, ReadExt as _, Write as _, util::at_least, varint::{MAX_U32_VARINT_SIZE, UInt},
+    Codec, Decode as _, EncodeSize, Read, ReadExt as _, Write as _,
+    util::at_least,
+    varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf, IoBufMut, IoBufs, buffer::paged::Writer};
 use std::{future::Future, io::Cursor};
