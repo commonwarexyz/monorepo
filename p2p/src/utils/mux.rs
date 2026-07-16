@@ -563,7 +563,10 @@ mod tests {
         seed: u64,
     ) -> (
         PublicKey,
-        MuxHandle<impl Sender<PublicKey = PublicKey>, impl Receiver<PublicKey = PublicKey>>,
+        MuxHandle<
+            impl Sender<PublicKey = PublicKey> + use<>,
+            impl Receiver<PublicKey = PublicKey> + use<>,
+        >,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
@@ -583,7 +586,10 @@ mod tests {
         seed: u64,
     ) -> (
         PublicKey,
-        MuxHandle<impl Sender<PublicKey = PublicKey>, impl Receiver<PublicKey = PublicKey>>,
+        MuxHandle<
+            impl Sender<PublicKey = PublicKey> + use<>,
+            impl Receiver<PublicKey = PublicKey> + use<>,
+        >,
         mpsc::Receiver<BackupResponse<PublicKey>>,
         GlobalSender<simulated::Sender<PublicKey, deterministic::Context>>,
     ) {

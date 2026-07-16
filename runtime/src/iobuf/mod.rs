@@ -2365,6 +2365,8 @@ unsafe impl BufMut for IoBufsMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
+        // SAFETY: The caller guarantees `cnt <= self.remaining_mut()`, so each
+        // delegated advance remains within the writable chunks.
         unsafe {
             // On failure, every writable byte was consumed before the chunks ran
             // out, so the advanced amount (`cnt - remaining`) is exactly what was
@@ -2755,6 +2757,7 @@ unsafe impl BufMut for Builder {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
+        // SAFETY: The caller guarantees that `cnt` is within the writable chunk.
         unsafe {
             self.buf.advance_mut(cnt);
         }

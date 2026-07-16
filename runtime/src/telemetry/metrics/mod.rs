@@ -375,7 +375,10 @@ where
     S: Clone + std::hash::Hash + Eq,
     C: raw::family::MetricConstructor<M>,
 {
-    pub fn get_by<Q>(&self, label_set: &Q) -> Option<impl Deref<Target = M> + '_>
+    pub fn get_by<Q>(
+        &self,
+        label_set: &Q,
+    ) -> Option<impl Deref<Target = M> + '_ + use<'_, Q, S, M, C>>
     where
         for<'a> S: From<&'a Q>,
     {
@@ -383,7 +386,10 @@ where
         self.get(&label_set)
     }
 
-    pub fn get_or_create_by<Q>(&self, label_set: &Q) -> impl Deref<Target = M> + '_
+    pub fn get_or_create_by<Q>(
+        &self,
+        label_set: &Q,
+    ) -> impl Deref<Target = M> + '_ + use<'_, Q, S, M, C>
     where
         for<'a> S: From<&'a Q>,
     {

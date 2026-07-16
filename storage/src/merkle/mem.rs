@@ -176,7 +176,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Return a new iterator over the peaks.
-    pub fn peak_iterator(&self) -> impl Iterator<Item = (Position<F>, u32)> {
+    pub fn peak_iterator(&self) -> impl Iterator<Item = (Position<F>, u32)> + use<F, D> {
         F::peaks(self.size())
     }
 

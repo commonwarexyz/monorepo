@@ -83,7 +83,7 @@ cfg_if::cfg_if! {
             }
         }
     } else {
-        use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, aead::AeadInPlace};
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, aead::AeadInOut};
 
         struct Cipher(ChaCha20Poly1305);
 
@@ -99,7 +99,7 @@ cfg_if::cfg_if! {
             ) -> Result<[u8; TAG_SIZE], Error> {
                 let tag = self
                     .0
-                    .encrypt_in_place_detached(nonce.into(), &[], data)
+                    .encrypt_inout_detached(nonce.into(), &[], data.into())
                     .map_err(|_| Error::EncryptionFailed)?;
                 Ok(tag.into())
             }
@@ -114,10 +114,10 @@ cfg_if::cfg_if! {
                     .try_into()
                     .map_err(|_| Error::DecryptionFailed)?;
                 self.0
-                    .decrypt_in_place_detached(
+                    .decrypt_inout_detached(
                         nonce.into(),
                         &[],
-                        &mut data[..plaintext_len],
+                        (&mut data[..plaintext_len]).into(),
                         &tag.into(),
                     )
                     .map_err(|_| Error::DecryptionFailed)?;
