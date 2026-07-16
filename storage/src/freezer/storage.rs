@@ -427,6 +427,7 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Metrics
     puts: Counter,
     gets: Counter,
+    has: Counter,
     unnecessary_reads: Counter,
     unnecessary_writes: Counter,
     resizes: Counter,
@@ -738,6 +739,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         // Create metrics
         let puts = context.counter("puts", "number of put operations");
         let gets = context.counter("gets", "number of get operations");
+        let has = context.counter("has", "number of has operations");
         let unnecessary_reads = context.counter(
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
@@ -765,6 +767,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             resize_progress: None,
             puts,
             gets,
+            has,
             unnecessary_reads,
             unnecessary_writes,
             resizes,
@@ -901,10 +904,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(value)
     }
 
-    /// Get the first value for a given key.
-    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
-        self.gets.inc();
-
+    /// Find the first key entry matching `key`, returning it with its section.
+    ///
+    /// Reads key entries only, never values.
+    async fn find_key(&self, key: &K) -> Result<Option<(u64, Record<K>)>, Error> {
         // Get head of the chain from table
         let table_index = self.table_index(key);
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
@@ -919,11 +922,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
             // Check if this key matches
             if key_entry.key.as_ref() == key.as_ref() {
-                let value = self
-                    .oversized
-                    .get_value(section, key_entry.value_offset, key_entry.value_size)
-                    .await?;
-                return Ok(Some(value));
+                return Ok(Some((section, key_entry)));
             }
 
             // Increment unnecessary reads
@@ -940,6 +939,20 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(None)
     }
 
+    /// Get the first value for a given key.
+    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
+        self.gets.inc();
+
+        let Some((section, key_entry)) = self.find_key(key).await? else {
+            return Ok(None);
+        };
+        let value = self
+            .oversized
+            .get_value(section, key_entry.value_offset, key_entry.value_size)
+            .await?;
+        Ok(Some(value))
+    }
+
     /// Get the value for a given [Identifier].
     ///
     /// If a [Cursor] is known for the required key, it
@@ -949,6 +962,16 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             Identifier::Cursor(cursor) => self.get_cursor(cursor).await.map(Some),
             Identifier::Key(key) => self.get_key(key).await,
         }
+    }
+
+    /// Check whether a value exists for a given key.
+    ///
+    /// Walks the same key index chain as [`Self::get`] with [`Identifier::Key`]
+    /// but never reads values.
+    pub async fn has(&self, key: &K) -> Result<bool, Error> {
+        self.has.inc();
+
+        Ok(self.find_key(key).await?.is_some())
     }
 
     /// Resize the table by doubling its size and split each entry into two.

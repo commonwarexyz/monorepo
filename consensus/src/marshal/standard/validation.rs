@@ -73,8 +73,8 @@ pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
     marshal: &Mailbox<S, Standard<B>>,
     context: &Context<B::Digest, S::PublicKey>,
     digest: B::Digest,
-    block: B,
-) -> Option<Decision<B>>
+    block: Arc<B>,
+) -> Option<Decision<Arc<B>>>
 where
     ES: Epocher,
     S: Scheme,
@@ -133,9 +133,9 @@ pub(super) enum ParentCheck<B> {
 pub(super) async fn await_and_validate_parent<B>(
     parent_commitment: B::Digest,
     block: &B,
-    parent_request: oneshot::Receiver<B>,
+    parent_request: oneshot::Receiver<Arc<B>>,
     tx: &mut oneshot::Sender<bool>,
-) -> Option<ParentCheck<B>>
+) -> Option<ParentCheck<Arc<B>>>
 where
     B: Block,
 {
@@ -187,8 +187,8 @@ where
 pub(super) async fn run_app_verify<E, S, A, B>(
     runtime_context: E,
     context: Context<B::Digest, S::PublicKey>,
-    block: &B,
-    parent: B,
+    block: Arc<B>,
+    parent: Arc<B>,
     application: &mut A,
     marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<bool>,
@@ -203,7 +203,7 @@ where
     let (parent_view, parent_commitment) = context.parent;
     let ancestry_stream = marshal.ancestor_stream(
         Arc::new(runtime_context.child("ancestor_stream")),
-        [block.clone(), parent],
+        [Arc::clone(&block), parent],
         ancestor_fetch_duration,
     );
     let validity_request = application

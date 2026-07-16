@@ -1,4 +1,7 @@
+# Exemptions for versions already locked at the merge base are appended by
+# .github/scripts/check_dependency_cooldown.sh (run via `just cooldown`). Invoking
+# `cargo cooldown` directly applies the cooldown window to every locked package.
 cooldown_minutes = 10080
 enforcement = "strict"
-lockfile_baseline = "floor"
+lockfile_baseline = "ignore"
 cache_dir = "target/cargo-cooldown"

@@ -17,7 +17,7 @@ use commonware_utils::{channel::oneshot, futures::Pool, vec::Bounded, NZUsize, T
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
-use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc, time::Duration};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -35,7 +35,7 @@ const MAX_SLEEP_DURATION_MS: u64 = 1000;
 const MAX_RECENT_DIGESTS: usize = (u8::MAX as usize) + 1;
 
 /// Subscription result paired with the digest requested so completions can be validated.
-type Subscription = (Digest, Result<FuzzMessage, oneshot::error::RecvError>);
+type Subscription = (Digest, Result<Arc<FuzzMessage>, oneshot::error::RecvError>);
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {

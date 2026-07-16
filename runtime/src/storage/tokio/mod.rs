@@ -143,9 +143,12 @@ impl crate::Storage for Storage {
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
         let (blob_version, logical_size) = if Header::missing(len) {
-            // New or corrupted blob - truncate and write header with latest version
+            // New or partially-created blob: reset it and write a fresh header. The
+            // file grows only as header bytes are written, so a create interrupted by
+            // a process crash leaves some prefix of the header, which the next open
+            // resets here instead of rejecting as corrupt below.
             let (header, blob_version) = Header::new(&versions);
-            file.set_len(Header::SIZE_U64)
+            file.set_len(0)
                 .await
                 .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
             file.write_all(&header.encode())
@@ -431,6 +434,52 @@ mod tests {
         assert!(
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
         );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Any file shorter than a header must reset to a valid, empty blob on open
+    /// rather than fail as corrupt.
+    #[tokio::test]
+    async fn test_blob_partial_header_reset() {
+        let storage_directory =
+            env::temp_dir().join(format!("test_partial_header_reset_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+        let partition_path = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_path).unwrap();
+
+        for prefix_len in 0..Header::SIZE {
+            let name = format!("short_{prefix_len}");
+            let path = partition_path.join(hex(name.as_bytes()));
+            // Seed a file shorter than a full header.
+            std::fs::write(&path, vec![0u8; prefix_len]).unwrap();
+
+            let (blob, size) = storage
+                .open("partition", name.as_bytes())
+                .await
+                .expect("interrupted create should recover, not fail");
+            assert_eq!(size, 0, "recovered blob should be empty");
+            drop(blob);
+
+            // The recovered blob is a valid header-only file and reopens cleanly.
+            let raw = std::fs::read(&path).unwrap();
+            assert_eq!(
+                raw.len(),
+                Header::SIZE,
+                "recovered blob should be header-only"
+            );
+            assert_eq!(&raw[..Header::MAGIC_LENGTH], &Header::MAGIC);
+            storage
+                .open("partition", name.as_bytes())
+                .await
+                .expect("reopen after recovery should succeed");
+        }
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

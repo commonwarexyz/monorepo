@@ -142,12 +142,26 @@ impl crate::Storage for Storage {
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
+        // For a new file, durably persist it and its directory entries before writing
+        // any header byte.
+        if raw_len == 0 {
+            file.sync_all()
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+            sync_dir(parent)?;
+            if !parent_existed {
+                sync_dir(&self.storage_directory)?;
+            }
+        }
+
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
         let (blob_version, logical_len) = if Header::missing(raw_len) {
-            // New (or corrupted) blob - truncate and write header with latest version
+            // New or partially-created blob: reset it and write a fresh header. The
+            // file grows only as header bytes are written, so a create interrupted by
+            // a process crash leaves some prefix of the header, which the next open
+            // resets here instead of rejecting as corrupt below.
             let (header, blob_version) = Header::new(&versions);
-            file.set_len(Header::SIZE_U64)
+            file.set_len(0)
                 .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
             file.seek(SeekFrom::Start(0))
                 .map_err(|_| Error::WriteFailed)?;
@@ -155,14 +169,6 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::WriteFailed)?;
             file.sync_all()
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-            // For new files, sync the parent directory to ensure the directory entry is durable.
-            if raw_len == 0 {
-                sync_dir(parent)?;
-                if !parent_existed {
-                    sync_dir(&self.storage_directory)?;
-                }
-            }
 
             (blob_version, 0)
         } else {
@@ -595,6 +601,44 @@ mod tests {
         assert!(err
             .to_string()
             .starts_with("blob corrupt: partition/6261645f6d61676963 reason: invalid magic"));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_partial_header_reset() {
+        // Any file shorter than a header must reset to a valid, empty blob on open
+        // rather than fail as corrupt.
+        let (storage, storage_directory) = create_test_storage();
+        let partition_path = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_path).unwrap();
+
+        for prefix_len in 0..Header::SIZE {
+            let name = format!("short_{prefix_len}");
+            let path = partition_path.join(hex(name.as_bytes()));
+            // Seed a file shorter than a full header.
+            std::fs::write(&path, vec![0u8; prefix_len]).unwrap();
+
+            let (blob, size) = storage
+                .open("partition", name.as_bytes())
+                .await
+                .expect("interrupted create should recover, not fail");
+            assert_eq!(size, 0, "recovered blob should be empty");
+            drop(blob);
+
+            // The recovered blob is a valid header-only file and reopens cleanly.
+            let raw = std::fs::read(&path).unwrap();
+            assert_eq!(
+                raw.len(),
+                Header::SIZE,
+                "recovered blob should be header-only"
+            );
+            assert_eq!(&raw[..Header::MAGIC_LENGTH], &Header::MAGIC);
+            storage
+                .open("partition", name.as_bytes())
+                .await
+                .expect("reopen after recovery should succeed");
+        }
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

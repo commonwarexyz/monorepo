@@ -22,7 +22,7 @@ use commonware_storage::{
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            fixed, variable, Keyless, Operation,
+            fixed, initial_root, variable, Keyless, Operation,
         },
         sync::{self, resolver::Resolver, Target as AnySyncTarget},
         Error,
@@ -258,6 +258,13 @@ where
         <Self>::init(context, config).await
     }
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, FixedEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         KeylessUnmerkleized {
@@ -334,6 +341,13 @@ where
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
+    }
+
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, VariableEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
     }
 
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {

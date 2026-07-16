@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "actor",
+    "bench",
     "broadcast",
     "codec",
     "codec/macros",
@@ -59,14 +60,14 @@ resolver = "2"
 libraries = [{ path = ".github/dylints/*" }]
 
 [workspace.package]
-version = "2026.5.0"
+version = "2026.7.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(benchmark_tracking)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
 warnings = "deny"
@@ -111,31 +112,32 @@ chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = "0.4.39"
 clap = "4.5.18"
 colored = "3.0.0"
-commonware-actor = { version = "2026.5.0", path = "actor" }
-commonware-broadcast = { version = "2026.5.0", path = "broadcast" }
-commonware-codec = { version = "2026.5.0", path = "codec", default-features = false }
-commonware-codec-macros = { version = "2026.5.0", path = "codec/macros" }
-commonware-coding = { version = "2026.5.0", path = "coding" }
-commonware-collector = { version = "2026.5.0", path = "collector" }
-commonware-conformance = { version = "2026.5.0", path = "conformance" }
-commonware-conformance-macros = { version = "2026.5.0", path = "conformance/macros" }
-commonware-consensus = { version = "2026.5.0", path = "consensus" }
-commonware-cryptography = { version = "2026.5.0", path = "cryptography", default-features = false }
-commonware-deployer = { version = "2026.5.0", path = "deployer", default-features = false }
-commonware-formatting = { version = "2026.5.0", path = "formatting", default-features = false }
-commonware-glue = { version = "2026.5.0", path = "glue" }
-commonware-invariants = { version = "2026.5.0", path = "invariants" }
-commonware-macros = { version = "2026.5.0", path = "macros", default-features = false }
-commonware-macros-impl = { version = "2026.5.0", path = "macros/impl" }
-commonware-math = { version = "2026.5.0", path = "math", default-features = false }
-commonware-p2p = { version = "2026.5.0", path = "p2p" }
-commonware-parallel = { version = "2026.5.0", path = "parallel", default-features = false }
-commonware-resolver = { version = "2026.5.0", path = "resolver" }
-commonware-runtime = { version = "2026.5.0", path = "runtime" }
-commonware-runtime-macros = { version = "2026.5.0", path = "runtime/macros" }
-commonware-storage = { version = "2026.5.0", path = "storage", default-features = false }
-commonware-stream = { version = "2026.5.0", path = "stream" }
-commonware-utils = { version = "2026.5.0", path = "utils", default-features = false }
+commonware-actor = { version = "2026.7.0", path = "actor" }
+commonware-bench = { version = "2026.7.0", path = "bench" }
+commonware-broadcast = { version = "2026.7.0", path = "broadcast" }
+commonware-codec = { version = "2026.7.0", path = "codec", default-features = false }
+commonware-codec-macros = { version = "2026.7.0", path = "codec/macros" }
+commonware-coding = { version = "2026.7.0", path = "coding" }
+commonware-collector = { version = "2026.7.0", path = "collector" }
+commonware-conformance = { version = "2026.7.0", path = "conformance" }
+commonware-conformance-macros = { version = "2026.7.0", path = "conformance/macros" }
+commonware-consensus = { version = "2026.7.0", path = "consensus" }
+commonware-cryptography = { version = "2026.7.0", path = "cryptography", default-features = false }
+commonware-deployer = { version = "2026.7.0", path = "deployer", default-features = false }
+commonware-formatting = { version = "2026.7.0", path = "formatting", default-features = false }
+commonware-glue = { version = "2026.7.0", path = "glue" }
+commonware-invariants = { version = "2026.7.0", path = "invariants" }
+commonware-macros = { version = "2026.7.0", path = "macros", default-features = false }
+commonware-macros-impl = { version = "2026.7.0", path = "macros/impl" }
+commonware-math = { version = "2026.7.0", path = "math", default-features = false }
+commonware-p2p = { version = "2026.7.0", path = "p2p" }
+commonware-parallel = { version = "2026.7.0", path = "parallel", default-features = false }
+commonware-resolver = { version = "2026.7.0", path = "resolver" }
+commonware-runtime = { version = "2026.7.0", path = "runtime" }
+commonware-runtime-macros = { version = "2026.7.0", path = "runtime/macros" }
+commonware-storage = { version = "2026.7.0", path = "storage", default-features = false }
+commonware-stream = { version = "2026.7.0", path = "stream" }
+commonware-utils = { version = "2026.7.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
 const-hex = { version = "1.18.1", default-features = false }
 cpufeatures = "0.2.17"
@@ -155,7 +157,9 @@ fixedbitset = { version = "0.5.7", default-features = false }
 futures = "0.3.31"
 futures-timer = "3.0.3"
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+glob = "0.3.3"
 governor = "0.10.4"
+gungraun = "0.19.1"
 hashbrown = { version = "0.16.1", default-features = false, features = ["default-hasher"] }
 io-uring = "0.7.4"
 libc = "0.2.172"
@@ -192,6 +196,7 @@ serde = "1.0.218"
 serde_json = "1.0.122"
 serde_yaml = "0.9.34"
 sha2 = { version = "0.11.0", default-features = false }
+shlex = "1.3.0"
 syn = "2.0.0"
 sysinfo = "0.37.2"
 thiserror = { version = "2.0.12", default-features = false }
@@ -208,6 +213,8 @@ zstd = "0.13.2"
 [profile.bench]
 # Because we enable overflow checks in "release", we should benchmark with them.
 overflow-checks = true
+# Gungraun requires debug symbols for bench targets.
+debug = true
 
 [profile.dev]
 # Although overflow checks are enabled by default in "dev", we explicitly

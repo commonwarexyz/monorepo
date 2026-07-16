@@ -267,9 +267,10 @@ impl<
     ///
     /// Invoked once per event loop iteration, after [Self::construct] and before
     /// [Self::notify] (regardless of whether anything will be broadcast), so
-    /// everything we tell the network is recoverable after a restart. Deferring
-    /// syncs to this boundary (rather than syncing after each append) coalesces
-    /// all appends in the same loop iteration into a single sync.
+    /// every vote and certificate we tell the network about is recoverable after
+    /// a restart. Deferring syncs to this boundary (rather than syncing after
+    /// each append) coalesces all appends in the same loop iteration into a
+    /// single sync.
     async fn sync_journal(&mut self, view: View) {
         if !self.dirty {
             return;
@@ -294,8 +295,10 @@ impl<
     /// Send a vote to every peer.
     ///
     /// Callers must sync pending journal appends first (via [Self::sync_journal]).
-    /// A vote must be durable before it reaches the network so a restart cannot
-    /// cause us to equivocate.
+    /// A vote must be durable before it reaches the network: a restart that
+    /// forgets a sent vote can sign a conflicting one, and conflicting votes
+    /// from the same signer allow conflicting certificates to form (a safety
+    /// failure).
     fn broadcast_vote<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Vote<S, D>>,
@@ -640,7 +643,12 @@ impl<
         }
         let view = self.state.current_view();
 
-        // Notify application of proposal.
+        // Notify the application of the proposal. To lower view latency as
+        // much as possible while preserving safety, this precedes the notarize
+        // vote's journal sync: unlike votes (which can form a conflicting
+        // certificate), extra payload bytes are harmless, and the worst a
+        // crash can do is relay a different payload for the same round after
+        // restart (see [Plan::Propose]).
         let _ = self.relay.broadcast(
             proposed,
             Plan::Propose {
@@ -808,7 +816,7 @@ impl<
     /// Broadcasts everything constructed this iteration and reports it to the application.
     ///
     /// Callers must sync pending journal appends first (via [Self::sync_journal])
-    /// so nothing reaches the network before it is durable.
+    /// so no vote or certificate reaches the network before it is durable.
     #[allow(clippy::type_complexity)]
     fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
@@ -1088,6 +1096,12 @@ impl<
                     self.state.set_certify_handle(view, handle);
                 }
 
+                // Prune views below the activity floor. To lower view latency,
+                // this runs after the automaton dispatches above so pruning
+                // overlaps proposal building and verification instead of
+                // delaying them.
+                self.prune_views().await;
+
                 // Prepare waiters
                 let propose_wait = Waiter(&mut pending_propose);
                 let verify_wait = Waiter(&mut pending_verify);
@@ -1211,10 +1225,6 @@ impl<
                 // This runs after notify so the finalization broadcast and the
                 // report into the application still nest under the view span.
                 self.state.close_decided_spans();
-
-                // After sending all required messages, prune any views
-                // we no longer need
-                self.prune_views().await;
 
                 // Update the batcher if we have moved to a new view
                 let current_view = self.state.current_view();

@@ -59,6 +59,10 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Config = ();
     type SyncTarget = u64;
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        unreachable!("TestDb is constructed directly in tests")
+    }
+
     async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
         Ok(Self)
     }
@@ -186,7 +190,7 @@ impl Application<deterministic::Context> for TestApp {
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         _input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -196,7 +200,7 @@ impl Application<deterministic::Context> for TestApp {
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         None

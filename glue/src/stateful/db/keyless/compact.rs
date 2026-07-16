@@ -16,7 +16,8 @@ use commonware_storage::{
     qmdb::{
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
-            fixed, variable, CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation,
+            fixed, initial_root, variable, CompactDb, CompactMerkleizedBatch,
+            CompactUnmerkleizedBatch, Operation,
         },
         sync::{self},
         Error,
@@ -207,6 +208,10 @@ where
         <Self>::init(context, config).await
     }
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        sync::compact::Target::new(initial_root::<F, FixedEncoding<V>, H>(), Location::new(1))
+    }
+
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         KeylessUnjournaledUnmerkleized {
@@ -264,6 +269,13 @@ where
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
+    }
+
+    fn initial_sync_target() -> Self::SyncTarget {
+        sync::compact::Target::new(
+            initial_root::<F, VariableEncoding<V>, H>(),
+            Location::new(1),
+        )
     }
 
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {

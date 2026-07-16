@@ -21,7 +21,7 @@ use commonware_storage::{
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            fixed, variable, Immutable, Operation,
+            fixed, initial_root, variable, Immutable, Operation,
         },
         operation::Key,
         sync::{self, resolver::Resolver, Target as AnySyncTarget},
@@ -286,6 +286,13 @@ where
         <Self>::init(context, config).await
     }
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, K, FixedEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         ImmutableUnmerkleized {
@@ -369,6 +376,13 @@ where
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
+    }
+
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, K, VariableEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
     }
 
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {

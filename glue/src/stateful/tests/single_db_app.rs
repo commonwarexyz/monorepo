@@ -35,14 +35,11 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     certificate::{mocks::Fixture, ConstantProvider},
-    ed25519,
-    sha256::{self, Digest as Sha256Digest},
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    ed25519, sha256, Digest as _, Digestible, Hasher, Sha256, Signer as _,
 };
-use commonware_formatting::hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, Handle, Quota, Spawner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, Buf, BufMut, Handle, Quota, Spawner, Supervisor as _,
 };
 use commonware_storage::{
     archive::prunable,
@@ -204,7 +201,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, E>> {
@@ -226,7 +223,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
@@ -424,15 +421,9 @@ impl EngineDefinition for SingleDbEngine {
         .await
         .expect("failed to initialize blocks archive");
 
-        let genesis_block = {
-            let empty_db_root = Sha256Digest::from(hex!(
-                "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
-            ));
-            Block::genesis(
-                empty_db_root,
-                non_empty_range!(Location::new(0), Location::new(1)),
-            )
-        };
+        let initial_target =
+            <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+        let genesis_block = Block::genesis(initial_target.root, initial_target.range);
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;

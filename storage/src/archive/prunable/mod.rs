@@ -1418,6 +1418,46 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_has_key() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(2));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Absent key
+            let key = test_key("aaaa1");
+            assert!(!archive.has(Identifier::Key(&key)).await.unwrap());
+
+            // Exact key
+            archive.put(1, key.clone(), 10).await.unwrap();
+            assert!(archive.has(Identifier::Key(&key)).await.unwrap());
+
+            // A translated-key collision (FourCap shares the "aaaa" prefix)
+            // must not produce a false positive
+            let collision = test_key("aaaa2");
+            assert!(!archive.has(Identifier::Key(&collision)).await.unwrap());
+            archive.put(2, collision.clone(), 20).await.unwrap();
+            assert!(archive.has(Identifier::Key(&collision)).await.unwrap());
+
+            // Pruned keys report absent. Pruning is section-granular
+            // (items_per_section = 2), so prune at a section boundary that
+            // drops indices 1 and 2 while retaining index 4.
+            archive.put(4, test_key("cccc"), 30).await.unwrap();
+            archive.prune(4).await.unwrap();
+            assert!(!archive.has(Identifier::Key(&key)).await.unwrap());
+            assert!(!archive.has(Identifier::Key(&collision)).await.unwrap());
+            assert!(archive
+                .has(Identifier::Key(&test_key("cccc")))
+                .await
+                .unwrap());
+
+            archive.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_put_multi_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
