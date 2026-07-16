@@ -43,18 +43,22 @@ use std::{
 };
 use tracing::{debug, error, info, trace, warn};
 
-/// An entry for a height that does not yet have a certificate.
-enum Pending<S: Scheme, D: Digest> {
+/// The state of a height that the engine is tracking.
+enum State<S: Scheme, D: Digest> {
     /// The automaton has not yet provided the digest for this height.
     /// The signatures may have arbitrary digests.
     Unverified(BTreeMap<Epoch, BTreeMap<Participant, Ack<S, D>>>),
 
     /// Verified by the automaton. Now stores the digest.
     Verified(D, BTreeMap<Epoch, BTreeMap<Participant, Ack<S, D>>>),
+
+    /// A certificate was formed for this height. Our own ack (if we signed one) is retained
+    /// so it can be rebroadcast until the height is pruned, allowing lagging validators to
+    /// reach quorum.
+    Confirmed(Certificate<S, D>, Option<Ack<S, D>>),
 }
 
-/// The type returned by the `pending` pool, used by the application to return which digest is
-/// associated with the given height.
+/// The result of requesting a digest from the automaton.
 struct DigestRequest<D: Digest> {
     /// The height in question.
     height: Height,
@@ -116,19 +120,16 @@ pub struct Engine<
     /// Tracks the tips of all validators.
     safe_tip: SafeTip<<P::Scheme as Verifier>::PublicKey>,
 
-    /// The keys represent the set of all `Height` values for which we are attempting to form a
-    /// certificate, but do not yet have one. Values may be [Pending::Unverified] or [Pending::Verified],
-    /// depending on whether the automaton has verified the digest or not.
-    pending: BTreeMap<Height, Pending<P::Scheme, D>>,
-
-    /// A map of heights with a certificate. Cached in memory if needed to send to other peers.
-    confirmed: BTreeMap<Height, Certificate<P::Scheme, D>>,
+    /// The state of each tracked height. Entries collect acks ([State::Unverified],
+    /// [State::Verified]) until a certificate is formed ([State::Confirmed]), after which
+    /// only our ack is retained. Entries are removed once pruned below the activity threshold.
+    heights: BTreeMap<Height, State<P::Scheme, D>>,
 
     // ---------- Rebroadcasting ----------
-    /// The frequency at which to rebroadcast pending heights.
+    /// The frequency at which to rebroadcast acks.
     rebroadcast_timeout: Duration,
 
-    /// A set of deadlines for rebroadcasting `Height` values that do not have a certificate.
+    /// A set of deadlines for rebroadcasting locally verified `Height` values.
     rebroadcast_deadlines: PrioritySet<Height, SystemTime>,
 
     // ---------- Journal ----------
@@ -180,8 +181,7 @@ impl<
             tip: Height::zero(),
             safe_tip: SafeTip::default(),
             digest_requests: FuturesPool::default(),
-            pending: BTreeMap::new(),
-            confirmed: BTreeMap::new(),
+            heights: BTreeMap::new(),
             rebroadcast_timeout: cfg.rebroadcast_timeout.into(),
             rebroadcast_deadlines: PrioritySet::new(),
             journal: None,
@@ -279,8 +279,8 @@ impl<
                 if next.delta_from(self.tip).unwrap() < self.window {
                     trace!(%next, "requesting new digest");
                     assert!(
-                        self.pending
-                            .insert(next, Pending::Unverified(BTreeMap::new()))
+                        self.heights
+                            .insert(next, State::Unverified(BTreeMap::new()))
                             .is_none()
                     );
                     self.get_digest(next);
@@ -314,15 +314,13 @@ impl<
 
                 // Update data structures by purging old epochs
                 let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
-                self.pending
+                self.heights
                     .iter_mut()
-                    .for_each(|(_, pending)| match pending {
-                        self::Pending::Unverified(acks) => {
+                    .for_each(|(_, state)| match state {
+                        State::Unverified(acks) | State::Verified(_, acks) => {
                             acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
-                        self::Pending::Verified(_, acks) => {
-                            acks.retain(|epoch, _| *epoch >= min_epoch);
-                        }
+                        State::Confirmed(..) => {}
                     });
 
                 continue;
@@ -440,34 +438,45 @@ impl<
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
-        // Entry must be `Pending::Unverified`, or return early
-        if !matches!(self.pending.get(&height), Some(Pending::Unverified(_))) {
-            return Err(Error::AckHeight(height));
+        // Move an unverified entry to verified. If a certificate formed while the
+        // digest request was outstanding, ensure it matches the automaton's digest.
+        let acks = match self.heights.get(&height) {
+            Some(State::Unverified(_)) => {
+                let Some(State::Unverified(acks)) = self
+                    .heights
+                    .insert(height, State::Verified(digest, BTreeMap::new()))
+                else {
+                    panic!("State::Unverified entry not found");
+                };
+                Some(acks)
+            }
+            Some(State::Confirmed(certificate, _)) => {
+                if certificate.item.digest != digest {
+                    return Err(Error::AckDigest(height));
+                }
+                None
+            }
+            _ => return Err(Error::AckHeight(height)),
         };
-
-        // Move the entry to `Pending::Verified`
-        let Some(Pending::Unverified(acks)) = self.pending.remove(&height) else {
-            panic!("Pending::Unverified entry not found");
-        };
-        self.pending
-            .insert(height, Pending::Verified(digest, BTreeMap::new()));
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
         // the new map, and may form a certificate if enough acks are present. Only process acks
         // that match the verified digest.
-        for epoch_acks in acks.values() {
-            for epoch_ack in epoch_acks.values() {
-                // Drop acks that don't match the verified digest
-                if epoch_ack.item.digest != digest {
-                    continue;
-                }
+        if let Some(acks) = acks {
+            for epoch_acks in acks.values() {
+                for epoch_ack in epoch_acks.values() {
+                    // Drop acks that don't match the verified digest
+                    if epoch_ack.item.digest != digest {
+                        continue;
+                    }
 
-                // Handle the ack
-                let _ = self.handle_ack(epoch_ack).await;
-            }
-            // Break early if a certificate was formed
-            if self.confirmed.contains_key(&height) {
-                break;
+                    // Handle the ack
+                    let _ = self.handle_ack(epoch_ack).await;
+                }
+                // Break early if a certificate was formed
+                if self.is_confirmed(height) {
+                    break;
+                }
             }
         }
 
@@ -478,8 +487,14 @@ impl<
         self.rebroadcast_deadlines
             .put(height, self.context.current() + self.rebroadcast_timeout);
 
-        // Handle ack as if it was received over the network
-        let _ = self.handle_ack(&ack).await;
+        // Handle the ack as if it was received over the network. If a certificate
+        // already exists, retain our ack for rebroadcasting.
+        match self.heights.get_mut(&height) {
+            Some(State::Confirmed(_, own)) => *own = Some(ack.clone()),
+            _ => {
+                let _ = self.handle_ack(&ack).await;
+            }
+        }
 
         // Send ack over the network.
         self.broadcast(ack, sender);
@@ -497,14 +512,13 @@ impl<
         let quorum = scheme.participants().quorum::<N3f1>();
 
         // Get the acks and check digest consistency
-        let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
-            None => {
-                // If the height is not in the pending pool, it may be confirmed
-                // (i.e. we have a certificate for it).
-                return Err(Error::AckHeight(ack.item.height));
-            }
-            Some(Pending::Unverified(acks)) => acks,
-            Some(Pending::Verified(digest, acks)) => {
+        let acks_by_epoch = match self.heights.get_mut(&ack.item.height) {
+            // The height is not tracked (pruned or outside the window)
+            None => return Err(Error::AckHeight(ack.item.height)),
+            // We already have a certificate for the height
+            Some(State::Confirmed(..)) => return Err(Error::AckCertified(ack.item.height)),
+            Some(State::Unverified(acks)) => acks,
+            Some(State::Verified(digest, acks)) => {
                 // If we have a verified digest, ensure the ack matches it
                 if ack.item.digest != *digest {
                     return Err(Error::AckDigest(ack.item.height));
@@ -539,12 +553,26 @@ impl<
     async fn handle_certificate(&mut self, certificate: Certificate<P::Scheme, D>) {
         // Check if we already have the certificate
         let height = certificate.item.height;
-        if self.confirmed.contains_key(&height) {
+        if self.is_confirmed(height) {
             return;
         }
 
-        // Store the certificate
-        self.confirmed.insert(height, certificate.clone());
+        // Store the certificate, dropping the collected acks except a matching ack
+        // from this validator. Retaining one ack proves the digest was locally verified
+        // and lets us continue rebroadcasting it in later epochs.
+        let own = match self.heights.remove(&height) {
+            Some(State::Unverified(acks)) | Some(State::Verified(_, acks)) => {
+                acks.into_iter().find_map(|(epoch, mut acks)| {
+                    let signer = self.scheme(epoch).ok()?.me()?;
+                    let ack = acks.remove(&signer)?;
+                    (ack.item.digest == certificate.item.digest).then_some(ack)
+                })
+            }
+            Some(State::Confirmed(..)) => return,
+            None => None,
+        };
+        self.heights
+            .insert(height, State::Confirmed(certificate.clone(), own));
 
         // Journal and notify the automaton
         let certified = Activity::Certified(certificate);
@@ -556,7 +584,7 @@ impl<
         if height == self.tip {
             // Compute the next tip
             let mut new_tip = height.next();
-            while self.confirmed.contains_key(&new_tip) && new_tip.get() < u64::MAX {
+            while self.is_confirmed(new_tip) && new_tip.get() < u64::MAX {
                 new_tip = new_tip.next();
             }
 
@@ -576,22 +604,38 @@ impl<
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
-        let Some(Pending::Verified(digest, acks)) = self.pending.get(&height) else {
-            // The height may already be confirmed; continue silently if so
-            return Ok(());
-        };
-
-        // Get our signature
-        let scheme = self.scheme(self.epoch)?;
-        let Some(signer) = scheme.me() else {
-            return Err(Error::NotSigner(self.epoch));
-        };
-        let ack = acks
-            .get(&self.epoch)
-            .and_then(|acks| acks.get(&signer).cloned());
-        let ack = match ack {
-            Some(ack) => ack,
-            None => self.sign_ack(height, *digest).await?,
+        // Get our ack for the height: for a verified height, our existing signature (or sign
+        // one now); for a confirmed height, the ack retained at certification (re-signed if
+        // the epoch has since changed)
+        let ack = match self.heights.get(&height) {
+            Some(State::Verified(digest, acks)) => {
+                let scheme = self.scheme(self.epoch)?;
+                let Some(signer) = scheme.me() else {
+                    return Err(Error::NotSigner(self.epoch));
+                };
+                match acks.get(&self.epoch).and_then(|acks| acks.get(&signer)) {
+                    Some(ack) => ack.clone(),
+                    None => {
+                        let digest = *digest;
+                        self.sign_ack(height, digest).await?
+                    }
+                }
+            }
+            Some(State::Confirmed(certificate, Some(own))) => {
+                if own.epoch == self.epoch {
+                    own.clone()
+                } else {
+                    // Re-sign the certified digest under the current epoch
+                    let digest = certificate.item.digest;
+                    let ack = self.sign_ack(height, digest).await?;
+                    if let Some(State::Confirmed(_, own)) = self.heights.get_mut(&height) {
+                        *own = Some(ack.clone());
+                    }
+                    ack
+                }
+            }
+            // The height was pruned, or was certified without us ever signing it
+            _ => return Ok(()),
         };
 
         // Reinsert the height with a new deadline
@@ -650,16 +694,16 @@ impl<
             return Err(Error::AckHeight(ack.item.height));
         }
 
-        // Validate that we don't already have the ack
-        if self.confirmed.contains_key(&ack.item.height) {
-            return Err(Error::AckCertified(ack.item.height));
-        }
-        let have_ack = match self.pending.get(&ack.item.height) {
+        // Validate that we don't already have the ack (or a certificate for the height)
+        let have_ack = match self.heights.get(&ack.item.height) {
             None => false,
-            Some(Pending::Unverified(epoch_map)) => epoch_map
+            Some(State::Confirmed(..)) => {
+                return Err(Error::AckCertified(ack.item.height));
+            }
+            Some(State::Unverified(epoch_map)) => epoch_map
                 .get(&ack.epoch)
                 .is_some_and(|acks| acks.contains_key(&ack.attestation.signer)),
-            Some(Pending::Verified(digest, epoch_map)) => {
+            Some(State::Verified(digest, epoch_map)) => {
                 // While we check this in the `handle_ack` function, checking early here avoids an
                 // unnecessary signature check.
                 if ack.item.digest != *digest {
@@ -684,11 +728,19 @@ impl<
 
     // ---------- Helpers ----------
 
+    /// Returns whether the given height has a certificate.
+    fn is_confirmed(&self, height: Height) -> bool {
+        matches!(self.heights.get(&height), Some(State::Confirmed(..)))
+    }
+
     /// Requests the digest from the automaton.
     ///
-    /// Pending must contain the height.
+    /// The height must be tracked and unverified.
     fn get_digest(&mut self, height: Height) {
-        assert!(self.pending.contains_key(&height));
+        assert!(matches!(
+            self.heights.get(&height),
+            Some(State::Unverified(_))
+        ));
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.digest_duration.timer(self.context.as_ref());
         self.digest_requests.push(async move {
@@ -740,17 +792,12 @@ impl<
     /// Returns the next height that we should process. This is the minimum height for
     /// which we do not have a digest or an outstanding request to the automaton for the digest.
     fn next(&self) -> Height {
-        let max_pending = self
-            .pending
+        let max_tracked = self
+            .heights
             .last_key_value()
             .map(|(k, _)| k.next())
             .unwrap_or_default();
-        let max_confirmed = self
-            .confirmed
-            .last_key_value()
-            .map(|(k, _)| k.next())
-            .unwrap_or_default();
-        max(self.tip, max(max_pending, max_confirmed))
+        max(self.tip, max_tracked)
     }
 
     /// Increases the tip to the given value, pruning stale entries.
@@ -763,9 +810,7 @@ impl<
 
         // Prune data structures with buffer to prevent losing certificates
         let activity_threshold = tip.saturating_sub(self.activity_timeout);
-        self.pending
-            .retain(|height, _| *height >= activity_threshold);
-        self.confirmed
+        self.heights
             .retain(|height, _| *height >= activity_threshold);
 
         // Add tip to journal
@@ -790,7 +835,7 @@ impl<
     }
 
     /// Replays the journal, updating the state of the engine.
-    /// Returns a list of unverified pending heights that need digest requests.
+    /// Returns a list of unverified heights that need digest requests.
     async fn replay(&mut self, journal: &mut Journal<E, Activity<P::Scheme, D>>) -> Vec<Height> {
         let mut tip = Height::default();
         let mut certified = Vec::new();
@@ -827,16 +872,16 @@ impl<
             .iter()
             .filter(|certificate| certificate.item.height >= activity_threshold)
             .for_each(|certificate| {
-                self.confirmed
-                    .insert(certificate.item.height, certificate.clone());
+                self.heights.insert(
+                    certificate.item.height,
+                    State::Confirmed(certificate.clone(), None),
+                );
             });
 
         // Group acks by height
         let mut acks_by_height: BTreeMap<Height, Vec<Ack<P::Scheme, D>>> = BTreeMap::new();
         for ack in acks {
-            if ack.item.height >= activity_threshold
-                && !self.confirmed.contains_key(&ack.item.height)
-            {
+            if ack.item.height >= activity_threshold && !self.is_confirmed(ack.item.height) {
                 acks_by_height.entry(ack.item.height).or_default().push(ack);
             }
         }
@@ -872,15 +917,15 @@ impl<
             // otherwise as Unverified
             match our_digest {
                 Some(digest) => {
-                    self.pending
-                        .insert(height, Pending::Verified(digest, epoch_map));
+                    self.heights
+                        .insert(height, State::Verified(digest, epoch_map));
 
                     // If we've already generated an ack and it isn't yet confirmed, mark for immediate rebroadcast
                     self.rebroadcast_deadlines
                         .put(height, self.context.current());
                 }
                 None => {
-                    self.pending.insert(height, Pending::Unverified(epoch_map));
+                    self.heights.insert(height, State::Unverified(epoch_map));
 
                     // Add to unverified heights
                     unverified.push(height);
@@ -888,18 +933,18 @@ impl<
             }
         }
 
-        // After replay, ensure we have all heights from tip to next in pending or confirmed
-        // to handle the case where we restart and some heights have no acks yet
+        // After replay, ensure we track all heights from tip to next to handle the case
+        // where we restart and some heights have no acks yet
         let next = self.next();
         for height in Height::range(self.tip, next) {
-            // If we already have the height in pending or confirmed, skip
-            if self.pending.contains_key(&height) || self.confirmed.contains_key(&height) {
+            // If we already track the height, skip
+            if self.heights.contains_key(&height) {
                 continue;
             }
 
-            // Add missing height to pending
-            self.pending
-                .insert(height, Pending::Unverified(BTreeMap::new()));
+            // Add missing height as unverified
+            self.heights
+                .insert(height, State::Unverified(BTreeMap::new()));
             unverified.push(height);
         }
         info!(tip = %self.tip, %next, ?unverified, "replayed journal");
