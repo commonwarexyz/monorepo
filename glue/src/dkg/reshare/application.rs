@@ -278,8 +278,8 @@ mod tests {
         sync::Mutex,
     };
     use futures::{
-        future::{Either, select},
         FutureExt,
+        future::{Either, select},
         pin_mut,
     };
     use rand_core::Rng;
@@ -575,11 +575,9 @@ mod tests {
             let (entered_tx, entered_rx) = oneshot::channel();
             let mut entered_rx = entered_rx;
             let inner = RecordingApp::pending(entered_tx);
-            let (sender, mut receiver) =
-                mailbox::new::<Message<TestBlock, TestBlsVariant, PrivateKey>>(
-                    context.child("mailbox"),
-                    NZUsize!(4),
-                );
+            let (sender, mut receiver) = mailbox::new::<
+                Message<TestBlock, TestBlsVariant, PrivateKey>,
+            >(context.child("mailbox"), NZUsize!(4));
             let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(4));
 
             let mut propose = Box::pin(app.propose(
