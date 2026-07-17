@@ -412,9 +412,13 @@ impl<
         let view = self.state.current_view();
         let (retry, nullify) = self.state.construct_nullify(view)?;
 
-        // Process nullify (and persist it if it is a first attempt)
+        // Inform the batcher on every attempt (it ignores duplicate nullifies):
+        // after a restart, the first attempt for a replayed nullify is a retry,
+        // and the batcher (whose state is not persisted) has not seen the vote yet.
+        batcher.constructed(Vote::Nullify(nullify.clone()));
+
+        // Persist the nullify if it is a first attempt
         if !retry {
-            batcher.constructed(Vote::Nullify(nullify.clone()));
             self.handle_nullify(nullify.clone()).await;
             return Some((nullify, None));
         }
