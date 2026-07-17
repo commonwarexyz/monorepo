@@ -269,7 +269,7 @@ mod tests {
     struct Node {
         marshal: mocks::TestMarshalMailbox,
         application: mocks::MockApplication,
-        _fence: Fence,
+        fence: Fence,
         orchestrator_handle: Handle<()>,
         certificate_mux_handle: Handle<Result<(), commonware_p2p::simulated::Error>>,
         marshal_handle: Handle<()>,
@@ -442,7 +442,7 @@ mod tests {
             Self {
                 marshal,
                 application,
-                _fence: fence,
+                fence,
                 orchestrator_handle,
                 certificate_mux_handle,
                 marshal_handle,
@@ -622,6 +622,40 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("orchestrator stayed alive after active engine stopped");
+                },
+            };
+        });
+    }
+
+    #[test]
+    fn certificate_mux_close_during_boundary_transition_stops_cleanly() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 1);
+            let mut cluster =
+                Cluster::start_with_gate_epoch(&mut context, &fixture, true, Epoch::zero()).await;
+            let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
+            assert_eq!(proposal.round.epoch(), Epoch::zero());
+
+            // The seeded boundary block parks the orchestrator inside
+            // enter_epoch(1) on the closed gate. Stop the externally owned
+            // certificate mux before releasing the gate so the transition
+            // observes a closed mux when it registers epoch subchannels.
+            // Marshal is stopped alongside it, as during node shutdown:
+            // exiting the transition drops the boundary acknowledgement, which
+            // a still-running marshal intentionally treats as fatal.
+            let node = &mut cluster.nodes[0];
+            node.certificate_mux_handle.abort();
+            node.marshal_handle.abort();
+            context.sleep(Duration::from_millis(10)).await;
+            node.fence.mark(Epoch::new(1));
+
+            select! {
+                result = &mut node.orchestrator_handle => {
+                    result.expect("orchestrator should stop cleanly");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("orchestrator stayed alive after certificate mux closed");
                 },
             };
         });
