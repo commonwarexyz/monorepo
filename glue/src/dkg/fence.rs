@@ -80,15 +80,16 @@ impl Future for Waiter<'_> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.gate.state.waker.register(cx.waker());
 
+        let closed = self.gate.state.closed.load(Ordering::Acquire);
         if self.epoch <= self.gate.state.epoch() {
             return Poll::Ready(Ok(()));
         }
 
-        if self.gate.state.closed.load(Ordering::Acquire) {
-            return Poll::Ready(Err(Closed));
+        if closed {
+            Poll::Ready(Err(Closed))
+        } else {
+            Poll::Pending
         }
-
-        Poll::Pending
     }
 }
 
