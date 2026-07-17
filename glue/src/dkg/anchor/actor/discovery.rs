@@ -6,7 +6,7 @@ use crate::dkg::{
 };
 use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Decode as _, Encode as _, Read};
+use commonware_codec::{Decode as _, Encode as _, Error as CodecError, Read};
 use commonware_consensus::{
     Epochable, Heightable,
     marshal::core::Variant,
@@ -25,6 +25,14 @@ use commonware_utils::{
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use tracing::{debug, warn};
+
+#[derive(Debug)]
+enum BoundaryResponseError {
+    BlockCommitment,
+    Decode(CodecError),
+    InvalidFinalization,
+    InvalidPayload,
+}
 
 pub(super) struct Pending {
     height: Height,
@@ -255,10 +263,9 @@ where
             return;
         };
 
-        let response = match wire::read_response::<S, V>(
+        let response = match wire::read_response_finalization::<S, V, _>(
             message,
             &self.verifier.certificate_codec_config(),
-            &self.block_codec_config,
         ) {
             Ok(Some(response)) => response,
             Ok(None) => {
@@ -276,6 +283,8 @@ where
                 return;
             }
         };
+        let finalization = response.finalization;
+        let body = response.body;
 
         let Some(expected_finalization_epoch) = pending.epoch.previous() else {
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
@@ -283,7 +292,7 @@ where
             return;
         };
 
-        let response_finalization_epoch = response.finalization.epoch();
+        let response_finalization_epoch = finalization.epoch();
         if response_finalization_epoch < expected_finalization_epoch {
             debug!(
                 response_finalization_epoch = %response_finalization_epoch,
@@ -294,7 +303,43 @@ where
             return;
         }
 
-        match self.artifact_from_response(&pending, expected_finalization_epoch, response) {
+        if response_finalization_epoch != expected_finalization_epoch {
+            commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
+            self.pending = Some(pending);
+            return;
+        }
+
+        let response = match authenticate_boundary_response::<_, S, V, _>(
+            self.context.as_present_mut(),
+            &self.verifier,
+            &self.strategy,
+            &self.block_codec_config,
+            finalization,
+            body,
+        ) {
+            Ok(response) => response,
+            Err(BoundaryResponseError::Decode(err)) => {
+                commonware_p2p::block!(
+                    self.blocker,
+                    peer,
+                    ?err,
+                    "invalid bootstrap boundary response"
+                );
+                self.pending = Some(pending);
+                return;
+            }
+            Err(
+                BoundaryResponseError::BlockCommitment
+                | BoundaryResponseError::InvalidFinalization
+                | BoundaryResponseError::InvalidPayload,
+            ) => {
+                commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
+                self.pending = Some(pending);
+                return;
+            }
+        };
+
+        match self.artifact_from_response(&pending, response) {
             Some(artifact) => self.resolve(artifact),
             None => {
                 commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
@@ -306,23 +351,9 @@ where
     fn artifact_from_response(
         &mut self,
         pending: &Pending,
-        expected_finalization_epoch: Epoch,
         response: wire::Response<S, V>,
     ) -> Option<ActorArtifact<S, V>> {
         if response.block.height() != pending.height {
-            return None;
-        }
-        if response.finalization.epoch() != expected_finalization_epoch {
-            return None;
-        }
-        if response.finalization.proposal.payload != V::commitment(&response.block) {
-            return None;
-        }
-        if !response.finalization.verify(
-            self.context.as_present_mut(),
-            &self.verifier,
-            &self.strategy,
-        ) {
             return None;
         }
 
@@ -346,5 +377,268 @@ where
             subscriber.send_lossy(artifact.clone());
         });
         self.artifact = Some(artifact);
+    }
+}
+
+fn authenticate_boundary_response<R, S, V, T>(
+    rng: &mut R,
+    verifier: &S,
+    strategy: &T,
+    block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+    finalization: commonware_consensus::simplex::types::Finalization<S, V::Commitment>,
+    body: impl Buf,
+) -> Result<wire::Response<S, V>, BoundaryResponseError>
+where
+    R: CryptoRng,
+    S: Scheme<V::Commitment>,
+    V: Variant,
+    T: Strategy,
+{
+    if !V::check_payload(verifier, finalization.proposal.payload) {
+        return Err(BoundaryResponseError::InvalidPayload);
+    }
+    if !finalization.verify(rng, verifier, strategy) {
+        return Err(BoundaryResponseError::InvalidFinalization);
+    }
+
+    let response = wire::read_response_block(body, finalization, block_codec_config)
+        .map_err(BoundaryResponseError::Decode)?;
+    if V::commitment(&response.block) != response.finalization.proposal.payload {
+        return Err(BoundaryResponseError::BlockCommitment);
+    }
+
+    Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dkg::tests::mocks;
+    use commonware_codec::Write as _;
+    use commonware_coding::{Config as CodingConfig, ReedSolomon};
+    use commonware_consensus::{
+        CertifiableBlock,
+        marshal::{
+            coding::{
+                Coding,
+                types::{CodedBlock, coding_config_for_participants},
+            },
+        },
+        simplex::types::{Finalization, Finalize, Proposal},
+        types::{Epoch, Height, Round, View, coding::Commitment},
+    };
+    use commonware_cryptography::{
+        Digest as _, Digestible as _, Hasher as _, certificate::Verifier as _, sha256::Sha256,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::NZU16;
+    use std::time::Duration;
+
+    type CodingContext =
+        commonware_consensus::simplex::types::Context<Commitment, mocks::TestPublicKey>;
+    type CodingBlock = mocks::MockBlock<mocks::TestDigest, CodingContext>;
+    type TestCodingVariant =
+        Coding<CodingBlock, ReedSolomon<Sha256>, Sha256, mocks::TestPublicKey>;
+
+    impl CertifiableBlock for CodingBlock {
+        type Context = CodingContext;
+
+        fn context(&self) -> Self::Context {
+            self.context().clone()
+        }
+    }
+
+    fn finalization<D>(
+        proposal: Proposal<D>,
+        schemes: &[mocks::TestScheme],
+    ) -> Finalization<mocks::TestScheme, D>
+    where
+        D: commonware_cryptography::Digest,
+    {
+        let finalizes = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect::<Vec<_>>();
+        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
+            .expect("finalization quorum")
+    }
+
+    fn split_response<'a, V>(
+        message: &'a [u8],
+        verifier: &mocks::TestScheme,
+    ) -> (Finalization<mocks::TestScheme, V::Commitment>, &'a [u8])
+    where
+        V: Variant,
+        mocks::TestScheme: Scheme<V::Commitment>,
+    {
+        let response = wire::read_response_finalization::<mocks::TestScheme, V, _>(
+            message,
+            &verifier.certificate_codec_config(),
+        )
+        .expect("response decoded")
+        .expect("response tag");
+        (response.finalization, response.body)
+    }
+
+    fn coding_block(
+        leader: mocks::TestPublicKey,
+        participants: u16,
+    ) -> CodedBlock<CodingBlock, ReedSolomon<Sha256>, Sha256> {
+        let parent = Sha256::hash(b"parent");
+        let context = CodingContext {
+            round: Round::new(Epoch::zero(), View::new(1)),
+            leader,
+            parent: (
+                View::zero(),
+                Commitment::from((
+                    mocks::TestDigest::EMPTY,
+                    mocks::TestDigest::EMPTY,
+                    mocks::TestDigest::EMPTY,
+                    coding_config_for_participants(participants),
+                )),
+            ),
+        };
+        let block = CodingBlock::new::<Sha256>(context, parent, Height::new(1), 0);
+        CodedBlock::new(block, coding_config_for_participants(participants), &Sequential)
+    }
+
+    #[test]
+    fn invalid_coding_config_is_rejected_before_block_decode() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let invalid_config = CodingConfig {
+                minimum_shards: NZU16!(1),
+                extra_shards: NZU16!(1),
+            };
+            let payload = Commitment::from((
+                Sha256::hash(b"block"),
+                Sha256::hash(b"root"),
+                Sha256::hash(b"context"),
+                invalid_config,
+            ));
+            let finalization = finalization(
+                Proposal::new(Round::new(Epoch::zero(), View::new(1)), View::zero(), payload),
+                &fixture.schemes,
+            );
+            let mut message = Vec::new();
+            wire::Tag::Response.write(&mut message);
+            finalization.write(&mut message);
+
+            let (finalization, body) =
+                split_response::<TestCodingVariant>(&message, &fixture.schemes[0]);
+            let result = authenticate_boundary_response::<
+                _,
+                mocks::TestScheme,
+                TestCodingVariant,
+                _,
+            >(
+                &mut context,
+                &fixture.schemes[0],
+                &Sequential,
+                &(),
+                finalization,
+                body,
+            );
+
+            assert!(matches!(
+                result,
+                Err(BoundaryResponseError::InvalidPayload)
+            ));
+        });
+    }
+
+    #[test]
+    fn valid_standard_response_decodes_after_authentication() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let block = mocks::genesis_block(fixture.participants[0].clone());
+            let finalization = finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    block.digest(),
+                ),
+                &fixture.schemes,
+            );
+            let message = wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::Response(
+                wire::Response {
+                    finalization,
+                    block: block.clone(),
+                },
+            )
+            .encode()
+            .to_vec();
+            let (finalization, body) =
+                split_response::<mocks::TestMarshalVariant>(&message, &fixture.schemes[0]);
+
+            let response = authenticate_boundary_response::<
+                _,
+                mocks::TestScheme,
+                mocks::TestMarshalVariant,
+                _,
+            >(
+                &mut context,
+                &fixture.schemes[0],
+                &Sequential,
+                &(),
+                finalization,
+                body,
+            )
+            .expect("standard response authenticated");
+
+            assert_eq!(response.block, block);
+        });
+    }
+
+    #[test]
+    fn valid_coding_response_decodes_after_authentication() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let block = coding_block(
+                fixture.participants[0].clone(),
+                fixture
+                    .participants
+                    .len()
+                    .try_into()
+                    .expect("participant count fits u16"),
+            );
+            let payload = TestCodingVariant::commitment(&block);
+            let finalization = finalization(
+                Proposal::new(Round::new(Epoch::zero(), View::new(1)), View::zero(), payload),
+                &fixture.schemes,
+            );
+            let message = wire::Message::<mocks::TestScheme, TestCodingVariant>::Response(
+                wire::Response {
+                    finalization,
+                    block,
+                },
+            )
+            .encode()
+            .to_vec();
+            let (finalization, body) =
+                split_response::<TestCodingVariant>(&message, &fixture.schemes[0]);
+
+            let response = authenticate_boundary_response::<
+                _,
+                mocks::TestScheme,
+                TestCodingVariant,
+                _,
+            >(
+                &mut context,
+                &fixture.schemes[0],
+                &Sequential,
+                &(),
+                finalization,
+                body,
+            )
+            .expect("coding response authenticated");
+
+            assert_eq!(response.block.height(), Height::new(1));
+            assert_eq!(TestCodingVariant::commitment(&response.block), payload);
+        });
     }
 }
