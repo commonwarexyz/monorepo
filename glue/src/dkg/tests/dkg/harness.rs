@@ -101,7 +101,6 @@ pub(super) struct DkgEngine {
     signers: Vec<ed25519::PrivateKey>,
     filtered_dkg: Arc<HashSet<ed25519::PublicKey>>,
     stores: Arc<Mutex<BTreeMap<ed25519::PublicKey, MemorySecretStore>>>,
-    states: Arc<Mutex<BTreeMap<ed25519::PublicKey, Arc<Mutex<NodeStateInner>>>>>,
 }
 
 impl DkgEngine {
@@ -114,7 +113,6 @@ impl DkgEngine {
             signers,
             filtered_dkg: Arc::default(),
             stores: Arc::default(),
-            states: Arc::default(),
         }
     }
 
@@ -150,12 +148,6 @@ impl DkgEngine {
             .entry(public_key.clone())
             .or_default()
             .clone()
-    }
-
-    fn state_inner(&self, public_key: &ed25519::PublicKey) -> Arc<Mutex<NodeStateInner>> {
-        let inner = Arc::new(Mutex::new(NodeStateInner::default()));
-        self.states.lock().insert(public_key.clone(), inner.clone());
-        inner
     }
 }
 
@@ -196,7 +188,7 @@ impl EngineDefinition for DkgEngine {
         let store = self.store(public_key);
         let state = NodeState {
             store: store.clone(),
-            inner: self.state_inner(public_key),
+            inner: Arc::default(),
         };
         let engine = bootstrap::Engine::<_, MinPk, _, _, _, _>::new(
             context.child("dkg"),
@@ -305,11 +297,11 @@ pub(super) fn run_restart_completion_state_is_fresh() {
     let public_key = engine.participant(0);
     let old_state = NodeState {
         store: engine.store(&public_key),
-        inner: engine.state_inner(&public_key),
+        inner: Arc::default(),
     };
     let replacement_state = NodeState {
         store: engine.store(&public_key),
-        inner: engine.state_inner(&public_key),
+        inner: Arc::default(),
     };
 
     let share = Share::new(Participant::new(0), Private::random(test_rng()));
