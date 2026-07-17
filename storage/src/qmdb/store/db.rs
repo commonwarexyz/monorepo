@@ -1157,7 +1157,6 @@ mod test {
         is_send(db.get(&key));
         let batch = db.new_batch();
         is_send(batch.get(&key));
-        drop(batch);
         is_send(db.apply_batch(Changeset::from([(key, Some(value))])));
     }
 
