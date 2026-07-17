@@ -1,13 +1,12 @@
 #![no_main]
 
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::cache::{Cache, Config};
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::{
     arbitrary::{Arbitrary, Unstructured},
     fuzz_target,
 };
-use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU16};
 
 const MAX_OPERATIONS: usize = 50;
@@ -126,8 +125,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let _rng = StdRng::seed_from_u64(input.seed);
-
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         let cfg = Config {

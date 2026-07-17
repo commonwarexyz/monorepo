@@ -1,14 +1,14 @@
 //! Blob management for a contiguous journal.
 
 use crate::{
-    journal::{frame::FrameReader, Error},
     Context,
+    journal::{Error, frame::FrameReader},
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
+    Blob as RBlob, Buf, Error as RError, IoBufMut, IoBufs,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
-    Blob as RBlob, Buf, Error as RError, IoBufMut, IoBufs,
 };
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
@@ -165,12 +165,12 @@ impl<E: Context> Writable<E> {
         pending: BTreeMap<u64, Writer<E::Blob>>,
         tail_blob: u64,
     ) -> Result<Self, Error> {
-        if let Some(&newest) = pending.keys().next_back() {
-            if newest > tail_blob {
-                return Err(Error::Corruption(format!(
-                    "blobs > tail blob {tail_blob} exist (newest={newest})"
-                )));
-            }
+        if let Some(&newest) = pending.keys().next_back()
+            && newest > tail_blob
+        {
+            return Err(Error::Corruption(format!(
+                "blobs > tail blob {tail_blob} exist (newest={newest})"
+            )));
         }
         let oldest = pending.keys().next().copied();
         let mut sealed = Vec::with_capacity(pending.len());
@@ -463,10 +463,10 @@ impl<'a, B: RBlob> Blob<'a, B> {
     }
 
     /// Read into `buf` if the data is already cached.
-    pub(super) fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
+    pub(super) fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
         match self {
-            Self::Writer(writer) => writer.try_read_sync(offset, buf),
-            Self::Sealed(sealed) => sealed.try_read_sync(offset, buf),
+            Self::Writer(writer) => writer.try_read_sync_into(buf, offset),
+            Self::Sealed(sealed) => sealed.try_read_sync_into(buf, offset),
         }
     }
 
@@ -536,6 +536,32 @@ impl<'a, B: RBlob> Blob<'a, B> {
                 .read_many_into(buf, offsets, item_size)
                 .await
                 .map_err(Error::Runtime),
+        }
+    }
+
+    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
+    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
+    pub(super) fn try_read_many_sync_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Vec<usize> {
+        match self {
+            Self::Writer(writer) => writer.try_read_many_sync_into(buf, offsets, item_size),
+            Self::Sealed(sealed) => sealed.try_read_many_sync_into(buf, offsets, item_size),
+        }
+    }
+
+    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges.
+    pub(super) fn try_read_ranges_sync_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Vec<usize> {
+        match self {
+            Self::Writer(writer) => writer.try_read_ranges_sync_into(buf, ranges),
+            Self::Sealed(sealed) => sealed.try_read_ranges_sync_into(buf, ranges),
         }
     }
 }
@@ -756,8 +782,8 @@ impl<'a, B: RBlob> Blobs<'a, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, IoBufMut, Runner as _, Storage as _};
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_runtime::{IoBufMut, Runner as _, Storage as _, deterministic};
+    use commonware_utils::{NZU16, NZUsize};
 
     fn assert_insufficient_length(result: Result<(IoBufMut, usize), Error>) {
         assert!(matches!(

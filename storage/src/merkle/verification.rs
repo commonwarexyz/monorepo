@@ -12,10 +12,10 @@
 //! past state of the structure rather than its current state.
 
 use crate::merkle::{
+    Bagging, Error, Family, Location, Position, Proof,
     hasher::Hasher,
     proof::{self as merkle_proof, Blueprint},
     storage::Storage,
-    Bagging, Error, Family, Location, Position, Proof,
 };
 use ahash::AHashMap;
 use commonware_cryptography::Digest;
@@ -295,7 +295,7 @@ pub async fn range_proof<
     range: Range<Location<F>>,
     inactive_peaks: usize,
 ) -> Result<Proof<F, D>, Error<F>> {
-    let leaves = Location::try_from(merkle.size().await)?;
+    let leaves = Location::try_from(merkle.size())?;
     historical_range_proof(hasher, merkle, leaves, range, inactive_peaks).await
 }
 
@@ -372,7 +372,7 @@ pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
     }
 
     // Collect all required node positions
-    let size = merkle.size().await;
+    let size = merkle.size();
     let leaves = Location::try_from(size)?;
     let node_positions: BTreeSet<_> =
         merkle_proof::nodes_required_for_multi_proof(leaves, inactive_peaks, bagging, locations)?;
@@ -404,12 +404,12 @@ mod tests {
             Bagging::{BackwardFold, ForwardFold},
             LocationRangeExt as _,
         },
-        mmb::{mem::Mmb, Location as MmbLocation},
-        mmr::{mem::Mmr, StandardHasher as Standard},
+        mmb::{Location as MmbLocation, mem::Mmb},
+        mmr::{StandardHasher as Standard, mem::Mmr},
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     fn test_digest(v: u8) -> Digest {
         Sha256::hash(&[v])

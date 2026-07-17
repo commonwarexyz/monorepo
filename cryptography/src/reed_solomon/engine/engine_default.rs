@@ -3,7 +3,7 @@ use crate::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::reed_solomon::engine::{Avx2, Ssse3};
 use crate::reed_solomon::engine::{
-    Engine, GfElement, NoSimd, ShardsRefMut, GF_ORDER, SHARD_CHUNK_BYTES,
+    Engine, GF_ORDER, GfElement, NoSimd, SHARD_CHUNK_BYTES, ShardsRefMut,
 };
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;

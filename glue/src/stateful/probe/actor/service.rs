@@ -3,8 +3,8 @@ use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Encode, ReadExt as _};
 use commonware_consensus::{
     marshal::{
-        core::{Mailbox as MarshalMailbox, Variant},
         Identifier,
+        core::{Mailbox as MarshalMailbox, Variant},
     },
     simplex::{scheme::Scheme, types::Finalization},
 };
@@ -14,7 +14,7 @@ use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::channel::fallible::OneshotExt;
 use futures::future::{self, Either};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use tracing::debug;
 
 /// The service phase of [`Probe`](super::Probe).
@@ -24,7 +24,7 @@ use tracing::debug;
 /// consumed its floor and a marshal has been attached.
 pub(super) struct Service<E, S, V, P, B>
 where
-    E: Spawner + CryptoRngCore + Clock + Metrics,
+    E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     V: Variant,
     P: PublicKey,
@@ -39,7 +39,7 @@ where
 
 impl<E, S, V, P, B> Service<E, S, V, P, B>
 where
-    E: Spawner + CryptoRngCore + Clock + Metrics,
+    E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     V: Variant,
     P: PublicKey,

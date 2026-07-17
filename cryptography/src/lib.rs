@@ -56,9 +56,8 @@ commonware_macros::stability_scope!(BETA {
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
-    use rand::SeedableRng as _;
     use rand_chacha::ChaCha20Rng;
-    use rand_core::CryptoRngCore;
+    use rand_core::{CryptoRng, SeedableRng as _};
 
     pub mod secret;
     pub use crate::secret::Secret;
@@ -108,7 +107,7 @@ commonware_macros::stability_scope!(BETA {
         /// This function is insecure and should only be used for examples
         /// and testing.
         fn from_seed(seed: u64) -> Self {
-            Self::random(&mut ChaCha20Rng::seed_from_u64(seed))
+            Self::random(ChaCha20Rng::seed_from_u64(seed))
         }
     }
 
@@ -155,8 +154,11 @@ commonware_macros::stability_scope!(BETA {
         /// The type of public keys that this verifier can accept.
         type PublicKey: PublicKey;
 
-        /// Create a new batch verifier.
-        fn new() -> Self;
+        /// Create a new batch verifier with capacity for at least `capacity` items.
+        ///
+        /// The capacity is a hint: more than `capacity` items may be added, and
+        /// implementations may ignore it.
+        fn new(capacity: usize) -> Self;
 
         /// Append item to the batch.
         ///
@@ -188,7 +190,7 @@ commonware_macros::stability_scope!(BETA {
         /// (`c_1 + d` and `c_2 - d`).
         ///
         /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-        fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool;
+        fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool;
     }
 
     /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
@@ -284,7 +286,7 @@ mod tests {
     use commonware_utils::test_rng;
 
     fn test_validate<C: PrivateKey>() {
-        let private_key = C::random(&mut test_rng());
+        let private_key = C::random(test_rng());
         let public_key = private_key.public_key();
         assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
     }

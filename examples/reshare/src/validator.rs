@@ -11,12 +11,12 @@ use commonware_consensus::{
     simplex::{elector::Config as Elector, scheme::Scheme},
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
+    Hasher, Sha256, Signer, bls12381::primitives::variant::MinSig, ed25519,
 };
 use commonware_macros::boxed;
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Quota, Supervisor as _, ThreadPooler};
-use commonware_utils::{union, union_unique, NZUsize, NZU32};
+use commonware_runtime::{Quota, Strategizer, Supervisor as _, tokio};
+use commonware_utils::{NZU32, NZUsize, union, union_unique};
 use futures::future::try_join_all;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -118,7 +118,7 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(context.child("resolver"), resolver_cfg, marshal);
 
-    let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+    let strategy = context.strategy(NZUsize!(2));
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.child("engine"),
         engine::Config {
@@ -165,32 +165,33 @@ mod test {
         types::Epoch,
     };
     use commonware_cryptography::{
+        Signer,
         bls12381::{
-            dkg::feldman_desmedt::{deal, Output},
+            dkg::feldman_desmedt::{Output, deal},
             primitives::{group::Share, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},
-        Signer,
     };
     use commonware_macros::{boxed, select, test_group, test_traced};
     use commonware_p2p::{
+        Message, Receiver,
         simulated::{self, Link, Network, Oracle},
         utils::mux,
-        Message, Receiver,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic::{self, Runner},
         Clock, Handle, Metrics as _, Quota, Runner as _, Spawner,
+        deterministic::{self, Runner},
     };
     use commonware_utils::{
+        N3f1, TestRng, TryCollect,
         channel::{mpsc, oneshot},
-        test_rng_seeded, union, N3f1, TryCollect,
+        union,
     };
-    use rand::seq::SliceRandom;
-    use rand_core::CryptoRngCore;
+    use rand::seq::IndexedRandom;
+    use rand_core::CryptoRng;
     use std::{
-        collections::{btree_map::Entry, BTreeMap, HashSet},
+        collections::{BTreeMap, HashSet, btree_map::Entry},
         future::Future,
         num::NonZeroU32,
         pin::Pin,
@@ -276,7 +277,7 @@ mod test {
     }
 
     impl Team {
-        fn reshare(mut rng: impl CryptoRngCore, total: u32, per_round: &[u32]) -> Self {
+        fn reshare(mut rng: impl CryptoRng, total: u32, per_round: &[u32]) -> Self {
             let mut participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
@@ -399,7 +400,7 @@ mod test {
                     namespace: union(namespace::APPLICATION, b"_ENGINE"),
                     output: self.output.clone(),
                     share: share.clone(),
-                    partition_prefix: format!("validator_{}", &pk),
+                    partition_prefix: format!("validator_{}", pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
                     strategy: Sequential,
@@ -597,7 +598,7 @@ mod test {
     }
 
     fn test_output(seed: u64) -> Output<MinSig, PublicKey> {
-        Team::reshare(test_rng_seeded(seed), 4, &[4])
+        Team::reshare(TestRng::new(seed), 4, &[4])
             .output
             .expect("reshare output exists")
     }
@@ -727,10 +728,10 @@ mod test {
                         let min_epoch = progress.min_epoch();
                         if progress.successes >= target {
                             // Wait for all active participants to reach the target epoch
-                            if let Some(target_epoch) = progress.success_target_epoch(target) {
-                                if min_epoch < target_epoch {
-                                    continue;
-                                }
+                            if let Some(target_epoch) = progress.success_target_epoch(target)
+                                && min_epoch < target_epoch
+                            {
+                                continue;
                             }
                             // Verify all delayed participants got acknowledged shares
                             if matches!(self.crash, Some(Crash::Delay { .. })) {
@@ -813,7 +814,7 @@ mod test {
                             team.participants.keys().cloned().collect();
                         let crash_count = (*count).min(all_participants.len());
                         let to_crash: Vec<PublicKey> = all_participants
-                            .choose_multiple(&mut ctx, crash_count)
+                            .sample(&mut ctx, crash_count)
                             .cloned()
                             .collect();
                         for pk in to_crash {
@@ -886,14 +887,16 @@ mod test {
         let err = progress
             .observe(pk.clone(), Epoch::new(1), None)
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("unexpected update epoch transition"));
+        assert!(
+            err.to_string()
+                .contains("unexpected update epoch transition")
+        );
 
         let err = progress.observe(pk, Epoch::zero(), None).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("unexpected update epoch transition"));
+        assert!(
+            err.to_string()
+                .contains("unexpected update epoch transition")
+        );
     }
 
     #[test]

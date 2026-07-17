@@ -4,11 +4,11 @@ use commonware_codec::config::RangeCfg;
 use commonware_macros::boxed;
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
-    archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
+    archive::{Archive as ArchiveTrait, Identifier, immutable, prunable},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes, test_rng};
+use rand::Rng;
 use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Number of bytes that can be buffered in a section before being written to a
@@ -199,7 +199,7 @@ impl ArchiveTrait for Archive {
 
 /// Append `count` random (index,key,value) triples and sync once.
 pub async fn append_random(archive: &mut Archive, count: u64) -> Vec<Key> {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let mut key_buf = [0u8; 64];
 
     let mut keys = Vec::with_capacity(count as usize);

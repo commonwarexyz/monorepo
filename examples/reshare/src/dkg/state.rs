@@ -15,6 +15,7 @@ use crate::dkg::ModeVersion;
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
+    BatchVerifier, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Error as DkgError,
@@ -23,19 +24,18 @@ use commonware_cryptography::{
         primitives::{group::Share, variant::Variant},
     },
     transcript::{Summary, Transcript},
-    BatchVerifier, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage,
+    Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage, buffer::paged::CacheRef,
 };
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
     metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_utils::{Faults, NZUsize, NZU16};
+use commonware_utils::{Faults, NZU16, NZUsize};
 use futures::StreamExt;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -663,7 +663,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Finalize the player's participation in the DKG round.
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = C::PublicKey>>(
         self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
     ) -> Result<
@@ -680,23 +680,24 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
+        Signer,
         bls12381::{
             dkg::feldman_desmedt::Info,
             primitives::{group::Scalar, sharing::Mode, variant::MinPk},
         },
-        ed25519, Signer,
+        ed25519,
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::{Random, Ring};
-    use commonware_runtime::{deterministic, Runner, Supervisor as _};
-    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, N3f1};
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_utils::{N3f1, TestRng, ordered::Set, test_rng};
 
     const TEST_NAMESPACE: &[u8] = b"test_dkg";
 
     fn create_test_signers(n: usize) -> Vec<ed25519::PrivateKey> {
         (0..n)
             .map(|i| {
-                let mut rng = test_rng_seeded(i as u64);
+                let mut rng = TestRng::new(i as u64);
                 ed25519::PrivateKey::random(&mut rng)
             })
             .collect()
@@ -741,7 +742,7 @@ mod tests {
             let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg, unsent);
 
             let unknown_player = {
-                let mut rng = test_rng_seeded(100);
+                let mut rng = TestRng::new(100);
                 ed25519::PrivateKey::random(&mut rng).public_key()
             };
             let fake_ack = PlayerAck::read(&mut signers[1].sign(b"ns", b"msg").encode().as_ref())

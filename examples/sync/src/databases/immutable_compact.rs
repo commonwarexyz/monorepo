@@ -2,8 +2,9 @@
 
 use crate::{Hasher, Key, Value};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, buffer::paged::CacheRef};
 use commonware_storage::{
+    Context,
     journal::contiguous::variable,
     merkle::mmr,
     qmdb::{
@@ -12,7 +13,7 @@ use commonware_storage::{
         sync::compact,
     },
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use tracing::error;
 
 /// Database type alias.
@@ -39,7 +40,7 @@ pub fn create_config(context: &impl BufferPooler) -> CompactConfig<Sequential> {
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -68,7 +69,7 @@ where
                     batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata, floor) => {
-                    let merkleized = batch.merkleize(self, metadata, floor);
+                    let merkleized = batch.merkleize(self, metadata, floor).await;
                     self.apply_batch(merkleized)?;
                     self.sync().await?;
                     batch = self.new_batch();
@@ -93,9 +94,9 @@ where
 
 impl<E> super::CompactSyncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
-    async fn target(&self) -> compact::Target<Self::Family, Key> {
+    fn target(&self) -> compact::Target<Self::Family, Key> {
         Self::target(self)
     }
 }

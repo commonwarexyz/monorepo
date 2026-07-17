@@ -6,16 +6,16 @@ use super::{
     config::Config,
     types,
 };
-use crate::{authenticated::discovery::types::InfoVerifier, Channel};
+use crate::{Channel, authenticated::discovery::types::InfoVerifier};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota,
-    Resolver, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
+    Spawner, spawn_cell,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed by the tracker.
@@ -26,7 +26,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
-    E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
+    E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
     C: Signer,
 > {
     context: ContextCell<E>,
@@ -40,10 +40,8 @@ pub struct Network<
     info_verifier: InfoVerifier<C::PublicKey>,
 }
 
-impl<
-        E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
-        C: Signer,
-    > Network<E, C>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
+    Network<E, C>
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -189,6 +187,7 @@ impl<
             self.context.child("dialer"),
             dialer::Config {
                 stream_cfg,
+                dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,
                 allow_private_ips: self.cfg.allow_private_ips,

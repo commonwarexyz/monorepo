@@ -1,10 +1,10 @@
 //! Interfaces for stores of finalized certificates and blocks.
 
-use crate::{simplex::types::Finalization, types::Height, Block};
-use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
+use crate::{Block, simplex::types::Finalization, types::Height};
+use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
 use commonware_runtime::{BufferPooler, Clock, Handle, Metrics, Storage};
 use commonware_storage::{
-    archive::{self, immutable, prunable, Archive, Identifier},
+    archive::{self, Archive, Identifier, immutable, prunable},
     translator::Translator,
 };
 use std::{error::Error, future::Future};
@@ -97,6 +97,9 @@ pub trait Certificates: Send + Sync + 'static {
     ) -> impl Future<
         Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
     > + Send;
+
+    /// Check whether a finalization is stored at `height` without fetching it.
+    fn has(&self, height: Height) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
     ///
@@ -280,6 +283,10 @@ where
         <Self as Archive>::get(self, id).await
     }
 
+    async fn has(&self, height: Height) -> Result<bool, Self::Error> {
+        <Self as Archive>::has(self, Identifier::Index(height.get())).await
+    }
+
     async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
         // Pruning is a no-op for immutable archives.
         Ok(())
@@ -379,6 +386,10 @@ where
         id: Identifier<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
+    }
+
+    async fn has(&self, height: Height) -> Result<bool, Self::Error> {
+        <Self as Archive>::has(self, Identifier::Index(height.get())).await
     }
 
     async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {

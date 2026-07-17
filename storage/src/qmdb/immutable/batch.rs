@@ -2,20 +2,20 @@
 
 use super::Immutable;
 use crate::{
+    Context,
     journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location},
     qmdb::{
-        any::{batch::lookup_sorted, ValueEncoding},
+        Error,
+        any::{ValueEncoding, batch::lookup_sorted},
         batch_chain::{self, Bounds},
         immutable::operation::Operation,
         operation::Key,
-        Error,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use std::{
     collections::BTreeMap,
@@ -42,7 +42,7 @@ where
     F: Family,
     K: Key,
     V: ValueEncoding,
-    H: CHasher,
+    H: Hasher,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>,
@@ -95,7 +95,7 @@ where
     F: Family,
     K: Key,
     V: ValueEncoding,
-    H: CHasher,
+    H: Hasher,
     Operation<F, K, V>: EncodeShared,
 {
     /// Create a batch from a committed DB (no parent chain).
@@ -120,8 +120,8 @@ where
 
     /// Set a key to a value.
     ///
-    /// The key must not already exist in the database or in any ancestor batch
-    /// in the chain. Setting a key that already exists causes undefined behavior.
+    /// If the key already exists in the database or an ancestor batch, reads
+    /// of it may return any of its written values.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.mutations.insert(key, value);
         self
@@ -231,7 +231,7 @@ where
     /// `inactivity_floor` declares that all operations before this location are inactive.
     /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
-    pub fn merkleize<E, C, T>(
+    pub async fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
         metadata: Option<V::Value>,
@@ -260,19 +260,17 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
-
-        // Hash before `with_mem` borrows committed Merkle state under its read lock.
-        let journal_batch = self.journal_batch.add_many(ops);
-        let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
-
-        // Compute the root.
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let root = db
+
+        // Leaf and node hashing dominate merkleization, so run them as one job on the
+        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        let (journal, root) = db
             .journal
-            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
+            .merkleize(self.journal_batch, ops, inactive_peaks)
+            .await
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.
@@ -320,7 +318,7 @@ where
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, K, V, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
@@ -334,7 +332,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
-        H: CHasher<Digest = D>,
+        H: Hasher<Digest = D>,
         T: Translator,
     {
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
@@ -360,7 +358,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
-        H: CHasher<Digest = D>,
+        H: Hasher<Digest = D>,
         T: Translator,
     {
         if keys.is_empty() {
@@ -415,7 +413,7 @@ where
     /// loss detected at `apply_batch` time.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S>
     where
-        H: CHasher<Digest = D>,
+        H: Hasher<Digest = D>,
     {
         UnmerkleizedBatch {
             journal_batch: self.journal_batch.new_batch::<H>(),
@@ -435,7 +433,7 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    H: CHasher,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 {

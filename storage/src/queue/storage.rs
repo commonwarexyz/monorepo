@@ -1,10 +1,10 @@
 //! Queue storage implementation.
 
-use super::{metrics, Error};
+use super::{Error, metrics};
 use crate::{
-    journal::contiguous::{variable, Contiguous as _},
-    rmap::RMap,
     Context,
+    journal::contiguous::{Contiguous as _, variable},
+    rmap::RMap,
 };
 use commonware_codec::CodecShared;
 use commonware_macros::boxed;
@@ -365,9 +365,9 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner, Supervisor as _,
+        BufferPooler, Metrics as _, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);

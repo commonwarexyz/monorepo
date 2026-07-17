@@ -64,22 +64,24 @@
 //! ```
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{full::Config as MerkleConfig, Family, Location},
+    merkle::{Family, Location, full::Config as MerkleConfig},
     qmdb::{
+        ROOT_BAGGING,
         any::operation::{Operation, Update},
         bitmap::Shared,
+        metrics::Metrics,
         operation::Committable,
-        ROOT_BAGGING,
+        single_operation_root,
     },
     translator::Translator,
-    Context,
 };
-use commonware_codec::CodecShared;
+use commonware_codec::{CodecShared, Encode};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -97,6 +99,20 @@ pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
+
+/// Compute the authenticated root of a newly initialized database without opening storage.
+///
+/// The initial commit never carries metadata, so this root always represents
+/// `CommitFloor(None, 0)`.
+pub fn initial_root<F, U, H>() -> H::Digest
+where
+    F: Family,
+    H: Hasher,
+    U: Update,
+    Operation<F, U>: Encode,
+{
+    single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
+}
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
@@ -178,7 +194,7 @@ where
     }
 
     let index = I::new(context.child("index"), cfg.translator);
-    let metrics = db::Metrics::new(context);
+    let metrics = Metrics::new(context);
     db::Db::init_from_log(index, log, bitmap, cfg.init_cache_size, metrics).await
 }
 
@@ -188,18 +204,15 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::{
-            self,
-            any::{FixedConfig, MerkleConfig, VariableConfig},
-        },
+        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig},
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Supervisor as _,
+        BufferPooler, Supervisor as _, buffer::paged::CacheRef, deterministic::Context,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
     use std::{
         collections::HashMap,
@@ -221,6 +234,17 @@ pub(crate) mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential> {
+        fixed_db_config_with_strategy(suffix, pooler, Sequential)
+    }
+
+    pub(crate) fn fixed_db_config_with_strategy<
+        T: Translator + Default,
+        S: commonware_parallel::Strategy,
+    >(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+        strategy: S,
+    ) -> FixedConfig<T, S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -228,7 +252,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                strategy: Sequential,
+                strategy,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -275,7 +299,7 @@ pub(crate) mod test {
         merkle::mmr,
         qmdb::any::{
             db::Db as AnyDb,
-            operation::{update::Update as UpdateTrait, Operation as AnyOperation},
+            operation::{Operation as AnyOperation, update::Update as UpdateTrait},
             traits::{DbAny, Provable, UnmerkleizedBatch as _},
         },
     };
@@ -329,14 +353,14 @@ pub(crate) mod test {
             db.apply_batch(merkleized).await.unwrap();
         }
         db.commit().await.unwrap();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
         let root = db.root();
         let op_count = db.size();
-        let inactivity_floor_loc = db.inactivity_floor_loc().await;
+        let inactivity_floor_loc = db.inactivity_floor_loc();
 
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.size(), op_count);
-        assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
         // Write without applying (unapplied batch should be lost on reopen).
@@ -351,7 +375,7 @@ pub(crate) mod test {
         }
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.size(), op_count);
-        assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
         // Write without applying again.
@@ -396,7 +420,7 @@ pub(crate) mod test {
         db.commit().await.unwrap();
         let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
         assert!(db.size() > op_count);
-        assert_ne!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+        assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_ne!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -529,6 +553,66 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// Pruning to a floor advanced by an applied-but-uncommitted batch must not durably outrun
+    /// the last durable commit: after a crash, the recovered commit's floor would lie below the
+    /// pruned boundary and the database could never reopen.
+    pub(crate) async fn test_any_db_prune_after_unsynced_floor_recovery<
+        F: Family,
+        D,
+        V: Clone + CodecShared,
+    >(
+        context: Context,
+        mut db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+    {
+        const ELEMENTS: u64 = 1000;
+
+        // Establish a durable state whose last commit declares an early inactivity floor.
+        {
+            let mut batch = db.new_batch();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                batch = batch.write(k, Some(make_value(i)));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+        }
+        db.commit().await.unwrap();
+        let durable_floor = db.inactivity_floor_loc();
+
+        // Apply (but do not commit) a batch that advances the in-memory floor well past the
+        // durable commit's floor.
+        {
+            let mut batch = db.new_batch();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                batch = batch.write(k, Some(make_value(i + 1)));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+        }
+        let unsynced_floor = db.inactivity_floor_loc();
+        assert!(unsynced_floor > durable_floor);
+
+        // Prune to the in-memory floor, then crash before any further commit.
+        db.prune(db.sync_boundary()).await.unwrap();
+        let root = db.root();
+        let op_count = db.size();
+        drop(db);
+
+        // Reopening must succeed: pruning made the floor-declaring commit durable before the
+        // journal durably advanced its boundary past positions that commit still needs.
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
+        assert_eq!(db.size(), op_count);
+        assert_eq!(db.inactivity_floor_loc(), unsynced_floor);
+        assert_eq!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
     /// Test rewinding to a prior committed state and recovering that state after reopen.
     pub(crate) async fn test_any_db_rewind_recovery<D, V>(
         context: Context,
@@ -544,7 +628,7 @@ pub(crate) mod test {
         let key2 = Sha256::hash(&2u64.to_be_bytes());
         let initial_root = db.root();
         let initial_size = db.size();
-        let initial_floor = db.inactivity_floor_loc().await;
+        let initial_floor = db.inactivity_floor_loc();
 
         // Empty-batch rewind on an otherwise empty DB should apply no snapshot undos.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
@@ -555,7 +639,7 @@ pub(crate) mod test {
         db.rewind_to_size(initial_size).await.unwrap();
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
-        assert_eq!(db.inactivity_floor_loc().await, initial_floor);
+        assert_eq!(db.inactivity_floor_loc(), initial_floor);
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
         let value0_a = make_value(10);
@@ -574,7 +658,7 @@ pub(crate) mod test {
 
         let root_a = db.root();
         let size_a = db.size();
-        let floor_a = db.inactivity_floor_loc().await;
+        let floor_a = db.inactivity_floor_loc();
         assert_eq!(size_a, range_a.end);
 
         let value0_b = make_value(20);
@@ -614,7 +698,7 @@ pub(crate) mod test {
         db.rewind_to_size(size_a).await.unwrap();
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size(), size_a);
-        assert_eq!(db.inactivity_floor_loc().await, floor_a);
+        assert_eq!(db.inactivity_floor_loc(), floor_a);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a.clone()));
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1_a));
@@ -625,7 +709,7 @@ pub(crate) mod test {
         let mut db = reopen_db(context.child("reopen_after_rewind")).await;
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size(), size_a);
-        assert_eq!(db.inactivity_floor_loc().await, floor_a);
+        assert_eq!(db.inactivity_floor_loc(), floor_a);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
         assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
@@ -659,7 +743,7 @@ pub(crate) mod test {
         db.rewind_to_size(initial_size).await.unwrap();
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
-        assert_eq!(db.inactivity_floor_loc().await, initial_floor);
+        assert_eq!(db.inactivity_floor_loc(), initial_floor);
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert_eq!(db.get(&key0).await.unwrap(), None);
         assert_eq!(db.get(&key1).await.unwrap(), None);
@@ -670,7 +754,7 @@ pub(crate) mod test {
         let db = reopen_db(context.child("reopen_initial_boundary")).await;
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
-        assert_eq!(db.inactivity_floor_loc().await, initial_floor);
+        assert_eq!(db.inactivity_floor_loc(), initial_floor);
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert_eq!(db.get(&key0).await.unwrap(), None);
         assert_eq!(db.get(&key1).await.unwrap(), None);
@@ -731,7 +815,7 @@ pub(crate) mod test {
         }
         // Commit + sync with pruning raises inactivity floor.
         db.sync().await.unwrap();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
 
         // Drop & reopen and ensure state matches.
         let root = db.root();
@@ -752,14 +836,12 @@ pub(crate) mod test {
                 assert!(db.get(&k).await.unwrap().is_none());
             }
         }
-
-        let hasher = qmdb::hasher::<Sha256>();
         let bounds = db.bounds();
-        let inactivity_floor = db.inactivity_floor_loc().await;
+        let inactivity_floor = db.inactivity_floor_loc();
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
-            assert!(verify_proof(&hasher, &proof, loc, &ops, &root));
+            assert!(verify_proof::<Sha256, _, _>(&proof, loc, &ops, &root));
         }
 
         db.destroy().await.unwrap();
@@ -843,9 +925,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let hasher = qmdb::hasher::<Sha256>();
-        assert!(verify_proof(
-            &hasher,
+        assert!(verify_proof::<Sha256, _, _>(
             &historical_proof,
             start_loc,
             &historical_ops,
@@ -872,8 +952,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof2.leaves, original_op_count);
         assert_eq!(historical_proof2.digests, regular_proof.digests);
         assert_eq!(historical_ops2, regular_ops);
-        assert!(verify_proof(
-            &hasher,
+        assert!(verify_proof::<Sha256, _, _>(
             &historical_proof2,
             start_loc,
             &historical_ops2,
@@ -922,15 +1001,12 @@ pub(crate) mod test {
         assert_eq!(proof.leaves, historical_op_count);
         assert_eq!(ops.len(), expected_ops_len);
 
-        let hasher = qmdb::hasher::<Sha256>();
-
         // Changing the proof digests should cause verification to fail
         {
             let mut tampered_proof = proof.clone();
             tampered_proof.digests[0] = Sha256::hash(b"invalid");
             let root_hash = db.root();
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -943,8 +1019,7 @@ pub(crate) mod test {
             let mut tampered_proof = proof.clone();
             tampered_proof.digests.push(Sha256::hash(b"invalid"));
             let root_hash = db.root();
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -959,8 +1034,7 @@ pub(crate) mod test {
             // Swap first two ops if we have at least 2
             if tampered_ops.len() >= 2 {
                 tampered_ops.swap(0, 1);
-                assert!(!verify_proof(
-                    &hasher,
+                assert!(!verify_proof::<Sha256, _, _>(
                     &proof,
                     Location::new(1),
                     &tampered_ops,
@@ -974,8 +1048,7 @@ pub(crate) mod test {
             let root_hash = db.root();
             let mut tampered_ops = ops.clone();
             tampered_ops.push(tampered_ops[0].clone());
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(1),
                 &tampered_ops,
@@ -986,8 +1059,7 @@ pub(crate) mod test {
         // Changing the start location should cause verification to fail
         {
             let root_hash = db.root();
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(2),
                 &ops,
@@ -998,8 +1070,7 @@ pub(crate) mod test {
         // Changing the root digest should cause verification to fail
         {
             let invalid_root = Sha256::hash(b"invalid");
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(1),
                 &ops,
@@ -1012,8 +1083,7 @@ pub(crate) mod test {
             let mut tampered_proof = proof.clone();
             tampered_proof.leaves = Location::new(100);
             let root_hash = db.root();
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -1151,7 +1221,7 @@ pub(crate) mod test {
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_parallel::{Sequential, Strategy};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
 
     // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
     type UnorderedFixed =
@@ -1249,9 +1319,9 @@ pub(crate) mod test {
         use crate::{
             index::{ordered::Index as OrderedIndex, unordered::Index as UnorderedIndex},
             journal::contiguous::{fixed::Journal as FJournal, variable::Journal as VJournal},
-            merkle::{mmb, Location},
+            merkle::{Location, mmb},
             qmdb::any::{
-                operation::{update, Operation},
+                operation::{Operation, update},
                 value::{FixedEncoding, VariableEncoding},
             },
         };
@@ -1442,6 +1512,7 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_non_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
     test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
 
     fn key(i: u64) -> Digest {
@@ -2624,13 +2695,13 @@ mod bitmap_tests {
     //! so one variant (`unordered::variable`) suffices as the test bed.
     use crate::{
         merkle::Location,
-        qmdb::any::unordered::variable::test::{create_test_config, AnyTest},
+        qmdb::any::unordered::variable::test::{AnyTest, create_test_config},
     };
-    use commonware_cryptography::{Hasher, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::{boxed, test_traced};
     use commonware_runtime::{
-        deterministic::{self, Context},
         Runner as _, Supervisor as _,
+        deterministic::{self, Context},
     };
     use commonware_utils::bitmap::Readable as _;
 

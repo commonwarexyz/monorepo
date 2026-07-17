@@ -6,15 +6,15 @@ cfg_if::cfg_if! {
     }
 }
 use super::common::{
-    impl_private_key_wrapper, impl_public_key_wrapper, PrivateKeyInner, PublicKeyInner, CURVE_NAME,
-    PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH,
+    CURVE_NAME, PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, PrivateKeyInner, PublicKeyInner,
+    impl_private_key_wrapper, impl_public_key_wrapper,
 };
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
+use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
-use commonware_utils::{union_unique, Array, Span};
+use commonware_utils::{Array, Span, union_unique};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -52,7 +52,7 @@ impl PrivateKey {
             Cow::Owned(union_unique(namespace, msg))
         });
         let signature: p256::ecdsa::Signature = self.0.key.expose(|key| key.sign(&payload));
-        let signature = signature.normalize_s().unwrap_or(signature);
+        let signature = signature.normalize_s();
         Signature::try_from(signature).expect("freshly signed signature is valid")
     }
 }
@@ -199,7 +199,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKey(PrivateKeyInner::random(&mut rand));
@@ -216,7 +216,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{secp256r1::common::tests::*, Signer as _, Verifier as _};
+    use crate::{Signer as _, Verifier as _, secp256r1::common::tests::*};
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
     use p256::elliptic_curve::scalar::IsHigh;
@@ -341,7 +341,7 @@ mod tests {
             .unwrap(),
         );
         let signature = private_key.sign_inner(None, message);
-        assert_eq!(signature.to_vec(), exp_sig.normalize_s().unwrap().to_vec());
+        assert_eq!(signature.to_vec(), exp_sig.normalize_s().to_vec());
 
         let (message, exp_sig) = (
             b"test",
@@ -555,9 +555,7 @@ mod tests {
                 assert!(Signature::decode(sig.as_ref()).is_err());
                 assert!(Signature::decode(Bytes::from(sig)).is_err());
 
-                if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
-                    ecdsa_signature = normalized_sig;
-                }
+                ecdsa_signature = ecdsa_signature.normalize_s();
             }
             let signature = Signature::try_from(ecdsa_signature).unwrap();
             public_key.verify_inner(None, &message, &signature)

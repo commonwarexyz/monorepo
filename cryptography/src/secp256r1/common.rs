@@ -9,8 +9,11 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use p256::ecdsa::{SigningKey, VerifyingKey};
-use rand_core::CryptoRngCore;
+use p256::{
+    ecdsa::{SigningKey, VerifyingKey},
+    elliptic_curve::Generate,
+};
+use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 pub const CURVE_NAME: &str = "secp256r1";
@@ -48,8 +51,8 @@ impl PrivateKeyInner {
 }
 
 impl Random for PrivateKeyInner {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
-        Self::new(SigningKey::random(&mut rng))
+    fn random(mut rng: impl CryptoRng) -> Self {
+        Self::new(SigningKey::generate_from_rng(&mut rng))
     }
 }
 
@@ -94,7 +97,7 @@ impl Display for PrivateKeyInner {
 impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         Ok(Self::random(&mut rand))
@@ -110,7 +113,7 @@ pub struct PublicKeyInner {
 
 impl PublicKeyInner {
     pub fn new(key: VerifyingKey) -> Self {
-        let encoded = key.to_encoded_point(true);
+        let encoded = key.to_sec1_point(true);
         let raw: [u8; PUBLIC_KEY_LENGTH] = encoded.as_bytes().try_into().unwrap();
         Self { raw, key }
     }
@@ -123,7 +126,7 @@ impl PublicKeyInner {
     /// in memory, extracting the uncompressed form directly is faster.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub fn to_uncompressed(&self) -> [u8; 65] {
-        let encoded = self.key.to_encoded_point(false);
+        let encoded = self.key.to_sec1_point(false);
         encoded.as_bytes().try_into().unwrap()
     }
 }
@@ -194,7 +197,7 @@ impl Display for PublicKeyInner {
 impl arbitrary::Arbitrary<'_> for PublicKeyInner {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKeyInner::random(&mut rand);
@@ -208,7 +211,7 @@ macro_rules! impl_private_key_wrapper {
         impl crate::PrivateKey for $name {}
 
         impl commonware_math::algebra::Random for $name {
-            fn random(rng: impl rand_core::CryptoRngCore) -> Self {
+            fn random(rng: impl rand_core::CryptoRng) -> Self {
                 Self(PrivateKeyInner::random(rng))
             }
         }
@@ -585,9 +588,9 @@ pub(crate) mod tests {
     pub fn parse_signature(r: &str, s: &str) -> p256::ecdsa::Signature {
         let vec_r = commonware_formatting::from_hex(r).unwrap();
         let vec_s = commonware_formatting::from_hex(s).unwrap();
-        let f1 = p256::FieldBytes::from_slice(&vec_r);
-        let f2 = p256::FieldBytes::from_slice(&vec_s);
-        p256::ecdsa::Signature::from_scalars(*f1, *f2).unwrap()
+        let f1 = p256::FieldBytes::try_from(vec_r.as_slice()).unwrap();
+        let f2 = p256::FieldBytes::try_from(vec_s.as_slice()).unwrap();
+        p256::ecdsa::Signature::from_scalars(f1, f2).unwrap()
     }
 
     pub fn vector_sig_verification_1_raw() -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool)
@@ -716,8 +719,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_10_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_10_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "224a4d65b958f6d6afb2904863efd2a734b31798884801fcab5a590f4d6da9de",
             "178d51fddada62806f097aa615d33b8f2404e6b1479f5fd4859d595734d6d2b9",
@@ -730,8 +733,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_11_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_11_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "43691c7795a57ead8c5c68536fe934538d46f12889680a9cb6d055a066228369",
             "f8790110b3c3b281aa1eae037d4f1234aff587d903d93ba3af225c27ddc9ccac",
@@ -744,8 +747,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_12_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_12_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "9157dbfcf8cf385f5bb1568ad5c6e2a8652ba6dfc63bc1753edf5268cb7eb596",
             "972570f4313d47fc96f7c02d5594d77d46f91e949808825b3d31f029e8296405",
@@ -758,8 +761,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_13_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_13_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "072b10c081a4c1713a294f248aef850e297991aca47fa96a7470abe3b8acfdda",
             "9581145cca04a0fb94cedce752c8f0370861916d2a94e7c647c5373ce6a4c8f5",
@@ -772,8 +775,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_14_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_14_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "09308ea5bfad6e5adf408634b3d5ce9240d35442f7fe116452aaec0d25be8c24",
             "f40c93e023ef494b1c3079b2d10ef67f3170740495ce2cc57f8ee4b0618b8ee5",
@@ -786,8 +789,8 @@ pub(crate) mod tests {
         (public_key, sig, message, false)
     }
 
-    pub fn vector_sig_verification_15_raw(
-    ) -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
+    pub fn vector_sig_verification_15_raw()
+    -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool) {
         let (public_key, sig, message) = vector_sig_verification_raw(
             "2d98ea01f754d34bbc3003df5050200abf445ec728556d7ed7d5c54c55552b6d",
             "9b52672742d637a32add056dfd6d8792f2a33c2e69dafabea09b960bc61e230a",

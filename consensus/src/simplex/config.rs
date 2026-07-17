@@ -3,14 +3,14 @@ use super::{
     types::{Activity, Context, Finalization},
 };
 use crate::{
-    types::{Epoch, ViewDelta},
     CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
+    types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Controls whether and how the engine proactively forwards certified blocks
@@ -53,7 +53,7 @@ pub enum Floor<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Floor<S, D> {
     fn assert<Rng>(&self, epoch: Epoch, rng: &mut Rng, scheme: &S, strategy: &impl Strategy)
     where
-        Rng: CryptoRngCore,
+        Rng: CryptoRng,
         S: super::scheme::Scheme<D>,
     {
         if let Self::Finalized(finalization) = self {
@@ -183,22 +183,22 @@ where
 }
 
 impl<
-        S: Scheme,
-        L: Elector<S>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
-        R: Relay,
-        F: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
-    > Config<S, L, B, D, A, R, F, T>
+    S: Scheme,
+    L: Elector<S>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
+    R: Relay,
+    F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
+> Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.
     ///
     /// The RNG is used to verify finalized floor certificates.
     pub fn assert<Rng>(&self, rng: &mut Rng)
     where
-        Rng: CryptoRngCore,
+        Rng: CryptoRng,
         S: super::scheme::Scheme<D>,
     {
         assert!(

@@ -1,12 +1,13 @@
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_codec::Encode;
 use commonware_cryptography::{
+    Signer as _,
     bls12381::{dkg::feldman_desmedt::deal_anonymous, primitives::variant::MinSig},
-    ed25519, Signer as _,
+    ed25519,
 };
 use commonware_formatting::hex;
 use commonware_utils::{N3f1, NZU32};
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 fn main() {
     // Setup parsing

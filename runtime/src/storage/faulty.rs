@@ -1,14 +1,14 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{deterministic::BoxDynRng, Error, Handle, IoBufs, IoBufsMut};
+use crate::{Error, Handle, IoBufs, IoBufsMut, deterministic::BoxDynRng};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
-use rand::Rng;
+use rand::RngExt as _;
 use std::{
     io::Error as IoError,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -171,7 +171,7 @@ impl Oracle {
         if rate >= 1.0 {
             return true;
         }
-        self.rng.lock().gen::<f64>() < rate
+        self.rng.lock().random::<f64>() < rate
     }
 
     /// Generate a random value strictly between `from` and `to`, or None if not possible.
@@ -183,7 +183,7 @@ impl Oracle {
         if max - min <= 1 {
             return None;
         }
-        Some(self.rng.lock().gen_range(min + 1..max))
+        Some(self.rng.lock().random_range(min + 1..max))
     }
 
     /// Try to generate a partial operation target. Returns Some if both the rate
@@ -404,11 +404,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
+        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
-        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
     };
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();

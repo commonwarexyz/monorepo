@@ -1,13 +1,14 @@
-use super::utils::{append_random, init, FreezerType, Key};
+use super::utils::{FreezerType, Key, append_random, init};
 use commonware_runtime::{
+    Runner,
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner,
 };
 use commonware_storage::freezer::Identifier;
-use criterion::{criterion_group, Criterion};
+use commonware_utils::TestRng;
+use criterion::{Criterion, criterion_group};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
@@ -23,10 +24,10 @@ const READS: [usize; 3] = [1_000, 10_000, 50_000];
 
 /// Select random keys for benchmarking.
 pub fn select_keys(count: usize, keys: &[Key]) -> Vec<Key> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut selected_keys = Vec::with_capacity(count);
     for _ in 0..count {
-        let idx = rng.gen_range(0..keys.len());
+        let idx = rng.random_range(0..keys.len());
         selected_keys.push(keys[idx].clone());
     }
     selected_keys

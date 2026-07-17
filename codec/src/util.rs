@@ -1,6 +1,6 @@
 //! Codec utility functions
 
-use crate::{extensions::ReadExt as _, Error, FixedSize, Read};
+use crate::{Error, FixedSize, Read, extensions::ReadExt as _};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::Buf;

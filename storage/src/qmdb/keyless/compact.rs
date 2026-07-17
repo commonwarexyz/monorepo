@@ -24,10 +24,11 @@
 
 use super::operation::Operation;
 use crate::{
+    Context,
     journal::contiguous::variable::{self, Config as JournalConfig},
-    merkle::{batch, compact as compact_merkle, Family, Location},
+    merkle::{Family, Location, batch, compact as compact_merkle},
     qmdb::{
-        self,
+        self, Error,
         any::value::ValueEncoding,
         batch_chain::{self, Bounds},
         compact::{
@@ -35,9 +36,7 @@ use crate::{
             witness::{self, VerifiedWitness, Witness},
         },
         sync::compact as compact_sync,
-        Error,
     },
-    Context,
 };
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
@@ -114,7 +113,7 @@ impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, 
 where
     Operation<F, V>: EncodeShared,
 {
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
@@ -183,7 +182,7 @@ where
         level = "info",
         skip_all
     )]
-    pub fn merkleize<E, C>(
+    pub async fn merkleize<E, C>(
         self,
         db: &Db<F, E, V, H, C, S>,
         metadata: Option<V::Value>,
@@ -202,21 +201,18 @@ where
         ops.push(Operation::Commit(metadata.clone(), inactivity_floor));
 
         let total_size = self.base_size + ops.len() as u64;
-        let merkle = compact_batch::merkleize_ops::<F, H, S, _>(
-            &db.merkle,
-            self.merkle_batch,
-            ops.as_slice(),
-        );
-
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let hasher = qmdb::hasher::<H>();
-        let root = db
-            .merkle
-            .with_mem(|mem| merkle.root(mem, &hasher, inactive_peaks))
-            .expect("inactive_peaks computed from batch size");
+        let (merkle, root) = compact_batch::merkleize_ops::<F, H, S, _>(
+            &db.merkle,
+            self.merkle_batch,
+            ops,
+            inactive_peaks,
+        )
+        .await
+        .expect("inactive_peaks computed from batch size");
 
         let ancestors =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors());
@@ -473,7 +469,8 @@ where
     ///
     /// # Errors
     ///
-    /// - [`Error::StaleBatch`] if the batch was created from a stale DB state.
+    /// - [`Error::StaleBatch`] if the batch is detected as stale (see
+    ///   [`crate::qmdb::batch_chain`] for more details).
     /// - [`Error::FloorRegressed`] if any commit in the chain declares a floor below the
     ///   previous commit's floor.
     /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
@@ -586,13 +583,13 @@ mod tests {
         merkle::mmr,
         qmdb::{any::value::FixedEncoding, compact::witness},
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256, (), Sequential>;
@@ -634,14 +631,16 @@ mod tests {
             let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-stale").await;
             let floor = db.inactivity_floor_loc();
 
-            let batch_a =
-                db.new_batch()
-                    .append(U64::new(1))
-                    .merkleize(&db, Some(U64::new(11)), floor);
-            let batch_b =
-                db.new_batch()
-                    .append(U64::new(2))
-                    .merkleize(&db, Some(U64::new(22)), floor);
+            let batch_a = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            let batch_b = db
+                .new_batch()
+                .append(U64::new(2))
+                .merkleize(&db, Some(U64::new(22)), floor)
+                .await;
 
             let expected_root = batch_a.root();
             db.apply_batch(batch_a).unwrap();
@@ -671,11 +670,12 @@ mod tests {
                 "snapshot before any mutation should match the live root"
             );
 
-            db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                &db,
-                Some(U64::new(11)),
-                floor,
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&db, Some(U64::new(11)), floor)
+                    .await,
+            )
             .unwrap();
 
             // Leave the witness cache behind the live Merkle state.
@@ -702,20 +702,21 @@ mod tests {
             let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-chained-stale").await;
             let floor = db.inactivity_floor_loc();
 
-            let parent =
-                db.new_batch()
-                    .append(U64::new(1))
-                    .merkleize(&db, Some(U64::new(11)), floor);
-            let child_a = parent.new_batch::<Sha256>().append(U64::new(2)).merkleize(
-                &db,
-                Some(U64::new(22)),
-                floor,
-            );
-            let child_b = parent.new_batch::<Sha256>().append(U64::new(3)).merkleize(
-                &db,
-                Some(U64::new(33)),
-                floor,
-            );
+            let parent = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            let child_a = parent
+                .new_batch::<Sha256>()
+                .append(U64::new(2))
+                .merkleize(&db, Some(U64::new(22)), floor)
+                .await;
+            let child_b = parent
+                .new_batch::<Sha256>()
+                .append(U64::new(3))
+                .merkleize(&db, Some(U64::new(33)), floor)
+                .await;
 
             db.apply_batch(child_a).unwrap();
             assert!(matches!(
@@ -734,15 +735,16 @@ mod tests {
                 open_db::<mmr::Family>(context.child("db"), "keyless-child-before-parent").await;
             let floor = db.inactivity_floor_loc();
 
-            let parent =
-                db.new_batch()
-                    .append(U64::new(1))
-                    .merkleize(&db, Some(U64::new(11)), floor);
-            let child = parent.new_batch::<Sha256>().append(U64::new(2)).merkleize(
-                &db,
-                Some(U64::new(22)),
-                floor,
-            );
+            let parent = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            let child = parent
+                .new_batch::<Sha256>()
+                .append(U64::new(2))
+                .merkleize(&db, Some(U64::new(22)), floor)
+                .await;
 
             db.apply_batch(child).unwrap();
             assert!(matches!(
@@ -760,15 +762,16 @@ mod tests {
             let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-parent-child").await;
             let floor = db.inactivity_floor_loc();
 
-            let parent =
-                db.new_batch()
-                    .append(U64::new(1))
-                    .merkleize(&db, Some(U64::new(11)), floor);
-            let child = parent.new_batch::<Sha256>().append(U64::new(2)).merkleize(
-                &db,
-                Some(U64::new(22)),
-                floor,
-            );
+            let parent = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            let child = parent
+                .new_batch::<Sha256>()
+                .append(U64::new(2))
+                .merkleize(&db, Some(U64::new(22)), floor)
+                .await;
             let expected_root = child.root();
 
             db.apply_batch(parent).unwrap();
@@ -788,13 +791,14 @@ mod tests {
                 open_db::<mmr::Family>(context.child("db"), "keyless-floor-regressed").await;
 
             let advance_floor = db.new_batch().append(U64::new(1));
-            let advance_floor = advance_floor.merkleize(&db, None, Location::new(1));
+            let advance_floor = advance_floor.merkleize(&db, None, Location::new(1)).await;
             db.apply_batch(advance_floor).unwrap();
 
-            let regressed =
-                db.new_batch()
-                    .append(U64::new(2))
-                    .merkleize(&db, None, Location::new(0));
+            let regressed = db
+                .new_batch()
+                .append(U64::new(2))
+                .merkleize(&db, None, Location::new(0))
+                .await;
 
             assert!(matches!(
                 db.apply_batch(regressed),
@@ -820,13 +824,14 @@ mod tests {
             let parent = db
                 .new_batch()
                 .append(U64::new(1))
-                .merkleize(&db, None, Location::new(2));
+                .merkleize(&db, None, Location::new(2))
+                .await;
             // child: append + commit at loc 4 with floor=1 (regressed from parent's floor=2).
-            let child = parent.new_batch::<Sha256>().append(U64::new(2)).merkleize(
-                &db,
-                None,
-                Location::new(1),
-            );
+            let child = parent
+                .new_batch::<Sha256>()
+                .append(U64::new(2))
+                .merkleize(&db, None, Location::new(1))
+                .await;
 
             assert!(matches!(
                 db.apply_batch(child),
@@ -849,7 +854,8 @@ mod tests {
             db.apply_batch(
                 db.new_batch()
                     .append(v1)
-                    .merkleize(&db, Some(meta1.clone()), floor1),
+                    .merkleize(&db, Some(meta1.clone()), floor1)
+                    .await,
             )
             .unwrap();
             db.sync().await.unwrap();
@@ -862,7 +868,8 @@ mod tests {
             db.apply_batch(
                 db.new_batch()
                     .append(v2)
-                    .merkleize(&db, Some(meta2.clone()), floor2),
+                    .merkleize(&db, Some(meta2.clone()), floor2)
+                    .await,
             )
             .unwrap();
             db.sync().await.unwrap();
@@ -889,21 +896,23 @@ mod tests {
 
             let root_after_first = {
                 let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
-                db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                    &db,
-                    Some(meta1.clone()),
-                    floor1,
-                ))
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(1))
+                        .merkleize(&db, Some(meta1.clone()), floor1)
+                        .await,
+                )
                 .unwrap();
                 db.sync().await.unwrap();
                 let root = db.root();
                 let size_after_first = db.size();
 
-                db.apply_batch(db.new_batch().append(U64::new(2)).merkleize(
-                    &db,
-                    Some(meta2),
-                    floor2,
-                ))
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(2))
+                        .merkleize(&db, Some(meta2), floor2)
+                        .await,
+                )
                 .unwrap();
                 db.sync().await.unwrap();
 
@@ -929,19 +938,21 @@ mod tests {
 
             let root_after_second = {
                 let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
-                db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                    &db,
-                    Some(meta1),
-                    Location::new(0),
-                ))
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(1))
+                        .merkleize(&db, Some(meta1), Location::new(0))
+                        .await,
+                )
                 .unwrap();
                 db.commit().await.unwrap();
 
-                db.apply_batch(db.new_batch().append(U64::new(2)).merkleize(
-                    &db,
-                    Some(meta2.clone()),
-                    Location::new(1),
-                ))
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(2))
+                        .merkleize(&db, Some(meta2.clone()), Location::new(1))
+                        .await,
+                )
                 .unwrap();
                 db.commit().await.unwrap();
                 db.root()
@@ -965,21 +976,23 @@ mod tests {
 
             let (root_a, size_a) = {
                 let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
-                db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                    &db,
-                    Some(meta1.clone()),
-                    Location::new(0),
-                ))
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(1))
+                        .merkleize(&db, Some(meta1.clone()), Location::new(0))
+                        .await,
+                )
                 .unwrap();
                 db.commit().await.unwrap();
                 let root_a = db.root();
                 let size_a = db.size();
 
-                db.apply_batch(db.new_batch().append(U64::new(2)).merkleize(
-                    &db,
-                    Some(meta2),
-                    Location::new(1),
-                ))
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(2))
+                        .merkleize(&db, Some(meta2), Location::new(1))
+                        .await,
+                )
                 .unwrap();
                 db.commit().await.unwrap();
                 (root_a, size_a)
@@ -1003,11 +1016,12 @@ mod tests {
 
             let root = {
                 let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
-                db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                    &db,
-                    Some(meta.clone()),
-                    Location::new(0),
-                ))
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(1))
+                        .merkleize(&db, Some(meta.clone()), Location::new(0))
+                        .await,
+                )
                 .unwrap();
                 db.commit().await.unwrap();
                 // The commit already made the state durable, so this is a no-op.
@@ -1034,11 +1048,13 @@ mod tests {
             let target_b = {
                 let mut source = open_db::<mmr::Family>(context.child("src"), src).await;
                 source
-                    .apply_batch(source.new_batch().append(U64::new(2)).merkleize(
-                        &source,
-                        Some(meta_b.clone()),
-                        Location::new(0),
-                    ))
+                    .apply_batch(
+                        source
+                            .new_batch()
+                            .append(U64::new(2))
+                            .merkleize(&source, Some(meta_b.clone()), Location::new(0))
+                            .await,
+                    )
                     .unwrap();
                 source.sync().await.unwrap();
                 source.target()
@@ -1061,11 +1077,13 @@ mod tests {
             {
                 let mut seeded = open_db::<mmr::Family>(context.child("seed"), dst).await;
                 seeded
-                    .apply_batch(seeded.new_batch().append(U64::new(1)).merkleize(
-                        &seeded,
-                        Some(meta_a),
-                        Location::new(0),
-                    ))
+                    .apply_batch(
+                        seeded
+                            .new_batch()
+                            .append(U64::new(1))
+                            .merkleize(&seeded, Some(meta_a), Location::new(0))
+                            .await,
+                    )
                     .unwrap();
                 seeded.sync().await.unwrap();
                 assert_ne!(seeded.target(), target_b);
@@ -1100,11 +1118,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-witness-tamper";
             let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
-            db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
-                &db,
-                Some(U64::new(11)),
-                Location::new(1),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(1))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             drop(db);
@@ -1137,19 +1156,21 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-corrupt-rewind-target";
             let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
-            db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                &db,
-                None,
-                Location::new(1),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&db, None, Location::new(1))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             let rewind_target = db.target().leaf_count;
-            db.apply_batch(db.new_batch().append(U64::new(2)).merkleize(
-                &db,
-                None,
-                Location::new(1),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(2))
+                    .merkleize(&db, None, Location::new(1))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             let tip_target = db.target();
@@ -1202,11 +1223,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-interrupted-import";
             let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
-            db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
-                &db,
-                Some(U64::new(11)),
-                Location::new(1),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(1))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             drop(db);
@@ -1236,11 +1258,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-invalid-persisted-floor";
             let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
-            db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
-                &db,
-                Some(U64::new(11)),
-                Location::new(1),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(1))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             drop(db);
@@ -1278,11 +1301,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-pins-tamper";
             let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
-            db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
-                &db,
-                Some(U64::new(11)),
-                Location::new(1),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(1))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             drop(db);
@@ -1311,11 +1335,12 @@ mod tests {
     fn test_compact_rewind_to_current_is_noop() {
         deterministic::Runner::default().start(|context| async move {
             let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-rewind-noop").await;
-            db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                &db,
-                Some(U64::new(11)),
-                Location::new(0),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(0))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             let root = db.root();
@@ -1333,11 +1358,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-prune-past-tip";
             let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
-            db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                &db,
-                Some(U64::new(11)),
-                Location::new(0),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(0))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             let target = db.target();
@@ -1384,7 +1410,8 @@ mod tests {
                 db.new_batch()
                     .append(U64::new(1))
                     .append(U64::new(2))
-                    .merkleize(&db, Some(U64::new(11)), floor),
+                    .merkleize(&db, Some(U64::new(11)), floor)
+                    .await,
             )
             .unwrap();
             db.sync().await.unwrap();
@@ -1393,11 +1420,12 @@ mod tests {
             assert_eq!(size_a, Location::new(4));
 
             // A second commit moves the size to 6.
-            db.apply_batch(db.new_batch().append(U64::new(3)).merkleize(
-                &db,
-                Some(U64::new(22)),
-                floor,
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(3))
+                    .merkleize(&db, Some(U64::new(22)), floor)
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             let root_b = db.root();
@@ -1429,11 +1457,12 @@ mod tests {
             let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
 
             // Commit state A.
-            db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                &db,
-                Some(U64::new(11)),
-                Location::new(1),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(1))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             let target_a = db.target();
@@ -1461,11 +1490,12 @@ mod tests {
             let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
 
             // Commit A, B, C, recording the state after A.
-            db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                &db,
-                Some(U64::new(11)),
-                Location::new(0),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&db, Some(U64::new(11)), Location::new(0))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             let root_a = db.root();
@@ -1473,11 +1503,12 @@ mod tests {
             let target_a = db.target();
 
             for i in [2u64, 3] {
-                db.apply_batch(db.new_batch().append(U64::new(i)).merkleize(
-                    &db,
-                    Some(U64::new(i * 11)),
-                    Location::new(0),
-                ))
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(i))
+                        .merkleize(&db, Some(U64::new(i * 11)), Location::new(0))
+                        .await,
+                )
                 .unwrap();
                 db.sync().await.unwrap();
             }
@@ -1515,11 +1546,12 @@ mod tests {
             // Commit A, B, C.
             let mut sizes = Vec::new();
             for i in [1u64, 2, 3] {
-                db.apply_batch(db.new_batch().append(U64::new(i)).merkleize(
-                    &db,
-                    Some(U64::new(i * 11)),
-                    Location::new(0),
-                ))
+                db.apply_batch(
+                    db.new_batch()
+                        .append(U64::new(i))
+                        .merkleize(&db, Some(U64::new(i * 11)), Location::new(0))
+                        .await,
+                )
                 .unwrap();
                 db.sync().await.unwrap();
                 sizes.push(db.size());
@@ -1546,11 +1578,12 @@ mod tests {
                 open_db::<mmr::Family>(context.child("db"), "keyless-rewind-preserves-pre-advance")
                     .await;
 
-            db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                &db,
-                None,
-                Location::new(0),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&db, None, Location::new(0))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             let size_after_first = db.size();
@@ -1559,14 +1592,16 @@ mod tests {
             let held = db
                 .new_batch()
                 .append(U64::new(2))
-                .merkleize(&db, None, Location::new(0));
+                .merkleize(&db, None, Location::new(0))
+                .await;
 
             // Advance past that state and commit, then rewind back to it.
-            db.apply_batch(db.new_batch().append(U64::new(3)).merkleize(
-                &db,
-                None,
-                Location::new(0),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(3))
+                    .merkleize(&db, None, Location::new(0))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             db.rewind(size_after_first).await.unwrap();
@@ -1589,7 +1624,8 @@ mod tests {
                 db.new_batch()
                     .append(U64::new(1))
                     .append(U64::new(2))
-                    .merkleize(&db, Some(U64::new(11)), Location::new(0)),
+                    .merkleize(&db, Some(U64::new(11)), Location::new(0))
+                    .await,
             )
             .unwrap();
             db.sync().await.unwrap();
@@ -1616,7 +1652,8 @@ mod tests {
                     db.new_batch()
                         .append(U64::new(1))
                         .append(U64::new(2))
-                        .merkleize(&db, Some(U64::new(11)), Location::new(0)),
+                        .merkleize(&db, Some(U64::new(11)), Location::new(0))
+                        .await,
                 )
                 .unwrap();
                 db.sync().await.unwrap();
@@ -1648,17 +1685,19 @@ mod tests {
                 db.new_batch()
                     .append(U64::new(1))
                     .append(U64::new(2))
-                    .merkleize(&db, Some(U64::new(11)), Location::new(0)),
+                    .merkleize(&db, Some(U64::new(11)), Location::new(0))
+                    .await,
             )
             .unwrap();
             db.sync().await.unwrap();
             let root_after_first = db.root();
 
-            db.apply_batch(db.new_batch().append(U64::new(3)).merkleize(
-                &db,
-                Some(U64::new(22)),
-                Location::new(1),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(3))
+                    .merkleize(&db, Some(U64::new(22)), Location::new(1))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
 
@@ -1681,20 +1720,22 @@ mod tests {
             let mut db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-rewind-makes-stale").await;
 
-            db.apply_batch(db.new_batch().append(U64::new(1)).merkleize(
-                &db,
-                None,
-                Location::new(0),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&db, None, Location::new(0))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
             let size_after_first = db.size();
 
-            db.apply_batch(db.new_batch().append(U64::new(2)).merkleize(
-                &db,
-                None,
-                Location::new(0),
-            ))
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(2))
+                    .merkleize(&db, None, Location::new(0))
+                    .await,
+            )
             .unwrap();
             db.sync().await.unwrap();
 
@@ -1702,7 +1743,8 @@ mod tests {
             let held = db
                 .new_batch()
                 .append(U64::new(3))
-                .merkleize(&db, None, Location::new(0));
+                .merkleize(&db, None, Location::new(0))
+                .await;
 
             db.rewind(size_after_first).await.unwrap();
 
@@ -1722,7 +1764,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-floor-beyond").await;
 
-            let batch = db.new_batch().merkleize(&db, None, Location::new(2));
+            let batch = db.new_batch().merkleize(&db, None, Location::new(2)).await;
 
             assert!(matches!(
                 db.apply_batch(batch),
@@ -1746,13 +1788,14 @@ mod tests {
             let parent = db
                 .new_batch()
                 .append(U64::new(1))
-                .merkleize(&db, None, Location::new(3));
+                .merkleize(&db, None, Location::new(3))
+                .await;
             // child: valid on its own (floor=0), but parent's floor is bad.
-            let child = parent.new_batch::<Sha256>().append(U64::new(2)).merkleize(
-                &db,
-                None,
-                Location::new(0),
-            );
+            let child = parent
+                .new_batch::<Sha256>()
+                .append(U64::new(2))
+                .merkleize(&db, None, Location::new(0))
+                .await;
 
             assert!(matches!(
                 db.apply_batch(child),

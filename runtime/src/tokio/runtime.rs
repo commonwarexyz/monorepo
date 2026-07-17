@@ -1,25 +1,24 @@
+#[cfg(feature = "external")]
+use crate::Pacer;
 #[cfg(not(feature = "iouring-network"))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
-#[cfg(feature = "external")]
-use crate::Pacer;
 use crate::{
-    child_label,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
+    Spawner as _, StreamOf, Supervisor as _, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::{
-        add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
-        Register, Registered, Registry,
+        CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
+        task::Label, validate_label,
     },
-    utils::{self, signal::Stopper, supervision::Tree, Panicker},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Name, SinkOf, Spawner as _,
-    StreamOf, Supervisor as _, METRICS_PREFIX,
+    utils::{self, Panicker, signal::Stopper, supervision::Tree},
 };
 #[cfg(feature = "iouring-network")]
 use crate::{
@@ -28,13 +27,14 @@ use crate::{
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
-use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, NZUsize};
+use commonware_parallel::Rayon;
+use commonware_utils::{NZUsize, sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use rand::{rngs::OsRng, CryptoRng, RngCore};
+use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use std::{
+    convert::Infallible,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -97,11 +97,18 @@ pub struct NetworkConfig {
     /// Defaults to `true`.
     zero_linger: bool,
 
+    /// Timeout for establishing an outbound TCP connection.
+    ///
+    /// Defaults to 10 seconds.
+    connect_timeout: Duration,
+
     /// Read/write timeout for network operations.
     ///
     /// Bounds the full `Sink::send` and `Stream::recv` calls rather than each
-    /// individual socket syscall. Larger
-    /// batched writes may therefore require a larger timeout.
+    /// individual socket syscall. Larger batched writes may therefore require a
+    /// larger timeout.
+    ///
+    /// Defaults to 60 seconds.
     read_write_timeout: Duration,
 }
 
@@ -110,6 +117,7 @@ impl Default for NetworkConfig {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
+            connect_timeout: Duration::from_secs(10),
             read_write_timeout: Duration::from_secs(60),
         }
     }
@@ -174,7 +182,7 @@ pub struct Config {
 impl Config {
     /// Returns a new [Config] with default values.
     pub fn new() -> Self {
-        let rng = OsRng.next_u64();
+        let rng = sys_rng().next_u64();
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
@@ -217,6 +225,11 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.network_cfg.connect_timeout = timeout;
+        self
+    }
+    /// See [Config]
     pub const fn with_read_write_timeout(mut self, d: Duration) -> Self {
         self.network_cfg.read_write_timeout = d;
         self
@@ -242,12 +255,12 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.network_buffer_pool_cfg = Some(cfg);
         self
     }
     /// See [Config]
-    pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.storage_buffer_pool_cfg = Some(cfg);
         self
     }
@@ -272,6 +285,10 @@ impl Config {
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
+    }
+    /// See [Config]
+    pub const fn connect_timeout(&self) -> Duration {
+        self.network_cfg.connect_timeout
     }
     /// See [Config]
     pub const fn read_write_timeout(&self) -> Duration {
@@ -436,6 +453,7 @@ impl crate::Runner for Runner {
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     zero_linger: self.cfg.network_cfg.zero_linger,
+                    connect_timeout: self.cfg.network_cfg.connect_timeout,
                     read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
@@ -458,6 +476,7 @@ impl crate::Runner for Runner {
                 );
             } else {
                 let config = TokioNetworkConfig::default()
+                    .with_connect_timeout(self.cfg.network_cfg.connect_timeout)
                     .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
@@ -635,13 +654,10 @@ impl crate::Spawner for Context {
 }
 
 #[stability(BETA)]
-impl crate::ThreadPooler for Context {
-    fn create_thread_pool(
-        &self,
-        concurrency: NonZeroUsize,
-    ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        ThreadPoolBuilder::new()
-            .num_threads(concurrency.get())
+impl crate::Strategizer for Context {
+    fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(parallelism.get())
             .spawn_handler(move |thread| {
                 // Tasks spawned in a thread pool are expected to run longer than any single
                 // task and thus should be provisioned as a dedicated thread.
@@ -651,7 +667,8 @@ impl crate::ThreadPooler for Context {
                 Ok(())
             })
             .build()
-            .map(Arc::new)
+            .expect("failed to create Tokio Rayon thread pool");
+        Rayon::with_pool(Arc::new(pool))
     }
 }
 
@@ -778,25 +795,24 @@ impl crate::Resolver for Context {
     }
 }
 
-impl RngCore for Context {
-    fn next_u32(&mut self) -> u32 {
-        OsRng.next_u32()
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(sys_rng().next_u32())
     }
 
-    fn next_u64(&mut self) -> u64 {
-        OsRng.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(sys_rng().next_u64())
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        OsRng.fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        OsRng.try_fill_bytes(dest)
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        sys_rng().fill_bytes(dest);
+        Ok(())
     }
 }
 
-impl CryptoRng for Context {}
+impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
@@ -839,14 +855,14 @@ mod tests {
 
         assert_eq!(cfg.worker_threads, 8);
         let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism, NZUsize!(8));
+        assert_eq!(network.parallelism(), NZUsize!(8));
         assert_eq!(
             network.thread_cache_config,
             BufferPoolConfig::for_network().thread_cache_config
         );
 
         let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism, NZUsize!(8));
+        assert_eq!(storage.parallelism(), NZUsize!(8));
         assert_eq!(
             storage.thread_cache_config,
             BufferPoolConfig::for_storage().thread_cache_config
@@ -881,14 +897,14 @@ mod tests {
             );
 
         let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism, NZUsize!(2));
+        assert_eq!(network.parallelism(), NZUsize!(2));
         assert_eq!(
             network.thread_cache_config,
             BufferPoolConfig::for_network().thread_cache_config
         );
 
         let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism, NZUsize!(1));
+        assert_eq!(storage.parallelism(), NZUsize!(1));
         assert_eq!(
             storage.thread_cache_config,
             BufferPoolConfig::for_storage()

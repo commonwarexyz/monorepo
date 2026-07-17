@@ -32,7 +32,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
+    Hasher, PublicKey, Sha256, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
@@ -245,11 +245,11 @@ mod tests {
         types::{Epoch, View},
     };
     use commonware_cryptography::{
-        bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
-        sha256::Digest as Sha256Digest, Sha256,
+        Sha256, bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
+        sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, TryFromIterator};
+    use commonware_utils::{Faults, N3f1, TryFromIterator, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -496,7 +496,7 @@ mod tests {
         use commonware_codec::{Encode, Write};
         use commonware_conformance::Conformance;
         use commonware_cryptography::Sha256;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt as _, SeedableRng};
         use rand_chacha::ChaCha8Rng;
 
         /// Conformance test for shuffled RoundRobin leader election.
@@ -511,12 +511,12 @@ mod tests {
                 let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
                 // Generate deterministic participants (using ed25519 fixture)
-                let n = rng.gen_range(1..=100);
+                let n = rng.random_range(1..=100);
                 let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, n);
                 let participants = Set::try_from_iter(participants).unwrap();
 
                 // Generate a random seed for shuffling
-                let shuffle_seed: [u8; 32] = rng.gen();
+                let shuffle_seed: [u8; 32] = rng.random();
 
                 // Build the shuffled elector
                 let elector: RoundRobinElector<ed25519::Scheme> =
@@ -539,7 +539,7 @@ mod tests {
                 let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
                 // Generate deterministic BLS threshold fixture (4-10 participants)
-                let n = rng.gen_range(4..=10);
+                let n = rng.random_range(4..=10);
                 let Fixture {
                     participants,
                     schemes,
@@ -550,8 +550,8 @@ mod tests {
                 let quorum = N3f1::quorum(schemes.len()) as usize;
 
                 // Generate deterministic round parameters
-                let epoch = rng.gen_range(0..1000);
-                let view = rng.gen_range(2..=101);
+                let epoch = rng.random_range(0..1000);
+                let view = rng.random_range(2..=101);
 
                 let round = Round::new(Epoch::new(epoch), View::new(view));
 

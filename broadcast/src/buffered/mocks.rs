@@ -1,7 +1,7 @@
 //! Mock implementations for testing.
 
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadRangeExt, Write};
-use commonware_cryptography::{sha256::Digest, Digestible, Hasher, Sha256};
+use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest};
 use commonware_runtime::{Buf, BufMut};
 
 /// A simple test message.

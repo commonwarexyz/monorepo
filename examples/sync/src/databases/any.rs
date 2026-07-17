@@ -3,23 +3,24 @@
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, buffer};
 use commonware_storage::{
+    Context,
     journal::contiguous::fixed::Config as FConfig,
-    mmr::{self, full::Config as MmrConfig, Location, Proof},
+    mmr::{self, Location, Proof, full::Config as MmrConfig},
     qmdb::{
         self,
         any::{
-            unordered::{
-                fixed::{Db, Operation as FixedOperation},
-                Update,
-            },
             FixedConfig as Config,
+            unordered::{
+                Update,
+                fixed::{Db, Operation as FixedOperation},
+            },
         },
         operation::Committable,
     },
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
@@ -54,7 +55,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
 
 impl<E> crate::databases::ExampleDatabase for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -134,13 +135,13 @@ where
 
 impl<E> crate::databases::Syncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
-    async fn size(&self) -> Location {
+    fn size(&self) -> Location {
         self.bounds().end
     }
 
-    async fn sync_boundary(&self) -> Location {
+    fn sync_boundary(&self) -> Location {
         self.sync_boundary()
     }
 

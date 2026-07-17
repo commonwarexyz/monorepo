@@ -72,8 +72,8 @@ impl<T: Read> Read for Vec<T> {
 mod tests {
     use super::*;
     use crate::{
-        types::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
         DecodeRangeExt, Encode,
+        types::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
     };
     use bytes::{Bytes, BytesMut};
 

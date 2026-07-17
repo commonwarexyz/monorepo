@@ -36,7 +36,7 @@ use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Size of a CRC32 checksum in bytes.
 const SIZE: usize = 4;
@@ -178,7 +178,7 @@ impl crate::Digest for Digest {
 }
 
 impl Random for Digest {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut array = [0u8; SIZE];
         rng.fill_bytes(&mut array);
         Self(array)
@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use crate::Hasher;
     use commonware_codec::{DecodeExt, Encode};
-    use crc::{Crc, CRC_32_ISCSI};
+    use crc::{CRC_32_ISCSI, Crc};
 
     /// Reference CRC32C implementation from the [`crc`](https://crates.io/crates/crc) crate.
     const CRC32C_REF: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);

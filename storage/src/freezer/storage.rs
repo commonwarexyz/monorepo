@@ -1,17 +1,16 @@
 use super::{Config, Error, Identifier};
 use crate::{
+    Context,
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
-    Context,
 };
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_cryptography::{crc32, Crc32, Hasher};
+use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    buffer,
+    Blob, Buf, BufMut, BufferPooler, IoBuf, buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
-    Blob, Buf, BufMut, BufferPooler, IoBuf,
 };
 use commonware_utils::{Array, Span};
 use futures::future::try_join;
@@ -427,6 +426,7 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Metrics
     puts: Counter,
     gets: Counter,
+    has: Counter,
     unnecessary_reads: Counter,
     unnecessary_writes: Counter,
     resizes: Counter,
@@ -543,10 +543,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             modified |= entry1_cleared || entry2_cleared;
 
             // If the latest entry has reached the resize frequency, increment the resizable entries
-            if let Some((_, _, added)) = Self::read_latest_entry(&entry1, &entry2) {
-                if added >= table_resize_frequency {
-                    resizable += 1;
-                }
+            if let Some((_, _, added)) = Self::read_latest_entry(&entry1, &entry2)
+                && added >= table_resize_frequency
+            {
+                resizable += 1;
             }
         }
 
@@ -738,6 +738,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         // Create metrics
         let puts = context.counter("puts", "number of put operations");
         let gets = context.counter("gets", "number of get operations");
+        let has = context.counter("has", "number of has operations");
         let unnecessary_reads = context.counter(
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
@@ -765,6 +766,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             resize_progress: None,
             puts,
             gets,
+            has,
             unnecessary_reads,
             unnecessary_writes,
             resizes,
@@ -862,30 +864,30 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         .await?;
 
         // If we're mid-resize and this entry has already been processed, update the new position too
-        if let Some(resize_progress) = self.resize_progress {
-            if table_index < resize_progress {
-                self.unnecessary_writes.inc();
+        if let Some(resize_progress) = self.resize_progress
+            && table_index < resize_progress
+        {
+            self.unnecessary_writes.inc();
 
-                // If the previous entry crossed the threshold, so did this one
-                if added == self.table_resize_frequency {
-                    self.resizable += 1;
-                }
-
-                // This entry has been processed, so we need to update the new position as well.
-                //
-                // The entries are still identical to the old ones, so we don't need to read them again.
-                let new_table_index = self.table_size + table_index;
-                let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
-                Self::update_head(
-                    &self.context,
-                    &self.table,
-                    new_table_index,
-                    &entry1,
-                    &entry2,
-                    new_entry,
-                )
-                .await?;
+            // If the previous entry crossed the threshold, so did this one
+            if added == self.table_resize_frequency {
+                self.resizable += 1;
             }
+
+            // This entry has been processed, so we need to update the new position as well.
+            //
+            // The entries are still identical to the old ones, so we don't need to read them again.
+            let new_table_index = self.table_size + table_index;
+            let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
+            Self::update_head(
+                &self.context,
+                &self.table,
+                new_table_index,
+                &entry1,
+                &entry2,
+                new_entry,
+            )
+            .await?;
         }
 
         Ok(Cursor::new(self.current_section, value_offset, value_size))
@@ -901,10 +903,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(value)
     }
 
-    /// Get the first value for a given key.
-    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
-        self.gets.inc();
-
+    /// Find the first key entry matching `key`, returning it with its section.
+    ///
+    /// Reads key entries only, never values.
+    async fn find_key(&self, key: &K) -> Result<Option<(u64, Record<K>)>, Error> {
         // Get head of the chain from table
         let table_index = self.table_index(key);
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
@@ -919,11 +921,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
             // Check if this key matches
             if key_entry.key.as_ref() == key.as_ref() {
-                let value = self
-                    .oversized
-                    .get_value(section, key_entry.value_offset, key_entry.value_size)
-                    .await?;
-                return Ok(Some(value));
+                return Ok(Some((section, key_entry)));
             }
 
             // Increment unnecessary reads
@@ -940,6 +938,20 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(None)
     }
 
+    /// Get the first value for a given key.
+    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
+        self.gets.inc();
+
+        let Some((section, key_entry)) = self.find_key(key).await? else {
+            return Ok(None);
+        };
+        let value = self
+            .oversized
+            .get_value(section, key_entry.value_offset, key_entry.value_size)
+            .await?;
+        Ok(Some(value))
+    }
+
     /// Get the value for a given [Identifier].
     ///
     /// If a [Cursor] is known for the required key, it
@@ -949,6 +961,16 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             Identifier::Cursor(cursor) => self.get_cursor(cursor).await.map(Some),
             Identifier::Key(key) => self.get_key(key).await,
         }
+    }
+
+    /// Check whether a value exists for a given key.
+    ///
+    /// Walks the same key index chain as [`Self::get`] with [`Identifier::Key`]
+    /// but never reads values.
+    pub async fn has(&self, key: &K) -> Result<bool, Error> {
+        self.has.inc();
+
+        Ok(self.find_key(key).await?.is_some())
     }
 
     /// Resize the table by doubling its size and split each entry into two.
@@ -1151,12 +1173,12 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
-        Supervisor as _,
+        Runner, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        deterministic::Context,
     };
     use commonware_utils::{
+        NZU16, NZUsize,
         sequence::{FixedBytes, U64},
-        NZUsize, NZU16,
     };
 
     fn test_key(key: &str) -> FixedBytes<64> {

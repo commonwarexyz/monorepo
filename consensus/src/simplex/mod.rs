@@ -311,8 +311,13 @@
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
-//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
-//! on restart (especially in the case of unclean shutdown).
+//! Before sending a message, any pending `Journal` appends are synced to prevent inadvertent Byzantine
+//! behavior on restart (especially in the case of unclean shutdown). All appends made in the same event
+//! loop iteration are coalesced into a single sync that runs after messages are constructed and before
+//! any are broadcast (even if there is nothing to broadcast). The proposal payload relay is not a
+//! consensus message and is not gated on this sync: to lower view latency, it is requested as soon
+//! as the automaton returns a payload, which is safe because extra payload bytes (unlike votes)
+//! cannot form a conflicting certificate (see [`Plan::Propose`]).
 //!
 //! ## Automaton Failure Semantics
 //!
@@ -331,9 +336,9 @@
 //! Returning `false` from `verify` means the proposal is permanently invalid and causes a local
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
 //! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
-//! a fast-skip signal and can halt progress because certification requests are not retried. The safe
-//! way to stop working on certification is to keep the request pending until Simplex drops it after
-//! finalizing the block or a descendant.
+//! a fast-skip signal and can halt progress because certification requests are not retried during
+//! the same run. The safe way to stop working on certification is to keep the request pending until
+//! Simplex drops it after finalizing the block or a descendant.
 
 pub mod elector;
 pub mod scheme;
@@ -383,11 +388,22 @@ cfg_if::cfg_if! {
         /// Describes how a payload should be broadcast to the network.
         pub enum Plan<P: PublicKey> {
             /// Initial broadcast of a newly proposed block to all participants.
+            ///
+            /// Requested before the proposer's notarize vote is durable: a
+            /// proposer that crashes and restarts may emit this plan again
+            /// with a different payload for the same round. Consumers must
+            /// tolerate multiple candidates per round (at most one is ever
+            /// referenced by the proposer's signed votes).
             Propose {
                 /// The round in which the block was proposed.
                 round: Round,
             },
             /// Forward a block to a specific set of peers.
+            ///
+            /// Requested only for a proposal already backed by a certificate.
+            /// Forwarding is best-effort help for lagging peers and advertises
+            /// nothing about the sender's own state, so it needs no durability
+            /// ordering.
             Forward {
                 /// The round in which the forwarded block was proposed.
                 round: Round,
@@ -413,6 +429,7 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
+        Monitor, Viewable,
         simplex::{
             elector::{Config as Elector, Elector as ElectorTrait, Random, RoundRobin},
             mocks::{
@@ -421,12 +438,12 @@ mod tests {
                 wrapped,
             },
             scheme::{
-                bls12381_multisig,
+                Scheme, bls12381_multisig,
                 bls12381_threshold::{
                     standard as bls12381_threshold_std,
                     vrf::{self as bls12381_threshold_vrf, Seedable},
                 },
-                ed25519, secp256r1, Scheme,
+                ed25519, secp256r1,
             },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
@@ -435,31 +452,33 @@ mod tests {
             },
         },
         types::{Epoch, Participant, Round},
-        Monitor, Viewable,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
+        Hasher as _, Sha256, Signer as _,
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
-        Hasher as _, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
+        Manager as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
-        Manager as _, Recipients, Sender as _, TrackedPeers,
     };
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
-        IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
+        Clock, IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{
+        Faults, N3f1, NZU16, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
+    };
     use engine::Engine;
     use futures::future::join_all;
-    use rand::{rngs::StdRng, Rng as _, SeedableRng};
+    use rand::{RngExt as _, SeedableRng, rngs::StdRng};
+    use rand_core::CryptoRng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -490,24 +509,32 @@ mod tests {
     //
     // Supported forms:
     //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture)
+    //   test_for_all_fixtures!(callee, arg);             // callee::<_, _, Elector, _>(fixture, arg)
+    //   test_for_all_fixtures!(callee, arg, level = "INFO"); // arg with a trace-level override
     //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture)
     //   test_for_all_fixtures!(callee, level = "INFO");  // overrides the trace level
     macro_rules! test_for_all_fixtures {
         ($callee:ident) => {
-            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee));
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [] []));
         };
         ($callee:ident, level = $level:literal) => {
-            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee));
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee [] []));
         };
         ($callee:ident, seeds = $n:expr) => {
             for_each_fixture!(test_for_all_fixtures!(@seeded $n, $callee));
         };
-        (@emit [$traced:meta] $callee:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
+        ($callee:ident, $arg:expr, level = $level:literal) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee [, _] [, $arg]));
+        };
+        ($callee:ident, $arg:expr) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [, _] [, $arg]));
+        };
+        (@emit [$traced:meta] $callee:ident [$($generics:tt)*] [$($args:tt)*], $suffix:ident, $elector:ty, $fixture:expr) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[$traced]
                 fn [<test_ $callee _ $suffix>]() {
-                    $callee::<_, _, $elector>($fixture);
+                    $callee::<_, _, $elector $($generics)*>($fixture $($args)*);
                 }
             }
         };
@@ -745,10 +772,10 @@ mod tests {
                 }
 
                 // Restrict to certain connections
-                if let Some(f) = restrict_to {
-                    if !f(validators.len(), i1, i2) {
-                        continue;
-                    }
+                if let Some(f) = restrict_to
+                    && !f(validators.len(), i1, i2)
+                {
+                    continue;
                 }
 
                 // Do any unlinking first
@@ -787,11 +814,14 @@ mod tests {
             .count() as u32
     }
 
-    fn all_online<S, F, L>(mut fixture: F)
-    where
+    fn all_online<S, F, L, T>(
+        mut fixture: F,
+        strategy: impl FnOnce(&mut deterministic::Context) -> T + Send + 'static,
+    ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
+        T: Strategy,
     {
         // Create context
         let n = 5;
@@ -808,6 +838,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let strategy = strategy(&mut context);
             let mut oracle =
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
@@ -863,7 +894,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
-                    strategy: Sequential,
+                    strategy: strategy.clone(),
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
@@ -989,7 +1020,7 @@ mod tests {
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             for finalizer in finalizers.iter() {
                                 if nullifies.contains(finalizer) {
                                     panic!("should not nullify and finalize at same view");
@@ -1019,7 +1050,15 @@ mod tests {
         });
     }
 
-    test_for_all_fixtures!(all_online);
+    test_for_all_fixtures!(all_online, |_| Sequential);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
+        all_online::<_, _, Random, _>(bls12381_threshold_vrf::fixture::<MinPk, _>, |context| {
+            context.strategy(NZUsize!(2))
+        });
+    }
 
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(mut fixture: F)
     where
@@ -1563,7 +1602,7 @@ mod tests {
     fn unclean_shutdown<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1585,12 +1624,12 @@ mod tests {
             schemes,
             ..
         } = fixture(&mut rng, &namespace, n);
+        let reporter_seed: [u8; 32] = rng.random();
 
         // Create block relay, shared across restarts.
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, S::PublicKey>::new());
 
         loop {
-            let rng = rng.clone();
             let participants = participants.clone();
             let schemes = schemes.clone();
             let shutdowns = shutdowns.clone();
@@ -1633,7 +1672,8 @@ mod tests {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
+                    let reporter_rng = StdRng::from_seed(reporter_seed);
+                    let reporter = mocks::reporter::Reporter::new(reporter_rng, reporter_config);
                     reporters.insert(validator.clone(), reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
@@ -1687,7 +1727,7 @@ mod tests {
 
                 // Store all finalizer handles
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
@@ -1698,7 +1738,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    context.gen_range(Duration::from_millis(100)..Duration::from_millis(2_000));
+                    context.random_range(Duration::from_millis(100)..Duration::from_millis(2_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
@@ -1714,7 +1754,7 @@ mod tests {
                         // Check reporters for faults activity
                         let supervised = supervised.lock();
                         for reporters in supervised.iter() {
-                            for (_, reporter) in reporters.iter() {
+                            for reporter in reporters.values() {
                                 reporter.assert_no_faults();
                             }
                         }
@@ -2139,7 +2179,7 @@ mod tests {
                 {
                     let notarizes = reporter.notarizes.lock();
                     for (view, payloads) in notarizes.iter() {
-                        for (_, participants) in payloads.iter() {
+                        for participants in payloads.values() {
                             if participants.contains(offline) {
                                 panic!("view: {view}");
                             }
@@ -2157,7 +2197,7 @@ mod tests {
                 {
                     let finalizes = reporter.finalizes.lock();
                     for (view, payloads) in finalizes.iter() {
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             if finalizers.contains(offline) {
                                 panic!("view: {view}");
                             }
@@ -2382,9 +2422,11 @@ mod tests {
                 // Ensure every reporter observes finalization progress to at least the target view.
                 {
                     let finalizations = reporter.finalizations.lock();
-                    assert!(finalizations
-                        .keys()
-                        .any(|view| *view >= required_containers));
+                    assert!(
+                        finalizations
+                            .keys()
+                            .any(|view| *view >= required_containers)
+                    );
                 }
             }
 
@@ -2588,6 +2630,242 @@ mod tests {
     }
 
     test_for_all_fixtures!(all_recovery);
+
+    fn all_crash_after_nullify<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: Elector<S>,
+    {
+        // Create context
+        let n = 4;
+        let required_containers = View::new(10);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(3600));
+        executor.start(|mut context| async move {
+            // Register participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // Participant 0 never starts an engine and no links exist yet, so no
+            // view can produce a certificate before the crash below.
+            let elector = L::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx_scheme, validator) in participants.iter().enumerate() {
+                // Skip first peer
+                if idx_scheme == 0 {
+                    continue;
+                }
+
+                // Create scheme context
+                let context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+
+                // Configure engine
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: NZUsize!(4),
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(context.child("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            // Wait for every online validator to construct its nullify vote for
+            // view 1.
+            let stalled = View::new(1);
+            loop {
+                let nullified = reporters.iter().zip(participants.iter().skip(1)).all(
+                    |(reporter, validator)| {
+                        reporter
+                            .nullifies
+                            .lock()
+                            .get(&stalled)
+                            .is_some_and(|nullifiers| nullifiers.contains(validator))
+                    },
+                );
+                if nullified {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+
+            // The reporter observes our vote via the batcher, which can run ahead
+            // of the voter's journal sync in the same instant. Wait one more tick
+            // so every vote is durable before crashing.
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Crash every online validator before any nullification certificate
+            // can circulate.
+            for handle in engine_handlers.drain(..) {
+                handle.abort();
+                let _ = handle.await;
+            }
+            relay.deregister_all();
+
+            // Restore connectivity between the online validators.
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &participants,
+                Action::Link(link),
+                Some(|_, i, j| ![i, j].contains(&0usize)),
+            )
+            .await;
+
+            // Restart every online validator from its journal.
+            let mut reporters = Vec::new();
+            for (idx_scheme, validator) in participants.iter().enumerate() {
+                // Skip first peer
+                if idx_scheme == 0 {
+                    continue;
+                }
+
+                // Create scheme context
+                let context = context
+                    .child("validator_restarted")
+                    .with_attribute("public_key", validator);
+
+                // Configure engine
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: NZUsize!(4),
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(context.child("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) =
+                    register_validator(&mut oracle, validator.clone()).await;
+                engine.start(pending, recovered, resolver);
+            }
+
+            // The restarted validators must reconstruct a nullification for view 1
+            // to make progress (participant 0 never votes, so every remaining vote
+            // is required to reach quorum).
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.recv().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+        });
+    }
+
+    test_for_all_fixtures!(all_crash_after_nullify);
 
     fn partition<S, F, L>(mut fixture: F)
     where
@@ -3093,7 +3371,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
+                    for faults in faulter.values() {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::ConflictingNotarize(_) => {
@@ -3882,7 +4160,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Abort a validator
-            let idx = context.gen_range(1..engines.len()); // skip byzantine validator
+            let idx = context.random_range(1..engines.len()); // skip byzantine validator
             let validator = &participants[idx];
             let handle = engines.remove(idx);
             handle.abort();
@@ -4283,7 +4561,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
+                    for faults in faulter.values() {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::NullifyFinalize(_) => {
@@ -4908,7 +5186,7 @@ mod tests {
 
                 // Check finalizes
                 let finalizes = reporter.finalizes.lock();
-                for (_, payloads) in finalizes.iter() {
+                for payloads in finalizes.values() {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
@@ -5554,7 +5832,7 @@ mod tests {
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5566,7 +5844,7 @@ mod tests {
                 target = target.saturating_add(interval);
 
                 // Select a random engine to shutdown
-                let idx = context.gen_range(0..engine_handlers.len());
+                let idx = context.random_range(0..engine_handlers.len());
                 let validator = &participants[idx];
                 let handle = engine_handlers.remove(&idx).unwrap();
                 handle.abort();
@@ -5576,7 +5854,7 @@ mod tests {
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5644,7 +5922,7 @@ mod tests {
 
                 // Wait for all engines to hit required containers
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5658,7 +5936,7 @@ mod tests {
 
             // Check reporters for correct activity
             let latest_complete = target.saturating_sub(activity_timeout);
-            for (_, reporter) in reporters.iter() {
+            for reporter in reporters.values() {
                 // Ensure no faults
                 reporter.assert_no_faults();
 
@@ -5718,7 +5996,7 @@ mod tests {
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             for finalizer in finalizers.iter() {
                                 if nullifies.contains(finalizer) {
                                     panic!("should not nullify and finalize at same view");
@@ -5813,7 +6091,7 @@ mod tests {
     }
 
     fn twins_campaign<S, F, L>(
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRng,
         campaign: TwinsCampaign,
         link: Link,
         mut fixture: F,
@@ -5854,8 +6132,7 @@ mod tests {
             let trailing_finalizations = campaign.trailing_finalizations;
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
-            let cfg = deterministic::Config::new()
-                .with_rng(Box::new(StdRng::from_rng(&mut *rng).unwrap()));
+            let cfg = deterministic::Config::new().with_rng(Box::new(StdRng::from_rng(&mut *rng)));
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
                 let Fixture {
@@ -6210,7 +6487,7 @@ mod tests {
                 // Ensure faults are attributable to twins.
                 for reporter in reporters.iter().skip(honest_start) {
                     let faults = reporter.faults.lock();
-                    for (faulter, _) in faults.iter() {
+                    for faulter in faults.keys() {
                         assert!(
                             twin_identities.contains(faulter),
                             "fault from non-twin participant"

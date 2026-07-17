@@ -8,25 +8,31 @@ use crate::{
     types::{Epoch, Epocher, Height, Round},
 };
 use commonware_cryptography::certificate::Scheme;
+use std::sync::Arc;
 
-/// Which stage of verification a block has reached.
+/// Which marshal cache should hold a structurally valid candidate.
 ///
-/// This is used to determine which marshal cache a block should be stored in.
+/// This selects where candidate bytes are stored; it is not, by itself, an
+/// application-validity claim. Some callers start this store after structural
+/// checks and before application verification completes so the sync can overlap
+/// app work. Their certification gate must still combine the app verdict with
+/// store durability before allowing a finalize vote.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Stage {
-    /// The block has been verified (store in `verified_blocks`).
+    /// Store in `verified_blocks`.
     Verified,
-    /// The block has been certified (store in `notarized_blocks`).
+    /// Store in `notarized_blocks`.
     Certified,
 }
 
 impl Stage {
-    /// Store `block` in the marshal cache for the provided stage.
+    /// Store `block` in the marshal cache for the provided stage, returning once it
+    /// is durably persisted (`false` if marshal could not accept it).
     pub(crate) async fn store<S: Scheme, V: Variant>(
         self,
-        marshal: &mut Mailbox<S, V>,
+        marshal: &Mailbox<S, V>,
         round: Round,
-        block: V::Block,
+        block: Arc<V::Block>,
     ) -> bool {
         match self {
             Self::Verified => marshal.verified(round, block).await,

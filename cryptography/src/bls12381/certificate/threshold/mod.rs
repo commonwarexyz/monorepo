@@ -12,6 +12,7 @@
 pub mod mocks;
 
 use crate::{
+    Digest, PublicKey,
     bls12381::primitives::{
         group::Share,
         ops::{self, batch, threshold},
@@ -19,16 +20,15 @@ use crate::{
         variant::{PartialSignature, Variant},
     },
     certificate::{Attestation, Namespace, Scheme, Subject, Verification},
-    Digest, PublicKey,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{types::lazy::Lazy, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Set, Faults, Participant};
+use commonware_utils::{Faults, Participant, ordered::Set};
 use core::fmt::Debug;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -261,7 +261,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     where
         S: Scheme<Signature = V::Signature>,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
         I::IntoIter: Send,
@@ -345,7 +345,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         M: Faults,
     {
@@ -371,7 +371,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
         T: Strategy,
@@ -431,6 +431,9 @@ impl<V: Variant> Certificate<V> {
     /// Attempts to get the decoded signature.
     ///
     /// Returns `None` if the signature fails to decode.
+    // `Lazy::get` is only `const` under some feature combinations, so this
+    // cannot be `const` without breaking the default build.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn get(&self) -> Option<&V::Signature> {
         self.signature.get()
     }
@@ -508,7 +511,7 @@ macro_rules! impl_certificate_bls12381_threshold {
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
         where
             V: $crate::bls12381::primitives::variant::Variant,
-            R: rand::RngCore + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
                 rng,
@@ -601,7 +604,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -616,7 +619,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -670,7 +673,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -685,7 +688,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 I::IntoIter: Send
@@ -718,6 +721,7 @@ macro_rules! impl_certificate_bls12381_threshold {
 mod tests {
     use super::*;
     use crate::{
+        Signer as _,
         bls12381::{
             dkg::feldman_desmedt as dkg,
             primitives::{
@@ -728,13 +732,12 @@ mod tests {
         certificate::{Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
-        Signer as _,
     };
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, Faults, N3f1, TryCollect, NZU32};
+    use commonware_utils::{Faults, N3f1, NZU32, TryCollect, ordered::Set, test_rng};
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -762,7 +765,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn setup_signers<V: Variant>(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         n: u32,
     ) -> (
         Vec<Scheme<ed25519::PublicKey, V>>,
@@ -824,11 +827,13 @@ mod tests {
     fn test_verifier_cannot_sign<V: Variant>() {
         let mut rng = test_rng();
         let (_, verifier, _) = setup_signers::<V>(&mut rng, 4);
-        assert!(verifier
-            .sign::<Sha256Digest>(TestSubject {
-                message: Bytes::from_static(MESSAGE),
-            })
-            .is_none());
+        assert!(
+            verifier
+                .sign::<Sha256Digest>(TestSubject {
+                    message: Bytes::from_static(MESSAGE),
+                })
+                .is_none()
+        );
     }
 
     #[test]
@@ -1066,9 +1071,11 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .is_none());
+        assert!(
+            schemes[0]
+                .assemble::<_, N3f1>(attestations, &Sequential)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1216,11 +1223,13 @@ mod tests {
         ));
 
         // Should not be able to sign
-        assert!(cert_verifier
-            .sign::<Sha256Digest>(TestSubject {
-                message: Bytes::from_static(MESSAGE),
-            })
-            .is_none());
+        assert!(
+            cert_verifier
+                .sign::<Sha256Digest>(TestSubject {
+                    message: Bytes::from_static(MESSAGE),
+                })
+                .is_none()
+        );
     }
 
     #[test]
@@ -1375,10 +1384,7 @@ mod tests {
         signer_shares_must_match_participant_indices::<MinSig>();
     }
 
-    fn make_participants<R: rand::RngCore + rand::CryptoRng + Clone>(
-        rng: &mut R,
-        n: u32,
-    ) -> Set<ed25519::PublicKey> {
+    fn make_participants<R: rand_core::CryptoRng>(rng: &mut R, n: u32) -> Set<ed25519::PublicKey> {
         (0..n)
             .map(|_| Ed25519PrivateKey::random(&mut *rng).public_key())
             .try_collect()

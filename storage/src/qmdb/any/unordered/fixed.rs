@@ -1,15 +1,15 @@
 //! An Any database implementation with an unordered key space and fixed-size values.
 
 use crate::{
+    Context,
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     merkle::{Family, Location},
     qmdb::{
-        any::{unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
         Error,
+        any::{FixedConfig as Config, FixedValue, unordered, value::FixedEncoding},
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -49,15 +49,15 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
+        Context,
         index::partitioned::unordered::Index,
         journal::contiguous::fixed::Journal,
         merkle::{Family, Location},
         qmdb::{
-            any::{FixedConfig as Config, FixedValue},
             Error,
+            any::{FixedConfig as Config, FixedValue},
         },
         translator::Translator,
-        Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
@@ -84,15 +84,15 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family,
-            E: Context,
-            K: Array,
-            V: FixedValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, S>
+        F: Family,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, S>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -121,31 +121,31 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         merkle::{
-            mmr::{self, Location},
             Location as GenericLocation,
+            mmr::{self, Location},
         },
         qmdb::{
-            self,
             any::{
-                test::fixed_db_config,
-                unordered::{fixed::Operation, Update},
+                test::{fixed_db_config, fixed_db_config_with_strategy},
+                unordered::{Update, fixed::Operation},
             },
             verify_proof,
         },
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_cryptography::{Sha256, sha256::Digest};
+    use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
+        Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
         deterministic::{self, Context},
-        Metrics as _, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{test_rng_seeded, NZUsize, NZU64};
+    use commonware_utils::{NZU64, NZUsize, TestRng};
     use core::num::NonZeroUsize;
-    use rand::RngCore;
-    use std::collections::HashMap;
+    use futures::FutureExt as _;
+    use rand::Rng;
+    use std::{collections::HashMap, time::Duration};
 
     /// A generic type alias for an Any database parameterized by merkle family.
     type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
@@ -179,6 +179,146 @@ pub(crate) mod test {
         AnyTest::init(context, cfg).await.unwrap()
     }
 
+    /// `get_many` over a batch large enough for the fused sharded path matches per-key `get`.
+    #[test_traced]
+    fn test_get_many_fused_sharded_matches_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // The fused path requires parallelism > 1 (the Sequential test config never takes
+            // it) and at least 4096 keys. The tiny test page cache pushes most keys through
+            // the batched miss fallback, and TwoCap produces translated-key collisions.
+            type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
+            let strategy = context.strategy(NZUsize!(2));
+            let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
+            let mut db = ParTest::init(context, cfg).await.unwrap();
+
+            let mut rng = TestRng::new(7);
+            let mut keys = Vec::with_capacity(4300);
+            let mut batch = db.new_batch();
+            for _ in 0..4200 {
+                let key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                keys.push(key);
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Mix in absent keys so some probes resolve to nothing.
+            for _ in 0..100 {
+                keys.push(Digest::random(&mut rng));
+            }
+            let refs: Vec<&Digest> = keys.iter().collect();
+            let fused = db.get_many(&refs).await.unwrap();
+            assert_eq!(fused.len(), keys.len());
+            for (key, result) in keys.iter().zip(fused) {
+                assert_eq!(result, db.get(key).await.unwrap());
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A merkleize future dropped mid-flight leaves the database fully usable.
+    ///
+    /// With a parallel strategy, merkleize's hashing job may keep running detached against its
+    /// snapshot of committed Merkle state after the future is dropped. Later mutations must not
+    /// observe it (they copy-on-write instead), and its discarded result must not corrupt
+    /// anything. Runs on the tokio runtime for the same reason as
+    /// [`test_get_many_fused_sharded_matches_get`].
+    #[test_traced]
+    fn test_merkleize_cancellation_leaves_db_usable() {
+        let executor = commonware_runtime::tokio::Runner::default();
+        executor.start(|context| async move {
+            type ParTest = Db<
+                mmr::Family,
+                commonware_runtime::tokio::Context,
+                Digest,
+                Digest,
+                Sha256,
+                TwoCap,
+                Rayon,
+            >;
+            let strategy = context.strategy(NZUsize!(2));
+            let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("cancel", &context, strategy);
+            let mut db = ParTest::init(context.child("db"), cfg).await.unwrap();
+
+            // Populate and commit so later snapshots carry committed nodes.
+            let mut rng = TestRng::new(11);
+            let mut keys = Vec::with_capacity(1024);
+            let mut batch = db.new_batch();
+            for _ in 0..1024 {
+                let key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                keys.push((key, value));
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Drop one merkleize after a single poll and race another against a timer, so the
+            // future is abandoned at whatever stage it reached (possibly mid-hashing-job).
+            for delay in [None, Some(Duration::from_millis(1))] {
+                // Fork the abandoned batch off a two-deep unapplied chain: the hashing job
+                // reaches the grandparent only through Weak references, so dropping the chain
+                // below exercises a mid-job truncation (any resulting panic is caught and
+                // discarded by `Strategy::spawn`).
+                let grandparent = db
+                    .new_batch()
+                    .write(Digest::random(&mut rng), Some(Digest::random(&mut rng)))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                let parent = grandparent
+                    .new_batch::<Sha256>()
+                    .write(Digest::random(&mut rng), Some(Digest::random(&mut rng)))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                let mut abandoned = parent.new_batch::<Sha256>();
+                for _ in 0..4200 {
+                    abandoned =
+                        abandoned.write(Digest::random(&mut rng), Some(Digest::random(&mut rng)));
+                }
+                let fut = abandoned.merkleize(&db, None);
+                match delay {
+                    None => {
+                        let _ = fut.now_or_never();
+                    }
+                    Some(delay) => {
+                        select! {
+                            _ = fut => {},
+                            _ = context.sleep(delay) => {},
+                        }
+                    }
+                }
+                drop(parent);
+                drop(grandparent);
+
+                // The database remains fully usable: mutate, merkleize, apply, and read back.
+                let (key, _) = keys[0];
+                let value = Digest::random(&mut rng);
+                let merkleized = db
+                    .new_batch()
+                    .write(key, Some(value))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+                assert_eq!(db.get(&key).await.unwrap(), Some(value));
+                keys[0].1 = value;
+                for (key, value) in &keys[1..] {
+                    assert_eq!(db.get(key).await.unwrap(), Some(*value));
+                }
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Create n random operations using the default seed (0). Some portion of
     /// the updates are deletes. create_test_ops(n) is a prefix of
     /// create_test_ops(n') for n < n'.
@@ -192,7 +332,7 @@ pub(crate) mod test {
         n: usize,
         seed: u64,
     ) -> Vec<Operation<mmr::Family, Digest, Digest>> {
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -317,7 +457,7 @@ pub(crate) mod test {
                 "db_last_commit 3",
                 "db_get_calls_total 1",
                 "db_get_many_calls_total 1",
-                "db_keys_requested_total 2",
+                "db_lookups_requested_total 2",
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 3",
                 "db_commit_calls_total 1",
@@ -335,12 +475,11 @@ pub(crate) mod test {
         });
     }
 
-    /// Reads on a batch cache resolved locations that `merkleize` consumes to skip re-reading
-    /// those keys. The root must be byte-identical to a write-only batch's `merkleize` (no
-    /// cached reads), across updates/deletes/creates, both with the batch rooted directly at
-    /// the DB (D=0) and through pending ancestors (D=1, D=2).
+    /// Reads on a batch must not perturb `merkleize`: the root must be byte-identical to a
+    /// write-only batch's `merkleize`, across updates/deletes/creates, both with the batch
+    /// rooted directly at the DB (D=0) and through pending ancestors (D=1, D=2).
     #[test_traced("WARN")]
-    fn test_unordered_fixed_resolved_merkleize_parity() {
+    fn test_unordered_fixed_read_merkleize_parity() {
         type ParentChain = Vec<
             std::sync::Arc<
                 crate::qmdb::any::batch::MerkleizedBatch<
@@ -368,7 +507,7 @@ pub(crate) mod test {
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
             // both depths see identical mutations.
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
-                let mut rng = test_rng_seeded(salt);
+                let mut rng = TestRng::new(salt);
                 let mut out = Vec::new();
                 for _ in 0..600 {
                     let r = rng.next_u32() % 100;
@@ -415,15 +554,13 @@ pub(crate) mod test {
                 }
                 let normal_root = nb.merkleize(&db, None).await.unwrap().root();
 
-                // Read-then-write on one batch: the read caches locations that merkleize
-                // consumes. Values and root must match the write-only path.
+                // Read-then-write on one batch. Values and root must match the write-only path.
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
                 let mut fb = new_batch();
-                // Duplicate keys in one read resolve identically per slot and cache once.
+                // Duplicate keys in one read resolve identically per slot.
                 let dup_values = fb.get_many(&[keys[0], keys[0]], &db).await.unwrap();
                 assert_eq!(dup_values[0], dup_values[1]);
-                // Keys read but never written (existing and absent) cache entries that
-                // merkleize must drop without affecting the root.
+                // Keys read but never written must not affect the root.
                 let unwritten: Vec<Digest> = (0..40u64)
                     .map(|i| key(i * 50))
                     .chain((0..5).map(|i| key(8000 + i)))
@@ -439,8 +576,8 @@ pub(crate) mod test {
                 let fused_root = fb.merkleize(&db, None).await.unwrap().root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
 
-                // Reads after writes: written keys are answered by the pending mutations and
-                // cache nothing; the root must still match.
+                // Reads after writes: written keys are answered by the pending mutations and the
+                // root must still match.
                 let half = muts.len() / 2;
                 let mut mb = new_batch();
                 for (k, v) in muts.iter().take(half) {
@@ -464,7 +601,7 @@ pub(crate) mod test {
                     "mixed root mismatch at depth={depth}"
                 );
 
-                // Multiple disjoint reads accumulate, and single-key gets populate the cache too.
+                // Multiple disjoint reads and single-key gets must not affect the root.
                 let mut gb = new_batch();
                 gb.get_many(&keys[..half], &db).await.unwrap();
                 for key in &keys[half..] {
@@ -479,90 +616,6 @@ pub(crate) mod test {
                     "merged root mismatch at depth={depth}"
                 );
             }
-        });
-    }
-
-    /// A batch's cached read locations must stay valid when an ancestor is committed and
-    /// dropped between the read and merkleize. Keys resolved through an uncommitted ancestor's
-    /// diff cache nothing, so the merkleize-time re-resolution picks up the post-commit
-    /// location and the final state matches a batch that never read. Keys resolved through the
-    /// committed snapshot cache their location, which the intervening commit cannot move
-    /// (applying an ancestor only relocates keys present in that ancestor's diff).
-    #[test_traced("WARN")]
-    fn test_unordered_fixed_caching_survives_ancestor_commit() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let mut roots = Vec::new();
-            for read_first in [false, true] {
-                let label = if read_first { "db_read" } else { "db_write" };
-                let mut db = create_test_db(ctx.child(label)).await;
-
-                // Seed and commit keys 0..100.
-                let mut seed = db.new_batch();
-                for i in 0..100u64 {
-                    seed = seed.write(key(i), Some(val(i)));
-                }
-                let seed = seed.merkleize(&db, None).await.unwrap();
-                db.apply_batch(seed).await.unwrap();
-                db.commit().await.unwrap();
-
-                // Grandparent overwrites keys 0..10 (pending), parent touches disjoint keys.
-                let mut gp = db.new_batch();
-                for i in 0..10u64 {
-                    gp = gp.write(key(i), Some(val(i + 1000)));
-                }
-                let gp = gp.merkleize(&db, None).await.unwrap();
-                let mut p = gp.new_batch::<Sha256>();
-                for i in 50..60u64 {
-                    p = p.write(key(i), Some(val(i + 2000)));
-                }
-                let p = p.merkleize(&db, None).await.unwrap();
-
-                // Child reads the grandparent-touched keys (resolving through its diff,
-                // caching nothing) and keys 20..30 (committed-resolved, cached).
-                let b = p.new_batch::<Sha256>();
-                if read_first {
-                    let keys: Vec<Digest> = (0..10u64).chain(20..30u64).map(key).collect();
-                    let key_refs: Vec<&Digest> = keys.iter().collect();
-                    let values = b.get_many(&key_refs, &db).await.unwrap();
-                    for (i, v) in values.into_iter().enumerate() {
-                        let expected = if i < 10 {
-                            val(i as u64 + 1000)
-                        } else {
-                            val(i as u64 + 10)
-                        };
-                        assert_eq!(v, Some(expected));
-                    }
-                }
-
-                // Commit the grandparent and drop it before the child merkleizes.
-                db.apply_batch(gp).await.unwrap();
-                db.commit().await.unwrap();
-
-                let mut b = b;
-                for i in 0..10u64 {
-                    b = b.write(key(i), Some(val(i + 3000)));
-                }
-                for i in 20..30u64 {
-                    b = b.write(key(i), Some(val(i + 4000)));
-                }
-                let b = b.merkleize(&db, None).await.unwrap();
-                db.apply_batch(p).await.unwrap();
-                db.apply_batch(b).await.unwrap();
-                db.commit().await.unwrap();
-
-                for i in 0..10u64 {
-                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i + 3000)));
-                }
-                for i in 20..30u64 {
-                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i + 4000)));
-                }
-                roots.push(db.root());
-                db.destroy().await.unwrap();
-            }
-            assert_eq!(
-                roots[0], roots[1],
-                "read-then-write diverged from write-only"
-            );
         });
     }
 
@@ -906,9 +959,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            let hasher = qmdb::hasher::<Sha256>();
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -930,8 +981,7 @@ pub(crate) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -954,8 +1004,6 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
-
             let mut db = create_test_db(context.child("first")).await;
             // Apply ops in multiple batches; each apply_ops ends in a commit, so the size
             // after each batch is a commit-boundary historical size.
@@ -972,12 +1020,12 @@ pub(crate) mod test {
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(1),
                 &proof_ops,
-                &root));
+                &root
+            ));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -1022,7 +1070,6 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ops = create_test_ops(100);
-            let hasher = qmdb::hasher::<Sha256>();
             let start_loc = Location::new(2);
             let max_ops = NZU64!(10);
 
@@ -1052,8 +1099,7 @@ pub(crate) mod test {
                 assert_eq!(historical_proof.leaves, reference_proof.leaves);
                 assert_eq!(historical_proof.digests, reference_proof.digests);
                 assert_eq!(historical_ops, reference_ops);
-                assert!(verify_proof(
-                    &hasher,
+                assert!(verify_proof::<Sha256, _, _>(
                     &historical_proof,
                     start_loc,
                     &historical_ops,
@@ -1064,8 +1110,7 @@ pub(crate) mod test {
             // Verify the current full-size proof against the current root as a final sanity check.
             let full_root = db.root();
             let (full_proof, full_ops) = db.proof(start_loc, max_ops).await.unwrap();
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &full_proof,
                 start_loc,
                 &full_ops,

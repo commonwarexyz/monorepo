@@ -100,9 +100,9 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, Config, Engine};
+    use super::{Config, Engine, mocks};
     use crate::{
-        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+        aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
@@ -115,16 +115,17 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
+        Clock, Quota, Runner, Spawner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock, Quota, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{
+        NZU16, NZUsize, NonZeroDuration, TestRng,
         channel::{fallible::OneshotExt, oneshot},
-        test_rng, NZUsize, NonZeroDuration, NZU16,
+        test_rng,
     };
     use futures::future::join_all;
-    use rand::{rngs::StdRng, Rng};
+    use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -450,7 +451,7 @@ mod tests {
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;
@@ -550,17 +551,17 @@ mod tests {
                                 loop {
                                     if let Some(tip_height) =
                                         reporter_mailbox.get_contiguous_tip().await
+                                        && tip_height >= target_height
                                     {
-                                        if tip_height >= target_height {
-                                            break;
-                                        }
+                                        break;
                                     }
                                     context.sleep(Duration::from_millis(50)).await;
                                 }
                             });
 
                     // Random shutdown timing to simulate unclean shutdown
-                    let shutdown_wait = context.gen_range(shutdown_range_min..shutdown_range_max);
+                    let shutdown_wait =
+                        context.random_range(shutdown_range_min..shutdown_range_max);
                     select! {
                         _ = context.sleep(shutdown_wait) => {
                             debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");
@@ -602,7 +603,7 @@ mod tests {
     fn unclean_shutdown_with_unsigned_height<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;

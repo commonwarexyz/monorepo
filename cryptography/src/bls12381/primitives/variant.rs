@@ -1,11 +1,11 @@
 //! Different variants of the BLS signature scheme.
 
 use super::{
-    group::{
-        Scalar, SmallScalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
-        G2_PROOF_OF_POSSESSION, GT,
-    },
     Error,
+    group::{
+        DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, GT,
+        Scalar, SmallScalar,
+    },
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -19,7 +19,7 @@ use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
@@ -58,7 +58,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
     fn batch_verify(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
@@ -120,7 +120,7 @@ impl Variant for MinPk {
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
     fn batch_verify(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
@@ -222,7 +222,7 @@ impl Variant for MinSig {
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
     fn batch_verify(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
@@ -323,7 +323,7 @@ mod tests {
     use crate::bls12381::primitives::{group::Scalar, ops};
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, NZUsize};
+    use commonware_utils::{NZUsize, test_rng};
 
     fn batch_verify_correct<V: Variant>() {
         let mut rng = test_rng();

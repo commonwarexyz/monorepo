@@ -6,16 +6,16 @@ use crate::{
     types::{Epoch, Height},
 };
 use commonware_actor::{
-    mailbox::{self, Policy, Receiver, Sender},
     Feedback,
+    mailbox::{self, Policy, Receiver, Sender},
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
 use commonware_parallel::Sequential;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{channel::oneshot, NZUsize};
-use rand_core::CryptoRngCore;
-use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet, VecDeque};
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_utils::{NZUsize, channel::oneshot};
+use rand_core::CryptoRng;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map::Entry};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<C: PublicKey, S: Scheme, D: Digest> {
@@ -34,7 +34,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Policy for Message<C, S, D> {
     }
 }
 
-pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
+pub struct Reporter<R: CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
     context: ContextCell<R>,
     mailbox: Receiver<Message<C, S, D>>,
 
@@ -60,7 +60,7 @@ pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
 
 impl<R, C, S, D> Reporter<R, C, S, D>
 where
-    R: CryptoRngCore + Metrics,
+    R: CryptoRng + Metrics,
     C: PublicKey,
     S: Scheme,
     D: Digest,

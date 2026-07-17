@@ -24,7 +24,7 @@ pre-pr: lint test-docs test
 
 # Fixes the formatting of the workspace
 fix-fmt *args='':
-    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2021 {{ args }}
+    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }}
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -65,13 +65,67 @@ test-benches crate test_flags='' lint_flags='':
         cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
     done
 
+# Run the Gungraun benchmark tracking suite
+benchmark-tracking mode='generate' *args='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    tracking_command=(
+        cargo run -p commonware-bench --bin benchmark-tracker --
+        --config .github/benchmark-tracking.toml
+        --output-dir benchmark-tracking-results
+        {{ args }}
+        {{ mode }}
+    )
+
+    run_tracking() {
+        "${tracking_command[@]}"
+    }
+
+    case "$(uname -s)" in
+        Linux)
+            run_tracking
+            ;;
+        Darwin)
+            image="commonware-gungraun:local"
+            arch="$(uname -m)"
+            if [ "$arch" = "arm64" ]; then
+                platform="linux/arm64"
+            else
+                platform="linux/amd64"
+            fi
+            DEFAULT_TAG="$image" PLATFORMS="$platform" docker buildx bake \
+                --load \
+                --progress plain \
+                -f docker/docker-bake.hcl \
+                gungraun
+            docker run --rm \
+                --platform "$platform" \
+                --security-opt seccomp=unconfined \
+                --user "$(id -u):$(id -g)" \
+                --volume "$PWD:/workspace" \
+                --workdir /workspace \
+                --env CARGO_HOME=/tmp/cargo \
+                --env CARGO_TARGET_DIR=/workspace/target/gungraun-docker \
+                "$image" \
+                "${tracking_command[@]}"
+            ;;
+        *)
+            echo "unsupported platform: $(uname -s)" >&2
+            exit 1
+            ;;
+    esac
+
 # Run tests
 test *args='':
     cargo nextest run $@
 
 # Run loom tests
 test-loom *args='':
-    cargo nextest run --release --features loom --lib {{ args }} loom_tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.features | has("loom")) | "-p " + .name')
+    cargo nextest run --release --features loom --lib $packages {{ args }} loom_tests
 
 # Test the Rust documentation
 test-docs *args='--all':
@@ -87,8 +141,7 @@ check-publish-order:
 
 # Check that locked dependencies are at least 7 days old
 cooldown:
-    cargo cooldown --workspace --all-features check
-    git diff --exit-code Cargo.lock
+    ./.github/scripts/check_dependency_cooldown.sh
 
 # Run custom Dylint lints
 dylint:
@@ -101,6 +154,13 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
     set -euo pipefail
     targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
+    if [ -z "$targets" ]; then
+        exit 0
+    fi
+    # Build every target in one cargo invocation before fuzzing. Each target is
+    # its own sanitizer-instrumented binary, so building inside the run loop
+    # serializes the links against the fuzz sessions while most cores sit idle.
+    cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
         rm -f {{fuzz_dir}}/target/*/release/$target

@@ -300,13 +300,13 @@
 //! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
 
 use crate::{
+    BatchVerifier, PublicKey, Secret, Signer,
     bls12381::primitives::{
         group::{Private, Scalar, ScalarReadCfg, Share},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    BatchVerifier, PublicKey, Secret, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
@@ -317,11 +317,11 @@ use commonware_parallel::{Sequential, Strategy};
 #[cfg(feature = "arbitrary")]
 use commonware_utils::N3f1;
 use commonware_utils::{
+    Faults, NZU32, Participant, TryCollect,
     ordered::{Map, Quorum, Set},
-    Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
 use thiserror::Error;
 
@@ -524,7 +524,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     /// However, if there is a previous round, we expect a share, hence `Result`.
     fn unwrap_or_random_share(
         &self,
-        mut rng: impl CryptoRngCore,
+        mut rng: impl CryptoRng,
         share: Option<Scalar>,
     ) -> Result<Scalar, Error> {
         let out = match (self.previous.as_ref(), share) {
@@ -610,7 +610,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     #[must_use]
     fn check_dealer_log<M: Faults, B: BatchVerifier<PublicKey = P>>(
         &self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
         round_transcript: &Transcript,
         dealer: &P,
@@ -626,7 +626,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return false;
         };
         let ack_summary = transcript_for_ack(round_transcript, dealer, &log.pub_msg).summarize();
-        let mut ack_batch = B::new();
+        let mut ack_batch = B::new(self.players.len());
         let mut reveal_count = 0;
         let max_reveals = self.max_reveals::<M>();
         let mut reveal_eval_points = Vec::new();
@@ -1337,7 +1337,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     }
 
     fn check_dealers<B: BatchVerifier<PublicKey = P>>(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         info: &Info<V, P>,
         strategy: &impl Strategy,
         transcript: &Transcript,
@@ -1383,7 +1383,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// each call.
     pub fn pre_verify<B: BatchVerifier<PublicKey = P>>(
         &mut self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
     ) {
         let required_commitments = self.info.required_commitments::<M>() as usize;
@@ -1442,7 +1442,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// This might return an error if there are not enough good logs that we can use.
     fn select<B: BatchVerifier<PublicKey = P>>(
         mut self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
     ) -> Result<SelectedLogs<V, P>, Error> {
         self.pre_verify::<B>(rng, strategy);
@@ -1493,7 +1493,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
     #[allow(clippy::type_complexity)]
     pub fn start<M: Faults>(
-        mut rng: impl CryptoRngCore,
+        mut rng: impl CryptoRng,
         info: Info<V, S::PublicKey>,
         me: S,
         share: Option<Share>,
@@ -1678,7 +1678,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 ///
 /// This will only ever return [`Error::DkgFailed`].
 pub fn observe<V: Variant, P: PublicKey, M: Faults, B: BatchVerifier<PublicKey = P>>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     logs: Logs<V, P, M>,
     strategy: &impl Strategy,
 ) -> Result<Output<V, P>, Error> {
@@ -1829,7 +1829,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// [`Error::MismatchedLogs`] if `logs` are bound to a different DKG round.
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = S::PublicKey>>(
         self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         logs: Logs<V, S::PublicKey, M>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
@@ -1900,7 +1900,7 @@ pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 
 /// Simply distribute shares at random, instead of performing a distributed protocol.
 pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
-    mut rng: impl CryptoRngCore,
+    mut rng: impl CryptoRng,
     mode: Mode,
     players: Set<P>,
 ) -> DealResult<V, P> {
@@ -1942,7 +1942,7 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
 /// the trouble of generating signing keys. The downside is that the result isn't
 /// compatible with subsequent DKGs, which need an [`Output`].
 pub fn deal_anonymous<V: Variant, M: Faults>(
-    rng: impl CryptoRngCore,
+    rng: impl CryptoRng,
     mode: Mode,
     n: NonZeroU32,
 ) -> (Sharing<V>, Vec<Share>) {
@@ -1955,17 +1955,17 @@ pub fn deal_anonymous<V: Variant, M: Faults>(
 mod test_plan {
     use super::*;
     use crate::{
+        PublicKey,
         bls12381::primitives::{
             ops::{self, threshold},
             variant::Variant,
         },
-        ed25519, PublicKey,
+        ed25519,
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
-    use commonware_utils::{Faults, N3f1, TryCollect};
+    use commonware_utils::{Faults, N3f1, TestRng, TryCollect};
     use core::num::NonZeroI32;
-    use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
 
     /// Apply a mask to some bytes, returning whether or not a modification happened
@@ -2310,7 +2310,7 @@ mod test_plan {
         pub fn run<V: Variant>(self, seed: u64) -> anyhow::Result<()> {
             self.validate()?;
 
-            let mut rng = StdRng::seed_from_u64(seed);
+            let mut rng = TestRng::new(seed);
 
             // Generate keys for all participants (1-indexed to num_participants)
             let keys = (0..self.num_participants.get())
@@ -2487,7 +2487,7 @@ mod test_plan {
 
                         let i_player = players
                             .index(&player_pk)
-                            .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
+                            .ok_or_else(|| anyhow!("unknown player: {:?}", player_pk))?;
                         let player_key_idx = pk_to_key_idx[&player_pk];
                         let player = &mut players.values_mut()[usize::from(i_player)];
                         let persisted = priv_msg.clone();
@@ -2562,7 +2562,7 @@ mod test_plan {
                                 let player_pk = keys[i_player as usize].public_key();
                                 *results
                                     .get_value_mut(&player_pk)
-                                    .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))? =
+                                    .ok_or_else(|| anyhow!("unknown player: {:?}", player_pk))? =
                                     AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::random(
                                         &mut rng,
                                     )));
@@ -2585,7 +2585,7 @@ mod test_plan {
                         let missing_pk = keys[missing_dealer as usize].public_key();
                         let missing_log = dealer_logs
                             .get(&missing_pk)
-                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", &missing_pk));
+                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", missing_pk));
                         for &i_player in &round.players {
                             let player_pk = keys[i_player as usize].public_key();
                             let was_acked = missing_log.get_ack(&player_pk).is_some();
@@ -2725,7 +2725,7 @@ mod test_plan {
                         let dealer_pk = keys[dealer_idx as usize].public_key();
                         let dealer_log = dealer_logs
                             .get(&dealer_pk)
-                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", &dealer_pk));
+                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", dealer_pk));
                         if dealer_log.get_ack(&player_pk).is_none() {
                             continue;
                         }
@@ -2787,7 +2787,10 @@ mod test_plan {
                 for player in player_set.iter() {
                     let expected = expected_reveals.get(player).copied().unwrap_or(0) > max_faults;
                     let actual = observer_output.revealed().position(player).is_some();
-                    assert_eq!(expected, actual, "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})");
+                    assert_eq!(
+                        expected, actual,
+                        "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})"
+                    );
                 }
 
                 // Finalize each player
@@ -3021,7 +3024,7 @@ mod test {
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_invariants::minifuzz;
-    use commonware_utils::{test_rng, test_rng_seeded, Faults, N3f1};
+    use commonware_utils::{Faults, N3f1, TestRng, test_rng};
     use core::num::NonZeroI32;
 
     const PRE_VERIFY_DEALERS: usize = 8;
@@ -3102,7 +3105,7 @@ mod test {
 
                 let dealer_sk = keys[dealer_index].clone();
                 let dealer_pk = dealer_sk.public_key();
-                let mut rng = test_rng_seeded(seed);
+                let mut rng = TestRng::new(seed);
                 let (mut dealer, pub_msg, priv_msgs) =
                     Dealer::start::<QuorumTwo>(&mut rng, info.clone(), dealer_sk, None)
                         .expect("dealer initialization must succeed");
@@ -3404,25 +3407,31 @@ mod test {
 
     #[test]
     fn invalid_checkpoint_configs_fail_validation() {
-        assert!(Plan::new(NZU32!(4))
-            .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
-            .validate()
-            .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .resume_missing_dealer_msg_fails(1, 2),
-            )
-            .validate()
-            .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .bad_reveal(1, 0)
-                    .resume_missing_dealer_msg_fails(2, 1),
-            )
-            .validate()
-            .is_err());
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(
+                    Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                        .resume_missing_dealer_msg_fails(1, 2),
+                )
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(
+                    Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                        .bad_reveal(1, 0)
+                        .resume_missing_dealer_msg_fails(2, 1),
+                )
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]

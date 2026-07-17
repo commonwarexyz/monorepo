@@ -13,20 +13,21 @@ use crate::stateful::db::{
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
+    Context,
     journal::contiguous::{
-        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
+        Mutable, fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
     },
     merkle::{Family, Location},
     qmdb::{
+        Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
+            Keyless, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            fixed, variable, Keyless, Operation,
+            fixed, initial_root, variable,
         },
-        sync::{self, resolver::Resolver, Target as AnySyncTarget},
-        Error,
+        sync::{self, Target as AnySyncTarget, resolver::Resolver},
     },
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock};
@@ -39,7 +40,7 @@ type KeylessDbHandle<F, E, V, C, H, S> = Arc<TracedAsyncRwLock<Keyless<F, E, V, 
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -55,7 +56,7 @@ where
 impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -72,7 +73,7 @@ where
 impl<F, E, V, C, H, S> KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -124,7 +125,7 @@ where
 pub struct KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -138,7 +139,7 @@ where
 impl<F, E, V, C, H, S> Deref for KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -155,7 +156,7 @@ where
 impl<F, E, V, C, H, S> KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -184,7 +185,7 @@ where
 impl<F, E, V, C, H, S> UnmerkleizedTrait for KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -196,11 +197,14 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(
-            &*db,
-            self.metadata,
-            self.inactivity_floor.unwrap_or_default(),
-        );
+        let merkleized = self
+            .batch
+            .merkleize(
+                &*db,
+                self.metadata,
+                self.inactivity_floor.unwrap_or_default(),
+            )
+            .await;
         Ok(KeylessMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -211,7 +215,7 @@ where
 impl<F, E, V, C, H, S> MerkleizedTrait for KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -238,7 +242,7 @@ where
 impl<F, E, V, H, S> ManagedDb<E> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: FixedValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
@@ -253,6 +257,13 @@ where
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
+    }
+
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, FixedEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
     }
 
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
@@ -280,7 +291,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
@@ -292,7 +303,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -304,7 +315,7 @@ where
 impl<F, E, V, H, S> ManagedDb<E> for variable::Db<F, E, V, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: VariableValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
@@ -333,6 +344,13 @@ where
         <Self>::init(context, config).await
     }
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, VariableEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
     async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         KeylessUnmerkleized {
@@ -358,7 +376,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
@@ -370,7 +388,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -382,7 +400,7 @@ where
 impl<F, E, V, H, S, R> StateSyncDb<E, R> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: FixedValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
@@ -420,7 +438,7 @@ where
 impl<F, E, V, H, S, R> StateSyncDb<E, R> for variable::Db<F, E, V, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: VariableValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
@@ -461,13 +479,13 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::full::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
     };
-    use commonware_utils::{non_empty_range, sequence::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::U64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type FixedDb = fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
@@ -543,7 +561,7 @@ mod tests {
             );
             assert_eq!(guard.get_metadata().await.unwrap(), Some(U64::new(9)));
 
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard).await;
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard);
             assert_eq!(target.root, guard.root());
             assert_eq!(target.range.start(), mmr::Location::new(1));
             assert_eq!(target.range.end(), mmr::Location::new(3));

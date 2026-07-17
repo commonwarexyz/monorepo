@@ -4,57 +4,56 @@
 //! and running them against both the standard and coding marshal variants.
 
 use crate::{
+    Heightable, Reporter,
     marshal::{
+        Identifier,
         ancestry::BlockProvider,
         coding::{
-            shards,
-            types::{coding_config_for_participants, hash_context, CodedBlock},
-            Coding,
+            Coding, shards,
+            types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
         core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
-        Identifier,
     },
     simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
     },
-    types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-    Heightable, Reporter,
+    types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
 use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
+    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Provider, Scoped, Verifier as _},
+    certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
-    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
+    Clock, Quota, Runner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     telemetry::metrics::{
-        histogram::{Buckets, Timed},
         MetricsExt as _,
+        histogram::{Buckets, Timed},
     },
-    Clock, Quota, Runner, Supervisor as _,
 };
 use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{test_rng_seeded, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, test_rng, vec::NonEmptyVec};
 use futures::StreamExt;
 use rand::{
+    RngExt as _,
     seq::{IteratorRandom, SliceRandom},
-    Rng,
 };
 use std::{
     collections::BTreeMap,
@@ -203,14 +202,15 @@ pub trait TestHarness: 'static + Sized {
 
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<
-        ApplicationBlock = Self::ApplicationBlock,
-        Commitment = Self::Commitment,
-    >;
+            ApplicationBlock = Self::ApplicationBlock,
+            Commitment = Self::Commitment,
+        >;
 
     /// The block type used in test operations.
     type TestBlock: Heightable
         + Clone
         + Send
+        + Sync
         + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
 
     /// Additional per-validator state (e.g., shards mailbox for coding).
@@ -269,12 +269,25 @@ pub trait TestHarness: 'static + Sized {
     /// Get the height from a test block.
     fn height(block: &Self::TestBlock) -> Height;
 
-    /// Propose a block (broadcast to network).
+    /// Drive the leader's propose durability handshake: persist the proposed
+    /// block and assert it is durable, without broadcasting it (mirroring the
+    /// certify-time flush of a staged proposal whose broadcast was never
+    /// requested). Scenarios drive dissemination explicitly, so a proposal
+    /// must not pre-seed peer buffers and mask delivery and backfill paths.
     fn propose(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
         block: &Self::TestBlock,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = ()> + Send {
+        async move {
+            let block: <Self::Variant as crate::marshal::core::Variant>::Block =
+                block.clone().into();
+            assert!(
+                handle.mailbox.verified(round, block).await,
+                "proposed block must be durable"
+            );
+        }
+    }
 
     /// Mark a block as verified.
     fn verify(
@@ -354,8 +367,8 @@ fn contract_runner(seed: u64) -> deterministic::Runner {
 }
 
 fn restart_cycles_for_seed(seed: u64) -> usize {
-    let mut rng = test_rng_seeded(seed);
-    rng.gen_range(2..=4)
+    let mut rng = TestRng::new(seed);
+    rng.random_range(2..=4)
 }
 
 struct HailstormValidator<H: TestHarness> {
@@ -556,13 +569,13 @@ async fn drive_hailstorm_height_up_to_verify<H: TestHarness>(
 ) -> PendingHailstormHeight<H> {
     let height = Height::new(height_value);
     let active = active_validator_indices(state.validators);
-    let proposer_idx = active[context.gen_range(0..active.len())];
+    let proposer_idx = active[context.random_range(0..active.len())];
     let verifier_count = usize::min(QUORUM as usize, active.len());
     let verifier_indices = active
         .iter()
         .copied()
         .filter(|idx| *idx != proposer_idx)
-        .choose_multiple(context, verifier_count.saturating_sub(1));
+        .sample(context, verifier_count.saturating_sub(1));
     let block = H::make_test_block(
         *state.parent,
         *state.parent_commitment,
@@ -732,7 +745,7 @@ pub fn hailstorm<H: TestHarness>(
         let max_down = max_down.max(1);
 
         for shutdown_idx in 0..shutdowns {
-            let leadup = context.gen_range(1..=max_interval);
+            let leadup = context.random_range(1..=max_interval);
             target_height += leadup;
 
             // Pick validators to crash and compute how far the advance should
@@ -743,13 +756,10 @@ pub fn hailstorm<H: TestHarness>(
             // reported for it.
             let active_pre = active_validator_indices(&validators);
             let down_limit = usize::min(max_down, active_pre.len().saturating_sub(1));
-            let down_count = context.gen_range(1..=down_limit.max(1));
-            let mut selected = active_pre
-                .iter()
-                .copied()
-                .choose_multiple(&mut context, down_count);
+            let down_count = context.random_range(1..=down_limit.max(1));
+            let mut selected = active_pre.iter().copied().sample(&mut context, down_count);
             selected.sort_unstable();
-            let crash_after = context.gen_range(0..=leadup);
+            let crash_after = context.random_range(0..=leadup);
             let persisted_height = target_height - leadup + crash_after;
 
             {
@@ -821,7 +831,7 @@ pub fn hailstorm<H: TestHarness>(
                 "marshal hailstorm shutdown"
             );
 
-            let downtime = context.gen_range(1..=max_interval);
+            let downtime = context.random_range(1..=max_interval);
             target_height += downtime;
             let mut state = HailstormState {
                 validators: &mut validators,
@@ -901,8 +911,9 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: `marshal.proposed(...)=true` means the block survives an
-/// immediate crash and repeated recoveries.
+/// Contract: a durable propose handshake (the proposal's sync handle
+/// resolving durable) means the block survives an immediate crash and
+/// repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -912,7 +923,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -980,18 +991,9 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered =
-                            restarted
-                                .mailbox
-                                .get_verified(round)
-                                .await
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "marshal.proposed() returning true must imply \
-                                     get_verified(round) recovers the block after restart \
-                                     (seed={seed}, cycle={cycle})"
-                                    )
-                                });
+                        let recovered = restarted.mailbox.get_verified(round).await.unwrap_or_else(
+                            || panic!("durable proposal lost after restart (seed={seed}, cycle={cycle})"),
+                        );
                         assert_eq!(
                             recovered.digest(),
                             digest,
@@ -1021,7 +1023,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -1124,9 +1126,9 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
 /// immediate crash and repeated recoveries.
 ///
 /// Complements [`verified_success_implies_recoverable_after_restart`] by
-/// exercising the `Message::Certified -> put_block -> put_sync` handshake.
-/// A regression that acked before syncing the notarized cache would surface
-/// here as a missing block after restart.
+/// exercising the `Message::Certified -> put_notarized -> sync handle` handshake.
+/// A regression that acked before the sync handle completed would surface here
+/// as a missing block after restart.
 pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -1136,7 +1138,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -1282,14 +1284,12 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         let repeated_digest = H::digest(&repeated);
 
         // Negative control: a verify-only block at a distinct early view.
-        // Placing `orphan` at V=2 (instead of V=1, where `repeated` already
-        // occupies the verified index) guarantees the write actually lands in
-        // `verified_blocks[V=2]` rather than being silently dropped as a
-        // duplicate index. Because it is never certified, it lives solely in
-        // that verified entry and must disappear once retention pruning
-        // advances past V=2. Asserting it is gone (after asserting it was
-        // present before pruning) confirms the prune actually fires at the
-        // expected floor.
+        // Placing `orphan` at its own view V=2 keeps its retention behavior
+        // independent of `repeated` at V=1. Because it is never certified, it
+        // lives solely in that verified entry and must disappear once
+        // retention pruning advances past V=2. Asserting it is gone (after
+        // asserting it was present before pruning) confirms the prune
+        // actually fires at the expected floor.
         let orphan = H::make_test_block(
             Sha256::hash(b"orphan"),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
@@ -1300,9 +1300,8 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         let orphan_digest = H::digest(&orphan);
 
         // Verify `repeated` at V=1, then certify at V=25 (reproposal-style gap).
-        // The chain below starts at V=3 to avoid overwriting V=1 (`repeated`)
-        // or V=2 (`orphan`) in the verified archive (which drops subsequent
-        // writes at an existing view).
+        // The chain below starts at V=3 so V=1 (`repeated`) and V=2 (`orphan`)
+        // keep their own verified entries.
         let v_early = Round::new(Epoch::zero(), View::new(1));
         let v_orphan = Round::new(Epoch::zero(), View::new(2));
         let v_late = Round::new(Epoch::zero(), View::new(25));
@@ -1377,11 +1376,9 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
 }
 
 /// Regression: when a leader equivocates, a validator may verify one block
-/// (A) and then certify a different block (B) at the same round. `verified()`
-/// and `certified()` must write to distinct archives so both blocks are
-/// retained and retrievable; otherwise the second write collides on the same
-/// prunable-archive index (`skip_if_index_exists=true`) and is silently
-/// dropped despite the mailbox returning success.
+/// (A) and then certify a different block (B) at the same round. Both blocks
+/// must remain retrievable: a same-round collision must not silently drop the
+/// second block while the mailbox returns success.
 pub fn certify_persists_equivocated_block<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
@@ -1454,6 +1451,187 @@ pub fn certify_persists_equivocated_block<H: TestHarness>() {
     });
 }
 
+/// Regression: a pre-restart same-round candidate must not satisfy the
+/// durability ack for a different block verified after restart. An
+/// equivocating leader can land block A in the verified archive before a
+/// crash. When the validator verifies block B at the same round after
+/// restart, `verified()` acking durable success must imply B itself is
+/// recoverable, not merely covered by A's stale same-round write.
+pub fn verified_after_restart_reverify_same_round_implies_recoverable<H: TestHarness>() {
+    reverify_same_round_implies_recoverable::<H, _, _>(
+        "marshal.verified() returning true must imply get_block(&digest_b) \
+         recovers the verified same-round block after restart",
+        |mut handle, round, block_a, block_b| async move {
+            // Re-verify A (a replayed duplicate of the pre-crash write), then
+            // verify equivocated block B at the same round.
+            let mut peers: [ValidatorHandle<H>; 0] = [];
+            H::verify(&mut handle, round, &block_a, &mut peers).await;
+            H::verify(&mut handle, round, &block_b, &mut peers).await;
+        },
+    );
+}
+
+/// Regression: extends
+/// [`verified_after_restart_reverify_same_round_implies_recoverable`] through
+/// certification. The certify path may reuse the verified archive's covering
+/// sync for a block it believes that archive holds. A stale same-round write
+/// for A must not be treated as coverage for certifying B: `certified()`
+/// acking success must imply B is recoverable after restart.
+pub fn certify_after_restart_reverify_same_round_implies_recoverable<H: TestHarness>() {
+    reverify_same_round_implies_recoverable::<H, _, _>(
+        "marshal.certified() returning true must imply get_block(&digest_b) \
+         recovers the certified same-round block after restart",
+        |mut handle, round, _block_a, block_b| async move {
+            // Verify only equivocated block B, so certification is covered by
+            // B's verified write (the elision path) rather than a fresh
+            // notarized write, then certify it.
+            let mut peers: [ValidatorHandle<H>; 0] = [];
+            H::verify(&mut handle, round, &block_b, &mut peers).await;
+            assert!(
+                H::certify(&mut handle, round, &block_b).await,
+                "certify must ack"
+            );
+        },
+    );
+}
+
+/// Shared scaffolding for the same-round reverify-after-restart contracts.
+///
+/// Phase 1 verifies block A and crashes with it durable in the verified
+/// archive. `phase_two` runs on the restarted validator and exercises the
+/// equivocated same-round block B. Phase 3 restarts once more and asserts
+/// both candidates are recoverable by digest, panicking with `durable_claim`
+/// when B is missing.
+fn reverify_same_round_implies_recoverable<H, F, Fut>(durable_claim: &'static str, phase_two: F)
+where
+    H: TestHarness,
+    F: FnOnce(ValidatorHandle<H>, Round, H::TestBlock, H::TestBlock) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    let Fixture {
+        participants,
+        schemes,
+        ..
+    } = bls12381_threshold_vrf::fixture::<V, _>(&mut test_rng(), NAMESPACE, NUM_VALIDATORS);
+
+    let me = participants[0].clone();
+    let provider = ConstantProvider::new(schemes[0].clone());
+    let round = Round::new(Epoch::zero(), View::new(1));
+    let parent = Sha256::hash(b"");
+    let parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+
+    // Two distinct blocks at the same height/round (leader equivocation):
+    // distinct timestamps yield distinct digests.
+    let block_a = H::make_test_block(
+        parent,
+        parent_commitment,
+        Height::new(1),
+        1,
+        NUM_VALIDATORS as u16,
+    );
+    let digest_a = H::digest(&block_a);
+    let block_b = H::make_test_block(
+        parent,
+        parent_commitment,
+        Height::new(1),
+        2,
+        NUM_VALIDATORS as u16,
+    );
+    let digest_b = H::digest(&block_b);
+    assert_ne!(digest_a, digest_b, "test requires distinct digests");
+
+    // Phase 1: verify block A, then crash with A durable in the verified archive.
+    let (_, checkpoint) = contract_runner(0).start_and_recover({
+        let participants = participants.clone();
+        let me = me.clone();
+        let provider = provider.clone();
+        let block_a = block_a.clone();
+        move |context| async move {
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let setup = H::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                provider.clone(),
+            )
+            .await;
+            let mut handle = ValidatorHandle::<H> {
+                mailbox: setup.mailbox,
+                extra: setup.extra,
+            };
+            let mut peers: [ValidatorHandle<H>; 0] = [];
+            H::verify(&mut handle, round, &block_a, &mut peers).await;
+        }
+    });
+
+    // Phase 2: restart and exercise equivocated block B at the same round,
+    // then crash again. A's pre-crash write must not stand in for B's
+    // durability.
+    let (_, checkpoint) = deterministic::Runner::from(checkpoint).start_and_recover({
+        let participants = participants.clone();
+        let me = me.clone();
+        let provider = provider.clone();
+        move |context| async move {
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let setup = H::setup_validator(
+                context
+                    .child("validator")
+                    .with_attribute("index", 0)
+                    .with_attribute("restart", 0),
+                &mut oracle,
+                me.clone(),
+                provider.clone(),
+            )
+            .await;
+            let handle = ValidatorHandle::<H> {
+                mailbox: setup.mailbox,
+                extra: setup.extra,
+            };
+            phase_two(handle, round, block_a, block_b).await;
+        }
+    });
+
+    // Phase 3: both same-round candidates must be recoverable.
+    deterministic::Runner::from(checkpoint).start(move |context| async move {
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+        let restarted = H::setup_validator(
+            context
+                .child("validator")
+                .with_attribute("index", 0)
+                .with_attribute("restart", 1),
+            &mut oracle,
+            me.clone(),
+            provider.clone(),
+        )
+        .await;
+        assert!(
+            restarted.mailbox.get_block(&digest_a).await.is_some(),
+            "pre-restart verified block A must remain recoverable"
+        );
+        let recovered = restarted
+            .mailbox
+            .get_block(&digest_b)
+            .await
+            .unwrap_or_else(|| panic!("{durable_claim}"));
+        assert_eq!(recovered.digest(), digest_b);
+    });
+}
+
 /// Contract: once marshal has delivered a finalized block to the application,
 /// that finalized block and its certificate must already be durable.
 pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
@@ -1465,7 +1643,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -1799,10 +1977,6 @@ impl TestHarness for StandardHarness {
         block.height()
     }
 
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2049,18 +2223,6 @@ impl TestHarness for InlineHarness {
         StandardHarness::height(block)
     }
 
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        StandardHarness::propose(
-            &mut ValidatorHandle::<StandardHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2251,18 +2413,6 @@ impl TestHarness for DeferredHarness {
 
     fn height(block: &Self::TestBlock) -> Height {
         InlineHarness::height(block)
-    }
-
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        InlineHarness::propose(
-            &mut ValidatorHandle::<InlineHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
     }
 
     async fn verify(
@@ -2644,14 +2794,6 @@ impl TestHarness for CodingHarness {
         block.height()
     }
 
-    async fn propose(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
-    ) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2925,10 +3067,10 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
             let fin = H::make_finalization(proposal, &schemes, QUORUM);
             if quorum_sees_finalization {
-                let do_finalize = context.gen_bool(0.2);
+                let do_finalize = context.random_bool(0.2);
                 for (i, h) in handles
                     .iter_mut()
-                    .choose_multiple(&mut context, NUM_VALIDATORS as usize)
+                    .sample(&mut context, NUM_VALIDATORS as usize)
                     .iter_mut()
                     .enumerate()
                 {
@@ -2941,7 +3083,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
                 }
             } else {
                 for h in handles.iter_mut() {
-                    if context.gen_bool(0.2)
+                    if context.random_bool(0.2)
                         || height.get() == NUM_BLOCKS
                         || height == bounds.last()
                     {
@@ -4521,11 +4663,13 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         };
 
         // Initially, no blocks
-        assert!(handle
-            .mailbox
-            .get_block(Identifier::Height(Height::new(1)))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_block(Identifier::Height(Height::new(1)))
+                .await
+                .is_none()
+        );
         assert!(handle.mailbox.get_block(Identifier::Latest).await.is_none());
 
         let mut parent = Sha256::hash(b"");
@@ -4578,11 +4722,13 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         assert_eq!(latest.height(), Height::new(3));
 
         // Missing height
-        assert!(handle
-            .mailbox
-            .get_block(Identifier::Height(Height::new(10)))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_block(Identifier::Height(Height::new(10)))
+                .await
+                .is_none()
+        );
     })
 }
 
@@ -4681,11 +4827,13 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         };
 
         // Initially, no finalization
-        assert!(handle
-            .mailbox
-            .get_finalization(Height::new(1))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .is_none()
+        );
 
         let mut parent = Sha256::hash(b"");
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
@@ -4727,11 +4875,13 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         }
 
         // Missing height
-        assert!(handle
-            .mailbox
-            .get_finalization(Height::new(10))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_finalization(Height::new(10))
+                .await
+                .is_none()
+        );
     })
 }
 
@@ -4820,11 +4970,13 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         }
 
         // Validator 1 should not have block 5 yet
-        assert!(handle1
-            .mailbox
-            .get_finalization(Height::new(5))
-            .await
-            .is_none());
+        assert!(
+            handle1
+                .mailbox
+                .get_finalization(Height::new(5))
+                .await
+                .is_none()
+        );
 
         // Validator 1: hint that block 5 is finalized, targeting validator 0
         handle1

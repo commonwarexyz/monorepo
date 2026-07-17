@@ -1,8 +1,8 @@
 use super::types::Ack;
 use crate::types::{Epoch, Height, Participant};
 use commonware_cryptography::{
-    certificate::{Attestation, Scheme},
     Digest, PublicKey,
+    certificate::{Attestation, Scheme},
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
@@ -158,24 +158,21 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
 }
 
 #[cfg(test)]
-#[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        mocks,
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+        scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
         types::Chunk,
     };
     use commonware_cryptography::{
+        Hasher, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::PublicKey,
-        Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_utils::{TestRng, test_rng};
     use helpers::Sha256Digest;
-    use rand::{rngs::StdRng, SeedableRng as _};
 
     const NAMESPACE: &[u8] = b"1234";
 
@@ -253,7 +250,7 @@ mod tests {
     fn chunk_different_payloads<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         // Use 8 validators so quorum is 6
         let num_validators = 8;
@@ -303,7 +300,7 @@ mod tests {
     fn sequencer_different_heights<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
@@ -350,7 +347,7 @@ mod tests {
     fn sequencer_contiguous_heights<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
@@ -414,7 +411,7 @@ mod tests {
     fn chunk_different_epochs<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
@@ -461,7 +458,7 @@ mod tests {
     fn add_certificate<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
@@ -502,7 +499,7 @@ mod tests {
     fn duplicate_attestation_submission<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
@@ -513,12 +510,14 @@ mod tests {
         let chunk = Chunk::new(sequencer, height, Sha256::hash(b"payload"));
 
         let ack = helpers::create_ack(&fixture.schemes[0], chunk, epoch);
-        assert!(acks
-            .add_ack(&ack, &fixture.schemes[0], &Sequential)
-            .is_none());
-        assert!(acks
-            .add_ack(&ack, &fixture.schemes[0], &Sequential)
-            .is_none());
+        assert!(
+            acks.add_ack(&ack, &fixture.schemes[0], &Sequential)
+                .is_none()
+        );
+        assert!(
+            acks.add_ack(&ack, &fixture.schemes[0], &Sequential)
+                .is_none()
+        );
     }
 
     #[test]
@@ -535,7 +534,7 @@ mod tests {
     fn subsequent_acks_after_certificate_reached<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
@@ -556,9 +555,10 @@ mod tests {
         assert!(produced.is_some());
 
         let ack = helpers::create_ack(&fixture.schemes[3], chunk, epoch);
-        assert!(acks
-            .add_ack(&ack, &fixture.schemes[0], &Sequential)
-            .is_none());
+        assert!(
+            acks.add_ack(&ack, &fixture.schemes[0], &Sequential)
+                .is_none()
+        );
     }
 
     #[test]
@@ -575,7 +575,7 @@ mod tests {
     fn multiple_sequencers<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
@@ -615,7 +615,7 @@ mod tests {
     fn incomplete_quorum<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
@@ -627,9 +627,10 @@ mod tests {
 
         let acks_vec = helpers::create_acks_for_indices(&fixture.schemes, chunk, epoch, &[0, 1]);
         for ack in acks_vec {
-            assert!(acks
-                .add_ack(&ack, &fixture.schemes[0], &Sequential)
-                .is_none());
+            assert!(
+                acks.add_ack(&ack, &fixture.schemes[0], &Sequential)
+                    .is_none()
+            );
         }
         assert_eq!(acks.get_certificate(&sequencer, height), None);
     }
@@ -648,7 +649,7 @@ mod tests {
     fn interleaved_payloads<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         // Use 20 validators so quorum is 14
         // We'll have validators [0-13] vote for payload1 and [6-19] vote for payload2

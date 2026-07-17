@@ -21,9 +21,11 @@ mod pool;
 pub(crate) use buffer::AlignedBuffer;
 use buffer::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
+use commonware_codec::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
 use crossbeam_utils::CachePadded;
-pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
+pub use pool::{
+    BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache, PoolError,
+};
 use std::{collections::VecDeque, io::IoSlice, mem::align_of, num::NonZeroUsize, ops::RangeBounds};
 
 /// Returns the system page size.
@@ -241,6 +243,22 @@ impl IoBuf {
                 .map_err(|pooled| Self {
                     inner: IoBufInner::Pooled(pooled),
                 }),
+        }
+    }
+
+    /// Convert this buffer into [`IoBufMut`], allocating from `pool` if needed.
+    ///
+    /// This is zero-copy when `self` has exclusive ownership of the backing
+    /// storage. If the buffer is shared, this allocates a new buffer from
+    /// `pool` and copies the readable bytes into it.
+    pub fn into_mut_with_pool(self, pool: &BufferPool) -> IoBufMut {
+        match self.try_into_mut() {
+            Ok(buf) => buf,
+            Err(buf) => {
+                let mut result = pool.alloc(buf.len());
+                result.put_slice(buf.as_ref());
+                result
+            }
         }
     }
 }
@@ -593,15 +611,18 @@ impl IoBufMut {
     /// Panics if `len > capacity()`.
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
-        assert!(
-            len <= self.capacity(),
-            "set_len({len}) exceeds capacity({})",
-            self.capacity()
-        );
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.set_len(len),
-            IoBufMutInner::Aligned(b) => b.set_len(len),
-            IoBufMutInner::Pooled(b) => b.set_len(len),
+        // SAFETY: The caller guarantees that all bytes in `0..len` are initialized.
+        unsafe {
+            assert!(
+                len <= self.capacity(),
+                "set_len({len}) exceeds capacity({})",
+                self.capacity()
+            );
+            match &mut self.inner {
+                IoBufMutInner::Bytes(b) => b.set_len(len),
+                IoBufMutInner::Aligned(b) => b.set_len(len),
+                IoBufMutInner::Pooled(b) => b.set_len(len),
+            }
         }
     }
 
@@ -789,10 +810,13 @@ unsafe impl BufMut for IoBufMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.advance_mut(cnt),
-            IoBufMutInner::Aligned(b) => b.advance_mut(cnt),
-            IoBufMutInner::Pooled(b) => b.advance_mut(cnt),
+        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunk.
+        unsafe {
+            match &mut self.inner {
+                IoBufMutInner::Bytes(b) => b.advance_mut(cnt),
+                IoBufMutInner::Aligned(b) => b.advance_mut(cnt),
+                IoBufMutInner::Pooled(b) => b.advance_mut(cnt),
+            }
         }
     }
 
@@ -1775,18 +1799,21 @@ impl IoBufsMut {
     ///
     /// Panics if `len` exceeds total capacity.
     pub(crate) unsafe fn set_len(&mut self, len: usize) {
-        let capacity = self.capacity();
-        assert!(
-            len <= capacity,
-            "set_len({len}) exceeds capacity({capacity})"
-        );
-        let mut remaining = len;
-        self.for_each_chunk_mut(|buf| {
-            let cap = buf.capacity();
-            let to_set = remaining.min(cap);
-            buf.set_len(to_set);
-            remaining -= to_set;
-        });
+        // SAFETY: The caller guarantees that all bytes in `0..len` are initialized.
+        unsafe {
+            let capacity = self.capacity();
+            assert!(
+                len <= capacity,
+                "set_len({len}) exceeds capacity({capacity})"
+            );
+            let mut remaining = len;
+            self.for_each_chunk_mut(|buf| {
+                let cap = buf.capacity();
+                let to_set = remaining.min(cap);
+                buf.set_len(to_set);
+                remaining -= to_set;
+            });
+        }
     }
 
     /// Copy data from a slice into the buffers.
@@ -1942,31 +1969,34 @@ unsafe impl BufMut for IoBufsMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        match &mut self.inner {
-            IoBufsMutInner::Single(buf) => buf.advance_mut(cnt),
-            IoBufsMutInner::Pair(pair) => {
-                let mut remaining = cnt;
-                if advance_mut_in_chunks(pair, &mut remaining) {
-                    return;
+        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunks.
+        unsafe {
+            match &mut self.inner {
+                IoBufsMutInner::Single(buf) => buf.advance_mut(cnt),
+                IoBufsMutInner::Pair(pair) => {
+                    let mut remaining = cnt;
+                    if advance_mut_in_chunks(pair, &mut remaining) {
+                        return;
+                    }
+                    panic!("cannot advance past end of buffer");
                 }
-                panic!("cannot advance past end of buffer");
-            }
-            IoBufsMutInner::Triple(triple) => {
-                let mut remaining = cnt;
-                if advance_mut_in_chunks(triple, &mut remaining) {
-                    return;
+                IoBufsMutInner::Triple(triple) => {
+                    let mut remaining = cnt;
+                    if advance_mut_in_chunks(triple, &mut remaining) {
+                        return;
+                    }
+                    panic!("cannot advance past end of buffer");
                 }
-                panic!("cannot advance past end of buffer");
-            }
-            IoBufsMutInner::Chunked(bufs) => {
-                let mut remaining = cnt;
-                let (first, second) = bufs.as_mut_slices();
-                if advance_mut_in_chunks(first, &mut remaining)
-                    || advance_mut_in_chunks(second, &mut remaining)
-                {
-                    return;
+                IoBufsMutInner::Chunked(bufs) => {
+                    let mut remaining = cnt;
+                    let (first, second) = bufs.as_mut_slices();
+                    if advance_mut_in_chunks(first, &mut remaining)
+                        || advance_mut_in_chunks(second, &mut remaining)
+                    {
+                        return;
+                    }
+                    panic!("cannot advance past end of buffer");
                 }
-                panic!("cannot advance past end of buffer");
             }
         }
     }
@@ -2319,7 +2349,10 @@ unsafe impl BufMut for Builder {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        self.buf.advance_mut(cnt);
+        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunk.
+        unsafe {
+            self.buf.advance_mut(cnt);
+        }
     }
 
     #[inline]
@@ -2390,19 +2423,17 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
-    use commonware_codec::{types::lazy::Lazy, Decode, Encode, RangeCfg};
+    use commonware_codec::{Decode, Encode, RangeCfg, types::lazy::Lazy};
     use core::ops::{Range, RangeFrom, RangeInclusive, RangeToInclusive};
     use std::collections::{BTreeMap, HashMap};
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
-                // Reduce max_per_class to avoid slow atomics under miri.
-                let pool_config = BufferPoolConfig {
-                    pool_min_size: 0,
-                    max_per_class: commonware_utils::NZU32!(32),
-                    ..BufferPoolConfig::for_network()
-                };
+                // Reduce the class limits to avoid slow atomics under miri.
+                let pool_config = BufferPoolConfig::for_network()
+                    .with_pool_min_size(0)
+                    .with_max_per_class(commonware_utils::NZU32!(32));
             } else {
                 let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
             }
@@ -3895,6 +3926,46 @@ mod tests {
     }
 
     #[test]
+    fn test_iobuf_into_mut_with_pool() {
+        let pool = test_pool();
+
+        // Unique buffers recover mutability without copying.
+        let mut unique = pool.alloc(4);
+        unique.put_slice(b"data");
+        let unique_ptr = unique.as_mut_ptr();
+        let mut recovered = unique.freeze().into_mut_with_pool(&pool);
+        assert_eq!(recovered.as_ref(), b"data");
+        assert_eq!(recovered.as_mut_ptr(), unique_ptr);
+
+        // Shared buffers allocate from the pool and copy readable bytes.
+        let mut shared = pool.alloc(4);
+        shared.put_slice(b"copy");
+        let shared = shared.freeze();
+        let shared_ptr = shared.as_ptr();
+        let _clone = shared.clone();
+        let mut copied = shared.into_mut_with_pool(&pool);
+        assert_eq!(copied.as_ref(), b"copy");
+        assert_ne!(copied.as_mut_ptr() as *const u8, shared_ptr);
+        assert!(copied.is_pooled());
+
+        // Recovery after transient slices are dropped is zero-copy and preserves
+        // the full readable length and capacity.
+        let mut mirror = pool.alloc(8);
+        mirror.put_slice(b"abcdefgh");
+        let mirror_cap = mirror.capacity();
+        let mirror_ptr = mirror.as_mut_ptr();
+        let frozen = mirror.freeze();
+        let head = frozen.slice(0..3);
+        let tail = frozen.slice(5..8);
+        drop(head);
+        drop(tail);
+        let mut recovered = frozen.into_mut_with_pool(&pool);
+        assert_eq!(recovered.as_ref(), b"abcdefgh");
+        assert_eq!(recovered.as_mut_ptr(), mirror_ptr);
+        assert_eq!(recovered.capacity(), mirror_cap);
+    }
+
+    #[test]
     fn test_iobufmut_additional_conversion_and_trait_paths() {
         // Basic mutable operations should keep readable bytes consistent.
         let mut buf = IoBufMut::from(vec![1u8, 2, 3, 4]);
@@ -3909,7 +3980,7 @@ mod tests {
         let expected: &[u8] = b"xyz";
         assert!(PartialEq::<[u8]>::eq(&buf, expected));
         assert!(buf == b"xyz"[..]);
-        assert!(buf == [b'x', b'y', b'z']);
+        assert!(buf == *b"xyz");
         assert!(buf == b"xyz");
 
         // Conversions from common owned/shared containers preserve contents.

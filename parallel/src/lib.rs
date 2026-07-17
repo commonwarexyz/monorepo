@@ -72,14 +72,15 @@ commonware_macros::stability_scope!(BETA {
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
+            use core::convert::Infallible;
             use futures::{
                 channel::oneshot,
                 future::{self, Either},
             };
             use rayon::{
+                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
-                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
@@ -100,7 +101,7 @@ commonware_macros::stability_scope!(BETA {
     #[derive(Clone, Debug)]
     pub struct Manual<S> {
         strategy: S,
-        parallelism: NonZeroUsize,
+        parallelism: usize,
     }
 
     impl<S> Manual<S> {
@@ -108,13 +109,13 @@ commonware_macros::stability_scope!(BETA {
         pub const fn new(strategy: S, parallelism: NonZeroUsize) -> Self {
             Self {
                 strategy,
-                parallelism,
+                parallelism: parallelism.get(),
             }
         }
 
-        /// Return the number of threads available for manually partitioned work.
-        pub const fn parallelism_hint(&self) -> usize {
-            self.parallelism.get()
+        /// Returns the parallelism to use for manually partitioned work.
+        pub const fn parallelism(&self) -> usize {
+            self.parallelism
         }
     }
 
@@ -133,6 +134,9 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// The returned future resolves when the submitted job completes, but blocking on external
         /// synchronization or I/O inside the job can occupy execution capacity until it returns.
+        /// When the polling thread itself belongs to the strategy's execution resources (e.g. a
+        /// runtime whose executor thread is registered as a pool worker), the job (and other
+        /// pending work) may be executed inline on that thread rather than waited on.
         ///
         /// If the job panics, the panic is propagated to the caller; it never aborts the process.
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
@@ -142,19 +146,24 @@ commonware_macros::stability_scope!(BETA {
 
         /// Runs either a serial or parallel body.
         #[track_caller]
-        fn run<R, SEQ, PAR>(
-            &self,
-            _len: usize,
-            serial: SEQ,
-            _parallel: PAR,
-        ) -> R
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
         where
             R: Send,
             SEQ: FnOnce() -> R + Send,
-            PAR: FnOnce() -> R + Send,
-        {
-            serial()
-        }
+            PAR: FnOnce() -> R + Send;
+
+        /// Like [`run`](Self::run), but for fallible work.
+        ///
+        /// The strategy chooses and runs either the serial or parallel body, returning the
+        /// first error produced by the chosen body. Elapsed time is only recorded on success,
+        /// so abort-early error paths cannot poison the adaptive policy's estimates.
+        #[track_caller]
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send;
 
         /// Reduces a collection to a single value with per-partition initialization.
         ///
@@ -269,6 +278,9 @@ commonware_macros::stability_scope!(BETA {
         /// applying `fold_op` after an error is observed. When more than one partition fails,
         /// any error may be returned.
         ///
+        /// Adaptive strategies must only record elapsed time when the fold succeeds, so
+        /// abort-early error paths cannot poison the policy's estimates.
+        ///
         /// # Arguments
         ///
         /// - `iter`: The collection to fold over
@@ -289,21 +301,7 @@ commonware_macros::stability_scope!(BETA {
             E: Send,
             ID: Fn() -> R + Send + Sync,
             F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            self.fold(
-                iter,
-                || Ok(identity()),
-                |acc, item| match acc {
-                    Ok(acc) => fold_op(acc, item),
-                    Err(error) => Err(error),
-                },
-                |a, b| match a {
-                    Ok(a) => b.map(|b| reduce_op(a, b)),
-                    Err(error) => Err(error),
-                },
-            )
-        }
+            RD: Fn(R, R) -> R + Send + Sync;
 
         /// Maps each element and collects results into a `Vec`.
         ///
@@ -588,7 +586,10 @@ commonware_macros::stability_scope!(BETA {
 
     impl<S: Strategy> Strategy for Manual<S> {
         fn manual(&self) -> Manual<Self> {
-            Manual::new(self.clone(), self.parallelism)
+            Manual {
+                strategy: self.clone(),
+                parallelism: self.parallelism,
+            }
         }
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
@@ -601,18 +602,24 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[track_caller]
-        fn run<R, SEQ, PAR>(
-            &self,
-            len: usize,
-            serial: SEQ,
-            parallel: PAR,
-        ) -> R
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
         where
             R: Send,
             SEQ: FnOnce() -> R + Send,
             PAR: FnOnce() -> R + Send,
         {
             self.strategy.run(len, serial, parallel)
+        }
+
+        #[track_caller]
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            self.strategy.try_run(len, serial, parallel)
         }
 
         #[track_caller]
@@ -777,6 +784,25 @@ commonware_macros::stability_scope!(BETA {
             async move { result }
         }
 
+        fn run<R, SEQ, PAR>(&self, _len: usize, serial: SEQ, _parallel: PAR) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            serial()
+        }
+
+        fn try_run<R, E, SEQ, PAR>(&self, _len: usize, serial: SEQ, _parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            serial()
+        }
+
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -834,7 +860,6 @@ commonware_macros::stability_scope!(BETA {
         {
             items.sort_by(compare);
         }
-
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
@@ -843,10 +868,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
     /// A parallel execution strategy backed by a rayon thread pool.
     ///
-    /// This strategy adaptively executes collection operations serially or across multiple
-    /// threads. It records estimated worker time by callsite, input-size bucket, and thread count so
-    /// small inputs can avoid rayon scheduling overhead without disabling parallelism for larger
-    /// inputs.
+    /// This strategy adaptively executes collection operations serially or through its backing
+    /// pool. It records wall-clock estimates by callsite, input-size and work-size buckets, and
+    /// planning parallelism so small inputs can avoid rayon scheduling overhead without disabling
+    /// parallel execution for larger inputs.
     ///
     /// # Thread Pool Ownership
     ///
@@ -883,8 +908,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     #[derive(Debug, Clone)]
     pub struct Rayon {
         thread_pool: ThreadPool,
+        // The parallelism assumed for policy decisions and manual partitioning. Defaults to the
+        // pool's thread count.
+        parallelism: usize,
         // `Some` enables adaptive serial-vs-parallel decisions; `None` (used by `manual`) runs the
-        // parallel body whenever the pool has more than one thread and allocates no policy state.
+        // parallel body whenever the parallelism exceeds one and allocates no policy state.
         policy: Option<policy::Policy>,
     }
 
@@ -900,10 +928,22 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
         /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
+            let parallelism = thread_pool.current_num_threads().max(1);
             Self {
                 thread_pool,
+                parallelism,
                 policy: Some(policy::Policy::default()),
             }
+        }
+
+        /// Overrides the parallelism assumed for planning decisions.
+        ///
+        /// This does not resize the backing pool. By default a strategy plans with the pool's
+        /// thread count; override it when the strategy should expose a different parallelism
+        /// (e.g. a runtime that executes strategy work inline on a single thread).
+        pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
+            self.parallelism = parallelism.get();
+            self
         }
 
         #[track_caller]
@@ -913,9 +953,23 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             multiplier: usize,
             run: impl FnOnce(policy::Execution) -> R,
         ) -> R {
-            let threads = self.thread_pool.current_num_threads();
+            match self.try_execute(len, multiplier, |execution| {
+                Ok::<_, Infallible>(run(execution))
+            }) {
+                Ok(result) => result,
+                Err(e) => match e {},
+            }
+        }
+
+        #[track_caller]
+        fn try_execute<R, E>(
+            &self,
+            len: usize,
+            multiplier: usize,
+            run: impl FnOnce(policy::Execution) -> Result<R, E>,
+        ) -> Result<R, E> {
             let Some(policy) = &self.policy else {
-                let execution = if threads <= 1 {
+                let execution = if self.parallelism <= 1 {
                     policy::Execution::Serial
                 } else {
                     policy::Execution::Parallel
@@ -924,21 +978,20 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             };
 
             let work = len.saturating_mul(multiplier);
-            policy.run(Location::caller(), len, work, threads, run)
+            policy.try_run(Location::caller(), len, work, self.parallelism, run)
         }
     }
 
     impl Strategy for Rayon {
         fn manual(&self) -> Manual<Self> {
-            let parallelism = NonZeroUsize::new(self.thread_pool.current_num_threads())
-                .unwrap_or_else(|| NonZeroUsize::new(1).unwrap());
-            Manual::new(
-                Self {
+            Manual {
+                strategy: Self {
                     thread_pool: self.thread_pool.clone(),
+                    parallelism: self.parallelism,
                     policy: None,
                 },
-                parallelism,
-            )
+                parallelism: self.parallelism,
+            }
         }
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
@@ -950,8 +1003,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 return Either::Left(future::ready(f(self.clone())));
             }
 
-            let (tx, rx) = oneshot::channel();
+            let (tx, mut rx) = oneshot::channel();
             let s = self.clone();
+            let pool = self.thread_pool.clone();
             self.thread_pool.spawn(move || {
                 // Catch the panic so a panicking job propagates to the awaiting task rather than
                 // aborting the process (rayon aborts on an uncaught panic in a spawned job).
@@ -959,6 +1013,22 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 let _ = tx.send(result);
             });
             Either::Right(async move {
+                // When the polling thread is itself a member of the pool, waiting on the channel
+                // could park the only worker able to run the job. Execute pending pool work inline
+                // until the job completes or another worker takes over. `yield_now` returns `None`
+                // when this thread is not a pool member, so external callers fall through to the
+                // channel immediately.
+                loop {
+                    if let Ok(Some(result)) = rx.try_recv() {
+                        return match result {
+                            Ok(value) => value,
+                            Err(payload) => panic::resume_unwind(payload),
+                        };
+                    }
+                    if !matches!(pool.yield_now(), Some(Yield::Executed)) {
+                        break;
+                    }
+                }
                 match rx.await {
                     Ok(Ok(value)) => value,
                     Ok(Err(payload)) => panic::resume_unwind(payload),
@@ -968,18 +1038,27 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         #[track_caller]
-        fn run<R, SEQ, PAR>(
-            &self,
-            len: usize,
-            serial: SEQ,
-            parallel: PAR,
-        ) -> R
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
         where
             R: Send,
             SEQ: FnOnce() -> R + Send,
             PAR: FnOnce() -> R + Send,
         {
             self.execute(len, 1, |execution| match execution {
+                policy::Execution::Serial => serial(),
+                policy::Execution::Parallel => parallel(),
+            })
+        }
+
+        #[track_caller]
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            self.try_execute(len, 1, |execution| match execution {
                 policy::Execution::Serial => serial(),
                 policy::Execution::Parallel => parallel(),
             })
@@ -1005,7 +1084,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.fold_init(items, init, identity, fold_op, reduce_op),
+                policy::Execution::Serial => {
+                    Sequential.fold_init(items, init, identity, fold_op, reduce_op)
+                }
                 policy::Execution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
@@ -1030,18 +1111,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(
-                items.len(),
-                1,
-                |execution| {
-                    match execution {
-                        policy::Execution::Serial => Sequential.map_collect_vec(items, map_op),
-                        policy::Execution::Parallel => self
-                            .thread_pool
-                            .install(|| items.into_par_iter().map(map_op).collect()),
-                    }
-                },
-            )
+            self.execute(items.len(), 1, |execution| match execution {
+                policy::Execution::Serial => Sequential.map_collect_vec(items, map_op),
+                policy::Execution::Parallel => self
+                    .thread_pool
+                    .install(|| items.into_par_iter().map(map_op).collect()),
+            })
         }
 
         #[track_caller]
@@ -1053,18 +1128,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             E: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(
-                items.len(),
-                1,
-                |execution| {
-                    match execution {
-                        policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
-                        policy::Execution::Parallel => self
-                            .thread_pool
-                            .install(|| items.into_par_iter().map(map_op).collect()),
-                    }
-                },
-            )
+            self.try_execute(items.len(), 1, |execution| match execution {
+                policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
+                policy::Execution::Parallel => self
+                    .thread_pool
+                    .install(|| items.into_par_iter().map(map_op).collect()),
+            })
         }
 
         #[track_caller]
@@ -1077,18 +1146,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(
-                items.len(),
-                1,
-                |execution| {
-                    match execution {
-                        policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                        policy::Execution::Parallel => self
-                            .thread_pool
-                            .install(|| items.into_par_iter().map_init(init, map_op).collect()),
-                    }
-                },
-            )
+            self.execute(items.len(), 1, |execution| match execution {
+                policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::Execution::Parallel => self
+                    .thread_pool
+                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+            })
         }
 
         #[track_caller]
@@ -1107,20 +1170,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(
-                items.len(),
-                multiplier,
-                |execution| {
-                    match execution {
-                        policy::Execution::Serial => {
-                            Sequential.map_init_collect_vec(items, init, map_op)
-                        }
-                        policy::Execution::Parallel => self
-                            .thread_pool
-                            .install(|| items.into_par_iter().map_init(init, map_op).collect()),
-                    }
-                },
-            )
+            self.execute(items.len(), multiplier, |execution| match execution {
+                policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::Execution::Parallel => self
+                    .thread_pool
+                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+            })
         }
 
         #[track_caller]
@@ -1140,8 +1195,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
+            self.try_execute(items.len(), 1, |execution| match execution {
+                policy::Execution::Serial => {
+                    Sequential.try_fold(items, identity, fold_op, reduce_op)
+                }
                 policy::Execution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
@@ -1167,16 +1224,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            self.execute(
-                items.len(),
-                1,
-                |execution| match execution {
-                    policy::Execution::Serial => Sequential.sort_by(items, compare),
-                    policy::Execution::Parallel => self.thread_pool.install(|| items.par_sort_by(compare)),
-                },
-            );
+            self.execute(items.len(), 1, |execution| match execution {
+                policy::Execution::Serial => Sequential.sort_by(items, compare),
+                policy::Execution::Parallel => {
+                    self.thread_pool.install(|| items.par_sort_by(compare))
+                }
+            });
         }
-
     }
 });
 
@@ -1188,8 +1242,8 @@ mod test {
     use proptest::prelude::*;
     use rayon::ThreadPoolBuilder;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     fn parallel_strategy() -> Rayon {
@@ -1219,11 +1273,7 @@ mod test {
 
     fn map_partition_from_same_callsite(strategy: &Rayon, len: usize) {
         let _: (Vec<_>, Vec<_>) = strategy.map_partition_collect_vec(0..len, |x| {
-            if x % 2 == 0 {
-                (x, Some(x))
-            } else {
-                (x, None)
-            }
+            if x % 2 == 0 { (x, Some(x)) } else { (x, None) }
         });
     }
 
@@ -1236,6 +1286,37 @@ mod test {
 
         assert_eq!(policy_len(&strategy), 1);
         assert_eq!(policy_len(&other), 0);
+    }
+
+    /// A spawn awaited from a thread inside the pool must complete even when no other
+    /// worker can run the job: the pool below registers this thread as a member and never
+    /// starts its remaining worker, so only the spawn future's yield loop can execute the
+    /// job (a single poll must suffice; there is no executor to re-poll a pending future).
+    #[test]
+    fn spawn_driven_inline_on_member_thread() {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(2)
+            .use_current_thread()
+            .spawn_handler(|_| Ok(()))
+            .build()
+            .unwrap();
+        let strategy = Rayon::with_pool(Arc::new(pool));
+
+        let result = strategy
+            .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+            .now_or_never()
+            .expect("spawn should complete on first poll via the yield loop");
+        assert_eq!(result, vec![1, 2]);
+    }
+
+    #[test]
+    fn with_parallelism_overrides_planning_parallelism() {
+        let strategy = Rayon::new(NonZeroUsize::new(1).unwrap())
+            .unwrap()
+            .with_parallelism(NonZeroUsize::new(4).unwrap());
+        let strategy = strategy.manual();
+        assert_eq!(strategy.parallelism(), 4);
+        assert_eq!(strategy.run(2, || "serial", || "parallel"), "parallel");
     }
 
     #[test]
@@ -1289,11 +1370,7 @@ mod test {
         );
         let _: usize = strategy.run(16, || 1, || 2);
         let _: (Vec<_>, Vec<_>) = strategy.map_partition_collect_vec(0..16, |x| {
-            if x % 2 == 0 {
-                (x, Some(x))
-            } else {
-                (x, None)
-            }
+            if x % 2 == 0 { (x, Some(x)) } else { (x, None) }
         });
         let _: (i32, i32) = strategy.join(|| 1, || 2);
         let mut sortable = vec![3, 2, 1];
@@ -1372,11 +1449,7 @@ mod test {
 
         map_partition_from_same_callsite(&strategy, 16);
         let _: (Vec<_>, Vec<_>) = strategy.map_partition_collect_vec(0..16, |x| {
-            if x % 2 == 0 {
-                (x, Some(x))
-            } else {
-                (x, None)
-            }
+            if x % 2 == 0 { (x, Some(x)) } else { (x, None) }
         });
 
         assert_eq!(policy_len(&strategy), 2);
@@ -1419,7 +1492,10 @@ mod test {
             .use_current_thread()
             .build()
             .unwrap();
-        let strategy = Rayon::with_pool(Arc::new(pool));
+        let strategy =
+            Rayon::with_pool(Arc::new(pool)).with_parallelism(NonZeroUsize::new(4).unwrap());
+
+        assert_eq!(strategy.manual().parallelism(), 4);
 
         let result = strategy.spawn(|_| 7).now_or_never();
 
@@ -1606,11 +1682,7 @@ mod test {
         let calls = AtomicUsize::new(0);
         let result: Result<Vec<usize>, usize> = Sequential.try_map_collect_vec(0..10, |i| {
             calls.fetch_add(1, Ordering::Relaxed);
-            if i == 3 {
-                Err(i)
-            } else {
-                Ok(i)
-            }
+            if i == 3 { Err(i) } else { Ok(i) }
         });
 
         assert_eq!(result, Err(3));
@@ -1619,14 +1691,8 @@ mod test {
 
     #[test]
     fn try_map_collect_vec_parallel_returns_an_error() {
-        let result: Result<Vec<usize>, usize> =
-            parallel_strategy().try_map_collect_vec(0..128, |i| {
-                if i == 17 || i == 42 {
-                    Err(i)
-                } else {
-                    Ok(i)
-                }
-            });
+        let result: Result<Vec<usize>, usize> = parallel_strategy()
+            .try_map_collect_vec(0..128, |i| if i == 17 || i == 42 { Err(i) } else { Ok(i) });
 
         assert!(matches!(result, Err(17 | 42)));
     }

@@ -35,12 +35,12 @@
 //! - Messages with timestamps too old are rejected to prevent replay attacks
 //! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
 use crate::{
-    transcript::{Summary, Transcript},
     PublicKey, Signature, Signer, Verifier,
+    transcript::{Summary, Transcript},
 };
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
 use core::ops::Range;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 mod error;
 pub use error::Error;
@@ -244,7 +244,7 @@ impl<S, P> Context<S, P> {
 /// Initiates a handshake as the dialer.
 /// Returns the dialer state and the first message to send.
 pub fn dial_start<S: Signer, P: PublicKey>(
-    rng: impl CryptoRngCore,
+    rng: impl CryptoRng,
     ctx: Context<S, P>,
 ) -> (DialState<P>, Syn<<S as Signer>::Signature>) {
     let Context {
@@ -325,7 +325,7 @@ pub fn dial_end<P: PublicKey>(
 /// Processes the first handshake message as the listener.
 /// Verifies the dialer's message and returns state and response.
 pub fn listen_start<S: Signer, P: PublicKey>(
-    rng: impl CryptoRngCore,
+    rng: impl CryptoRng,
     ctx: Context<S, P>,
     msg: Syn<<P as Verifier>::Signature>,
 ) -> Result<(ListenState, SynAck<<S as Signer>::Signature>), Error> {
@@ -392,7 +392,7 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ed25519::PrivateKey, transcript::Transcript, Signer};
+    use crate::{Signer, ed25519::PrivateKey, transcript::Transcript};
     use commonware_codec::{Codec, DecodeExt};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;

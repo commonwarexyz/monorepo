@@ -31,11 +31,11 @@
 //! measures the cost observed by callers that actually use the buffer, including
 //! first-touch behavior for pages that have not yet been materialized.
 
-use super::utils::{measure, Threading};
+use super::utils::{Threading, measure};
 use commonware_runtime::{
-    page_size, tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
+    BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _, page_size, tokio,
 };
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{NZU32, NZUsize};
 use criterion::Criterion;
 use std::{hint::black_box, num::NonZeroUsize};
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];
@@ -66,7 +66,7 @@ pub fn bench(c: &mut Criterion) {
 
     for &size in SIZES {
         let pool = build_pool(size, threads);
-        let alignment = pool.config().alignment.get();
+        let alignment = pool.config().alignment().get();
 
         for threading in threadings {
             for touch in [false, true] {
@@ -192,9 +192,7 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         u32::try_from(threads * 4).expect("bench capacity must fit in u32 slot ids");
     let cfg = BufferPoolConfig::for_network()
         .with_pool_min_size(0)
-        .with_min_size(NZUsize!(size))
-        .with_max_size(NZUsize!(size))
-        .with_max_per_class(NZU32!(max_per_class))
+        .with_size_class_range(NZUsize!(size), NZUsize!(size), NZU32!(max_per_class))
         .with_parallelism(NZUsize!(threads))
         .with_prefill(true);
 

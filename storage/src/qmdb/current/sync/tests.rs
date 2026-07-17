@@ -18,14 +18,14 @@ use crate::qmdb::{
     current::tests::{fixed_config, variable_config},
     sync::Database as SyncDatabase,
 };
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
+    BufferPooler, Runner as _, Supervisor as _, deterministic, deterministic::Context,
 };
 use commonware_utils::non_empty_range;
-use rand::RngCore as _;
+use rand::Rng as _;
 
 // ===== Harness Implementations =====
 
@@ -33,7 +33,7 @@ mod harnesses {
     use super::*;
     use crate::merkle::{self, mmb, mmr};
     use commonware_math::algebra::Random;
-    use commonware_utils::test_rng_seeded;
+    use commonware_utils::TestRng;
 
     type OrderedFixedDb<F> = crate::qmdb::current::ordered::fixed::Db<
         F,
@@ -80,9 +80,9 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -102,9 +102,9 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -124,9 +124,9 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut ops = Vec::new();
         for i in 0..n {
             if i % 10 == 0 && i > 0 {
@@ -150,9 +150,9 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut ops = Vec::new();
         for i in 0..n {
             let key = Digest::random(&mut rng);
@@ -175,7 +175,7 @@ mod harnesses {
         mut db: UnorderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>>,
     ) -> UnorderedFixedDb<F> {
-        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
 
         let merkleized = {
             let mut batch = db.new_batch();
@@ -201,7 +201,7 @@ mod harnesses {
         mut db: UnorderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>>,
     ) -> UnorderedVariableDb<F> {
-        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
 
         let merkleized = {
             let mut batch = db.new_batch();
@@ -227,7 +227,7 @@ mod harnesses {
         mut db: OrderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>>,
     ) -> OrderedFixedDb<F> {
-        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
 
         let merkleized = {
             let mut batch = db.new_batch();
@@ -253,7 +253,7 @@ mod harnesses {
         mut db: OrderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>>,
     ) -> OrderedVariableDb<F> {
-        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
 
         let merkleized = {
             let mut batch = db.new_batch();
@@ -617,29 +617,33 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
             root: sync_root,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
-        assert!(<Db as SyncDatabase>::local_boundary_nodes(
-            context.child("probe_stale"),
-            &config,
-            &stale_target,
-            &db.any.log.journal,
-        )
-        .await
-        .unwrap()
-        .is_none());
+        assert!(
+            <Db as SyncDatabase>::local_boundary_nodes(
+                context.child("probe_stale"),
+                &config,
+                &stale_target,
+                &db.any.log.journal,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
 
         let matching_target = crate::qmdb::sync::Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
-        assert!(<Db as SyncDatabase>::local_boundary_nodes(
-            context.child("probe_matching"),
-            &config,
-            &matching_target,
-            &db.any.log.journal,
-        )
-        .await
-        .unwrap()
-        .is_some());
+        assert!(
+            <Db as SyncDatabase>::local_boundary_nodes(
+                context.child("probe_matching"),
+                &config,
+                &matching_target,
+                &db.any.log.journal,
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
 
         db.destroy().await.unwrap();
     });

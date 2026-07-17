@@ -3,9 +3,9 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{p2p::Producer, Consumer, Delivery, Fetch as ResolverFetch};
+use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
 use commonware_runtime::Metrics;
-use commonware_utils::{channel::oneshot, Span};
+use commonware_utils::{Span, channel::oneshot};
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
@@ -507,8 +507,8 @@ mod tests {
     use crate::types::{Epoch, View};
     use commonware_codec::{Encode, ReadExt};
     use commonware_cryptography::{
-        sha256::{Digest as Sha256Digest, Sha256},
         Hasher as _,
+        sha256::{Digest as Sha256Digest, Sha256},
     };
     use std::collections::BTreeSet;
 

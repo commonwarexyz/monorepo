@@ -1,17 +1,17 @@
 use crate::{
-    archive::{immutable::Config, Error, Identifier},
+    Context,
+    archive::{Error, Identifier, immutable::Config},
     freezer::{self, Checkpoint, Cursor, Freezer},
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
-    Context,
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    telemetry::metrics::{Counter, MetricsExt as _},
     Buf, BufMut, BufferPooler,
+    telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
+use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
 use futures::join;
 use std::collections::BTreeMap;
 use tracing::debug;
@@ -287,7 +287,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
 
         match identifier {
             Identifier::Index(index) => Ok(self.ordinal.has(index)),
-            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
+            Identifier::Key(key) => Ok(self.freezer.has(key).await?),
         }
     }
 

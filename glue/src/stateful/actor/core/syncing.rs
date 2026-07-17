@@ -1,4 +1,5 @@
 use crate::stateful::{
+    Application, PruneConfig,
     actor::{
         core::{
             mailbox::{ErasedAncestorStream, Message},
@@ -9,30 +10,28 @@ use crate::stateful::{
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
-    Application, PruneConfig,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
+    Epochable, Heightable, Viewable,
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
     },
-    Epochable, Heightable, Viewable,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    telemetry::metrics::GaugeExt, Clock, ContextCell, Metrics, Spawner, Storage,
-};
+use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
+use commonware_storage::Context;
 use commonware_utils::{
+    Acknowledgement,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     sync::AsyncMutex,
-    Acknowledgement,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
-use tracing::{debug, error, info_span, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, error, info_span};
 
 /// Verify request buffered while state sync is still in progress.
 pub(super) struct HeldVerify<C, B> {
@@ -52,7 +51,7 @@ enum FinalizedHandoff<B> {
 
 pub(super) struct Syncing<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -74,7 +73,7 @@ where
     pub(super) marshal: MarshalMailbox<S, V>,
 
     /// Durable state-sync metadata.
-    pub(super) sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
+    pub(super) sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, S, V::Commitment>>>,
 
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
@@ -104,7 +103,7 @@ where
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -197,12 +196,12 @@ where
     /// Processes a finalized block during state sync.
     async fn process_finalized(
         &mut self,
-        block: A::Block,
+        block: Arc<A::Block>,
         acknowledgement: Exact,
-    ) -> Option<FinalizedHandoff<A::Block>> {
+    ) -> Option<FinalizedHandoff<Arc<A::Block>>> {
         if self.artifact.is_none() {
-            let anchor = Anchor::from(&block);
-            let targets = A::sync_targets(&block);
+            let anchor = Anchor::from(block.as_ref());
+            let targets = A::sync_targets(block.as_ref());
 
             // Do not acknowledge marshal until the live sync session has recorded this
             // block's tip update. If we ack after merely enqueueing it, sync can still
@@ -240,7 +239,7 @@ where
 
     /// Transitions to [`Processing`] state once the database set has converged
     /// on the state sync [`Anchor`].
-    async fn transition(mut self, handoff: Option<FinalizedHandoff<A::Block>>) {
+    async fn transition(mut self, handoff: Option<FinalizedHandoff<Arc<A::Block>>>) {
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;
 
@@ -263,13 +262,14 @@ where
             match handoff {
                 FinalizedHandoff::Reflected(block, acknowledgement) => {
                     processor
-                        .notify_finalized(self.context.as_present(), &block)
+                        .notify_finalized(self.context.as_present(), block.as_ref())
                         .await;
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let (status, prune) =
-                        processor.finalize(self.context.as_present(), block).await;
+                    let (status, prune) = processor
+                        .finalize(self.context.as_present(), block.as_ref())
+                        .await;
                     if let Some(prune) = prune {
                         prune.run(processor.databases_mut(), &self.marshal).await;
                     }
@@ -332,28 +332,28 @@ mod tests {
             syncer::{self, StateSyncMetadata, SyncResult},
         },
         db::{Anchor, AttachableResolver},
-        tests::mocks::{anchor, test_databases, TestApp, TestBlock, TestScheme, TestVariant},
+        tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant, anchor, test_databases},
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
+        Heightable,
         marshal::{self, core::Actor as MarshalActor},
         simplex::mocks::scheme as scheme_mocks,
         types::{FixedEpocher, Height, ViewDelta},
-        Heightable,
     };
     use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
+        ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
+        Acknowledgement, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::oneshot,
         sync::{AsyncMutex, TracedAsyncRwLock},
-        Acknowledgement, NZUsize, NZU16, NZU64,
     };
-    use futures::{pin_mut, poll, FutureExt};
+    use futures::{FutureExt, pin_mut, poll};
     use std::sync::Arc;
 
     #[derive(Clone)]
@@ -476,7 +476,7 @@ mod tests {
 
             let action = harness
                 .syncing
-                .process_finalized(TestBlock::new(7, 9), acknowledgement)
+                .process_finalized(Arc::new(TestBlock::new(7, 9)), acknowledgement)
                 .await;
 
             assert!(poll!(&mut waiter).is_pending());
@@ -494,7 +494,7 @@ mod tests {
 
             let action = harness
                 .syncing
-                .process_finalized(TestBlock::new(8, 10), acknowledgement)
+                .process_finalized(Arc::new(TestBlock::new(8, 10)), acknowledgement)
                 .await;
 
             assert!(waiter.now_or_never().is_none());
@@ -515,7 +515,7 @@ mod tests {
             let (acknowledgement, _waiter) = Exact::handle();
             let _ = harness
                 .syncing
-                .process_finalized(TestBlock::new(7, 10), acknowledgement)
+                .process_finalized(Arc::new(TestBlock::new(7, 10)), acknowledgement)
                 .await;
         });
     }
@@ -528,7 +528,7 @@ mod tests {
             let (acknowledgement, _waiter) = Exact::handle();
             let _ = harness
                 .syncing
-                .process_finalized(TestBlock::new(9, 10), acknowledgement)
+                .process_finalized(Arc::new(TestBlock::new(9, 10)), acknowledgement)
                 .await;
         });
     }
@@ -542,7 +542,7 @@ mod tests {
             let (acknowledgement, mut waiter) = Exact::handle();
 
             let transition = harness.syncing.transition(Some(FinalizedHandoff::Apply(
-                TestBlock::new(8, 10),
+                Arc::new(TestBlock::new(8, 10)),
                 acknowledgement,
             )));
             pin_mut!(transition);

@@ -1,23 +1,23 @@
 //! Batch mutation API for Keyless QMDBs.
 
-use super::{operation::Operation, Keyless};
+use super::{Keyless, operation::Operation};
 use crate::{
+    Context,
     journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location},
     qmdb::{
+        Error,
         any::value::ValueEncoding,
         batch_chain::{self, Bounds},
-        Error,
     },
-    Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::Strategy;
 use std::sync::{Arc, Weak};
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the keyless-batch chain.
-type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, V, S>>;
+type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, DigestOf<H>, V, S>>;
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
@@ -72,7 +72,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 }
@@ -166,12 +166,11 @@ where
 
         // Check parent operation chain. If the ancestor was freed, read_chain_op returns None
         // and we fall through to the DB.
-        if let Some(parent) = self.parent.as_ref() {
-            if loc_val >= self.db_size {
-                if let Some(op) = read_chain_op(parent, loc_val) {
-                    return Ok(op.into_value());
-                }
-            }
+        if let Some(parent) = self.parent.as_ref()
+            && loc_val >= self.db_size
+            && let Some(op) = read_chain_op(parent, loc_val)
+        {
+            return Ok(op.into_value());
         }
 
         // Fall through to base DB.
@@ -195,7 +194,7 @@ where
             return Ok(Vec::new());
         }
         assert!(
-            locs.windows(2).all(|w| w[0] < w[1]),
+            locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
         let mut results = Vec::with_capacity(locs.len());
@@ -217,13 +216,12 @@ where
             }
 
             // Check parent operation chain.
-            if let Some(parent) = self.parent.as_ref() {
-                if loc_val >= self.db_size {
-                    if let Some(op) = read_chain_op(parent, loc_val) {
-                        results.push(op.into_value());
-                        continue;
-                    }
-                }
+            if let Some(parent) = self.parent.as_ref()
+                && loc_val >= self.db_size
+                && let Some(op) = read_chain_op(parent, loc_val)
+            {
+                results.push(op.into_value());
+                continue;
             }
 
             // Need DB fallthrough -- record index for reassembly.
@@ -249,7 +247,7 @@ where
     /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
     /// would let a later `prune(floor)` remove the last readable commit.
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
-    pub fn merkleize<E, C>(
+    pub async fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H, S>,
         metadata: Option<V::Value>,
@@ -267,19 +265,17 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = self.base_size + ops.len() as u64;
-
-        // Hash before `with_mem` borrows committed Merkle state under its read lock.
-        let journal_batch = self.journal_batch.add_many(ops);
-        let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
-
-        // Compute the root.
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let root = db
+
+        // Leaf and node hashing dominate merkleization, so run them as one job on the
+        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        let (journal, root) = db
             .journal
-            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
+            .merkleize(self.journal_batch, ops, inactive_peaks)
+            .await
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.
@@ -335,10 +331,10 @@ where
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
         // freed, fall through to the committed DB.
-        if loc_val >= self.bounds.db_size {
-            if let Some(op) = read_chain_op(self, loc_val) {
-                return Ok(op.into_value());
-            }
+        if loc_val >= self.bounds.db_size
+            && let Some(op) = read_chain_op(self, loc_val)
+        {
+            return Ok(op.into_value());
         }
 
         // Fall through to base DB.
@@ -363,7 +359,7 @@ where
             return Ok(Vec::new());
         }
         assert!(
-            locs.windows(2).all(|w| w[0] < w[1]),
+            locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
         let mut results = Vec::with_capacity(locs.len());
@@ -373,11 +369,11 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc_val >= self.bounds.db_size {
-                if let Some(op) = read_chain_op(self, loc_val) {
-                    results.push(op.into_value());
-                    continue;
-                }
+            if loc_val >= self.bounds.db_size
+                && let Some(op) = read_chain_op(self, loc_val)
+            {
+                results.push(op.into_value());
+                continue;
             }
 
             db_indices.push(i);

@@ -2,8 +2,8 @@ use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
-    reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
     Digest, Hasher,
+    reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
 };
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
@@ -334,7 +334,7 @@ fn encode<H: Hasher, S: Strategy>(
 
     // Compute recovery shards, striping large shard widths across the strategy
     let manual = strategy.manual();
-    let recovery_buf = match striped::ranges(shard_len, manual.parallelism_hint()) {
+    let recovery_buf = match striped::ranges(shard_len, manual.parallelism()) {
         Some(ranges) => {
             let original_shards = padded.chunks(shard_len).collect::<Vec<_>>();
             let mut buf = vec![0u8; m * shard_len];
@@ -956,7 +956,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     // Process checked chunks
     let shard_len = first.shard.len();
     let manual = strategy.manual();
-    let stripes = striped::ranges(shard_len, manual.parallelism_hint());
+    let stripes = striped::ranges(shard_len, manual.parallelism());
     let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
@@ -1211,8 +1211,8 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
+    use commonware_utils::{NZU16, NZUsize};
 
     type RS = ReedSolomon<Sha256>;
     const STRATEGY: Sequential = Sequential;
@@ -1587,8 +1587,7 @@ mod tests {
         // exercise the sequential path.
         let shard_len = canonical_shard_len(data.len(), min as usize);
         assert!(
-            striped::ranges(shard_len, strategy.manual().parallelism_hint()).map_or(0, |r| r.len())
-                >= 2,
+            striped::ranges(shard_len, strategy.manual().parallelism()).map_or(0, |r| r.len()) >= 2,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
@@ -1748,8 +1747,7 @@ mod tests {
         let shard_len = canonical_shard_len(data.len(), min as usize);
         let rayon = Rayon::new(NZUsize!(4)).unwrap();
         assert!(
-            striped::ranges(shard_len, rayon.manual().parallelism_hint()).map_or(0, |r| r.len())
-                >= 2,
+            striped::ranges(shard_len, rayon.manual().parallelism()).map_or(0, |r| r.len()) >= 2,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
@@ -1857,10 +1855,12 @@ mod tests {
 
         // Verify all proofs at incorrect root
         for i in 0..total {
-            assert!(chunks[i as usize]
-                .clone()
-                .verify::<Sha256>(i, &malicious_root)
-                .is_none());
+            assert!(
+                chunks[i as usize]
+                    .clone()
+                    .verify::<Sha256>(i, &malicious_root)
+                    .is_none()
+            );
         }
 
         // Collect valid pieces (these are legitimate fragments checked against
@@ -2179,8 +2179,7 @@ mod tests {
         let min = 4u16;
         let shard_len = canonical_shard_len(data.len(), min as usize);
         assert!(
-            striped::ranges(shard_len, strategy.manual().parallelism_hint()).map_or(0, |r| r.len())
-                >= 2,
+            striped::ranges(shard_len, strategy.manual().parallelism()).map_or(0, |r| r.len()) >= 2,
             "test must exercise the striped path (shard_len={shard_len})"
         );
 
@@ -2253,15 +2252,17 @@ mod tests {
 
     #[test]
     fn test_too_many_total_shards() {
-        assert!(RS::encode(
-            &Config {
-                minimum_shards: NZU16!(u16::MAX / 2 + 1),
-                extra_shards: NZU16!(u16::MAX),
-            },
-            [].as_slice(),
-            &STRATEGY,
+        assert!(
+            RS::encode(
+                &Config {
+                    minimum_shards: NZU16!(u16::MAX / 2 + 1),
+                    extra_shards: NZU16!(u16::MAX),
+                },
+                [].as_slice(),
+                &STRATEGY,
+            )
+            .is_err()
         )
-        .is_err())
     }
 
     #[test]

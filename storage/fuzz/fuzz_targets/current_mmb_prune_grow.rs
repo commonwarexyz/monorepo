@@ -14,14 +14,14 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb},
-    qmdb::current::{unordered::fixed::Db as CurrentDb, BitmapPrunedBits, FixedConfig as Config},
+    qmdb::current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, HashSet},
@@ -180,7 +180,7 @@ async fn apply_pending(db: &mut Db, writes: &[(Key, Option<Value>)]) {
     db.commit().await.expect("commit fsync should not fail");
 }
 
-async fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {
+fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {
     assert_eq!(
         db.bounds().end,
         reference_db.bounds().end,
@@ -206,7 +206,7 @@ async fn commit_pending(
     pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
 ) {
     if pending_writes.is_empty() {
-        assert_matches_reference(db, reference_db, "empty commit").await;
+        assert_matches_reference(db, reference_db, "empty commit");
         return;
     }
 
@@ -214,14 +214,14 @@ async fn commit_pending(
     apply_pending(db, &writes).await;
     apply_pending(reference_db, &writes).await;
     committed_state.extend(pending_expected.drain());
-    assert_matches_reference(db, reference_db, "commit").await;
+    assert_matches_reference(db, reference_db, "commit");
 }
 
 async fn prune_to_floor(db: &mut Db, reference_db: &Db, context: &str) {
     db.prune(db.sync_boundary())
         .await
         .expect("prune should not fail");
-    assert_matches_reference(db, reference_db, context).await;
+    assert_matches_reference(db, reference_db, context);
 }
 
 async fn reopen_pruned_db(
@@ -263,7 +263,7 @@ async fn reopen_pruned_db(
         pruned_bits_before,
         "pruned bits changed after reopen"
     );
-    assert_matches_reference(&reopened, reference_db, "reopen").await;
+    assert_matches_reference(&reopened, reference_db, "reopen");
     reopened
 }
 

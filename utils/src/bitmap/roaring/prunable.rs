@@ -231,13 +231,13 @@ impl Read for Prunable {
         // Validate invariant: no container key < pruned_below >> 16.
         let bitmap = Bitmap::read_cfg(buf, cfg)?;
         let target_key = pruned_below >> 16;
-        if let Some((&first_key, _)) = bitmap.containers.first_key_value() {
-            if first_key < target_key {
-                return Err(CodecError::Invalid(
-                    "Prunable",
-                    "container key below pruned_below",
-                ));
-            }
+        if let Some((&first_key, _)) = bitmap.containers.first_key_value()
+            && first_key < target_key
+        {
+            return Err(CodecError::Invalid(
+                "Prunable",
+                "container key below pruned_below",
+            ));
         }
         Ok(Self {
             bitmap,

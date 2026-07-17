@@ -24,13 +24,13 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Replay},
     Blob, Buf, Handle, Metrics, Storage,
+    buffer::paged::{CacheRef, Replay},
 };
 use commonware_utils::NZUsize;
 use futures::{
-    stream::{self, Stream},
     StreamExt,
+    stream::{self, Stream},
 };
 use std::{marker::PhantomData, num::NonZeroUsize};
 use tracing::{trace, warn};
@@ -179,12 +179,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         buf: &mut [u8],
     ) -> Result<(Vec<A>, usize), Error> {
         assert!(
-            positions.windows(2).all(|w| w[0] < w[1]),
+            positions.is_sorted_by(|a, b| a < b),
             "positions must be strictly increasing"
         );
         if positions.is_empty() {
             return Ok((Vec::new(), 0));
         }
+        assert!(
+            buf.len() >= positions.len() * Self::CHUNK_SIZE,
+            "get_many requires buf.len() >= positions.len() * CHUNK_SIZE"
+        );
+        let buf = &mut buf[..positions.len() * Self::CHUNK_SIZE];
         let blob = self
             .manager
             .get(section)?
@@ -212,30 +217,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
     pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
-        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        self.try_get_sync_into(section, position, &mut buf)
-    }
-
-    /// Get an item synchronously using caller-provided buffer.
-    ///
-    /// `buf` must be at least [Self::CHUNK_SIZE] bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `buf` is smaller than [Self::CHUNK_SIZE].
-    pub fn try_get_sync_into(&self, section: u64, position: u64, buf: &mut [u8]) -> Option<A> {
-        assert!(
-            buf.len() >= Self::CHUNK_SIZE,
-            "try_get_sync_into requires buf.len() >= CHUNK_SIZE"
-        );
         let blob = self.manager.get(section).ok()??;
         let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
         let remaining = blob.size().checked_sub(offset)?;
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let buf = &mut buf[..Self::CHUNK_SIZE];
-        if !blob.try_read_sync(offset, buf) {
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
+        if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
         A::decode(&buf[..]).ok()
@@ -442,20 +431,20 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
+        BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{fail_pending_syncs, release_pending_syncs, DelayedSyncContext},
-        BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
+        mocks::{DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_pending_syncs},
     };
-    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
+    use commonware_utils::{NZU16, NZUsize};
     use core::num::NonZeroU16;
-    use futures::{pin_mut, StreamExt};
+    use futures::{StreamExt, pin_mut};
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);
@@ -1497,9 +1486,10 @@ mod tests {
             }
             assert_eq!(journal.section_len(0).unwrap(), 5);
 
-            // Read all 5 items in one call.
+            // Read all 5 items in one call. The reusable buffer is intentionally oversized:
+            // get_many slices it to the exact length the batch needs.
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
-            let mut buf = vec![0u8; 5 * chunk];
+            let mut buf = vec![0u8; 6 * chunk];
             let (items, _) = journal
                 .get_many(0, &[0, 1, 2, 3, 4], &mut buf)
                 .await
@@ -1588,7 +1578,7 @@ mod tests {
     fn test_segmented_fixed_prune_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -1642,7 +1632,7 @@ mod tests {
     fn test_segmented_fixed_destroy_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -1694,7 +1684,7 @@ mod tests {
     fn test_segmented_fixed_clear_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -1756,7 +1746,7 @@ mod tests {
     fn test_segmented_fixed_rewind_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -1816,7 +1806,7 @@ mod tests {
     fn test_segmented_fixed_prune_surfaces_failed_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),

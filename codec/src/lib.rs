@@ -60,7 +60,7 @@
 //!   [Encode], [Codec], [EncodeFixed], and [CodecFixed] when `T: FixedSize`.
 //! - Collections: [`Vec`], [`Option`], `BTreeMap`, `BTreeSet`
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
-//! - Common External Types: [::bytes::Bytes]
+//! - Common External Types: [::bytes::Bytes], `Arc` (encoding only)
 //!
 //! With the `std` feature (enabled by default):
 //! - Networking:

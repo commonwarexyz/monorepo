@@ -37,7 +37,13 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
+        additional-components: llvm-tools-preview
+        additional-cache-key: ${{ matrix.flags || 'default' }}
+        rust-cache-save: ${{ matrix.partition == 1 }}
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Remove fuzz
       run: |
         rm -rf broadcast/fuzz
@@ -55,7 +61,7 @@ jobs:
       run: |
         sed -i.bak '/fuzz/d' Cargo.toml
     - name: Install coverage tooling
-      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.133
     - name: Normalize flags for paths

@@ -7,25 +7,25 @@ use clap::{Arg, Command};
 use commonware_codec::{EncodeShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage,
-    Supervisor as _,
+    BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage, Supervisor as _,
+    tokio as tokio_runtime,
 };
 use commonware_storage::{
     mmr,
     qmdb::sync::{self, compact},
 };
 use commonware_sync::{
-    any, crate_version, current,
+    Error, Key, any, crate_version, current,
     databases::{DatabaseType, SyncMode},
     immutable, immutable_compact, keyless, keyless_compact,
     net::{ErrorCode, Resolver},
-    Error, Key,
 };
 use commonware_utils::{
-    channel::mpsc::{self, error::TrySendError},
     DurationExt,
+    channel::mpsc::{self, error::TrySendError},
+    sys_rng,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr},
@@ -363,6 +363,9 @@ where
             resolver,
             target,
             db_config: make_db_config(&context),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
         };
         let database: DB = match compact::sync(sync_config).await {
             Ok(database) => database,
@@ -536,7 +539,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .to_string();
         // Only add suffix if using the default value
         if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
-            let suffix: u64 = rand::thread_rng().gen();
+            let suffix: u64 = sys_rng().next_u64();
             format!("{storage_dir}-{suffix}")
         } else {
             storage_dir

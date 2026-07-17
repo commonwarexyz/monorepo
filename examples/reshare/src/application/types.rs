@@ -1,13 +1,13 @@
 //! Types for the `commonware-reshare` example application.
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
+    Block as ConsensusBlock, CertifiableBlock, Heightable,
     simplex::types::Context,
     types::{Epoch, Height, Round, View},
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
-    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
     Committable, Digest, Digestible, Hasher, Signer,
+    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
 };
 use commonware_runtime::{Buf, BufMut};
 use std::num::NonZeroU32;

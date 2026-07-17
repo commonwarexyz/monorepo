@@ -319,30 +319,28 @@
 //! against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
-//! verifying ops proofs directly should use [`crate::qmdb::hasher`]. After sync, the bitmap and
-//! grafted tree are reconstructed deterministically from the operations, and the canonical root is
-//! computed. [proof::OpsRootWitness] can be used to validate that a particular ops root is
+//! verifying ops proofs directly should use [`crate::qmdb::verify_proof`]. After sync, the bitmap
+//! and grafted tree are reconstructed deterministically from the operations, and the canonical root
+//! is computed. [proof::OpsRootWitness] can be used to validate that a particular ops root is
 //! committed by a trusted canonical root; the sync engine does not perform this check itself.
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig, Location},
+    merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
-        self,
         any::{
-            self,
+            self, Config as AnyConfig,
             operation::{Operation, Update},
-            Config as AnyConfig,
         },
         bitmap::Shared,
         operation::Committable,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
@@ -448,11 +446,9 @@ where
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
-    let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
@@ -462,16 +458,14 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(
+    let storage = grafting::Storage::<F, H, _, _>::new(
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        hasher.clone(),
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();
-    let root = db::compute_db_root(
-        &hasher,
+    let root = db::compute_db_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -484,11 +478,13 @@ where
     let metrics = Metrics::new(context);
     let db = db::Db {
         any,
-        grafted_tree,
+        grafted_tree: Arc::new(grafted_tree),
         metadata,
         strategy,
         root,
         metrics,
+        #[cfg(test)]
+        halt_before_prune_log: false,
     };
     db.update_metrics();
     Ok(db)
@@ -504,7 +500,7 @@ pub trait BitmapPrunedBits {
     fn get_bit(&self, index: u64) -> bool;
 
     /// Returns the position of the oldest retained bit.
-    fn oldest_retained(&self) -> impl core::future::Future<Output = u64> + Send;
+    fn oldest_retained(&self) -> u64;
 }
 
 #[cfg(test)]
@@ -512,29 +508,29 @@ pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
     pub use super::BitmapPrunedBits;
-    use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
+    use super::{FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig, ordered, unordered};
     use crate::{
-        merkle::{self, mmb, mmr, Bagging::ForwardFold},
+        merkle::{self, mmb, mmr},
         qmdb::{
-            self,
             any::{
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
+            verify_proof,
         },
         translator::Translator,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
+        BufferPooler, Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{bitmap::Readable, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, bitmap::Readable};
     use core::future::Future;
     use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
-    use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use rand::Rng;
     use std::{
         num::{NonZeroU16, NonZeroUsize},
         sync::Arc,
@@ -549,6 +545,206 @@ pub mod tests {
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(88);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
+
+    /// Instantiate the staged-merkleize parity test for one current DB kind, with `$open_db` as
+    /// the kind's test DB constructor.
+    ///
+    /// The staged path (`stage` + `Staged::merkleize`) must produce a root byte-identical to an
+    /// explicit `get_many` + `write` + `merkleize` over the current layer, across updates,
+    /// deletes (which fall back to normal mutations and, for the ordered kind, rewrite
+    /// predecessors via a snapshot-bucket scan), upserts, duplicate read slots, missing keys,
+    /// and prefix-then-suffix expansion, rooted at the DB (D=0) and through one or two pending
+    /// ancestors (D=1/D=2). This guards the current-layer threading of
+    /// `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
+    /// `compute_current_layer` for non-empty staged updates. Collision-prone translators in
+    /// `$open_db` (e.g. `OneCap`) stress predecessor rewrites.
+    macro_rules! staged_merkleize_parity_test {
+        ($name:ident, $open_db:path) => {
+            #[test_traced("WARN")]
+            pub fn $name() {
+                fn key(i: u64) -> Digest {
+                    Sha256::hash(&i.to_be_bytes())
+                }
+                fn val(i: u64) -> Digest {
+                    Sha256::hash(&(i + 10000).to_be_bytes())
+                }
+
+                deterministic::Runner::default().start(|ctx| async move {
+                    let mut db = $open_db(ctx.child("current"), "staged-parity".to_string()).await;
+
+                    let mut seed = db.new_batch();
+                    for i in 0..2000u64 {
+                        seed = seed.write(key(i), Some(val(i)));
+                    }
+                    let seed = seed.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(seed).await.unwrap();
+                    db.commit().await.unwrap();
+
+                    for depth in [0u8, 1u8, 2u8] {
+                        // Keep every uncommitted ancestor alive until the child is merkleized.
+                        // Speculative batch Merkle lookups walk weak parent links for in-memory
+                        // ancestor nodes.
+                        let mut stack = Vec::new();
+                        match depth {
+                            0 => {}
+                            1 => {
+                                let mut p = db.new_batch();
+                                for i in 0..50u64 {
+                                    p = p.write(key(i), Some(val(i + 1_000)));
+                                }
+                                for i in 100..110u64 {
+                                    p = p.write(key(i), None);
+                                }
+                                stack.push(p.merkleize(&db, None).await.unwrap());
+                            }
+                            2 => {
+                                let mut grandparent = db.new_batch();
+                                for i in 0..10u64 {
+                                    grandparent = grandparent.write(key(i), Some(val(i + 1_000)));
+                                }
+                                for i in 100..110u64 {
+                                    grandparent = grandparent.write(key(i), None);
+                                }
+                                let grandparent = grandparent.merkleize(&db, None).await.unwrap();
+
+                                let mut p = grandparent.new_batch::<Sha256>();
+                                for i in 20..30u64 {
+                                    p = p.write(key(i), Some(val(i + 2_000)));
+                                }
+                                let p = p.merkleize(&db, None).await.unwrap();
+                                stack.push(grandparent);
+                                stack.push(p);
+                            }
+                            _ => unreachable!("covered depths"),
+                        };
+                        let new_batch = || {
+                            stack
+                                .last()
+                                .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                        };
+
+                        // key(60) is untouched by the depth-1/2 ancestors, so its staged read
+                        // stays committed-resolved and exercises staged cached-location reuse
+                        // behind stacked batches.
+                        let read_keys = [
+                            key(5),
+                            key(6),
+                            key(9000),
+                            key(5),
+                            key(0),
+                            key(20),
+                            key(60),
+                            key(105),
+                        ];
+                        let keys: Vec<&Digest> = read_keys.iter().collect();
+                        let indexed_updates = vec![
+                            (0, Some(val(5_000))),
+                            (2, Some(val(5_001))),
+                            (3, Some(val(5_002))),
+                            (4, Some(val(5_003))),
+                            (5, None),
+                            (6, Some(val(5_004))),
+                            (7, Some(val(5_005))),
+                        ];
+                        let upserts = vec![
+                            (key(7000), Some(val(6_000))),
+                            (key(30), Some(val(6_001))),
+                            (key(5), Some(val(6_002))),
+                            (key(31), None),
+                        ];
+
+                        let mut explicit = new_batch();
+                        let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
+                        for (slot, value) in &indexed_updates {
+                            explicit = explicit.write(read_keys[*slot], *value);
+                        }
+                        for (k, v) in &upserts {
+                            explicit = explicit.write(*k, *v);
+                        }
+                        let explicit_root = explicit.merkleize(&db, None).await.unwrap().root();
+
+                        let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
+                        let staged_root = staged
+                            .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
+                            .await
+                            .unwrap()
+                            .root();
+
+                        assert_eq!(
+                            explicit_values, staged_values,
+                            "value mismatch at depth={depth}"
+                        );
+                        assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
+
+                        let split = 3;
+                        let (mut expanded_values, staged) =
+                            new_batch().stage(&keys[..split], &db).await.unwrap();
+                        let (range, suffix_values, staged) =
+                            staged.expand(&keys[split..], &db).await.unwrap();
+                        assert_eq!(range, split..keys.len());
+                        expanded_values.extend(suffix_values);
+                        let expanded_root = staged
+                            .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
+                            .await
+                            .unwrap()
+                            .root();
+
+                        assert_eq!(
+                            explicit_values, expanded_values,
+                            "expanded value mismatch at depth={depth}"
+                        );
+                        assert_eq!(
+                            explicit_root, expanded_root,
+                            "expanded root mismatch at depth={depth}"
+                        );
+
+                        let planned = val(7_000);
+                        let duplicate_update = val(7_001);
+                        let (first_values, staged) =
+                            new_batch().stage(&keys[..1], &db).await.unwrap();
+                        let (duplicate_range, duplicate_values, staged) =
+                            staged.expand(&keys[..1], &db).await.unwrap();
+                        assert_eq!(duplicate_range, 1..2);
+                        assert_eq!(
+                            first_values[0], duplicate_values[0],
+                            "duplicate expansion must assign a new slot without changing the base read"
+                        );
+                        assert_ne!(
+                            duplicate_values[0],
+                            Some(planned),
+                            "expand must not observe values computed for earlier staged slots"
+                        );
+
+                        let duplicate_root = staged
+                            .merkleize(
+                                vec![
+                                    (0, Some(planned)),
+                                    (duplicate_range.start, Some(duplicate_update)),
+                                ],
+                                Vec::new(),
+                                None,
+                                &db,
+                            )
+                            .await
+                            .unwrap()
+                            .root();
+                        let expected_duplicate_root = new_batch()
+                            .write(read_keys[0], Some(planned))
+                            .write(read_keys[0], Some(duplicate_update))
+                            .merkleize(&db, None)
+                            .await
+                            .unwrap()
+                            .root();
+                        assert_eq!(
+                            expected_duplicate_root, duplicate_root,
+                            "duplicate expanded slots should use normal update-order semantics"
+                        );
+                    }
+                });
+            }
+        };
+    }
+    pub(crate) use staged_merkleize_parity_test;
 
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
@@ -644,7 +840,7 @@ pub mod tests {
     {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
-        let mut rng = StdRng::seed_from_u64(rng_seed);
+        let mut rng = TestRng::new(rng_seed);
 
         // First loop: all initial writes in one batch.
         let writes: Vec<_> = (0u64..num_elements)
@@ -663,13 +859,13 @@ pub mod tests {
         let mut pending: WriteVec<F, C> = Vec::new();
         for _ in 0u64..num_elements * 10 {
             let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
-            if rng.next_u32() % 7 == 0 {
+            if rng.next_u32().is_multiple_of(7) {
                 pending.push((rand_key, None));
                 continue;
             }
             let v = TestValue::from_seed(rng.next_u64());
             pending.push((rand_key, Some(v)));
-            if commit_changes && rng.next_u32() % 20 == 0 {
+            if commit_changes && rng.next_u32().is_multiple_of(20) {
                 commit_writes(&mut db, pending.drain(..)).await?;
             }
         }
@@ -807,7 +1003,7 @@ pub mod tests {
         commit_writes(&mut db, []).await.unwrap();
         let committed_root = db.root();
         let committed_op_count = db.bounds().end;
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
 
         // Perform more random operations without committing any of them.
         let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
@@ -856,7 +1052,7 @@ pub mod tests {
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
             .await
             .unwrap();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
         // State from scenario #2 should match that of a successful commit.
         assert_eq!(db.bounds().end, committed_op_count);
         assert_eq!(db.root(), scenario_2_root);
@@ -911,7 +1107,7 @@ pub mod tests {
                     .await
                     .unwrap();
                 db_pruning
-                    .prune(db_no_pruning.sync_boundary().await)
+                    .prune(db_no_pruning.sync_boundary())
                     .await
                     .unwrap();
             }
@@ -932,8 +1128,8 @@ pub mod tests {
 
         // Also verify inactivity floors match
         assert_eq!(
-            db_no_pruning.inactivity_floor_loc().await,
-            db_pruning.inactivity_floor_loc().await
+            db_no_pruning.inactivity_floor_loc(),
+            db_pruning.inactivity_floor_loc()
         );
 
         db_no_pruning.destroy().await.unwrap();
@@ -971,13 +1167,13 @@ pub mod tests {
         db.apply_batch(merkleized).await.unwrap();
 
         // Prune to flatten bitmap layers and advance pruned_chunks.
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
 
         let pruned_bits_before = db.pruned_bits();
         warn!(
             "pruned_bits_before={}, inactivity_floor={}, op_count={}",
             pruned_bits_before,
-            *db.inactivity_floor_loc().await,
+            *db.inactivity_floor_loc(),
             *db.bounds().end
         );
 
@@ -1071,7 +1267,7 @@ pub mod tests {
 
         // Sync and prune.
         db.sync().await.unwrap();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
 
         // Record root before dropping.
         let root = db.root();
@@ -1148,7 +1344,7 @@ pub mod tests {
     }
 
     use crate::translator::OneCap;
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_group, test_traced};
 
     type OrderedFixedDb =
@@ -1383,7 +1579,6 @@ pub mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
@@ -1451,17 +1646,17 @@ pub mod tests {
 
             // Honest exclusion proving refuses a live key.
             assert!(matches!(
-                db.exclusion_proof(&hasher, &c).await,
+                db.exclusion_proof(&c).await,
                 Err(Error::KeyExists)
             ));
 
             // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
             // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
             // [b, a), which cyclically covered `c` and verified).
-            let kvp = db.key_value_proof(&hasher, b.clone()).await.unwrap();
+            let kvp = db.key_value_proof(b.clone()).await.unwrap();
             let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!ForgedExclusionDb::verify_exclusion_proof(
-                &hasher, &c, &forged, &root
+                &c, &forged, &root
             ));
 
             db.destroy().await.unwrap();
@@ -1955,8 +2150,7 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let hasher = qmdb::hasher::<Sha256>();
-            let _proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let _proof = reopened.key_value_proof(k).await.unwrap();
 
             reopened.destroy().await.unwrap();
         });
@@ -2196,10 +2390,8 @@ pub mod tests {
                 mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
             }
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
+            let proof = db.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2219,10 +2411,8 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let proof = reopened.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2446,11 +2636,9 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -2479,11 +2667,9 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -3885,9 +4071,6 @@ pub mod tests {
     /// Regression: `ops_historical_proof` must verify with QMDB's ops-tree hasher configuration.
     #[test_traced("INFO")]
     fn test_current_mmb_ops_historical_proof_verifies_with_backward_bagging() {
-        use crate::{merkle::hasher::Standard, qmdb::verify_proof};
-        use commonware_utils::NZU64;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
@@ -3911,19 +4094,7 @@ pub mod tests {
                 .unwrap();
 
             // Verifies under the QMDB ops-tree hasher configuration.
-            let hasher = qmdb::hasher::<Sha256>();
-            assert!(verify_proof(
-                &hasher,
-                &proof,
-                Location::new(0),
-                &ops,
-                &ops_root
-            ));
-
-            // Sanity: a different Merkle hasher configuration must not accept this proof.
-            let plain = Standard::<Sha256>::new(ForwardFold);
-            assert!(!verify_proof(
-                &plain,
+            assert!(verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(0),
                 &ops,

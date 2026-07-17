@@ -46,16 +46,16 @@ use crate::{
     merkle::{Family, Location, Proof},
     qmdb::{
         self,
-        any::{value::ValueEncoding, FixedValue, VariableValue},
+        any::{FixedValue, VariableValue, value::ValueEncoding},
         immutable::{
+            CompactDb as ImmutableCompactDb, Operation as ImmutableOp,
             fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
             variable::{Db as ImmutableVariableDb, Operation as ImmutableVariableOp},
-            CompactDb as ImmutableCompactDb, Operation as ImmutableOp,
         },
         keyless::{
+            CompactDb as KeylessCompactDb, Operation as KeylessOp,
             fixed::{Db as KeylessFixedDb, Operation as KeylessFixedOp},
             variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
-            CompactDb as KeylessCompactDb, Operation as KeylessOp,
         },
         operation::Key,
         sync::{EngineError, Error},
@@ -67,14 +67,15 @@ use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
-use commonware_macros::boxed;
+use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor};
+use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor, reschedule};
 use commonware_utils::{
-    channel::oneshot,
-    sync::{AsyncRwLock, TracedAsyncRwLock},
     Array,
+    channel::{mpsc, oneshot},
+    sync::{AsyncRwLock, TracedAsyncRwLock},
 };
+use futures::future::{Either, pending};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Compact-sync target for a compact-storage database.
@@ -292,8 +293,8 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         &'a self,
         target: Target<Self::Family, Self::Digest>,
     ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
-           + Send
-           + 'a;
+    + Send
+    + 'a;
 }
 
 /// Marker trait for resolvers whose associated types match a specific compact-sync database.
@@ -360,6 +361,39 @@ where
     pub target: Target<DB::Family, DB::Digest>,
     /// Database-specific configuration.
     pub db_config: DB::Config,
+    /// Channel for receiving sync target updates. Each update supersedes the
+    /// current target, cancelling any in-flight attempt against it.
+    pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
+    /// Channel that requests sync completion once the current target is reached.
+    ///
+    /// When `None`, sync completes as soon as the target is reached.
+    pub finish_rx: Option<mpsc::Receiver<()>>,
+    /// Channel used to notify an observer once the current target is reached.
+    /// If the receiver is dropped, sync completes with the current database.
+    pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
+}
+
+/// Maximum queued target updates drained per scheduling tick.
+const MAX_UPDATE_DRAIN_PER_TICK: usize = 32;
+
+/// Drain all queued target updates without blocking, returning the newest.
+async fn drain_latest_target<T>(update_rx: &mut mpsc::Receiver<T>) -> Option<T> {
+    let mut latest = None;
+    let mut drained = 0usize;
+    loop {
+        match update_rx.try_recv() {
+            Ok(update) => {
+                latest = Some(update);
+                drained += 1;
+                if drained.is_multiple_of(MAX_UPDATE_DRAIN_PER_TICK) {
+                    reschedule().await;
+                }
+            }
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                return latest;
+            }
+        }
+    }
 }
 
 /// Create/open a compact-storage database and initialize it from compact authenticated state.
@@ -367,6 +401,92 @@ where
 /// Unlike streaming sync, compact sync jumps directly to `target.leaf_count`. This path
 /// authenticates the final commit and frontier state for the target root rather than replaying a
 /// retained operation range.
+///
+/// Targets received on `update_rx` supersede the current target. When `finish_rx` is `Some(...)`,
+/// reaching a target parks sync until a finish signal or another target update arrives. Each
+/// reached target is reported on `reached_target_tx`.
+#[boxed]
+pub async fn sync<DB, R>(
+    config: Config<DB, R>,
+) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
+where
+    DB: Database,
+    R: CompactDbResolver<DB>,
+{
+    let Config {
+        context,
+        resolver,
+        mut target,
+        db_config,
+        mut update_rx,
+        mut finish_rx,
+        reached_target_tx,
+    } = config;
+    let metrics = super::Metrics::new(&context);
+    let mut attempt = 0u64;
+    loop {
+        // Prefer the newest queued target before starting an attempt.
+        if let Some(update_rx) = update_rx.as_mut()
+            && let Some(update) = drain_latest_target(update_rx).await
+        {
+            target = update;
+        }
+        target
+            .validate()
+            .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
+        metrics.record_target(*target.leaf_count);
+
+        attempt += 1;
+        let update_future = update_rx.as_mut().map_or_else(
+            || Either::Right(pending()),
+            |update_rx| Either::Left(update_rx.recv()),
+        );
+        let db = select! {
+            update = update_future => {
+                let Some(update) = update else {
+                    update_rx = None;
+                    continue;
+                };
+                target = update;
+                continue;
+            },
+            db = attempt_sync(&context, attempt, &resolver, &db_config, &target) => db?,
+        };
+        metrics.record_synced(*target.leaf_count);
+
+        // A target queued while the attempt ran supersedes the result.
+        if let Some(update_rx) = update_rx.as_mut()
+            && let Some(update) = drain_latest_target(update_rx).await
+        {
+            target = update;
+            continue;
+        }
+
+        if let Some(reached_target_tx) = reached_target_tx.as_ref()
+            && reached_target_tx.send(target.clone()).await.is_err()
+        {
+            return Ok(db);
+        }
+
+        let Some(finish_rx) = finish_rx.as_mut() else {
+            return Ok(db);
+        };
+        let Some(update_rx) = update_rx.as_mut() else {
+            return Ok(db);
+        };
+        select! {
+            _ = finish_rx.recv() => return Ok(db),
+            update = update_rx.recv() => {
+                let Some(update) = update else {
+                    return Ok(db);
+                };
+                target = update;
+            },
+        }
+    }
+}
+
+/// Run one compact sync attempt against `target`.
 ///
 /// Verification order:
 /// 1. Fetch the proposed compact state for `target`.
@@ -376,31 +496,28 @@ where
 /// 5. Assert the db root still matches and persist the state.
 ///
 /// A failure before the final persist leaves on-disk state untouched.
-#[boxed]
-pub async fn sync<DB, R>(
-    config: Config<DB, R>,
+async fn attempt_sync<DB, R>(
+    context: &DB::Context,
+    attempt: u64,
+    resolver: &R,
+    db_config: &DB::Config,
+    target: &Target<DB::Family, DB::Digest>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
 where
     DB: Database,
     R: CompactDbResolver<DB>,
 {
-    let target = config.target;
-    target
-        .validate()
-        .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
-
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
     // responses. Resolver errors and local construction failures remain terminal.
     loop {
-        let FetchResult { state, callback } = config
-            .resolver
+        let FetchResult { state, callback } = resolver
             .get_compact_state(target.clone())
             .await
             .map_err(Error::Resolver)?;
 
         // Validation failures describe a bad compact response. Reject it if the resolver supplied
         // feedback, then fetch another candidate.
-        let validated_state = match validate_compact_state::<DB>(&target, state) {
+        let validated_state = match validate_compact_state::<DB>(target, state) {
             Ok(state) => state,
             Err(err) => {
                 if let Some(callback) = callback {
@@ -415,8 +532,8 @@ where
         // construction should only fail for local database/storage reasons; a root mismatch is a
         // bug in this path.
         let mut db = DB::from_validated_state(
-            config.context.child("compact"),
-            config.db_config.clone(),
+            context.child("compact").with_attribute("attempt", attempt),
+            db_config.clone(),
             validated_state,
         )
         .await
@@ -450,10 +567,8 @@ where
         });
     }
 
-    let hasher = qmdb::hasher::<DB::Hasher>();
     let last_commit_loc = Location::new(*state.leaf_count - 1);
-    if !verify_proof(
-        &hasher,
+    if !verify_proof::<DB::Hasher, _, _>(
         &state.last_commit_proof,
         last_commit_loc,
         std::slice::from_ref(&state.last_commit_op),
@@ -984,20 +1099,20 @@ impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, Varia
 mod tests {
     use super::{Config, Database, FetchResult, Resolver, State, Target};
     use crate::{
-        merkle::{mmr, Location},
+        merkle::{Location, mmr},
         qmdb,
     };
     use commonware_codec::{DecodeExt as _, Encode as _, RangeCfg};
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_parallel::Rayon;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::sync::AsyncRwLock;
     use std::{
         collections::VecDeque,
         convert::Infallible,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -1175,6 +1290,9 @@ mod tests {
                 },
                 target: target.clone(),
                 db_config: (target.root, constructions.clone()),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();

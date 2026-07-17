@@ -1,10 +1,11 @@
 use super::{
+    BlockDigest, StateSyncMetadata, SyncResult,
     mailbox::{Mailbox, Message},
-    resolve_state_sync_floor, BlockDigest, StateSyncMetadata, SyncResult,
+    resolve_state_sync_floor,
 };
 use crate::stateful::{
-    db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
     Application,
+    db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
 use commonware_consensus::{
@@ -13,22 +14,23 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
+use commonware_storage::Context;
 use commonware_utils::{
+    NZUsize,
     channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
     sync::AsyncMutex,
-    NZUsize,
 };
 use futures::SinkExt;
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::debug;
 
 /// Configuration for [`Syncer`].
 pub struct Config<E, A, R, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
@@ -47,7 +49,7 @@ where
     pub resolvers: R,
 
     /// Durable state-sync metadata.
-    pub sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
+    pub sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, S, V::Commitment>>>,
 
     /// Finalized floor marshal should resolve before sync starts.
     pub finalization: Finalization<S, V::Commitment>,
@@ -61,7 +63,7 @@ where
 
 pub struct Syncer<E, A, R, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
@@ -86,7 +88,7 @@ where
     resolvers: R,
 
     /// Durable state-sync metadata.
-    sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
+    sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, S, V::Commitment>>>,
 
     /// Finalized floor marshal should resolve before sync starts.
     finalization: Finalization<S, V::Commitment>,
@@ -100,7 +102,7 @@ where
 
 impl<E, A, R, S, V> Syncer<E, A, R, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     R: Send + Sync + 'static,
@@ -136,7 +138,7 @@ where
             resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
         {
             let mut sync_metadata = self.sync_metadata.lock().await;
-            sync_metadata.begin_sync(resolved_floor.marker).await;
+            sync_metadata.begin_sync(self.finalization.clone()).await;
         }
 
         let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));

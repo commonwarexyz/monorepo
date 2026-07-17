@@ -1,19 +1,19 @@
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::{Contiguous as _, Mutable},
     },
     merkle::{
-        full::{self, Merkle},
         Family, Location,
+        full::{self, Merkle},
     },
     qmdb::{
         self,
         any::value::ValueEncoding,
-        keyless::{operation::Codec, CompactDb, Keyless, Metrics, Operation},
+        keyless::{CompactDb, Keyless, Metrics, Operation, operation::Codec},
         sync,
     },
-    Context,
 };
 use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Hasher;
@@ -115,6 +115,35 @@ where
 
         db.sync().await?;
         Ok(db)
+    }
+
+    async fn local_boundary_nodes(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &sync::Target<F, Self::Digest>,
+        journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
+        if target.range.start() == Location::new(0)
+            || !sync::journal_covers_range(journal.bounds(), &target.range)
+        {
+            return Ok(None);
+        }
+
+        // The inactivity floor is carried by the last commit operation rather than being
+        // the target range's start.
+        let inactivity_floor =
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end(), |op| {
+                op.has_floor()
+            })
+            .await?;
+
+        sync::local_boundary_nodes::<F, _, H, S>(
+            context,
+            config.merkle.clone(),
+            target,
+            inactivity_floor,
+        )
+        .await
     }
 
     fn root(&self) -> Self::Digest {

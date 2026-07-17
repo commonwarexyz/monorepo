@@ -2,16 +2,16 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{ed25519, Signer};
+use commonware_cryptography::{Signer, ed25519};
 use commonware_p2p::{
-    simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
+    Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait, simulated,
 };
-use commonware_runtime::{deterministic, Clock, IoBuf, Quota, Runner, Supervisor as _};
+use commonware_runtime::{Clock, IoBuf, Quota, Runner, Supervisor as _, deterministic};
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
-use rand::Rng;
+use rand::RngExt as _;
 use std::{
-    collections::{hash_map, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque, hash_map},
     num::NonZeroU32,
     time::Duration,
 };
@@ -120,7 +120,7 @@ fn fuzz(input: FuzzInput) {
         // Generate peer identities
         let mut peer_pks = Vec::new();
         for _ in 0..num_peers {
-            let private_key = ed25519::PrivateKey::from_seed(context.gen());
+            let private_key = ed25519::PrivateKey::from_seed(context.random());
             peer_pks.push(private_key.public_key());
         }
 
@@ -159,15 +159,14 @@ fn fuzz(input: FuzzInput) {
                     let idx = (peer_idx as usize) % peer_pks.len();
 
                     // Only register if not already registered
-                    if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id)) {
-                        if let Ok((sender, receiver)) = oracle
+                    if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id))
+                        && let Ok((sender, receiver)) = oracle
                             .control(peer_pks[idx].clone())
                             .register(channel_id as u64, TEST_QUOTA)
                             .await
                         {
                             e.insert((sender, receiver));
                         }
-                    }
                 }
 
                 Operation::SendMessage {

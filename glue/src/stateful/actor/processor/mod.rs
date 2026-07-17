@@ -23,32 +23,33 @@
 //! [`await_or_cancel`].
 
 use crate::stateful::{
+    Application, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
     db::{Anchor, DatabaseSet},
-    Application, Proposed, PruneConfig,
 };
 use commonware_consensus::{
+    Block, CertifiableBlock, Heightable, Roundable,
     marshal::{
+        Identifier,
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
-        Identifier,
     },
     types::{Height, Round},
-    Block, CertifiableBlock, Heightable, Roundable,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{
-    telemetry::{metrics::GaugeExt, traces::TracedExt as _},
     Clock, Metrics, Spawner,
+    telemetry::{metrics::GaugeExt, traces::TracedExt as _},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use futures::{stream, Stream, StreamExt};
-use rand::Rng;
+use futures::{Stream, StreamExt, stream};
+use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
     num::NonZeroUsize,
+    sync::Arc,
 };
 use tracing::{debug, info_span, warn};
 
@@ -247,7 +248,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<A::Block>> + Send + 'static,
         input_provider: &mut A::InputProvider,
         mut response: oneshot::Sender<Option<A::Block>>,
     ) where
@@ -270,7 +271,7 @@ where
             }
         };
         let parent_digest = parent.digest();
-        let ancestry = stream::once(std::future::ready(parent.clone())).chain(ancestry);
+        let ancestry = stream::once(std::future::ready(Arc::clone(&parent))).chain(ancestry);
 
         let round = consensus_context.round();
         let batches = match self
@@ -339,7 +340,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<A::Block>> + Send + 'static,
         mut response: oneshot::Sender<bool>,
     ) where
         S: Scheme,
@@ -380,8 +381,13 @@ where
         //
         // `last_processed.height` is only advanced from finalized state
         // (genesis, startup reconciliation, or finalize/ack path).
-        match is_already_processed(self.last_processed, marshal.clone(), &block, &mut response)
-            .await
+        match is_already_processed(
+            self.last_processed,
+            marshal.clone(),
+            block.as_ref(),
+            &mut response,
+        )
+        .await
         {
             Ok(true) => {
                 timer.observe(context);
@@ -529,7 +535,7 @@ where
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
-        parent: A::Block,
+        parent: Arc<A::Block>,
         response: &mut oneshot::Sender<Response>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
@@ -572,7 +578,7 @@ where
         &mut self,
         context: &E,
         provider: P,
-        target: A::Block,
+        target: Arc<A::Block>,
         response: &mut oneshot::Sender<Response>,
     ) -> Result<(), PrepareBatchesError>
     where
@@ -694,7 +700,7 @@ where
     pub(super) async fn finalize(
         &mut self,
         context: &E,
-        block: A::Block,
+        block: &A::Block,
     ) -> (FinalizeStatus, DeferredPrune<PendingSyncTargets<A, E>>) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
@@ -715,7 +721,7 @@ where
         let timer = self.metrics.finalize_duration.timer(context);
         let block_context = block.context();
         let round = block_context.round();
-        let sync_targets = A::sync_targets(&block);
+        let sync_targets = A::sync_targets(block);
 
         // Marshal finalization is ordered. A pending miss means we can replay
         // this block on top of finalized state.
@@ -730,7 +736,7 @@ where
                     .app
                     .apply(
                         (context.child("finalize_replay"), block_context),
-                        &block,
+                        block,
                         batches,
                     )
                     .await;
@@ -743,7 +749,7 @@ where
         };
 
         self.databases.finalize(batch).await;
-        self.notify_finalized(context, &block).await;
+        self.notify_finalized(context, block).await;
         let prune = self
             .pruning
             .as_mut()
@@ -914,40 +920,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        await_or_cancel, fetch_ancestor, FinalizeStatus, PrepareBatchesError, Processor, Prune,
-        Pruning,
+        FinalizeStatus, PrepareBatchesError, Processor, Prune, Pruning, await_or_cancel,
+        fetch_ancestor,
     };
     use crate::stateful::{
+        Application, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
-        Application, Proposed, PruneConfig,
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
+        Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
         marshal::ancestry::BlockProvider,
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
-        Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
     };
     use commonware_cryptography::{
-        ed25519, sha256::Digest, Digest as _, Digestible, Hasher, Sha256, Signer as _,
+        Digest as _, Digestible, Hasher, Sha256, Signer as _, ed25519, sha256::Digest,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
+        ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, full::Config as MmrJournalConfig, Location},
+        mmr::{self, Location, full::Config as MmrJournalConfig},
         qmdb::{any, sync::Target},
         translator::TwoCap,
     };
     use commonware_utils::{
+        NZU16, NZU64, NZUsize,
         channel::oneshot,
         non_empty_range,
         range::NonEmptyRange,
         sync::{Mutex, TracedAsyncRwLock},
-        NZUsize, NZU16, NZU64,
     };
     use futures::{Stream, StreamExt};
     use std::{
@@ -955,8 +961,8 @@ mod tests {
         future::Future,
         num::NonZeroUsize,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -1162,7 +1168,7 @@ mod tests {
         async fn propose(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: &mut Self::InputProvider,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -1188,7 +1194,7 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
             let mut ancestry = Box::pin(ancestry);
@@ -1265,10 +1271,10 @@ mod tests {
         fn subscribe_parent(
             &self,
             block: &Self::Block,
-        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             let provider = self.clone();
             let parent = block.parent();
-            async move { provider.fetch_by_digest(parent) }
+            async move { provider.fetch_by_digest(parent).map(Arc::new) }
         }
     }
 
@@ -1296,7 +1302,7 @@ mod tests {
         fn subscribe_parent(
             &self,
             block: &Self::Block,
-        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             let provider = self.clone();
             let child = block.digest();
             async move {
@@ -1307,6 +1313,7 @@ mod tests {
                     .get_mut(&child)
                     .and_then(VecDeque::pop_front)
                     .flatten()
+                    .map(Arc::new)
             }
         }
     }
@@ -1484,7 +1491,7 @@ mod tests {
 
         async fn finalize(&mut self, block: Block) -> FinalizeStatus {
             self.processor
-                .finalize(self.context_cell.as_present(), block)
+                .finalize(self.context_cell.as_present(), &block)
                 .await
                 .0
         }
@@ -1503,7 +1510,7 @@ mod tests {
             >,
         ){
             self.processor
-                .finalize(self.context_cell.as_present(), block)
+                .finalize(self.context_cell.as_present(), &block)
                 .await
         }
 
@@ -1786,10 +1793,12 @@ mod tests {
 
             assert!(harness.processor.pending.contains_key(&winner.digest()));
             assert!(harness.processor.pending.contains_key(&loser.digest()));
-            assert!(harness
-                .processor
-                .pending
-                .contains_key(&loser_child.digest()));
+            assert!(
+                harness
+                    .processor
+                    .pending
+                    .contains_key(&loser_child.digest())
+            );
 
             let status = harness.finalize(winner.clone()).await;
             assert_eq!(
@@ -1971,7 +1980,7 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider,
-                    gap_block.clone(),
+                    Arc::new(gap_block.clone()),
                     &mut response,
                 )
                 .await;
@@ -2170,7 +2179,7 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider,
-                    block2,
+                    Arc::new(block2),
                     &mut response,
                 )
                 .await;
@@ -2205,7 +2214,7 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider.clone(),
-                    block2,
+                    Arc::new(block2),
                     &mut response,
                 )
                 .await;

@@ -1,13 +1,13 @@
 //! Actor for compact QMDB sync over P2P.
 
-use super::{handler, mailbox, Mailbox};
+use super::{Mailbox, handler, mailbox};
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
-use commonware_resolver::{p2p, Resolver as _};
-use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_resolver::{Resolver as _, p2p};
+use commonware_runtime::{BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_storage::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
     qmdb::{self, sync::compact},
@@ -17,7 +17,7 @@ use commonware_utils::{
     sync::TracedAsyncRwLock,
 };
 use futures::future;
-use rand::Rng;
+use rand_core::Rng;
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
 use tracing::info;
 
@@ -319,9 +319,7 @@ where
             return false;
         }
 
-        let hasher = qmdb::hasher::<H>();
-        qmdb::verify_proof(
-            &hasher,
+        qmdb::verify_proof::<H, _, _>(
             &state.last_commit_proof,
             Location::new(*state.leaf_count - 1),
             std::slice::from_ref(&state.last_commit_op),
@@ -348,20 +346,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519, sha256, Sha256};
+    use commonware_cryptography::{Sha256, ed25519, sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_storage::{
         merkle::Proof,
         mmr,
         qmdb::keyless::fixed::{self as keyless_fixed, Operation as KeylessOp},
     };
     use commonware_utils::{
+        NZUsize,
         channel::{mpsc, oneshot},
         sequence::U64,
         sync::TracedAsyncRwLock,
-        NZUsize,
     };
     use std::{sync::Arc, time::Duration};
 
@@ -454,11 +452,12 @@ mod tests {
         compact::FetchResult<mmr::Family, TestOp, sha256::Digest>,
     ) {
         let mut db = init_db(context).await;
-        db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
-            &db,
-            None,
-            db.inactivity_floor_loc(),
-        ))
+        db.apply_batch(
+            db.new_batch()
+                .append(U64::new(7))
+                .merkleize(&db, None, db.inactivity_floor_loc())
+                .await,
+        )
         .unwrap();
         db.sync().await.unwrap();
 

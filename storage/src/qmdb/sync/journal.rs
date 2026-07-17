@@ -11,7 +11,7 @@ pub trait Journal<F: Family>: Sized + Send {
     type Context;
 
     /// The configuration of the journal
-    type Config;
+    type Config: Sync;
 
     /// The type of operations in the journal
     type Op: Send;
@@ -44,7 +44,7 @@ pub trait Journal<F: Family>: Sized + Send {
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Get the number of operations in the journal
-    fn size(&self) -> impl Future<Output = u64> + Send;
+    fn size(&self) -> u64;
 
     /// Append an operation to the journal
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>> + Send;
@@ -81,7 +81,7 @@ where
         Self::sync(self).await
     }
 
-    async fn size(&self) -> u64 {
+    fn size(&self) -> u64 {
         Contiguous::bounds(self).end
     }
 
@@ -148,7 +148,7 @@ where
         Self::sync(self).await
     }
 
-    async fn size(&self) -> u64 {
+    fn size(&self) -> u64 {
         Contiguous::bounds(self).end
     }
 
@@ -164,10 +164,10 @@ mod tests {
     use commonware_cryptography::sha256::Digest;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob, BufferPooler, Runner, Storage,
-        Supervisor as _,
+        Blob, BufferPooler, Runner, Storage, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
-    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
 
     type FixedJournal = fixed::Journal<deterministic::Context, Digest>;
     type F = crate::merkle::mmr::Family;

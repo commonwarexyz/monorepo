@@ -36,7 +36,7 @@
 
 use crate::{Epochable, Viewable};
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::telemetry::traces::TracedExt;
 use commonware_utils::sequence::U64;
@@ -724,12 +724,12 @@ commonware_macros::stability_scope!(ALPHA {
         use commonware_coding::Config as CodingConfig;
         use commonware_cryptography::Digest;
         use commonware_math::algebra::Random;
-        use commonware_utils::{Array, Span, NZU16};
+        use commonware_utils::{Array, NZU16, Span};
         use core::{
             num::NonZeroU16,
             ops::{Deref, Range},
         };
-        use rand_core::CryptoRngCore;
+        use rand_core::CryptoRng;
 
         /// A [`Digest`] containing a coding commitment, encoded [`CodingConfig`], and context hash.
         ///
@@ -800,7 +800,7 @@ commonware_macros::stability_scope!(ALPHA {
         }
 
         impl Random for Commitment {
-            fn random(mut rng: impl CryptoRngCore) -> Self {
+            fn random(mut rng: impl CryptoRng) -> Self {
                 let mut buf = [0u8; Self::SIZE];
                 rng.fill_bytes(&mut buf[..Self::CONFIG_OFFSET]);
 
@@ -941,7 +941,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize};
     use commonware_coding::Config as CodingConfig;
     use commonware_math::algebra::Random;
-    use commonware_utils::{test_rng, Array, Span, NZU16, NZU64};
+    use commonware_utils::{Array, NZU16, NZU64, Span, test_rng};
     use std::ops::Deref;
 
     #[test]
@@ -1710,7 +1710,7 @@ mod tests {
         struct Digest([u8; Self::SIZE]);
 
         impl Random for Digest {
-            fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
+            fn random(mut rng: impl rand_core::CryptoRng) -> Self {
                 let mut buf = [0u8; Self::SIZE];
                 rng.fill_bytes(&mut buf);
                 Self(buf)

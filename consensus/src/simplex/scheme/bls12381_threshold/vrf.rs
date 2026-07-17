@@ -33,20 +33,21 @@
 #[commonware_macros::stability(ALPHA)]
 use crate::simplex::scheme::seed_namespace;
 use crate::{
+    Epochable, Viewable,
     simplex::{
         scheme::Namespace,
         types::{Finalization, Notarization, Subject},
     },
     types::{Epoch, Participant, Round, View},
-    Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    types::lazy::Lazy, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
+    Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
 };
 #[commonware_macros::stability(ALPHA)]
 use commonware_cryptography::bls12381::tle;
 use commonware_cryptography::{
+    Digest, PublicKey,
     bls12381::primitives::{
         group::Share,
         ops::{self, batch, threshold},
@@ -54,13 +55,12 @@ use commonware_cryptography::{
         variant::{PartialSignature, Variant},
     },
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
-    Digest, PublicKey,
 };
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Set, Faults};
-use rand::{rngs::StdRng, SeedableRng};
-use rand_core::CryptoRngCore;
+use commonware_utils::{Faults, ordered::Set};
+use rand::rngs::StdRng;
+use rand_core::{CryptoRng, SeedableRng};
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
@@ -246,7 +246,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// from a certificate of the target round (i.e. notarization, finalization,
     /// or nullification).
     #[stability(ALPHA)]
-    pub fn encrypt<R: CryptoRngCore>(
+    pub fn encrypt<R: CryptoRng>(
         &self,
         rng: &mut R,
         target: Round,
@@ -269,7 +269,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// from a certificate of the target round (i.e. notarization, finalization,
 /// or nullification).
 #[stability(ALPHA)]
-pub fn encrypt<R: CryptoRngCore, V: Variant>(
+pub fn encrypt<R: CryptoRng, V: Variant>(
     rng: &mut R,
     identity: V::Public,
     namespace: &[u8],
@@ -296,7 +296,7 @@ pub fn fixture<V, R>(
 >
 where
     V: Variant,
-    R: rand::RngCore + rand::CryptoRng,
+    R: rand_core::CryptoRng,
 {
     commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
         rng,
@@ -562,7 +562,7 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         M: Faults,
     {
@@ -591,7 +591,7 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
         M: Faults,
@@ -691,7 +691,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
     {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
@@ -730,7 +730,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> Verification<Self>
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
@@ -885,6 +885,7 @@ mod tests {
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
+        Hasher, Sha256,
         bls12381::{
             dkg::feldman_desmedt as dkg,
             primitives::{
@@ -893,16 +894,15 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        certificate::{mocks::Fixture, Scheme as _, Verifier as _},
+        certificate::{Scheme as _, Verifier as _, mocks::Fixture},
         ed25519,
         ed25519::certificate::mocks::participants as ed25519_participants,
         sha256::Digest as Sha256Digest,
-        Hasher, Sha256,
     };
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, NZU32};
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{Faults, N3f1, NZU32, test_rng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
 
@@ -1957,25 +1957,27 @@ mod tests {
             .assemble::<_, N3f1>(votes2, &Sequential)
             .expect("assemble certificate2");
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
-            &mut rng,
-            [
-                (
-                    Subject::Notarize {
-                        proposal: &proposal1,
-                    },
-                    &certificate1
-                ),
-                (
-                    Subject::Notarize {
-                        proposal: &proposal2,
-                    },
-                    &certificate2
-                ),
-            ]
-            .into_iter(),
-            &Sequential,
-        ));
+        assert!(
+            verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+                &mut rng,
+                [
+                    (
+                        Subject::Notarize {
+                            proposal: &proposal1,
+                        },
+                        &certificate1
+                    ),
+                    (
+                        Subject::Notarize {
+                            proposal: &proposal2,
+                        },
+                        &certificate2
+                    ),
+                ]
+                .into_iter(),
+                &Sequential,
+            )
+        );
 
         let cert1 = certificate1.get().unwrap();
         let cert2 = certificate2.get().unwrap();
@@ -2070,25 +2072,27 @@ mod tests {
         let notarization_certificate = assemble_notarization_certificate(&schemes, &proposal);
         let finalization_certificate = assemble_finalization_certificate(&schemes, &proposal);
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
-            &mut rng,
-            [
-                (
-                    Subject::Notarize {
-                        proposal: &proposal,
-                    },
-                    &notarization_certificate,
-                ),
-                (
-                    Subject::Finalize {
-                        proposal: &proposal,
-                    },
-                    &finalization_certificate,
-                ),
-            ]
-            .into_iter(),
-            &Sequential,
-        ));
+        assert!(
+            verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+                &mut rng,
+                [
+                    (
+                        Subject::Notarize {
+                            proposal: &proposal,
+                        },
+                        &notarization_certificate,
+                    ),
+                    (
+                        Subject::Finalize {
+                            proposal: &proposal,
+                        },
+                        &finalization_certificate,
+                    ),
+                ]
+                .into_iter(),
+                &Sequential,
+            )
+        );
     }
 
     #[test]
@@ -2106,25 +2110,27 @@ mod tests {
         let certificate1 = assemble_notarization_certificate(&schemes, &proposal1);
         let certificate2 = assemble_notarization_certificate(&schemes, &proposal2);
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
-            &mut rng,
-            [
-                (
-                    Subject::Notarize {
-                        proposal: &proposal1,
-                    },
-                    &certificate1,
-                ),
-                (
-                    Subject::Notarize {
-                        proposal: &proposal2,
-                    },
-                    &certificate2,
-                ),
-            ]
-            .into_iter(),
-            &Sequential,
-        ));
+        assert!(
+            verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+                &mut rng,
+                [
+                    (
+                        Subject::Notarize {
+                            proposal: &proposal1,
+                        },
+                        &certificate1,
+                    ),
+                    (
+                        Subject::Notarize {
+                            proposal: &proposal2,
+                        },
+                        &certificate2,
+                    ),
+                ]
+                .into_iter(),
+                &Sequential,
+            )
+        );
 
         let cert1 = certificate1.get().unwrap();
         let cert2 = certificate2.get().unwrap();

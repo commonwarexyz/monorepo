@@ -2,12 +2,12 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{
-    bls12381::{self, Batch},
     BatchVerifier, Signer, Verifier,
+    bls12381::{self, Batch},
 };
 use commonware_parallel::Sequential;
+use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 
 mod common;
 use common::arbitrary_bytes;
@@ -54,7 +54,7 @@ struct FuzzState {
 impl FuzzState {
     fn new() -> Self {
         Self {
-            batch: Batch::new(),
+            batch: Batch::new(0),
             expected_result: true,
         }
     }
@@ -111,7 +111,7 @@ fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
 
     let rng_seed: u64 = u.arbitrary().unwrap_or(0);
-    let mut rng = StdRng::seed_from_u64(rng_seed);
+    let mut rng = TestRng::new(rng_seed);
     let mut state = FuzzState::new();
 
     let num_ops = u.int_in_range(1..=32).unwrap_or(1);

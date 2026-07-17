@@ -273,6 +273,8 @@ impl Freelist {
     /// finally dropped, otherwise the buffer leaks.
     #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer)> {
+        // Loom's atomic implementation does not provide `try_update`.
+        #[allow(deprecated)]
         let slot = self
             .created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
@@ -819,10 +821,10 @@ impl SlotBitmapProbe {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use commonware_utils::{NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize};
     use std::sync::{
-        atomic::{AtomicUsize as StdAtomicUsize, Ordering as AtomicOrdering},
         Arc, Barrier,
+        atomic::{AtomicUsize as StdAtomicUsize, Ordering as AtomicOrdering},
     };
 
     pub fn created(freelist: &Freelist) -> usize {
@@ -1306,11 +1308,11 @@ pub(super) mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
-    use commonware_utils::{sync::Mutex, NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use loom::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         thread,
     };

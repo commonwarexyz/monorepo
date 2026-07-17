@@ -1,7 +1,7 @@
 use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
-    index::{unordered::Index, Unordered},
+    index::{Unordered, unordered::Index},
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
@@ -10,12 +10,12 @@ use crate::{
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
+    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;
-use futures::{pin_mut, StreamExt};
-use std::collections::{btree_map, BTreeMap, BTreeSet};
+use futures::{StreamExt, pin_mut};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -157,6 +157,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         (index / self.items_per_section) * self.items_per_section
     }
 
+    /// Returns true when `index` is below the prune floor.
+    const fn pruned(&self, index: u64) -> bool {
+        match self.oldest_allowed {
+            Some(oldest_allowed) => index < oldest_allowed,
+            None => false,
+        }
+    }
+
     /// Iterate over all positions for a given index (first + extras).
     fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
         self.indices.get(&index).into_iter().copied().chain(
@@ -277,10 +285,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Fetch index
         let iter = self.keys.get(key);
-        let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
-            if *index < min_allowed {
+            if self.pruned(*index) {
                 continue;
             }
 
@@ -309,6 +316,36 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
 
         Ok(None)
+    }
+
+    /// Check whether any retained index stores `key`.
+    ///
+    /// Confirms translated-key candidates against index journal entries,
+    /// never reading values.
+    async fn has_key(&self, key: &K) -> Result<bool, Error> {
+        for index in self.keys.get(key) {
+            // Continue if index is no longer allowed due to pruning.
+            if self.pruned(*index) {
+                continue;
+            }
+
+            // Get all positions at this index
+            if !self.indices.contains_key(index) {
+                return Err(Error::RecordCorrupted);
+            }
+            let section = self.section(*index);
+
+            for position in self.iter_positions(*index) {
+                // Fetch index entry from index journal to verify key
+                let entry = self.oversized.get(section, position).await?;
+                if entry.key.as_ref() == key.as_ref() {
+                    return Ok(true);
+                }
+                self.unnecessary_reads.inc();
+            }
+        }
+
+        Ok(false)
     }
 
     fn has_index(&self, index: u64) -> bool {
@@ -374,12 +411,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let min = self.section(min);
 
         // Check if min is less than last pruned
-        if let Some(oldest_allowed) = self.oldest_allowed {
-            if min <= oldest_allowed {
-                // We don't return an error in this case because the caller
-                // shouldn't be burdened with converting `min` to some section.
-                return Ok(());
-            }
+        if let Some(oldest_allowed) = self.oldest_allowed
+            && min <= oldest_allowed
+        {
+            // We don't return an error in this case because the caller
+            // shouldn't be burdened with converting `min` to some section.
+            return Ok(());
         }
         debug!(min, "pruning archive");
 
@@ -434,7 +471,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.has.inc();
         match identifier {
             Identifier::Index(index) => Ok(self.has_index(index)),
-            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
+            Identifier::Key(key) => self.has_key(key).await,
         }
     }
 
@@ -526,6 +563,32 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     async fn put_multi(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
         self.put_internal(index, key, data, false).await
+    }
+
+    async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
+        self.has.inc();
+
+        // Ignore pruned indices.
+        if self.pruned(index) {
+            return Ok(false);
+        }
+
+        // A key absent from the in-memory index is not stored anywhere, so
+        // absence is decided without touching disk. A translated-key hit may
+        // be a collision, so confirm against the stored keys at `index`
+        // (reads index journal entries, never values).
+        if !self.keys.get(key).any(|candidate| *candidate == index) {
+            return Ok(false);
+        }
+        let section = self.section(index);
+        for position in self.iter_positions(index) {
+            let entry = self.oversized.get(section, position).await?;
+            if entry.key.as_ref() == key.as_ref() {
+                return Ok(true);
+            }
+            self.unnecessary_reads.inc();
+        }
+        Ok(false)
     }
 }
 

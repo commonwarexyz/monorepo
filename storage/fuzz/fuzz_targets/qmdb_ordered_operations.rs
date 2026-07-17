@@ -1,26 +1,26 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     index::ordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
-    merkle::{self, mmb, mmr, Bagging::BackwardFold, Family as MerkleFamily, Location, Proof},
+    merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
+            FixedConfig as Config,
             db::Db as AnyDb,
             ordered::{Operation, Update},
             value::FixedEncoding,
-            FixedConfig as Config,
         },
         verify_proof,
     },
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, HashSet},
@@ -107,7 +107,6 @@ async fn commit_pending<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
-    let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
     let runner = deterministic::Runner::default();
 
     runner.start(|context| {
@@ -204,8 +203,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 .expect("proof should not fail");
 
                             assert!(
-                                verify_proof(
-                                    &hasher,
+                                verify_proof::<Sha256, _, _>(
                                     &proof,
                                     adjusted_start,
                                     &log,
@@ -235,8 +233,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             if let Ok(res) = db
                                 .proof(adjusted_start, *max_ops)
                                 .await {
-                                    let _ = verify_proof(
-                                        &hasher,
+                                    let _ = verify_proof::<Sha256, _, _>(
                                         &proof,
                                         adjusted_start,
                                         &res.1,

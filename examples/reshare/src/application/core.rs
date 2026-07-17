@@ -1,13 +1,13 @@
 //! Core reshare [Application] implementation.
 
 use crate::{application::Block, dkg};
-use commonware_consensus::{marshal::ancestry::Ancestry, simplex::types::Context, Heightable};
+use commonware_consensus::{Heightable, marshal::ancestry::Ancestry, simplex::types::Context};
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Hasher, Signer,
+    Committable, Hasher, Signer, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
-use rand::Rng;
+use rand_core::Rng;
 use std::marker::PhantomData;
 
 pub struct Application<E, S, H, C, V>

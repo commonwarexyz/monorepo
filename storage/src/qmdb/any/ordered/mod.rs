@@ -1,12 +1,12 @@
 use crate::{
+    Context,
     index::Ordered as Index,
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
     qmdb::{
-        any::{db::Db, ValueEncoding},
+        any::{ValueEncoding, db::Db},
         operation::{Key, Operation as OperationTrait},
     },
-    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -19,22 +19,22 @@ use futures::{
 pub mod fixed;
 pub mod variable;
 
-pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
+pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as Update};
 
 /// Type alias for a location and its associated key data.
 type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
 
 impl<
-        F: Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<F, K, V>>,
-        I: Index<Value = Location<F>>,
-        H: Hasher,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, C, I, H, Update<K, V>, N, S>
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Contiguous<Item = Operation<F, K, V>>,
+    I: Index<Value = Location<F>>,
+    H: Hasher,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, C, I, H, Update<K, V>, N, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -320,12 +320,12 @@ mod test {
         merkle::Family,
         qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::boxed;
-    use commonware_runtime::{deterministic::Context, Supervisor as _};
+    use commonware_runtime::{Supervisor as _, deterministic::Context};
     use commonware_utils::{sequence::FixedBytes, test_rng};
     use core::{future::Future, pin::Pin};
-    use rand::Rng;
+    use rand::RngExt as _;
 
     /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
     /// ascending query sequence, including queries past the last candidate (cyclic wrap).
@@ -333,14 +333,14 @@ mod test {
     fn find_next_key_ascending_matches_binary_search() {
         let mut rng = test_rng();
         for _ in 0..50 {
-            let mut candidates: Vec<u64> = (0..rng.gen_range(1..40))
-                .map(|_| rng.gen_range(0..60u64))
+            let mut candidates: Vec<u64> = (0..rng.random_range(1..40))
+                .map(|_| rng.random_range(0..60u64))
                 .collect();
             candidates.sort_unstable();
             candidates.dedup();
 
-            let mut queries: Vec<u64> = (0..rng.gen_range(1..80))
-                .map(|_| rng.gen_range(0..70u64))
+            let mut queries: Vec<u64> = (0..rng.random_range(1..80))
+                .map(|_| rng.random_range(0..70u64))
                 .collect();
             queries.sort_unstable();
 
@@ -375,7 +375,7 @@ mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
         assert!(db.get_metadata().await.unwrap().is_none());
-        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
+        assert!(matches!(db.prune(db.sync_boundary()).await, Ok(())));
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
@@ -398,7 +398,7 @@ mod test {
         assert_eq!(range.start, Location::new(1));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
-        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
+        assert!(matches!(db.prune(db.sync_boundary()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
@@ -613,7 +613,7 @@ mod test {
 
         // Pruning inactive ops should not affect current state or root.
         let root = db.root();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();

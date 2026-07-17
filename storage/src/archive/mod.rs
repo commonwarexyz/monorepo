@@ -170,6 +170,16 @@ pub trait MultiArchive: Archive {
         index: u64,
     ) -> impl Future<Output = Result<Option<Vec<Self::Value>>, Error>> + Send + use<'_, Self>;
 
+    /// Check whether `key` is stored at `index`.
+    ///
+    /// Unlike [Archive::has] with [Identifier::Key], the check is scoped to a
+    /// single index. Unlike [MultiArchive::get_all], no values are fetched.
+    fn has_at<'a>(
+        &'a self,
+        index: u64,
+        key: &'a Self::Key,
+    ) -> impl Future<Output = Result<bool, Error>> + Send + use<'a, Self>;
+
     /// Store an item, allowing multiple items at the same index.
     ///
     /// Multiple items may share the same `index`. If the same key is stored at
@@ -216,13 +226,13 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
+        Metrics as _, Runner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         telemetry::metrics::has_metric_value,
-        Metrics as _, Runner, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-    use rand::Rng;
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+    use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
@@ -667,14 +677,14 @@ mod tests {
             // Insert 100 keys with gaps
             let mut last_index = 0u64;
             while keys.len() < 100 {
-                let gap: u64 = context.gen_range(1..=10);
+                let gap: u64 = context.random_range(1..=10);
                 let index = last_index + gap;
                 last_index = index;
 
                 let mut key_bytes = [0u8; 64];
                 context.fill(&mut key_bytes);
                 let key = FixedBytes::<64>::decode(key_bytes.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.random();
 
                 if keys.contains_key(&index) {
                     continue;
@@ -722,13 +732,13 @@ mod tests {
                 assert_eq!(start_next, next_actual_index);
 
                 // If there's a gap, check an index within the gap
-                if let Some(next_index) = next_actual_index {
-                    if next_index > block_end_index + 1 {
-                        let in_gap_index = block_end_index + 1;
-                        let (current_end, start_next) = archive.next_gap(in_gap_index);
-                        assert!(current_end.is_none());
-                        assert_eq!(start_next, Some(next_index));
-                    }
+                if let Some(next_index) = next_actual_index
+                    && next_index > block_end_index + 1
+                {
+                    let in_gap_index = block_end_index + 1;
+                    let (current_end, start_next) = archive.next_gap(in_gap_index);
+                    assert!(current_end.is_none());
+                    assert_eq!(start_next, Some(next_index));
                 }
                 i = j + 1;
             }
@@ -792,7 +802,7 @@ mod tests {
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
                 let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.random();
 
                 archive
                     .put(index, key.clone(), data)
@@ -801,7 +811,7 @@ mod tests {
                 keys.insert(key, (index, data));
 
                 // Randomly sync the archive
-                if context.gen_bool(0.1) {
+                if context.random_bool(0.1) {
                     archive.sync().await.expect("Failed to sync archive");
                 }
             }

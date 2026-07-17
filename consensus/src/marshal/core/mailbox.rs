@@ -1,29 +1,29 @@
-use super::Variant;
+use super::{Variant, durability::Durable as _};
 use crate::{
+    Reporter,
     marshal::{
-        ancestry::{AncestorStream, Ancestry, BlockProvider},
         Identifier,
+        ancestry::{AncestorStream, Ancestry, BlockProvider},
     },
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
-    Reporter,
 };
 use commonware_actor::{
-    mailbox::{Overflow, Policy, Sender},
     Feedback,
+    mailbox::{Overflow, Policy, Sender},
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_runtime::{
+    Clock, Handle,
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
-    Clock,
 };
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
-    collections::{btree_map::Entry, BTreeMap, VecDeque},
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     sync::Arc,
 };
-use tracing::{info_span, Span};
+use tracing::{Span, info_span};
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -100,7 +100,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// How marshal should behave if the block is missing locally.
         fallback: DigestFallback,
         /// A channel to send the retrieved block.
-        response: oneshot::Sender<V::Block>,
+        response: oneshot::Sender<Arc<V::Block>>,
     },
     /// A request to subscribe to a block by its commitment.
     SubscribeByCommitment {
@@ -111,7 +111,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// How marshal should behave if the block is missing locally.
         fallback: CommitmentFallback,
         /// A channel to send the retrieved block.
-        response: oneshot::Sender<V::Block>,
+        response: oneshot::Sender<Arc<V::Block>>,
     },
     /// A hint to fetch a notarized block by round without adding another local subscriber.
     ///
@@ -145,16 +145,18 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The recipients to forward the block to.
         recipients: Recipients<S::PublicKey>,
     },
-    /// A notification that a block has been locally proposed by this node.
+    /// A request to broadcast a locally proposed block and persist it.
     Proposed {
         /// The span carried with this request.
         span: Span,
         /// The round in which the block was proposed.
         round: Round,
         /// The proposed block.
-        block: V::Block,
-        /// A channel signaled once the block is durably stored.
-        ack: Option<oneshot::Sender<()>>,
+        block: Arc<V::Block>,
+        /// The recipients to broadcast the block to.
+        recipients: Recipients<S::PublicKey>,
+        /// A channel sent once the block sync has started.
+        ack: oneshot::Sender<Handle<()>>,
     },
     /// A notification that a block has been verified by the application.
     Verified {
@@ -163,9 +165,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The round in which the block was verified.
         round: Round,
         /// The verified block.
-        block: V::Block,
-        /// A channel signaled once the block is durably stored.
-        ack: Option<oneshot::Sender<()>>,
+        block: Arc<V::Block>,
+        /// A channel sent once the block sync has started.
+        ack: oneshot::Sender<Handle<()>>,
     },
     /// A notification that a block has been certified by the application.
     Certified {
@@ -174,9 +176,10 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The round in which the block was certified.
         round: Round,
         /// The certified block.
-        block: V::Block,
-        /// A channel signaled once the block is durably stored.
-        ack: Option<oneshot::Sender<()>>,
+        block: Arc<V::Block>,
+        /// A channel sent once the block and notarization syncs have started; the
+        /// handle covers both.
+        ack: oneshot::Sender<Handle<()>>,
     },
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
@@ -529,15 +532,15 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     {
         // Drain floor and prune first so the actor advances its floor before
         // it sees the height-bounded reads that follow
-        if let Some((span, finalization)) = self.floor.take() {
-            if !self.drain_one(Message::SetFloor { span, finalization }, &mut push) {
-                return;
-            }
+        if let Some((span, finalization)) = self.floor.take()
+            && !self.drain_one(Message::SetFloor { span, finalization }, &mut push)
+        {
+            return;
         }
-        if let Some((span, height)) = self.prune.take() {
-            if !self.drain_one(Message::Prune { span, height }, &mut push) {
-                return;
-            }
+        if let Some((span, height)) = self.prune.take()
+            && !self.drain_one(Message::Prune { span, height }, &mut push)
+        {
+            return;
         }
 
         // Drain the remaining queued messages in FIFO order
@@ -636,15 +639,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
-        I: IntoIterator<Item = V::Block>,
+        I: IntoIterator<Item = Arc<V::ApplicationBlock>>,
         C: Clock,
     {
-        AncestorStream::new(
-            clock,
-            self.clone(),
-            initial.into_iter().map(V::into_inner),
-            fetch_duration,
-        )
+        AncestorStream::new(clock, self.clone(), initial, fetch_duration)
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
@@ -747,7 +745,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         &self,
         digest: <V::Block as Digestible>::Digest,
         fallback: DigestFallback,
-    ) -> oneshot::Receiver<V::Block> {
+    ) -> oneshot::Receiver<Arc<V::Block>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByDigest {
             span: info_span!("marshal.mailbox.subscribe_by_digest", digest = %digest),
@@ -777,7 +775,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         &self,
         commitment: V::Commitment,
         fallback: CommitmentFallback,
-    ) -> oneshot::Receiver<V::Block> {
+    ) -> oneshot::Receiver<Arc<V::Block>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             span: info_span!("marshal.mailbox.subscribe_by_commitment", commitment = %commitment),
@@ -826,13 +824,18 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         C: Clock,
     {
         let receiver = self.subscribe_by_digest(start_digest, fallback);
-        receiver
-            .await
-            .ok()
-            .map(|block| self.ancestor_stream(clock, [block], fetch_duration))
+        receiver.await.ok().map(|block| {
+            let block = V::into_inner_shared(block);
+            self.ancestor_stream(clock, [block], fetch_duration)
+        })
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
+    ///
+    /// Multiple candidates can exist for one round (an equivocating leader can
+    /// land one before a crash and another after), and this returns the first
+    /// stored. Callers must not assume it is the most recently verified
+    /// candidate: check context/digest before reuse, or look up by digest.
     pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetVerified {
@@ -843,49 +846,84 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Notifies the actor that a block has been locally proposed.
+    /// Requests the broadcast of a locally proposed block, persisting it after
+    /// the send.
     ///
-    /// Returns after the block is durably persisted.
-    #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
-        let (ack, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Proposed {
+    /// The actor hands the block to the network before ingesting and persisting
+    /// it, so the storage write never delays propagation. `ack` receives the
+    /// durable-sync handle once the write's sync has started. The propose path
+    /// stages the block (and `ack`) at propose time and calls this when consensus
+    /// requests the broadcast via [`crate::Relay::broadcast`], awaiting durability
+    /// only at certification so the sync overlaps consensus voting.
+    ///
+    /// A dropped `ack` (the mailbox is closed) abandons the handshake.
+    pub fn proposed(
+        &self,
+        round: Round,
+        block: impl Into<Arc<V::Block>>,
+        recipients: Recipients<S::PublicKey>,
+        ack: oneshot::Sender<Handle<()>>,
+    ) -> Feedback {
+        self.sender.enqueue(Message::Proposed {
             span: info_span!("marshal.mailbox.proposed", round = %round),
             round,
-            block,
-            ack: Some(ack),
+            block: block.into(),
+            recipients,
+            ack,
+        })
+    }
+
+    /// Notifies the actor that a block should be durably persisted at `round`,
+    /// delivering its durable-sync handle through `ack` without awaiting it.
+    ///
+    /// Takes a sender rather than returning a receiver so certification can
+    /// deliver the handle into a handshake staged at propose time. A dropped
+    /// `ack` (the mailbox is closed) abandons the handshake.
+    pub fn verified_deferred(
+        &self,
+        round: Round,
+        block: impl Into<Arc<V::Block>>,
+        ack: oneshot::Sender<Handle<()>>,
+    ) {
+        let _ = self.sender.enqueue(Message::Verified {
+            span: info_span!("marshal.mailbox.verified", round = %round),
+            round,
+            block: block.into(),
+            ack,
         });
-        receiver.await.is_ok()
     }
 
     /// Notifies the actor that a block has been verified.
     ///
-    /// Returns after the block is durably persisted.
+    /// Returns after the block is durably persisted. Mirrors [Self::certified]: the
+    /// durable sync is awaited on the caller's task (off the actor), so the actor
+    /// never blocks on fsync.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
+    pub async fn verified(&self, round: Round, block: impl Into<Arc<V::Block>>) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Verified {
-            span: info_span!("marshal.mailbox.verified", round = %round),
-            round,
-            block,
-            ack: Some(ack),
-        });
-        receiver.await.is_ok()
+        self.verified_deferred(round, block, ack);
+        let Ok(handle) = receiver.await else {
+            return false;
+        };
+        handle.durable(round, "verified").await
     }
 
     /// Notifies the actor that a block has been certified.
     ///
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn certified(&self, round: Round, block: V::Block) -> bool {
+    pub async fn certified(&self, round: Round, block: impl Into<Arc<V::Block>>) -> bool {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Certified {
             span: info_span!("marshal.mailbox.certified", round = %round),
             round,
-            block,
-            ack: Some(ack),
+            block: block.into(),
+            ack,
         });
-        receiver.await.is_ok()
+        let Ok(handle) = receiver.await else {
+            return false;
+        };
+        handle.durable(round, "certified").await
     }
 
     /// Attempts to set the sync starting point from a finalized commitment.
@@ -915,7 +953,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         });
     }
 
-    /// Forward a block to a set of recipients.
+    /// Forward a locally stored block to a set of recipients.
     pub fn forward(
         &self,
         round: Round,
@@ -954,15 +992,16 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
 mod tests {
     use super::*;
     use crate::{
+        Heightable,
         marshal::{mocks::harness, standard::Standard},
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{Epoch, View},
-        Heightable,
     };
     use commonware_cryptography::{
-        certificate::mocks::Fixture, ed25519::PrivateKey, Digest as _, Signer as _,
+        Digest as _, Signer as _, certificate::mocks::Fixture, ed25519::PrivateKey,
     };
-    use commonware_utils::{channel::oneshot::error::TryRecvError, test_rng_seeded};
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{NZUsize, TestRng, channel::oneshot::error::TryRecvError};
 
     type TestMessage = Message<harness::S, Standard<harness::B>>;
     type TestPending = Pending<harness::S, Standard<harness::B>>;
@@ -984,7 +1023,7 @@ mod tests {
     }
 
     fn finalization(height: u64) -> Finalization<harness::S, harness::D> {
-        let mut rng = test_rng_seeded(height);
+        let mut rng = TestRng::new(height);
         let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<harness::V, _>(
             &mut rng,
             harness::NAMESPACE,
@@ -1010,40 +1049,41 @@ mod tests {
         )
     }
 
-    fn proposed(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
+    fn proposed(height: u64) -> (TestMessage, oneshot::Receiver<Handle<()>>) {
         let (ack, receiver) = oneshot::channel();
         (
             TestMessage::Proposed {
                 span: Span::none(),
                 round: round(height),
-                block: block(height),
-                ack: Some(ack),
+                block: block(height).into(),
+                recipients: Recipients::All,
+                ack,
             },
             receiver,
         )
     }
 
-    fn verified(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
+    fn verified(height: u64) -> (TestMessage, oneshot::Receiver<Handle<()>>) {
         let (ack, receiver) = oneshot::channel();
         (
             TestMessage::Verified {
                 span: Span::none(),
                 round: round(height),
-                block: block(height),
-                ack: Some(ack),
+                block: block(height).into(),
+                ack,
             },
             receiver,
         )
     }
 
-    fn certified(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
+    fn certified(height: u64) -> (TestMessage, oneshot::Receiver<Handle<()>>) {
         let (ack, receiver) = oneshot::channel();
         (
             TestMessage::Certified {
                 span: Span::none(),
                 round: round(height),
-                block: block(height),
-                ack: Some(ack),
+                block: block(height).into(),
+                ack,
             },
             receiver,
         )
@@ -1078,7 +1118,7 @@ mod tests {
         )
     }
 
-    fn subscribe_by_digest(height: u64) -> (TestMessage, oneshot::Receiver<harness::B>) {
+    fn subscribe_by_digest(height: u64) -> (TestMessage, oneshot::Receiver<Arc<harness::B>>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByDigest {
@@ -1096,7 +1136,7 @@ mod tests {
     fn subscribe_by_commitment_message(
         height: u64,
         fallback: CommitmentFallback,
-    ) -> (TestMessage, oneshot::Receiver<harness::B>) {
+    ) -> (TestMessage, oneshot::Receiver<Arc<harness::B>>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByCommitment {
@@ -1225,6 +1265,23 @@ mod tests {
                 }) if *commitment == expected_commitment && !response.is_closed()
             )
         })
+    }
+
+    #[test]
+    fn durable_methods_report_failure_when_mailbox_closed() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let (sender, receiver) =
+                commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
+            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender);
+            drop(receiver);
+
+            let (ack, receiver) = oneshot::channel();
+            let _ = mailbox.proposed(round(1), block(1), Recipients::All, ack);
+            assert!(receiver.await.is_err());
+            assert!(!mailbox.verified(round(2), block(2)).await);
+            assert!(!mailbox.certified(round(3), block(3)).await);
+        });
     }
 
     #[test]

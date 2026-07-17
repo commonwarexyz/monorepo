@@ -15,10 +15,11 @@ use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
-    blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
-    blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
-    blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
+    BLS12_381_G1, BLS12_381_G2, BLST_ERROR, Pairing, blst_bendian_from_fp12,
+    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
+    blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
+    blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
+    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
     blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
@@ -26,7 +27,7 @@ use blst::{
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
     blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
-    blst_scalar_from_fr, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar_from_fr,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -49,7 +50,7 @@ use core::{
     ptr,
 };
 use ctutils::{Choice, CtEq};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 fn all_zero(bytes: &[u8]) -> Choice {
@@ -285,7 +286,7 @@ pub struct SmallScalar {
 
 impl SmallScalar {
     /// Generates a random 128-bit scalar.
-    pub fn random(mut rng: impl CryptoRngCore) -> Self {
+    pub fn random(mut rng: impl CryptoRng) -> Self {
         // blst_scalar is 32 bytes
         let mut bytes = [0u8; 32];
         // Fill the last 16 bytes (128 bits) with entropy.
@@ -541,7 +542,7 @@ impl FixedSize for Private {
 }
 
 impl Random for Private {
-    fn random(rng: impl CryptoRngCore) -> Self {
+    fn random(rng: impl CryptoRng) -> Self {
         Self::new(Scalar::random(rng))
     }
 }
@@ -930,7 +931,7 @@ impl Field for Scalar {
 
 impl Random for Scalar {
     /// Returns a random **non-zero** scalar.
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
         rng.fill_bytes(ikm.as_mut());
         Self::from_ikm(&ikm)
@@ -1141,7 +1142,7 @@ impl G1 {
         }
         let npoints = points_filtered.len();
         let manual = strategy.manual();
-        let ncpus = manual.parallelism_hint();
+        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1562,7 +1563,7 @@ impl G2 {
         }
         let npoints = points_filtered.len();
         let manual = strategy.manual();
-        let ncpus = manual.parallelism_hint();
+        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1900,7 +1901,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
-    use commonware_math::algebra::{test_suites, Random};
+    use commonware_math::algebra::{Random, test_suites};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
     use std::{
@@ -1941,7 +1942,7 @@ mod tests {
     #[test]
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-        let s = Scalar::random(&mut test_rng());
+        let s = Scalar::random(test_rng());
         let mut s2 = s.clone();
         s2.double();
 
@@ -1956,7 +1957,7 @@ mod tests {
 
     #[test]
     fn test_scalar_codec() {
-        let original = Scalar::random(&mut test_rng());
+        let original = Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode_cfg(&mut encoded, &ScalarReadCfg::RejectZero).unwrap();
@@ -2037,7 +2038,7 @@ mod tests {
     #[test]
     fn test_scalar_read_cfg_accepts_canonical_zero() {
         // Round-trips canonical encodings, including zero.
-        let s = Scalar::random(&mut test_rng());
+        let s = Scalar::random(test_rng());
         let bytes = s.encode_fixed::<{ Scalar::SIZE }>();
         assert_eq!(
             Scalar::decode_cfg(bytes.as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
@@ -2055,7 +2056,7 @@ mod tests {
 
     #[test]
     fn test_g1_codec() {
-        let original = G1::generator() * &Scalar::random(&mut test_rng());
+        let original = G1::generator() * &Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G1::SIZE);
         let decoded = G1::decode(&mut encoded).unwrap();
@@ -2064,7 +2065,7 @@ mod tests {
 
     #[test]
     fn test_g2_codec() {
-        let original = G2::generator() * &Scalar::random(&mut test_rng());
+        let original = G2::generator() * &Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
@@ -2295,12 +2296,9 @@ mod tests {
         assert_eq!(g2_set.len(), NUM_ITEMS);
 
         // Verify that `BTreeSet` iteration is sorted, which relies on `Ord`.
-        let scalars: Vec<_> = scalar_set.iter().collect();
-        assert!(scalars.windows(2).all(|w| w[0] <= w[1]));
-        let g1s: Vec<_> = g1_set.iter().collect();
-        assert!(g1s.windows(2).all(|w| w[0] <= w[1]));
-        let g2s: Vec<_> = g2_set.iter().collect();
-        assert!(g2s.windows(2).all(|w| w[0] <= w[1]));
+        assert!(scalar_set.iter().is_sorted());
+        assert!(g1_set.iter().is_sorted());
+        assert!(g2_set.iter().is_sorted());
 
         // Test that we can use these types as keys in hash maps, which relies on `Hash` and `Eq`.
         let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();

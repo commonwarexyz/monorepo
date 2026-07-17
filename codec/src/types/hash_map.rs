@@ -4,10 +4,10 @@
 //! the size of the map must fit within a [u32].
 
 use crate::{
+    RangeCfg,
     codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_map,
-    RangeCfg,
 };
 use bytes::{Buf, BufMut};
 use std::{collections::HashMap, hash::Hash};

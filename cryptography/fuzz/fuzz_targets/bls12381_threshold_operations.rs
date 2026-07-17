@@ -3,15 +3,14 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
-    group::{Share, G1, G2},
+    group::{G1, G2, Share},
     ops::threshold,
     sharing::Sharing,
     variant::{MinPk, MinSig, PartialSignature},
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{N3f1, Participant};
+use commonware_utils::{N3f1, Participant, test_rng};
 use libfuzzer_sys::fuzz_target;
-use rand::thread_rng;
 use std::num::NonZeroUsize;
 
 mod common;
@@ -229,6 +228,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 }
 
 fn fuzz(op: FuzzOperation) {
+    let mut rng = test_rng();
     match op {
         FuzzOperation::SignProofOfPossessionMinPk {
             public,
@@ -293,7 +293,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_signer::<_, MinPk, _>(
-                    &mut thread_rng(),
+                    &mut rng,
                     &public,
                     index,
                     &entries_refs,
@@ -323,7 +323,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_signer::<_, MinSig, _>(
-                    &mut thread_rng(),
+                    &mut rng,
                     &public,
                     index,
                     &entries_refs,
@@ -347,7 +347,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_message::<_, MinPk, _>(
-                    &mut thread_rng(),
+                    &mut rng,
                     &public,
                     &namespace,
                     &message,
@@ -372,7 +372,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_message::<_, MinSig, _>(
-                    &mut thread_rng(),
+                    &mut rng,
                     &public,
                     &namespace,
                     &message,

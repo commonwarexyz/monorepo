@@ -2,22 +2,22 @@
 //!
 //! For variable-size values, use [super::variable] instead.
 
-use super::{operation::Operation as BaseOperation, Config as BaseConfig, Immutable};
+use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
-        any::{value::FixedEncoding, FixedValue},
         Error, ROOT_BAGGING,
+        any::{FixedValue, value::FixedEncoding},
     },
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
 /// Type alias for a fixed-size operation.
@@ -39,15 +39,8 @@ pub type Config<T, S> = BaseConfig<T, JournalConfig, S>;
 /// Configuration for a fixed-size compact immutable db.
 pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
-impl<
-        F: Family,
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -64,7 +57,7 @@ impl<
     }
 }
 
-impl<F: Family, E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, S: Strategy>
+impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, S: Strategy>
     CompactDb<F, E, K, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.
@@ -82,13 +75,13 @@ mod tests {
         qmdb::immutable::test,
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
+        BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -149,7 +142,11 @@ mod tests {
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
             let floor = db.inactivity_floor_loc();
-            let batch = db.new_batch().set(key, value).merkleize(&db, None, floor);
+            let batch = db
+                .new_batch()
+                .set(key, value)
+                .merkleize(&db, None, floor)
+                .await;
             db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
@@ -166,7 +163,7 @@ mod tests {
                 "db_last_commit 2",
                 "db_get_calls_total 1",
                 "db_get_many_calls_total 1",
-                "db_keys_requested_total 2",
+                "db_lookups_requested_total 2",
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 2",
                 "db_commit_calls_total 1",
@@ -305,6 +302,18 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_fixed_prune_after_uncommitted_apply_batch_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_prune_after_uncommitted_apply_batch_recovery(
+                ctx,
+                open::<mmr::Family>,
+            )
+            .await;
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_fixed_batch_chain() {
         let executor = deterministic::Runner::default();
@@ -402,13 +411,14 @@ mod tests {
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&db, Some(metadata), floor);
-        let compact_batch =
-            compact
-                .new_batch()
-                .set(k1, v1)
-                .set(k2, v2)
-                .merkleize(&compact, Some(metadata), floor);
+            .merkleize(&db, Some(metadata), floor)
+            .await;
+        let compact_batch = compact
+            .new_batch()
+            .set(k1, v1)
+            .set(k2, v2)
+            .merkleize(&compact, Some(metadata), floor)
+            .await;
 
         assert_eq!(retained.root(), compact_batch.root());
 

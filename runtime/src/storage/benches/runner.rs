@@ -6,7 +6,7 @@ use crate::{
     report::Stats,
 };
 use commonware_runtime::{Blob, IoBufMut, IoBufs};
-use rand::{rngs::SmallRng, Rng, SeedableRng};
+use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::time::Instant;
 
 /// Operations between deadline checks.
@@ -42,7 +42,7 @@ pub fn sequential_blocks(start: u64, stride: u64, total_blocks: u64) -> impl FnM
 #[inline]
 pub fn random_blocks(seed: u64, total_blocks: u64) -> impl FnMut() -> u64 {
     let mut rng = SmallRng::seed_from_u64(seed);
-    move || rng.gen_range(0..total_blocks)
+    move || rng.random_range(0..total_blocks)
 }
 
 /// Read loop without statistics collection (for cache warm-up).
@@ -109,11 +109,11 @@ pub async fn run_write_loop(
 
         after_write(offset + io_size);
         writes_since_sync += 1;
-        if let SyncMode::Every(every) = sync_mode {
-            if writes_since_sync == every {
-                blob.sync().await?;
-                writes_since_sync = 0;
-            }
+        if let SyncMode::Every(every) = sync_mode
+            && writes_since_sync == every
+        {
+            blob.sync().await?;
+            writes_since_sync = 0;
         }
     }
 

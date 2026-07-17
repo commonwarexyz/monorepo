@@ -5,18 +5,19 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        db::{
-            p2p::{compact as compact_resolver, standard as qmdb_resolver},
-            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
-        },
-        probe::{Config as ProbeConfig, Probe},
         Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
         SyncPlan,
+        db::{
+            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
+            p2p::{compact as compact_resolver, standard as qmdb_resolver},
+        },
+        probe::{Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
+    Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
         core::{Actor as MarshalActor, CommitmentFallback},
@@ -31,40 +32,37 @@ use commonware_consensus::{
         types::Context,
     },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
-    certificate::{mocks::Fixture, ConstantProvider},
-    ed25519,
-    sha256::{self, Digest as Sha256Digest},
     Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    certificate::{ConstantProvider, mocks::Fixture},
+    ed25519, sha256,
 };
-use commonware_formatting::hex;
 use commonware_p2p::utils::mux::Muxer;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, Clock, Handle, Metrics, Quota, Spawner, Storage,
-    Supervisor as _,
+    Buf, BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
+    Context as StorageContext,
     archive::prunable,
     journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
-    mmr::{self, full::Config as MmrJournalConfig, Location},
+    mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
-        any::{unordered::fixed, FixedConfig},
+        any::{FixedConfig, unordered::fixed},
         immutable,
-        sync::{compact as compact_sync, Target},
+        sync::{Target, compact as compact_sync},
     },
     translator::TwoCap,
 };
 use commonware_utils::{
-    non_empty_range,
+    NZDuration, NZU64, NZUsize, non_empty_range,
     range::NonEmptyRange,
     sync::{Mutex, TracedAsyncRwLock},
-    test_rng, NZDuration, NZUsize, NZU64,
+    test_rng,
 };
 use futures::{Stream, StreamExt};
-use rand::Rng;
+use rand_core::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// The full (journaled) QMDB used as DB-A in the multi-db e2e tests.
@@ -201,7 +199,7 @@ impl App {
     }
 
     /// Execute a block against two databases.
-    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage>(
+    async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         batches: (
             <DbA<E> as DatabaseSet<E>>::Unmerkleized,
@@ -239,7 +237,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
+impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -253,7 +251,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, E>> {
@@ -287,7 +285,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
@@ -524,20 +522,14 @@ impl EngineDefinition for MultiDbEngine {
         .await
         .expect("failed to initialize blocks archive");
 
-        let genesis_block = {
-            let empty_db_root = Sha256Digest::from(hex!(
-                "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
-            ));
-            let empty_compact_db_root = Sha256Digest::from(hex!(
-                "290cbd39f3eaaca7cb4a92f4a2740fc438cabb99144258b24ba0cf54b3f4cfec"
-            ));
-            Block::genesis(
-                empty_db_root,
-                non_empty_range!(Location::new(0), Location::new(1)),
-                empty_compact_db_root,
-                non_empty_range!(Location::new(0), Location::new(1)),
-            )
-        };
+        let (initial_a, initial_b) =
+            <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+        let genesis_block = Block::genesis(
+            initial_a.root,
+            initial_a.range,
+            initial_b.root,
+            non_empty_range!(Location::new(0), initial_b.leaf_count),
+        );
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
@@ -665,8 +657,8 @@ impl EngineDefinition for MultiDbEngine {
             let mailbox = prune_observer.clone();
             Box::pin(async move {
                 let (a, _b) = mailbox.subscribe_databases().await;
-                let oldest_a = *a.read().await.bounds().start;
-                oldest_a
+
+                *a.read().await.bounds().start
             })
         });
 

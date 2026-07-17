@@ -1,5 +1,5 @@
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, Sha256};
+use commonware_cryptography::{Committable, Digestible, Hasher, Sha256, sha256::Digest};
 use commonware_runtime::{Buf, BufMut};
 
 /// A mock request for testing

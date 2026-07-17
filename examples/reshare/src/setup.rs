@@ -2,24 +2,21 @@
 use crate::dkg::MAX_SUPPORTED_MODE;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
+    Signer,
     bls12381::{
-        dkg::feldman_desmedt::{deal, Output},
+        dkg::feldman_desmedt::{Output, deal},
         primitives::{group::Share, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},
-    Signer,
 };
 use commonware_formatting::{from_hex, hex};
 use commonware_math::algebra::Random;
 use commonware_utils::{
+    Faults, N3f1, NZU32, TryCollect,
     ordered::{Map, Set},
-    Faults, N3f1, TryCollect, NZU32,
+    sys_rng,
 };
-use rand::{
-    rngs::{OsRng, StdRng},
-    seq::IteratorRandom,
-    SeedableRng,
-};
+use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -122,7 +119,7 @@ impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
         }
         let mut rng = StdRng::seed_from_u64(round);
         p_iter
-            .choose_multiple(&mut rng, to_choose)
+            .sample(&mut rng, to_choose)
             .into_iter()
             .try_collect()
             .unwrap()
@@ -162,7 +159,9 @@ pub fn run(args: super::SetupArgs) {
         let mprocs_dkg_cmd = mprocs_validator_cmd.replace("validator", "dkg");
         println!("\nTo start the DKG process, run the following command:");
         println!("\n{mprocs_dkg_cmd}");
-        println!("\nOnce the DKG process completes, exit the DKG processes and start the validators with the following command:");
+        println!(
+            "\nOnce the DKG process completes, exit the DKG processes and start the validators with the following command:"
+        );
     } else {
         println!("\nThe network is configured with a trusted threshold setup.");
         println!("\nTo start the validators, run the following command:");
@@ -182,8 +181,9 @@ fn generate_identities(
     Vec<(PrivateKey, Option<Share>)>,
 ) {
     // Generate p2p private keys
+    let mut rng = sys_rng();
     let peer_signers = (0..num_peers)
-        .map(|_| PrivateKey::random(&mut OsRng))
+        .map(|_| PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
 
     // Generate consensus key
@@ -197,7 +197,7 @@ fn generate_identities(
         (None, Map::default())
     } else {
         let (output, shares) = deal::<MinSig, _, N3f1>(
-            OsRng,
+            &mut rng,
             Default::default(),
             all_participants
                 .iter()
@@ -226,10 +226,11 @@ fn generate_configs(
     output: Option<&Output<MinSig, PublicKey>>,
     identities: &[(PrivateKey, Option<Share>)],
 ) -> Vec<PathBuf> {
+    let mut rng = sys_rng();
     let bootstrappers = identities
         .iter()
         .enumerate()
-        .choose_multiple(&mut OsRng, args.num_bootstrappers)
+        .sample(&mut rng, args.num_bootstrappers)
         .into_iter()
         .map(|(i, (signer, _))| {
             (
@@ -316,8 +317,8 @@ mod serde_hex_ordered {
     use commonware_formatting::from_hex;
     use core::fmt;
     use serde::{
-        de::{SeqAccess, Visitor},
         Deserializer, Serializer,
+        de::{SeqAccess, Visitor},
     };
 
     pub fn serialize<T, S>(value: &Set<T>, serializer: S) -> Result<S::Ok, S::Error>

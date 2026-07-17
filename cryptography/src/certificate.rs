@@ -59,21 +59,21 @@
 
 #[commonware_macros::stability(ALPHA)]
 pub use crate::secp256r1::certificate as secp256r1;
+use crate::{Digest, PublicKey};
 pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
 };
-use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    types::lazy::Lazy, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write,
+    Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write, types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
+use commonware_utils::{Faults, Participant, bitmap::BitMap, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
@@ -204,7 +204,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         M: Faults;
 
@@ -216,7 +216,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
         M: Faults,
@@ -242,7 +242,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         strategy: &impl Strategy,
     ) -> Vec<bool>
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         Self::Subject<'a, D>: Copy,
         Self::Certificate: 'a,
@@ -342,7 +342,7 @@ pub trait Scheme: Verifier {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest;
 
     /// Batch-verifies attestations and separates valid attestations from signer indices that failed
@@ -358,7 +358,7 @@ pub trait Scheme: Verifier {
         strategy: &impl Strategy,
     ) -> Verification<Self>
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
@@ -445,7 +445,7 @@ impl<S: Scheme> Verifier for Scoped<S> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         M: Faults,
     {
@@ -460,7 +460,7 @@ impl<S: Scheme> Verifier for Scoped<S> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
         M: Faults,
@@ -556,9 +556,8 @@ impl Signers {
     /// Iterates over signer indices in ascending order.
     pub fn iter(&self) -> impl Iterator<Item = Participant> + '_ {
         self.bitmap
-            .iter()
-            .enumerate()
-            .filter_map(|(index, bit)| bit.then_some(Participant::from_usize(index)))
+            .ones_iter()
+            .map(|index| Participant::from_usize(index as usize))
     }
 }
 
@@ -635,11 +634,11 @@ pub mod mocks;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519::PrivateKey, sha256::Digest as Sha256Digest, Signer as _};
+    use crate::{Signer as _, ed25519::PrivateKey, sha256::Digest as Sha256Digest};
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect};
+    use commonware_utils::{N3f1, TryCollect, ordered::Set, test_rng};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
 
     #[test]

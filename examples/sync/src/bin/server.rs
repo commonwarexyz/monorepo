@@ -8,29 +8,30 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::{boxed, select_loop};
 use commonware_runtime::{
+    BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf, Spawner, Storage, StreamOf,
+    Supervisor as _,
     telemetry::metrics::{Counter, MetricsExt as _},
-    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
-    Spawner, Storage, StreamOf, Supervisor as _,
+    tokio as tokio_runtime,
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{compact, Target},
+    qmdb::sync::{Target, compact},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    any, crate_version, current,
+    Error, Key, any, crate_version, current,
     databases::{CompactSyncable, DatabaseType, ExampleDatabase, StorageKind, SyncMode, Syncable},
     immutable, immutable_compact, keyless, keyless_compact,
-    net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
-    Error, Key,
+    net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE, wire},
 };
 use commonware_utils::{
+    DurationExt,
     channel::mpsc,
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
-    DurationExt,
+    sys_rng,
 };
-use rand::{Rng, RngCore};
+use rand_core::Rng;
 use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr},
@@ -173,7 +174,7 @@ async fn maybe_add_operations<DB, E>(
 ) -> Result<(), BoxError>
 where
     DB: ExampleDatabase<Family = mmr::Family>,
-    E: Storage + Clock + Metrics + RngCore,
+    E: Storage + Clock + Metrics + Rng,
 {
     let now = context.current();
     let should_add = {
@@ -222,11 +223,7 @@ where
     // Get the current database state
     let (root, sync_boundary, size) = {
         let database = state.database.read().await;
-        (
-            database.root(),
-            database.sync_boundary().await,
-            database.size().await,
-        )
+        (database.root(), database.sync_boundary(), database.size())
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
@@ -249,7 +246,7 @@ where
 
     let target = {
         let database = state.database.read().await;
-        database.target().await
+        database.target()
     };
     let response = wire::GetCompactTargetResponse::<Key> {
         request_id: request.request_id,
@@ -274,7 +271,7 @@ where
     let database = state.database.read().await;
 
     // Check if we have enough operations
-    let db_size = database.size().await;
+    let db_size = database.size();
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc ({}) >= database size ({})",
@@ -345,11 +342,11 @@ async fn handle_get_compact_state<DB>(
 where
     DB: CompactSyncable<Family = mmr::Family>,
     Arc<AsyncRwLock<DB>>: compact::Resolver<
-        Family = mmr::Family,
-        Op = DB::Operation,
-        Digest = Key,
-        Error = compact::ServeError<mmr::Family, Key>,
-    >,
+            Family = mmr::Family,
+            Op = DB::Operation,
+            Digest = Key,
+            Error = compact::ServeError<mmr::Family, Key>,
+        >,
 {
     state.request_counter.inc();
 
@@ -410,11 +407,11 @@ where
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     Arc<AsyncRwLock<DB>>: compact::Resolver<
-        Family = mmr::Family,
-        Op = DB::Operation,
-        Digest = Key,
-        Error = compact::ServeError<mmr::Family, Key>,
-    >,
+            Family = mmr::Family,
+            Op = DB::Operation,
+            Digest = Key,
+            Error = compact::ServeError<mmr::Family, Key>,
+        >,
 {
     const LISTENING_MESSAGE: &'static str =
         "compact server listening and continuously adding operations";
@@ -546,7 +543,7 @@ async fn initialize_database<DB, E>(
 ) -> Result<DB, BoxError>
 where
     DB: Syncable<Family = mmr::Family>,
-    E: RngCore,
+    E: Rng,
 {
     info!("starting {} database", DB::name());
 
@@ -561,8 +558,8 @@ where
     database.add_operations(initial_ops).await?;
 
     // Display database state
-    let size = database.size().await;
-    let sync_boundary = database.sync_boundary().await;
+    let size = database.size();
+    let sync_boundary = database.sync_boundary();
     let root = database.root();
     info!(size = ?size, sync_boundary = ?sync_boundary, root = %format_root(&root), "{} database ready", DB::name());
 
@@ -577,7 +574,7 @@ async fn initialize_compact_database<DB, E>(
 ) -> Result<DB, BoxError>
 where
     DB: CompactSyncable<Family = mmr::Family>,
-    E: RngCore,
+    E: Rng,
 {
     info!("starting {} database", DB::name());
 
@@ -590,7 +587,7 @@ where
     );
     database.add_operations(initial_ops).await?;
 
-    let target = database.target().await;
+    let target = database.target();
     let root = target.root;
     info!(
         leaf_count = ?target.leaf_count,
@@ -612,7 +609,7 @@ where
     DB: ExampleDatabase<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
     Mode: ServeMode<DB> + 'static,
 {
     // Create listener to accept connections
@@ -667,7 +664,7 @@ where
     DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let database = initialize_database(database, &config, &mut context).await?;
     run_server::<DB, E, FullMode>(context, config, database).await
@@ -683,13 +680,13 @@ where
     DB: CompactSyncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
     Arc<AsyncRwLock<DB>>: compact::Resolver<
-        Family = mmr::Family,
-        Op = DB::Operation,
-        Digest = Key,
-        Error = compact::ServeError<mmr::Family, Key>,
-    >,
+            Family = mmr::Family,
+            Op = DB::Operation,
+            Digest = Key,
+            Error = compact::ServeError<mmr::Family, Key>,
+        >,
 {
     let database = initialize_compact_database(database, &config, &mut context).await?;
     run_server::<DB, E, CompactMode>(context, config, database).await
@@ -699,7 +696,7 @@ where
 #[boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = any::create_config(&context);
     let database = any::Database::init(context.child("database"), db_config).await?;
@@ -711,7 +708,7 @@ where
 #[boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = current::create_config(&context);
     let database = current::Database::init(context.child("database"), db_config).await?;
@@ -723,7 +720,7 @@ where
 #[boxed]
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = immutable::create_config(&context);
     let database = immutable::Database::init(context.child("database"), db_config).await?;
@@ -738,7 +735,7 @@ async fn run_immutable_full_source<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = immutable::create_config(&context);
     let database = immutable::Database::init(context.child("database"), db_config).await?;
@@ -750,7 +747,7 @@ where
 #[boxed]
 async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = keyless::create_config(&context);
     let database = keyless::Database::init(context.child("database"), db_config).await?;
@@ -765,7 +762,7 @@ async fn run_keyless_full_source<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = keyless::create_config(&context);
     let database = keyless::Database::init(context.child("database"), db_config).await?;
@@ -779,7 +776,7 @@ async fn run_immutable_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = immutable_compact::create_config(&context);
     let database = immutable_compact::Database::init(context.child("database"), db_config).await?;
@@ -793,7 +790,7 @@ async fn run_keyless_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
 {
     let db_config = keyless_compact::create_config(&context);
     let database = keyless_compact::Database::init(context.child("database"), db_config).await?;
@@ -930,7 +927,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .to_string();
             // Only add suffix if using the default value
             if storage_dir == "/tmp/commonware-sync/server" {
-                let suffix: u64 = rand::thread_rng().gen();
+                let suffix: u64 = sys_rng().next_u64();
                 format!("{storage_dir}-{suffix}")
             } else {
                 storage_dir

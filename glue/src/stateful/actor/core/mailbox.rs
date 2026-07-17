@@ -2,23 +2,23 @@
 
 use crate::stateful::Application;
 use commonware_actor::{
-    mailbox::{Overflow, Policy, Sender},
     Feedback,
+    mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    marshal::Update, Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter,
-    Viewable,
+    Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter, Viewable,
+    marshal::Update,
 };
 use commonware_cryptography::Digestible;
-use commonware_runtime::{telemetry::traces::TracedExt as _, Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use futures::Stream;
-use rand::Rng;
-use std::{collections::VecDeque, pin::Pin};
-use tracing::{info_span, Span};
+use rand_core::Rng;
+use std::{collections::VecDeque, pin::Pin, sync::Arc};
+use tracing::{Span, info_span};
 
 /// Type alias for an ancestor stream sent through the actor mailbox.
-pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = B> + Send>>;
+pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = Arc<B>> + Send>>;
 
 /// Messages processed by the actor loop.
 pub(crate) enum Message<E, A>
@@ -45,7 +45,7 @@ where
     /// A reporting of a new finalized block.
     Finalized {
         span: Span,
-        block: A::Block,
+        block: Arc<A::Block>,
         acknowledgement: Exact,
     },
 
@@ -206,7 +206,7 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send + 'static,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
@@ -226,7 +226,7 @@ where
     async fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Arc<Self::Block>> + Send + 'static,
     ) -> bool {
         // We must panic if we don't get a response; We cannot override the decision
         // of the application based on the availabilitiy of the actor.

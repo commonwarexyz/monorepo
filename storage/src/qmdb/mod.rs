@@ -44,16 +44,20 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::{
-        contiguous::{Contiguous, Mutable},
         Error as JournalError,
+        contiguous::{Contiguous, Mutable},
     },
-    merkle::{hasher::Standard as StandardHasher, Bagging, Family, Location},
+    merkle::{
+        Bagging, Family, Location,
+        hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
+    },
     qmdb::operation::Operation,
 };
-use commonware_cryptography::Hasher as CryptoHasher;
-use commonware_utils::{cache::Clock, NZUsize};
+use commonware_codec::Encode;
+use commonware_cryptography::Hasher;
+use commonware_utils::{NZUsize, cache::Clock};
 use core::num::NonZeroUsize;
-use futures::{pin_mut, StreamExt as _};
+use futures::{StreamExt as _, pin_mut};
 use thiserror::Error;
 
 pub mod any;
@@ -80,8 +84,23 @@ pub use verify::{
 pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
 
 /// Return the Merkle hasher configuration used by QMDB operation roots and proofs.
-pub const fn hasher<H: CryptoHasher>() -> StandardHasher<H> {
+pub const fn hasher<H: Hasher>() -> StandardHasher<H> {
     StandardHasher::new(ROOT_BAGGING)
+}
+
+/// Return the root of an operation log containing only `operation`.
+///
+/// This lets database variants derive their initial root from the bootstrap commit without
+/// opening a database.
+fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Digest {
+    let hasher = hasher::<H>();
+    let leaf = MerkleHasher::<F>::leaf_digest(
+        &hasher,
+        F::location_to_position(Location::new(0)),
+        &operation.encode(),
+    );
+    MerkleHasher::<F>::root(&hasher, Location::new(1), 0, [&leaf])
+        .expect("a single-leaf Merkle root is always valid")
 }
 
 /// Look up the inactivity floor declared at the commit immediately preceding `op_count`.
@@ -181,6 +200,8 @@ pub enum Error<F: Family> {
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
     /// The batch was created from a different database state than the current one.
+    ///
+    /// See [`batch_chain`] for more details on staleness detection.
     #[error(
         "stale batch: db has {db_size} ops, batch requires {batch_db_size}, {batch_base_size}, or an ancestor boundary"
     )]
@@ -352,10 +373,6 @@ where
 
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
-///
-/// # Panics
-///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
 async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,

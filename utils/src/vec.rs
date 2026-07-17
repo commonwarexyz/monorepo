@@ -212,11 +212,7 @@ impl<T> NonEmptyVec<T> {
     ///
     /// This ensures the vector always has at least one element.
     pub fn pop(&mut self) -> Option<T> {
-        if self.0.len() > 1 {
-            self.0.pop()
-        } else {
-            None
-        }
+        if self.0.len() > 1 { self.0.pop() } else { None }
     }
 
     /// Removes and returns the element at position `index`, or `None` if

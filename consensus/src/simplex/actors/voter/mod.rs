@@ -5,12 +5,12 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as Elector, types::Activity, Floor, Plan},
-    types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
+    simplex::{Floor, Plan, elector::Config as Elector, types::Activity},
+    types::{Epoch, ViewDelta},
 };
 pub use actor::Actor;
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::paged::CacheRef;
 pub use ingress::Mailbox;
@@ -51,6 +51,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
+        Viewable,
         simplex::{
             actors::{
                 batcher,
@@ -60,8 +61,8 @@ mod tests {
             metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
-                bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-                secp256r1, Scheme,
+                Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf,
+                ed25519, secp256r1,
             },
             types::{
                 Artifact, Certificate, Finalization, Finalize, Notarization, Notarize,
@@ -69,29 +70,30 @@ mod tests {
             },
         },
         types::{Participant, Round, View},
-        Viewable,
     };
     use commonware_actor::mailbox;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
+        Hasher as _, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
-        Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::{
-        simulated::{Config as NConfig, Link, Network, Oracle},
         Recipients,
+        simulated::{Config as NConfig, Link, Network, Oracle},
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
-        Runner, Supervisor as _,
+        Clock, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
+        reschedule,
+        telemetry::traces::collector::TraceStorage,
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
+    use commonware_utils::{NZU16, NZUsize, sync::Mutex};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},
@@ -1873,7 +1875,6 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
-                verifier: _,
                 ..
             } = fixture(&mut context, &namespace, n);
 
@@ -3999,10 +4000,9 @@ mod tests {
             loop {
                 if let batcher::Message::Update { finalized, .. } =
                     batcher_receiver.recv().await.unwrap()
+                    && finalized >= view2
                 {
-                    if finalized >= view2 {
-                        break;
-                    }
+                    break;
                 }
             }
 
@@ -4030,10 +4030,9 @@ mod tests {
             loop {
                 if let batcher::Message::Update { current, .. } =
                     batcher_receiver.recv().await.unwrap()
+                    && current > view3
                 {
-                    if current > view3 {
-                        break;
-                    }
+                    break;
                 }
             }
 
@@ -5132,23 +5131,23 @@ mod tests {
     }
 
     /// When the voter is the leader of a view and later reconstructs a
-    /// notarization for the proposal it built locally, it must not ask the
-    /// automaton to certify that same proposal again.
+    /// notarization for the proposal it built locally, it certifies that proposal
+    /// through the automaton like any other.
     ///
-    /// This is enforced in `actor::run` by short-circuiting certification only
-    /// when the round carries explicit local proposal evidence, not merely
-    /// because `leader == me`. The test asserts the end-to-end invariant on the
-    /// live path: a `Finalize` is emitted for the leader-owned view without the
-    /// certify observer firing for that view.
-    fn no_self_certify_when_proposing<S, F>(mut fixture: F)
+    /// Certification is the durability barrier: the leader awaits its own
+    /// proposal's persistence (via the automaton's `certify`) before casting a
+    /// finalize vote, so it must not short-circuit. The test asserts the end-to-end
+    /// invariant on the live path: a `Finalize` is emitted for the leader-owned
+    /// view and the certify observer fires for that view.
+    fn certifies_own_proposal_when_proposing<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"no_self_certify_when_proposing".to_vec();
-        let partition = "no_self_certify_when_proposing".to_string();
+        let namespace = b"certifies_own_proposal_when_proposing".to_vec();
+        let partition = "certifies_own_proposal_when_proposing".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Set up the simulated network.
@@ -5173,8 +5172,8 @@ mod tests {
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
-            // Install a certify observer to detect any spurious certify call for
-            // the leader-owned view.
+            // Install a certify observer to confirm the leader certifies its own
+            // proposal for the leader-owned view.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
             let app_cfg = mocks::application::Config {
@@ -5293,42 +5292,43 @@ mod tests {
                 }
             }
 
-            // Assert the live invariant: the certify observer never fired for
-            // the leader-owned proposal we built ourselves.
+            // Assert the live invariant: the certify observer fired for the
+            // leader-owned proposal we built ourselves.
             let certified = certify_calls.lock();
             assert!(
-                !certified.contains(&target_view),
-                "voter must not certify its own leader-built proposal (observed: {certified:?})"
+                certified.contains(&target_view),
+                "voter must certify its own leader-built proposal through the automaton \
+                 (the durability barrier before finalize); observed: {certified:?}"
             );
         });
     }
 
     #[test_traced]
-    fn test_no_self_certify_when_proposing() {
-        no_self_certify_when_proposing(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        no_self_certify_when_proposing(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        no_self_certify_when_proposing(bls12381_multisig::fixture::<MinPk, _>);
-        no_self_certify_when_proposing(bls12381_multisig::fixture::<MinSig, _>);
-        no_self_certify_when_proposing(ed25519::fixture);
-        no_self_certify_when_proposing(secp256r1::fixture);
+    fn test_certifies_own_proposal_when_proposing() {
+        certifies_own_proposal_when_proposing(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certifies_own_proposal_when_proposing(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        certifies_own_proposal_when_proposing(bls12381_multisig::fixture::<MinPk, _>);
+        certifies_own_proposal_when_proposing(bls12381_multisig::fixture::<MinSig, _>);
+        certifies_own_proposal_when_proposing(ed25519::fixture);
+        certifies_own_proposal_when_proposing(secp256r1::fixture);
     }
 
-    /// Restart analogue of `no_self_certify_when_proposing`: after the voter has
-    /// proposed and journaled a local notarize as leader, restarting must
-    /// recover that local proposal evidence and continue to bypass automaton
-    /// certification once the corresponding notarization is resolved.
+    /// Restart analogue of `certifies_own_proposal_when_proposing`: after the voter
+    /// has proposed and journaled a local notarize as leader, restarting recovers
+    /// that local proposal evidence and still certifies through the automaton once
+    /// the corresponding notarization is resolved.
     ///
     /// The replayed local notarize is what distinguishes this case from merely
     /// observing a leader-owned proposal certificate during catch-up.
-    fn no_self_certify_after_restart<S, F>(mut fixture: F)
+    fn certifies_own_proposal_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"no_self_certify_after_restart".to_vec();
-        let partition = "no_self_certify_after_restart".to_string();
+        let namespace = b"certifies_own_proposal_after_restart".to_vec();
+        let partition = "certifies_own_proposal_after_restart".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             // Set up the simulated network.
@@ -5532,8 +5532,8 @@ mod tests {
             mailbox
                 .resolved(Certificate::Notarization(notarization));
 
-            // A finalize for the leader-owned view proves the voter recovered
-            // the local certification shortcut after replay.
+            // A finalize for the leader-owned view proves replay restored the
+            // local proposal state and the voter certified it through the automaton.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
@@ -5554,34 +5554,32 @@ mod tests {
                 }
             }
 
-            // Assert the restart invariant: certify did not fire for the
-            // leader-owned view whose journaled local notarize replay restored
-            // the local proposal evidence.
+            // Assert the restart invariant: certify fired for the leader-owned
+            // view whose journaled local notarize replay restored the local
+            // proposal evidence.
             let certified = certify_calls.lock();
             assert!(
-                !certified.contains(&target_view),
-                "voter must not certify its own leader-built proposal after restart (observed: {certified:?})"
+                certified.contains(&target_view),
+                "voter must certify its own leader-built proposal after restart (observed: {certified:?})"
             );
         });
     }
 
     #[test_traced]
-    fn test_no_self_certify_after_restart() {
-        no_self_certify_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        no_self_certify_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        no_self_certify_after_restart(bls12381_multisig::fixture::<MinPk, _>);
-        no_self_certify_after_restart(bls12381_multisig::fixture::<MinSig, _>);
-        no_self_certify_after_restart(ed25519::fixture);
-        no_self_certify_after_restart(secp256r1::fixture);
+    fn test_certifies_own_proposal_after_restart() {
+        certifies_own_proposal_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certifies_own_proposal_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        certifies_own_proposal_after_restart(bls12381_multisig::fixture::<MinPk, _>);
+        certifies_own_proposal_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        certifies_own_proposal_after_restart(ed25519::fixture);
+        certifies_own_proposal_after_restart(secp256r1::fixture);
     }
 
     /// Regression: when an elected leader receives an external notarization
     /// for a proposal it did *not* build locally, it must invoke
-    /// `automaton.certify` before finalizing the view. The
-    /// `is_local=true` shortcut in `actor::run` must only short-circuit when
-    /// the slot carries explicit local proposal evidence; an
-    /// externally-recovered proposal on a leader-owned view produces
-    /// `is_local=false`, which requires consulting the automaton.
+    /// `automaton.certify` before finalizing the view. The voter certifies every
+    /// notarized proposal through the automaton, including externally-recovered
+    /// proposals on a leader-owned view.
     fn certify_observer_fires_for_external_leader_proposal<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -5620,11 +5618,11 @@ mod tests {
             // a locally-built proposal. The slot stays empty (proposal=None,
             // status=None) while the voter's internal flag `requested_build`
             // is true, exactly the state in which an externally-recovered
-            // proposal lands with `is_local=false` at the leader.
+            // proposal lands at the leader.
             //
-            // The certify observer records every `automaton.certify` call so
-            // the final assertion can confirm the `is_local=false` code path
-            // ran instead of being short-circuited.
+            // The certify observer records every `automaton.certify` call so the
+            // final assertion can confirm certification ran for the recovered
+            // leader-owned proposal.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
             let app_cfg = mocks::application::Config {
@@ -5718,15 +5716,13 @@ mod tests {
             let (_, foreign_notarization) = build_notarization(&schemes, &foreign_proposal, quorum);
 
             // Deliver the foreign notarization. This seeds the voter's slot
-            // with a proposal it never built, producing `is_local=false` on
-            // the certification candidate.
+            // with a proposal it never built.
             mailbox.resolved(Certificate::Notarization(foreign_notarization));
 
             // Wait for a `Finalize` on the leader-owned view. Observing
             // finalize proves the certify callback both fired and resolved
             // successfully. Any `Nullify` here would mean the voter never
-            // reached the certification branch (for example because
-            // `is_local=true` incorrectly short-circuited it).
+            // reached the certification branch.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
@@ -5749,10 +5745,8 @@ mod tests {
                 }
             }
 
-            // Assert the `is_local=false` invariant: the certify callback
-            // fired for the leader-owned view. Without the fix under test,
-            // a `leader == me`-only shortcut would skip the call and this
-            // assertion would fail.
+            // The certify callback must fire for the leader-owned view: the voter
+            // certifies its own proposals through the automaton.
             let certified = certify_calls.lock();
             assert!(
                 certified.contains(&target_view),
@@ -5903,10 +5897,9 @@ mod tests {
             loop {
                 if let batcher::Message::Update { finalized, .. } =
                     batcher_receiver.recv().await.unwrap()
+                    && finalized >= view5
                 {
-                    if finalized >= view5 {
-                        break;
-                    }
+                    break;
                 }
             }
 
@@ -6327,10 +6320,10 @@ mod tests {
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view {
-                                break true;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                        {
+                            break true;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6468,10 +6461,10 @@ mod tests {
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view {
-                                break true;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                        {
+                            break true;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6608,10 +6601,10 @@ mod tests {
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view {
-                                break true;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                        {
+                            break true;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -7292,6 +7285,9 @@ mod tests {
             //    a. Certification of view 4 to succeed (impossible - no context)
             //    b. A nullification certificate for view 4 (impossible - only f votes)
             //    c. A finalization certificate (requires Byzantine to vote finalize)
+            // Use a fixed deadline: timeout retries re-send the nullify vote every
+            // second, which would otherwise restart a per-iteration sleep forever.
+            let deadline = context.current() + Duration::from_secs(5);
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
@@ -7310,7 +7306,7 @@ mod tests {
                             _ => {}
                         }
                     },
-                    _ = context.sleep(Duration::from_secs(5)) => {
+                    _ = context.sleep_until(deadline) => {
                         break false;
                     },
                 }
@@ -7334,16 +7330,17 @@ mod tests {
             mailbox.resolved(Certificate::Finalization(finalization_5));
 
             // Now the validator SHOULD advance (finalization aborts stuck certification)
+            let deadline = context.current() + Duration::from_secs(5);
             let rescued = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > view_5 {
-                                break true;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > view_5
+                        {
+                            break true;
                         }
                     },
-                    _ = context.sleep(Duration::from_secs(5)) => {
+                    _ = context.sleep_until(deadline) => {
                         break false;
                     },
                 }
@@ -7511,8 +7508,9 @@ mod tests {
     /// Verify that a voter recovers via timeout when certification hangs indefinitely.
     ///
     /// This simulates the scenario where a notarization forms but the block is
-    /// unrecoverable (e.g., proposer is dead and shard gossip didn't deliver enough
-    /// shards for reconstruction). In this case, `certify()` subscribes to the block
+    /// unrecoverable. This includes the restart case where the local block was not
+    /// durable and no peer can provide enough data for reconstruction. In this
+    /// case, `certify()` subscribes to the block
     /// but the subscription never resolves. The voter must rely on the view timeout
     /// to emit a nullify vote and advance the chain.
     ///
@@ -8250,13 +8248,12 @@ mod tests {
         first_view_progress_without_timeout::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    /// Tests that a successful certification is correctly replayed from the journal
-    /// after a restart.
+    /// Tests that certification and finalize are coalesced into one durable section sync.
     ///
-    /// 1. First run: follower certifies a view successfully, which is persisted to journal.
-    /// 2. Abort the voter.
-    /// 3. Second run: voter replays journal and processes the Artifact::Certification entry,
-    ///    advancing past the certified view without re-certifying.
+    /// 1. First run: gate the section sync after certification and verify finalize is staged but
+    ///    not broadcast.
+    /// 2. Release the only section sync, observe the finalize broadcast, and abort the voter.
+    /// 3. Second run: replay both artifacts and advance without re-certifying.
     fn successful_certification_replayed_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -8284,11 +8281,19 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let epoch = Epoch::new(333);
+            let target_view = View::new(3);
 
-            // First run: certify a follower view successfully.
+            let pending_syncs = PendingSyncs::default();
+            let voter_context = DelayedSyncContext {
+                inner: context.child("voter"),
+                pending: pending_syncs.clone(),
+            };
+            let pending_syncs_for_certifier = pending_syncs.clone();
+
+            // Arm the sync gate immediately before the target certification succeeds.
             let app_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
@@ -8296,7 +8301,13 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
+                should_certify: mocks::application::Certifier::Custom(Box::new(
+                    move |round, _| {
+                        assert_eq!(round.view(), target_view);
+                        pending_syncs_for_certifier.arm();
+                        true
+                    },
+                )),
             };
             let (app_actor, application) =
                 mocks::application::Application::new(context.child("app"), app_cfg);
@@ -8319,11 +8330,17 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    &voter_context,
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
-            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
+            let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
+            let (resolver_sender, mut resolver_receiver) =
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) =
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -8334,6 +8351,24 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
+            let observer = participants[1].clone();
+            let (_, mut observer_vote_receiver) = oracle
+                .control(observer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    me.clone(),
+                    observer,
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
             let handle = voter.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
@@ -8341,14 +8376,12 @@ mod tests {
                 cert_sender,
             );
 
-            if let batcher::Message::Update { .. } =
-                batcher_receiver.recv().await.unwrap()
-            {
-
-            }
+            assert!(matches!(
+                batcher_receiver.recv().await.unwrap(),
+                batcher::Message::Update { .. }
+            ));
 
             // Advance to follower view 3 (leader = participant 1).
-            let target_view = View::new(3);
             let parent_payload = advance_to_view(
                 &mut mailbox,
                 &mut batcher_receiver,
@@ -8369,39 +8402,134 @@ mod tests {
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
-            // Send notarization to trigger certification.
-            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
-            mailbox
-                .resolved(Certificate::Notarization(notarization));
-
-            // Wait for certification to complete (view advances past target_view).
+            // Wait until the notarize for the target view is constructed. The gate is armed
+            // in the strictly later iteration that requests certification, by which point the
+            // notarize iteration's journal sync has completed, keeping the gate focused on
+            // the certification and finalize appends.
             loop {
                 select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(notarize))
+                            if notarize.view() == target_view => break,
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("timed out waiting for notarize in view {target_view}");
+                    },
+                }
+            }
+
+            // Send notarization to trigger certification.
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization));
+
+            // Wait until the first durability operation reaches the gate. Both artifacts must have
+            // been appended by this point, but notify must still be waiting behind the sync.
+            while pending_syncs.lock().is_empty() {
+                reschedule().await;
+            }
+            let deferred = next_pending_sync(&pending_syncs);
+            let blocked = deferred.blocked;
+            blocked.await.expect("gated section sync was dropped");
+
+            let mut certified_before_sync = false;
+            while let Some(msg) = resolver_receiver.recv().now_or_never().flatten() {
+                if let MailboxMessage::Certified { round, success, .. } = msg
+                    && round.view() == target_view {
+                        assert!(success, "expected successful certification");
+                        certified_before_sync = true;
+                    }
+            }
+            assert!(
+                !certified_before_sync,
+                "resolver observed certification before the section sync completed"
+            );
+
+            let mut finalize_constructed = false;
+            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
+                if matches!(
+                    msg,
+                    batcher::Message::Constructed(Vote::Finalize(ref finalize))
+                        if finalize.view() == target_view
+                ) {
+                    finalize_constructed = true;
+                }
+            }
+            assert!(
+                finalize_constructed,
+                "finalize was not constructed before the section sync"
+            );
+            assert_eq!(
+                pending_syncs.calls(),
+                1,
+                "certification and finalize must share one section sync"
+            );
+
+            // While the section sync is blocked, no target finalize may reach the network.
+            let deadline = context.current() + Duration::from_millis(10);
+            loop {
+                select! {
+                    _ = context.sleep_until(deadline) => break,
+                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                        let (_, message) = message.unwrap();
+                        let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
+                        assert!(
+                            !matches!(
+                                vote,
+                                Vote::Finalize(ref finalize) if finalize.view() == target_view
+                            ),
+                            "finalize reached the network before its section sync completed"
+                        );
+                    },
+                }
+            }
+
+            deferred.release.send(Ok(())).unwrap();
+
+            // The resolver should observe certification only after the section sync completes.
+            let mut certified = false;
+            let deadline = context.current() + Duration::from_secs(5);
+            while !certified {
+                select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == target_view =>
+                        {
                             assert!(success, "expected successful certification");
-                            break;
+                            certified = true;
                         }
                         _ => {}
                     },
-                    msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { .. } = msg.unwrap() {
+                    _ = context.sleep_until(deadline) => {
+                        panic!("timed out waiting for certification after section sync");
+                    },
+                }
+            }
 
+            // The durable finalize should be broadcast, without another section sync.
+            let deadline = context.current() + Duration::from_secs(5);
+            loop {
+                select! {
+                    _ = context.sleep_until(deadline) => {
+                        panic!("timed out waiting for finalize in view {target_view}");
+                    },
+                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                        let (_, message) = message.unwrap();
+                        let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
+                        if matches!(
+                            vote,
+                            Vote::Finalize(ref finalize) if finalize.view() == target_view
+                        ) {
+                            break;
                         }
                     },
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("timed out waiting for certification in first run");
-                    },
                 }
             }
-
-            // Drain any pending batcher messages so the view has advanced.
-            context.sleep(Duration::from_millis(50)).await;
-            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
-                if let batcher::Message::Update { .. } = msg {
-
-                }
-            }
+            assert_eq!(
+                pending_syncs.calls(),
+                1,
+                "certification and finalize used multiple section syncs"
+            );
 
             // Abort first voter.
             handle.abort();
@@ -8427,13 +8555,18 @@ mod tests {
                 mocks::application::Application::new(context.child("app_restarted"), app_cfg);
             app_actor.start();
 
+            let replay_reporter = mocks::reporter::Reporter::new(
+                context.child("reporter_restarted"),
+                reporter_cfg,
+            );
+
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter,
+                reporter: replay_reporter.clone(),
                 partition,
                 epoch,
                 floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
@@ -8446,10 +8579,11 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) =
-                Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
+            let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
+            let (resolver_sender, mut resolver_receiver) =
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) =
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -8467,10 +8601,10 @@ mod tests {
                 cert_sender,
             );
 
-            // Wait for replay to complete and verify the voter advanced past
-            // target_view (certification was replayed from journal).
+            // Wait for both replay notifications. Certification advances exactly one view.
             let mut replayed_certified = false;
-            loop {
+            let mut advanced = false;
+            while !(replayed_certified && advanced) {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
                         MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
@@ -8483,12 +8617,10 @@ mod tests {
                         if let batcher::Message::Update {
                             current, ..
                         } = msg.unwrap()
-                        {
-
-                            if current > target_view {
-                                break;
+                            && current >= target_view.next() {
+                                assert_eq!(current, target_view.next());
+                                advanced = true;
                             }
-                        }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("timed out waiting for restarted voter to advance past view {target_view}");
@@ -8496,18 +8628,22 @@ mod tests {
                 }
             }
 
-            assert!(
-                replayed_certified,
-                "resolver should receive Certified during replay for view {target_view}"
-            );
-
             // The voter should NOT have called certify on the automaton for
             // target_view (it was replayed from journal).
-            let certified = certify_calls.lock();
-            assert!(
-                !certified.contains(&target_view),
-                "voter should not re-certify view {target_view} during replay (observed: {certified:?})"
-            );
+            {
+                let certified = certify_calls.lock();
+                assert!(
+                    !certified.contains(&target_view),
+                    "voter should not re-certify view {target_view} during replay (observed: {certified:?})"
+                );
+            }
+
+            let finalizes = replay_reporter.finalizes.lock();
+            let signers = finalizes
+                .get(&target_view)
+                .and_then(|payloads| payloads.get(&proposal.payload))
+                .expect("coalesced finalize should replay after restart");
+            assert!(signers.contains(&me));
         });
     }
 
@@ -8910,10 +9046,10 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view {
-                                break;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                        {
+                            break;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -9001,10 +9137,11 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view && replayed_nullification {
-                                break;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                            && replayed_nullification
+                        {
+                            break;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {

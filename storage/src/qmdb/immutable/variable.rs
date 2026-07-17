@@ -2,24 +2,24 @@
 //!
 //! For fixed-size values, use [super::fixed] instead.
 
-use super::{operation::Operation as BaseOperation, Config as BaseConfig, Immutable};
+use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::variable::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
-        any::{value::VariableEncoding, VariableValue},
-        operation::Key,
         Error, ROOT_BAGGING,
+        any::{VariableValue, value::VariableEncoding},
+        operation::Key,
     },
     translator::Translator,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Type alias for a variable-size operation.
 pub type Operation<F, K, V> = BaseOperation<F, K, VariableEncoding<V>>;
@@ -40,15 +40,8 @@ pub type Config<T, C, S> = BaseConfig<T, JournalConfig<C>, S>;
 /// Configuration for a variable-size compact immutable db.
 pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 
-impl<
-        F: Family,
-        E: Storage + Clock + Metrics,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -69,14 +62,14 @@ impl<
 }
 
 impl<
-        F: Family,
-        E: Storage + Clock + Metrics,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        C: Clone + Send + Sync + 'static,
-        S: Strategy,
-    > CompactDb<F, E, K, V, H, C, S>
+    F: Family,
+    E: Context,
+    K: Key,
+    V: VariableValue,
+    H: Hasher,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+> CompactDb<F, E, K, V, H, C, S>
 where
     Operation<F, K, V>: Read<Cfg = C>,
 {
@@ -102,13 +95,13 @@ mod tests {
         qmdb::immutable::test,
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -350,13 +343,14 @@ mod tests {
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&db, Some(metadata), floor);
-        let compact_batch =
-            compact
-                .new_batch()
-                .set(k1, v1)
-                .set(k2, v2)
-                .merkleize(&compact, Some(metadata), floor);
+            .merkleize(&db, Some(metadata), floor)
+            .await;
+        let compact_batch = compact
+            .new_batch()
+            .set(k1, v1)
+            .set(k2, v2)
+            .merkleize(&compact, Some(metadata), floor)
+            .await;
 
         assert_eq!(retained.root(), compact_batch.root());
 

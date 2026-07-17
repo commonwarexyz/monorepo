@@ -98,21 +98,22 @@ use super::{
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
 };
+use crate::{
+    Context,
+    journal::{
+        Error,
+        contiguous::{Many, Mutable, metrics::Metrics},
+    },
+};
 #[commonware_macros::stability(ALPHA)]
 use crate::{journal::authenticated, merkle};
-use crate::{
-    journal::{
-        contiguous::{metrics::FixedMetrics as Metrics, Many, Mutable},
-        Error,
-    },
-    Context,
-};
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Writer},
     Blob as RBlob, Buf, IoBuf,
+    buffer::paged::{CacheRef, Writer},
 };
-use futures::Stream;
+use commonware_utils::Cached;
+use futures::{Stream, future::try_join_all};
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -122,6 +123,11 @@ use std::{
     sync::Arc,
 };
 use tracing::warn;
+
+// Reusable scratch for [`Reader::probe_items`], grown to the largest probe served on the
+// thread. Probes run per shard on the hot read path, where a fresh zeroed allocation per call
+// contends under the pool's fan-out.
+commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
@@ -468,11 +474,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 drop(pending.remove(&newest));
                 partition.remove(newest).await?;
             }
-            if let Some(writer) = pending.get_mut(&tail_blob) {
-                if truncate_to < writer.size() {
-                    writer.resize(truncate_to).await.map_err(Error::Runtime)?;
-                    writer.sync().await.map_err(Error::Runtime)?;
-                }
+            if let Some(writer) = pending.get_mut(&tail_blob)
+                && truncate_to < writer.size()
+            {
+                writer.resize(truncate_to).await.map_err(Error::Runtime)?;
+                writer.sync().await.map_err(Error::Runtime)?;
             }
         }
 
@@ -791,7 +797,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// crash after this call doesn't require any recovery.
     pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
-        self.metrics.record_commit();
+        self.metrics.commit_calls.inc();
         self.flush_dirty_blobs().await?;
         self.dirty_from_blob = None;
         Ok(())
@@ -1046,13 +1052,20 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(false);
         }
 
+        // Make all dirty blobs durable before removing any: the prune target may be
+        // justified by an appended-but-unflushed item (e.g. a consumer's commit record), and
+        // removals are durable, so pruning without this barrier could leave a recovered
+        // journal whose surviving items no longer justify its boundary. Dirty blobs below the
+        // prune point are flushed too: removal may be interrupted, and recovery truncates at
+        // the first torn item, so an unsynced survivor below the boundary could discard
+        // every synced blob behind it.
+        self.flush_dirty_blobs().await?;
+        self.dirty_from_blob = None;
+
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
-        if let Some(dirty_from) = self.dirty_from_blob {
-            self.dirty_from_blob = Some(dirty_from.max(min_blob));
-        }
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1150,6 +1163,81 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok(())
     }
 
+    /// Resolve a blob-sharing group of positions to its blob number and per-position byte
+    /// offsets within the blob.
+    fn locate_group(&self, group: &[u64]) -> Result<(u64, Vec<u64>), Error> {
+        let items_per_blob = self.items_per_blob.get();
+        let blob = super::position_to_blob(group[0], items_per_blob);
+        let first_position = first_in_blob(self.bounds.start, blob, items_per_blob)?;
+        let offsets = group
+            .iter()
+            .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
+            .collect::<Result<Vec<u64>, _>>()?;
+        Ok((blob, offsets))
+    }
+
+    /// Shared body of [`super::Contiguous::read_many`] and the variable journal's offsets
+    /// reads; the callers record the batch-read metrics, so routing them through `read_many`
+    /// would count every batch twice.
+    pub(super) async fn read_many_inner(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        for &pos in positions {
+            self.validate_readable(pos)?;
+        }
+
+        let items_per_blob = self.items_per_blob.get();
+
+        // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
+        // maximal runs that share one blob. Each group goes through the blob's batched read,
+        // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
+        // true misses from the blob (concurrently).
+        let mut result: Vec<A> = Vec::with_capacity(positions.len());
+        let mut reusable_buf = vec![0u8; positions.len() * A::SIZE];
+
+        // The buffer is pre-sized for every position, so each group can own a disjoint slice and
+        // all groups can read concurrently.
+        let mut reads = Vec::new();
+        let mut remaining_buf = reusable_buf.as_mut_slice();
+        for group in positions.chunk_by(|a, b| {
+            super::position_to_blob(*a, items_per_blob)
+                == super::position_to_blob(*b, items_per_blob)
+        }) {
+            let (blob_num, blob_offsets) = self.locate_group(group)?;
+            let blob = self
+                .blobs
+                .get(blob_num)
+                .expect("positions in bounds map to a retained blob");
+            let (buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
+            remaining_buf = rest;
+            reads.push(async move {
+                blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                    .await
+            });
+        }
+        let hits: u64 = try_join_all(reads)
+            .await?
+            .into_iter()
+            .map(|group_hits| group_hits as u64)
+            .sum();
+
+        for slice in reusable_buf.chunks_exact(A::SIZE) {
+            result.push(A::decode(slice).map_err(Error::Codec)?);
+        }
+
+        self.metrics.cache_hits.inc_by(hits);
+        self.metrics
+            .cache_misses
+            .inc_by(positions.len() as u64 - hits);
+        self.metrics.items_read.inc_by(positions.len() as u64);
+        Ok(result)
+    }
+
     /// Resolve `pos` to its blob and byte offset within the blob.
     fn locate(&self, pos: u64) -> Result<(Blob<'_, E::Blob>, u64), Error> {
         self.validate_readable(pos)?;
@@ -1164,14 +1252,70 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok((blob, offset))
     }
 
-    /// Read the item at `pos` synchronously if its bytes are cached, else `None`.
-    fn try_read_sync_cached(&self, pos: u64) -> Option<A> {
-        let (blob, offset) = self.locate(pos).ok()?;
-        let mut buf = vec![0u8; A::SIZE];
-        if !blob.try_read_sync(offset, &mut buf) {
-            return None;
+    /// Probe `positions` (strictly increasing) against the page cache, returning one slot per
+    /// position: `Some(item)` for sync hits and `None` for positions that require I/O, fail to
+    /// decode, or fall outside `bounds()`.
+    pub(super) fn probe_items(&self, positions: &[u64]) -> Vec<Option<A>> {
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        let mut out: Vec<Option<A>> = (0..positions.len()).map(|_| None).collect();
+
+        // Sorted positions put pruned ones in a prefix and out-of-range ones in a suffix, so
+        // validation trims the batch instead of poisoning a blob group that also holds valid
+        // positions.
+        let start = positions.partition_point(|&pos| pos < self.bounds.start);
+        let end = positions.partition_point(|&pos| pos < self.bounds.end);
+        let valid = &positions[start..end];
+        if valid.is_empty() {
+            return out;
         }
-        A::decode(&buf[..]).ok()
+
+        // Serve the probe from the per-thread scratch buffer. Stale bytes from a previous probe
+        // are harmless: slots the cache cannot serve are reported as misses and never decoded.
+        let items_per_blob = self.items_per_blob.get();
+        let mut scratch =
+            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        let need = valid.len() * A::SIZE;
+        if scratch.len() < need {
+            scratch.resize(need, 0);
+        }
+        let buf = &mut scratch[..need];
+        let mut hits = 0u64;
+        let mut group_base = start;
+        for group in valid.chunk_by(|a, b| {
+            super::position_to_blob(*a, items_per_blob)
+                == super::position_to_blob(*b, items_per_blob)
+        }) {
+            let base = group_base;
+            group_base += group.len();
+            let Ok((blob_num, blob_offsets)) = self.locate_group(group) else {
+                continue;
+            };
+            let Some(blob) = self.blobs.get(blob_num) else {
+                continue;
+            };
+            let buf = &mut buf[..group.len() * A::SIZE];
+            let misses =
+                blob.try_read_many_sync_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE);
+            let mut misses = misses.into_iter().peekable();
+            for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
+                if misses.peek() == Some(&idx) {
+                    misses.next();
+                    continue;
+                }
+                // A decode failure declines to a miss: the async completion re-reads the
+                // item and bubbles the failure as [Error::Codec], like every async read path.
+                if let Ok(item) = A::decode(slice) {
+                    out[base + idx] = Some(item);
+                    hits += 1;
+                }
+            }
+        }
+        self.metrics.cache_hits.inc_by(hits);
+        self.metrics.items_read.inc_by(hits);
+        out
     }
 }
 
@@ -1186,15 +1330,13 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         self.metrics.read_calls.inc();
 
         // Serve from the page cache synchronously when possible, avoiding the async storage path.
-        if let Some(item) = self.try_read_sync_cached(pos) {
-            self.metrics.record_cache_hits(1);
-            self.metrics.items_read.inc();
+        if let Some(item) = self.try_read_sync(pos) {
             return Ok(item);
         }
-        self.metrics.record_cache_misses(1);
 
         let _timer = self.metrics.read_timer();
         let (blob, offset) = self.locate(pos)?;
+        self.metrics.cache_misses.inc();
         let bufs = blob.read_at(offset, A::SIZE).await?;
         let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
         self.metrics.items_read.inc();
@@ -1207,72 +1349,26 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         }
         let _timer = self.metrics.read_many_timer();
         self.metrics.read_many_calls.inc();
-        let mut prev: Option<u64> = None;
-        for &pos in positions {
-            if prev.is_some_and(|p| pos <= p) {
-                return Err(Error::PositionsNotIncreasing);
-            }
-            prev = Some(pos);
-            self.validate_readable(pos)?;
-        }
-
-        let items_per_blob = self.items_per_blob.get();
-        let pruning_boundary = self.bounds.start;
-        let chunk_size = A::SIZE;
-
-        // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
-        // maximal runs that share one blob. Each group goes through the blob's batched read,
-        // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
-        // true misses from the blob (concurrently).
-        let mut result: Vec<A> = Vec::with_capacity(positions.len());
-        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
-        let mut hits = 0u64;
-        for group in positions.chunk_by(|a, b| {
-            super::position_to_blob(*a, items_per_blob)
-                == super::position_to_blob(*b, items_per_blob)
-        }) {
-            let blob = super::position_to_blob(group[0], items_per_blob);
-            let first_position = first_in_blob(pruning_boundary, blob, items_per_blob)?;
-            let blob_offsets: Vec<u64> = group
-                .iter()
-                .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
-                .collect::<Result<_, _>>()?;
-
-            let blob = self
-                .blobs
-                .get(blob)
-                .expect("positions in bounds map to a retained blob");
-            let buf = &mut reusable_buf[..group.len() * chunk_size];
-            let group_hits = blob
-                .read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
-                .await?;
-            hits += group_hits as u64;
-
-            for slice in buf.chunks_exact(chunk_size) {
-                result.push(A::decode(slice).map_err(Error::Codec)?);
-            }
-        }
-
-        self.metrics.record_cache_hits(hits);
-        self.metrics
-            .record_cache_misses(positions.len() as u64 - hits);
-        self.metrics.items_read.inc_by(positions.len() as u64);
-        Ok(result)
+        self.read_many_inner(positions).await
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
-        self.try_read_sync_cached(pos).map_or_else(
-            || {
-                self.metrics.record_cache_misses(1);
-                None
-            },
-            |item| {
-                self.metrics.record_cache_hits(1);
-                self.metrics.try_read_sync_hits.inc();
-                self.metrics.items_read.inc();
-                Some(item)
-            },
-        )
+        let mut buf = vec![0u8; A::SIZE];
+        let item = match self.locate(pos) {
+            Ok((blob, offset)) if blob.try_read_sync_into(&mut buf, offset) => {
+                A::decode(&buf[..]).ok()
+            }
+            _ => None,
+        };
+        if item.is_some() {
+            self.metrics.cache_hits.inc();
+            self.metrics.items_read.inc();
+        }
+        item
+    }
+
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
+        self.probe_items(positions)
     }
 
     async fn replay(
@@ -1307,6 +1403,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         self.reader().try_read_sync(pos)
+    }
+
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
+        self.reader().probe_items(positions)
     }
 
     async fn replay(
@@ -1386,16 +1486,16 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::Contiguous as _;
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::Writer,
-        deterministic::{self, Context},
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
         Supervisor as _,
+        buffer::paged::Writer,
+        deterministic::{self, Context},
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
-    use futures::{pin_mut, StreamExt};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);
@@ -1417,6 +1517,16 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    /// Extract a metric counter's value from encoded metrics output.
+    fn counter(buffer: &str, name: &str) -> u64 {
+        buffer
+            .lines()
+            .find(|l| l.contains(name) && !l.starts_with('#'))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+            .expect("counter missing")
     }
 
     impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
@@ -3197,6 +3307,44 @@ mod tests {
         });
     }
 
+    /// A crash right after pruning must not lose retained items that were appended but never
+    /// synced. Blob removal is durable, so prune flushes every dirty blob first: otherwise the
+    /// unsynced tail would vanish with the crash and recovery would truncate the journal to
+    /// empty even though the removal survived.
+    #[test_traced]
+    fn test_fixed_recovery_prune_crash_retains_unsynced_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Durably persist blob 0 (positions 0..10), then append positions 10..25 across
+            // blobs 1 and 2 without syncing.
+            for i in 0..10u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            for i in 10..25u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            // Prune away blob 0, then crash before any sync.
+            assert!(journal.prune(10).await.unwrap());
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..25);
+            for i in 10..25u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test recovery when the oldest blob is empty but a newer blob still holds durable items.
     ///
     /// This is the fixed-journal analog of the variable-journal empty-oldest-blob gap bug. A
@@ -4010,8 +4158,10 @@ mod tests {
         });
     }
 
+    /// Prune flushes every dirty blob and clears the dirty state, so a commit issued right
+    /// after must not attempt to sync the removed blobs.
     #[test_traced]
-    fn test_fixed_journal_prune_adjusts_dirty_boundary() {
+    fn test_fixed_journal_commit_after_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -4027,7 +4177,7 @@ mod tests {
             journal
                 .commit()
                 .await
-                .expect("commit should not try to sync pruned dirty blobs");
+                .expect("commit should not try to sync pruned blobs");
             assert_eq!(journal.bounds(), 5..12);
             journal.destroy().await.unwrap();
         });
@@ -4454,8 +4604,8 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "positions must be strictly increasing")]
     fn test_read_many_rejects_unsorted_positions() {
-        // Non-increasing positions return an error rather than panicking.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
@@ -4464,17 +4614,23 @@ mod tests {
                 journal.append(&test_digest(i)).await.unwrap();
             }
 
-            assert!(matches!(
-                journal.snapshot().await.unwrap().read_many(&[2, 1]).await,
-                Err(Error::PositionsNotIncreasing)
-            ));
-            // Duplicates are not strictly increasing either.
-            assert!(matches!(
-                journal.snapshot().await.unwrap().read_many(&[1, 1]).await,
-                Err(Error::PositionsNotIncreasing)
-            ));
+            let _ = journal.snapshot().await.unwrap().read_many(&[2, 1]).await;
+        });
+    }
 
-            journal.destroy().await.unwrap();
+    #[test_traced]
+    #[should_panic(expected = "positions must be strictly increasing")]
+    fn test_read_many_rejects_duplicate_positions() {
+        // Duplicates are not strictly increasing either.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            for i in 0..5u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            let _ = journal.snapshot().await.unwrap().read_many(&[1, 1]).await;
         });
     }
 
@@ -4600,6 +4756,122 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_try_read_many_sync_matches_read_many() {
+        // Cached positions are served synchronously and match the async batched read.
+        // Positions that fail validation are misses rather than errors.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(4));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+
+            for i in 0..20u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..20).collect();
+            let reader = journal.snapshot().await.unwrap();
+            let expected = reader.read_many(&positions).await.unwrap();
+
+            // Every synchronously served item must match the async read. Positions the
+            // 3-page test cache cannot hold are misses, never wrong values.
+            let served = reader.try_read_many_sync(&positions);
+            assert_eq!(served.len(), positions.len());
+            for (item, expected) in served.iter().zip(&expected) {
+                if let Some(item) = item {
+                    assert_eq!(item, expected);
+                }
+            }
+
+            // The last blob (positions 16..20) spans at most the cache capacity, so after
+            // warming exactly those positions they are all served synchronously.
+            let tail: Vec<u64> = (16..20).collect();
+            reader.read_many(&tail).await.unwrap();
+            let served = reader.try_read_many_sync(&tail);
+            for (item, pos) in served.iter().zip(&tail) {
+                assert_eq!(
+                    item.as_ref().expect("warmed position is served"),
+                    &expected[*pos as usize]
+                );
+            }
+
+            // A long-evicted position is a miss.
+            assert!(reader.try_read_many_sync(&[0])[0].is_none());
+
+            // An out-of-range position is a miss, not an error, and does not poison the
+            // valid position grouped before it.
+            let served = reader.try_read_many_sync(&[19, 20]);
+            assert!(served[0].is_some());
+            assert!(served[1].is_none());
+            drop(served);
+            drop(reader);
+
+            // After a rewind the journal's end is not blob-aligned, so an out-of-range
+            // position can share a blob with a valid one. Validation trims the batch
+            // instead of poisoning the shared group.
+            journal.rewind(18).await.unwrap();
+            let reader = journal.snapshot().await.unwrap();
+            reader.read_many(&[17]).await.unwrap();
+            let served = reader.try_read_many_sync(&[17, 18]);
+            assert!(served[0].is_some());
+            assert!(served[1].is_none());
+            drop(served);
+            drop(reader);
+
+            // A pruned position is trimmed from the prefix rather than reaching offset
+            // derivation, and the valid remainder is still served.
+            journal.prune(8).await.unwrap();
+            let reader = journal.snapshot().await.unwrap();
+            reader.read_many(&[9]).await.unwrap();
+            let served = reader.try_read_many_sync(&[3, 9]);
+            assert!(served[0].is_none());
+            assert!(served[1].is_some());
+            drop(served);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_probe_then_read_many_matches_read_many() {
+        // A probe completed by one batched read over its declined positions returns the same
+        // items as read_many, cold and warm.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(4));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+
+            for i in 0..20u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..20).collect();
+            let reader = journal.snapshot().await.unwrap();
+            let expected: Vec<_> = (0..20).map(test_digest).collect();
+            for _ in 0..2 {
+                let mut served = reader.try_read_many_sync(&positions);
+                let misses: Vec<u64> = positions
+                    .iter()
+                    .zip(&served)
+                    .filter_map(|(&pos, item)| item.is_none().then_some(pos))
+                    .collect();
+                let mut fetched = reader.read_many(&misses).await.unwrap().into_iter();
+                for item in served.iter_mut().filter(|item| item.is_none()) {
+                    *item = fetched.next();
+                }
+                let completed: Vec<_> = served.into_iter().map(Option::unwrap).collect();
+                assert_eq!(completed, expected);
+            }
+            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_fixed_journal_metrics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -4636,7 +4908,6 @@ mod tests {
                 "fixed_metrics_append_many_calls_total 1",
                 "fixed_metrics_read_calls_total 1",
                 "fixed_metrics_read_many_calls_total 1",
-                "fixed_metrics_try_read_sync_hits_total 1",
                 "fixed_metrics_items_read_total 5",
                 "fixed_metrics_commit_calls_total 1",
                 "fixed_metrics_sync_calls_total 1",
@@ -4835,15 +5106,6 @@ mod tests {
 
             let reader = journal.snapshot().await.unwrap();
 
-            fn counter(buffer: &str, name: &str) -> u64 {
-                buffer
-                    .lines()
-                    .find(|l| l.contains(name) && !l.starts_with('#'))
-                    .and_then(|l| l.split_whitespace().last())
-                    .and_then(|v| v.parse().ok())
-                    .expect("counter missing")
-            }
-
             // Sparse subset spanning multiple blobs, including the pruning boundary.
             // `try_read_sync` probes do not populate the cache, so the cached subset is
             // whatever the append path left resident; derive the expected hit count from
@@ -4878,6 +5140,72 @@ mod tests {
             let batch = reader.read_many(&all).await.unwrap();
             for (i, &pos) in all.iter().enumerate() {
                 assert_eq!(batch[i], reader.read(pos).await.unwrap());
+            }
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_cold_blob_groups() {
+        // Read a batch whose positions are all cache misses spread over four blobs, so the whole
+        // batch is served by per-blob group reads into disjoint slices of the shared output
+        // buffer. Each digest encodes its position, so a group read into the wrong slice fails
+        // the value assertions.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(8));
+            cfg.page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(32));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..40u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen with a fresh page cache so every full page is cold. The positions avoid
+            // each blob's trailing bytes, which sealed blobs keep in memory and always serve
+            // synchronously.
+            cfg.page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(32));
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let reader = journal.snapshot().await.unwrap();
+            let positions = [1, 5, 10, 14, 17, 22, 25, 30];
+            for pos in positions {
+                assert!(reader.try_read_sync(pos).is_none(), "position {pos}");
+            }
+
+            // Every item requires a blob read, split into four groups of two.
+            let before = context.encode();
+            let batch = reader.read_many(&positions).await.unwrap();
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "second_cache_misses") - counter(&before, "second_cache_misses"),
+                positions.len() as u64
+            );
+            assert_eq!(
+                counter(&after, "second_cache_hits"),
+                counter(&before, "second_cache_hits")
+            );
+            for (i, &pos) in positions.iter().enumerate() {
+                assert_eq!(batch[i], test_digest(pos), "position {pos}");
+            }
+
+            // The first pass cached every page it faulted, so a second pass is all hits and must
+            // return the same items.
+            let before = context.encode();
+            let batch = reader.read_many(&positions).await.unwrap();
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "second_cache_hits") - counter(&before, "second_cache_hits"),
+                positions.len() as u64
+            );
+            for (i, &pos) in positions.iter().enumerate() {
+                assert_eq!(batch[i], test_digest(pos), "position {pos}");
             }
             drop(reader);
 

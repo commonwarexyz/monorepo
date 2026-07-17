@@ -8,9 +8,9 @@
 //! the module documentation). The sync engine operates on the **ops root**, not the canonical root:
 //! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
 //! (identical to `any` sync). Callers that verify current ops proofs directly should use
-//! `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be used by callers that need
-//! to authenticate the synced ops root against a trusted canonical root; the sync engine does not
-//! perform this check itself.
+//! [crate::qmdb::verify_proof]. [crate::qmdb::current::proof::OpsRootWitness] can be used by
+//! callers that need to authenticate the synced ops root against a trusted canonical root; the sync
+//! engine does not perform this check itself.
 //!
 //! After all operations are synced, the bitmap and grafted tree are reconstructed deterministically
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
@@ -26,20 +26,22 @@
 //! height.
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, fixed, variable},
     },
     merkle::{
-        full::{self, Merkle},
         Graftable, Location,
+        full::{self, Merkle},
     },
     qmdb::{
         self,
         any::{
-            db::{Db as AnyDb, Metrics as AnyMetrics},
-            operation::{update::Update, Operation},
+            FixedValue, VariableValue,
+            db::Db as AnyDb,
+            operation::{Operation, update::Update},
             ordered::{
                 fixed::{Operation as OrderedFixedOp, Update as OrderedFixedUpdate},
                 variable::{Operation as OrderedVariableOp, Update as OrderedVariableUpdate},
@@ -48,29 +50,27 @@ use crate::{
                 fixed::{Operation as UnorderedFixedOp, Update as UnorderedFixedUpdate},
                 variable::{Operation as UnorderedVariableOp, Update as UnorderedVariableUpdate},
             },
-            FixedValue, VariableValue,
         },
         bitmap::Shared,
         current::{
-            db, grafting,
+            FixedConfig, VariableConfig, db, grafting,
             ordered::{
                 fixed::Db as CurrentOrderedFixedDb, variable::Db as CurrentOrderedVariableDb,
             },
             unordered::{
                 fixed::Db as CurrentUnorderedFixedDb, variable::Db as CurrentUnorderedVariableDb,
             },
-            FixedConfig, VariableConfig,
         },
+        metrics::Metrics as AnyMetrics,
         operation::{Committable, Key, Operation as _},
-        sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
+        sync::{Database, DatabaseConfig as Config, resolver::fetch_operations},
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
+use commonware_utils::{Array, bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -117,7 +117,6 @@ where
     Operation<F, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let hasher = qmdb::hasher::<H>();
     let merkle = Merkle::<F, _, _, S>::init_sync(
         context.child("merkle"),
         full::SyncConfig {
@@ -131,7 +130,7 @@ where
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         merkle,
         log,
-        hasher,
+        qmdb::hasher::<H>(),
         apply_batch_size as u64,
     )
     .await?;
@@ -178,11 +177,9 @@ where
     };
 
     // Build grafted tree.
-    let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
@@ -194,36 +191,22 @@ where
     // Compute the canonical root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
     // from the ops).
-    let storage = grafting::Storage::new(
+    let storage = grafting::Storage::<F, H, _, _>::new(
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        hasher.clone(),
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
-    let grafted_root = db::compute_grafted_root(
-        &hasher,
+    let ops_root = any.root();
+    let root = db::compute_db_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
+        partial,
         any.inactivity_floor_loc,
+        &ops_root,
     )
     .await?;
-    let ops_root = any.root();
-    let partial_digest = partial.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(&chunk);
-        (next_bit, digest)
-    });
-    let pending_digest =
-        db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
-            .map(|chunk| hasher.digest(&chunk));
-    let root = db::combine_roots(
-        &hasher,
-        &ops_root,
-        &grafted_root,
-        pending_digest.as_ref(),
-        partial_digest.as_ref().map(|(nb, d)| (*nb, d)),
-    );
 
     // Initialize metadata store and construct the Db.
     let (metadata, _, _) =
@@ -233,11 +216,13 @@ where
     let metrics = db::Metrics::new(context);
     let mut current_db = db::Db {
         any,
-        grafted_tree,
+        grafted_tree: Arc::new(grafted_tree),
         metadata,
         strategy,
         root,
         metrics,
+        #[cfg(test)]
+        halt_before_prune_log: false,
     };
     current_db.update_metrics();
 
@@ -307,17 +292,14 @@ macro_rules! impl_current_sync_database {
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
                 journal: &Self::Journal,
             ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-                if target.range.start() == Location::new(0) {
-                    return Ok(None);
-                }
-
-                let bounds = journal.bounds();
-                if Location::new(bounds.start) > target.range.start()
-                    || Location::new(bounds.end) != target.range.end()
+                if target.range.start() == Location::new(0)
+                    || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
                 {
                     return Ok(None);
                 }
 
+                // The inactivity floor is carried by the last commit operation rather than
+                // being the target range's start.
                 let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(
                     journal,
                     target.range.end(),
@@ -325,31 +307,13 @@ macro_rules! impl_current_sync_database {
                 )
                 .await?;
 
-                let hasher = qmdb::hasher::<H>();
-                let merkle = Merkle::<F, _, _, S>::init(
-                    context.child("local_boundary_merkle"),
-                    &hasher,
+                qmdb::sync::local_boundary_nodes::<F, _, H, S>(
+                    context,
                     config.merkle_config.clone(),
-                )
-                .await?;
-                let bounds = merkle.bounds();
-                if bounds.start > target.range.start() || bounds.end != target.range.end() {
-                    return Ok(None);
-                }
-
-                let inactive_peaks = F::inactive_peaks(
-                    F::location_to_position(target.range.end()),
+                    target,
                     inactivity_floor,
-                );
-                if merkle.root(&hasher, inactive_peaks)? != target.root {
-                    return Ok(None);
-                }
-
-                merkle
-                    .pinned_nodes_at(target.range.start())
-                    .await
-                    .map(Some)
-                    .map_err(Into::into)
+                )
+                .await
             }
 
             /// Returns the ops root (not the canonical root), since the sync engine verifies

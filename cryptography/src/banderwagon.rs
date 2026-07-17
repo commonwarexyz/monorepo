@@ -8,8 +8,8 @@ use blst::blst_fr;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
-    msm_naive, Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring,
-    Space,
+    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
+    msm_naive,
 };
 use commonware_parallel::Strategy;
 use core::{
@@ -58,7 +58,7 @@ impl F {
 }
 
 impl Random for F {
-    fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
+    fn random(mut rng: impl rand_core::CryptoRng) -> Self {
         // Rejection-sample a uniform element of `[0, r)`. Each candidate is
         // `F::BITS` random bits (the width of `r`), so it lands in `[0, 2^BITS)`
         // and is accepted with probability `r / 2^BITS > 0.9`: ~1.1 draws on

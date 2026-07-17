@@ -1,11 +1,12 @@
 use super::DummyMetrics;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
-    index::{ordered, partitioned, unordered, Unordered},
+    index::{Unordered, ordered, partitioned, unordered},
     translator::{Cap, EightCap, Hashed},
 };
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use commonware_utils::test_rng;
+use criterion::{Criterion, criterion_group};
+use rand::seq::SliceRandom;
 use std::time::{Duration, Instant};
 
 #[cfg(not(full_bench))]
@@ -57,7 +58,7 @@ const VARIANTS: [Variant; 9] = [
 fn bench_insert(c: &mut Criterion) {
     for items in N_ITEMS {
         // Setup items
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = test_rng();
         let mut kvs = Vec::with_capacity(items);
         for i in 0..items {
             kvs.push((Sha256::hash(&i.to_be_bytes()), i as u64));

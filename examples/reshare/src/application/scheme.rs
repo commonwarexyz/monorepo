@@ -4,12 +4,13 @@
 use crate::orchestrator::EpochTransition;
 use commonware_consensus::{simplex, types::Epoch};
 use commonware_cryptography::{
+    PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt as dkg,
         primitives::variant::{MinSig, Variant},
     },
     certificate::{self, Scheme, Scoped},
-    ed25519, PublicKey, Signer,
+    ed25519,
 };
 use commonware_utils::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};

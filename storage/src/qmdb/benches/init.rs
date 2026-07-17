@@ -4,18 +4,18 @@
 //! inside `bench_function` so criterion's name filter can skip them entirely.
 
 use crate::common::{
-    define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value, make_var_value,
-    Digest,
+    Digest, define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value,
+    make_var_value,
 };
 use commonware_runtime::{
+    Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
     tokio::{Config, Context},
-    Runner as _, Supervisor as _,
 };
 use commonware_storage::{merkle::Family, qmdb::any::traits::DbAny};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, TestRng};
 use core::num::NonZeroUsize;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
@@ -41,7 +41,7 @@ async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
     db: &mut C,
     elements: u64,
     operations: u64,
-    make_value: impl Fn(&mut rand::rngs::StdRng) -> C::Value,
+    make_value: impl Fn(&mut TestRng) -> C::Value,
 ) {
     gen_random_kv::<F, _>(
         db,
@@ -55,7 +55,7 @@ async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
         make_value,
     )
     .await;
-    db.prune(db.sync_boundary().await).await.unwrap();
+    db.prune(db.sync_boundary()).await.unwrap();
     db.sync().await.unwrap();
 }
 

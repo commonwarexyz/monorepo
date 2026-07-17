@@ -4,16 +4,16 @@
 
 use crate::application::Block;
 use commonware_actor::{
-    mailbox::{Policy, Sender},
     Feedback,
+    mailbox::{Policy, Sender},
 };
-use commonware_consensus::{marshal::Update, Reporter};
+use commonware_consensus::{Reporter, marshal::Update};
 use commonware_cryptography::{
-    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
     Hasher, Signer,
+    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
 };
-use commonware_utils::{acknowledgement::Exact, channel::oneshot, Acknowledgement};
-use std::collections::VecDeque;
+use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot};
+use std::{collections::VecDeque, sync::Arc};
 use tracing::error;
 
 /// A message that can be sent to the [Actor].
@@ -35,7 +35,10 @@ where
     },
 
     /// A new block has been finalized.
-    Finalized { block: Block<H, C, V>, response: A },
+    Finalized {
+        block: Arc<Block<H, C, V>>,
+        response: A,
+    },
 }
 
 impl<H, C, V, A> Policy for Message<H, C, V, A>

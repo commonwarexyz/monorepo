@@ -172,13 +172,13 @@ pub trait ExampleDatabase: Sized {
 #[allow(clippy::type_complexity)]
 pub trait Syncable: ExampleDatabase {
     /// Get the total number of operations in the database (including pruned operations).
-    fn size(&self) -> impl Future<Output = Location<Self::Family>> + Send;
+    fn size(&self) -> Location<Self::Family>;
 
     /// Get the most recent location from which this database can safely be synced.
     ///
     /// Callers constructing a sync target should use this value (or any earlier retained
     /// location) as the `range.start`.
-    fn sync_boundary(&self) -> impl Future<Output = Location<Self::Family>> + Send;
+    fn sync_boundary(&self) -> Location<Self::Family>;
 
     /// Get historical proof and operations.
     fn historical_proof(
@@ -212,16 +212,16 @@ pub trait CompactSyncable: ExampleDatabase {
     /// Full databases implement this so they can act as compact-sync sources, and compact-storage
     /// databases implement it so compact nodes can sync from each other. The client still
     /// materializes into compact storage in both cases.
-    fn target(&self) -> impl Future<Output = compact::Target<Self::Family, Key>> + Send;
+    fn target(&self) -> compact::Target<Self::Family, Key>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        immutable, immutable_compact, keyless, keyless_compact, DatabaseType, ExampleDatabase,
-        SyncMode,
+        DatabaseType, ExampleDatabase, SyncMode, immutable, immutable_compact, keyless,
+        keyless_compact,
     };
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
     #[test]
     fn test_supported_client_mode_matrix() {

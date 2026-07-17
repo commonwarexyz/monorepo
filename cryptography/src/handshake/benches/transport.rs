@@ -1,4 +1,4 @@
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 
 fn bench_transport(c: &mut Criterion) {
     let (mut send, mut recv) = super::connect().unwrap();

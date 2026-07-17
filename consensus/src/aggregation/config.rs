@@ -1,11 +1,11 @@
 use super::types::Activity;
 use crate::{
-    types::{Epoch, EpochDelta, Height, HeightDelta},
     Automaton, Monitor, Reporter,
+    types::{Epoch, EpochDelta, Height, HeightDelta},
 };
 use commonware_cryptography::{
-    certificate::{Provider, Verifier},
     Digest,
+    certificate::{Provider, Verifier},
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;

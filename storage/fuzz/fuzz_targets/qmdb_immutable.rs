@@ -2,22 +2,23 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+use commonware_runtime::{BufferPooler, Runner, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{self, mmb, mmr, Bagging::BackwardFold, Family as MerkleFamily, Location},
+    merkle::{Family as MerkleFamily, Location, mmb, mmr},
     mmr::full::Config as MerkleConfig,
     qmdb::{
-        immutable::{variable::Db as Immutable, Config},
+        immutable::{Config, variable::Db as Immutable},
         verify_proof,
     },
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngExt as _;
+use rand_core::CryptoRng;
 use std::num::{NonZeroU16, NonZeroU64};
 
 const MAX_OPERATIONS: usize = 50;
@@ -81,17 +82,17 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn generate_key(rng: &mut StdRng, seed: u64) -> Digest {
-    let mut data = vec![0u8; rng.gen_range(1..=MAX_KEY_SIZE)];
+fn generate_key(rng: &mut impl CryptoRng, seed: u64) -> Digest {
+    let mut data = vec![0u8; rng.random_range(1..=MAX_KEY_SIZE)];
     for (i, byte) in data.iter_mut().enumerate() {
-        *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.gen::<u8>();
+        *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.random::<u8>();
     }
     Sha256::hash(&data)
 }
 
-fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
+fn generate_value(rng: &mut impl CryptoRng, size: usize) -> Vec<u8> {
     let actual_size = size.clamp(1, MAX_VALUE_SIZE);
-    (0..actual_size).map(|_| rng.gen()).collect()
+    (0..actual_size).map(|_| rng.random()).collect()
 }
 
 #[allow(clippy::type_complexity)]
@@ -145,7 +146,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     runner.start(|context| {
         let operations = input.operations.clone();
         async move {
-            let mut rng = StdRng::seed_from_u64(input.seed);
+            let mut rng = TestRng::new(input.seed);
 
             let cfg = db_config(suffix, &context);
             let mut db =
@@ -153,7 +154,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     .await
                     .unwrap();
 
-            let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();
             let mut set_locations: Vec<(Digest, Location<F>)> = Vec::new();
             let mut last_commit_loc: Option<Location<F>> = None;
@@ -211,7 +211,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         } else {
                             db.inactivity_floor_loc()
                         };
-                        let merkleized = batch.merkleize(&db, metadata, floor);
+                        let merkleized = batch.merkleize(&db, metadata, floor).await;
                         db.apply_batch(merkleized).await.unwrap();
                         db.commit().await.unwrap();
                         last_commit_loc = Some(db.bounds().end - 1);
@@ -234,7 +234,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             // Set the floor to at least safe_loc so the prune succeeds,
                             // but never below the current floor (monotonicity).
                             let floor = safe_loc.max(db.inactivity_floor_loc());
-                            let merkleized = batch.merkleize(&db, None, floor);
+                            let merkleized = batch.merkleize(&db, None, floor).await;
                             db.apply_batch(merkleized).await.unwrap();
                             db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().end - 1);
@@ -266,13 +266,14 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 batch = batch.set(k, v);
                             }
                             let floor = db.inactivity_floor_loc();
-                            let merkleized = batch.merkleize(&db, None, floor);
+                            let merkleized = batch.merkleize(&db, None, floor).await;
                             db.apply_batch(merkleized).await.unwrap();
                             db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().end - 1);
                             if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                                 let root = db.root();
-                                let _ = verify_proof(&hasher, &proof, safe_start, &ops, &root);
+                                let _ =
+                                    verify_proof::<Sha256, _, _>(&proof, safe_start, &ops, &root);
                             }
                         }
                     }
@@ -292,7 +293,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
                             let floor = db.inactivity_floor_loc();
-                            let batch = db.new_batch().merkleize(&db, None, floor);
+                            let batch = db.new_batch().merkleize(&db, None, floor).await;
                             db.apply_batch(batch).await.unwrap();
                             db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().end - 1);
@@ -328,7 +329,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             batch = batch.set(k, v);
                         }
                         let floor = db.inactivity_floor_loc();
-                        let merkleized = batch.merkleize(&db, None, floor);
+                        let merkleized = batch.merkleize(&db, None, floor).await;
                         db.apply_batch(merkleized).await.unwrap();
                         db.commit().await.unwrap();
                         last_commit_loc = Some(db.bounds().end - 1);
@@ -348,7 +349,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 batch = batch.set(k, v);
             }
             let floor = db.inactivity_floor_loc();
-            let merkleized = batch.merkleize(&db, None, floor);
+            let merkleized = batch.merkleize(&db, None, floor).await;
             db.apply_batch(merkleized).await.unwrap();
             db.destroy().await.unwrap();
         }

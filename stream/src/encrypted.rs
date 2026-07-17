@@ -58,12 +58,12 @@
 use crate::utils::codec::{append_frame, framed_len, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError, FixedSize};
 use commonware_cryptography::{
+    Signer,
     handshake::{
-        self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
-        Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck,
+        self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
+        dial_start, listen_end, listen_start,
     },
     transcript::Transcript,
-    Signer,
 };
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -72,7 +72,7 @@ use commonware_runtime::{
     Stream,
 };
 use commonware_utils::SystemTimeExt;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
@@ -184,7 +184,7 @@ where
 
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
-pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
+pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: Sink>(
     ctx: R,
     config: Config<S>,
     peer: S::PublicKey,
@@ -244,7 +244,7 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
 pub async fn listen<
-    R: BufferPooler + CryptoRngCore + Clock,
+    R: BufferPooler + CryptoRng + Clock,
     S: Signer,
     I: Stream,
     O: Sink,
@@ -392,7 +392,7 @@ impl<O: Sink> Sender<O> {
         let mut chunks = Vec::with_capacity(lower.max(1));
         let mut batch = Vec::new();
         let mut batch_total = 0usize;
-        let max_batch_size = self.pool.config().max_size.get();
+        let max_batch_size = self.pool.config().max_size().get();
 
         for buf in bufs {
             let msg = buf.into();
@@ -529,16 +529,16 @@ impl<I: Stream> Receiver<I> {
 mod test {
     use super::*;
     use commonware_codec::varint::UInt;
-    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+    use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{
-        deterministic, mocks, BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _,
-        Spawner as _, Supervisor as _,
+        BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
+        Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{sync::Mutex, NZUsize};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -799,8 +799,7 @@ mod test {
             deterministic::Config::new().with_network_buffer_pool_config(
                 BufferPoolConfig::for_network()
                     .with_pool_min_size(256)
-                    .with_min_size(NZUsize!(256))
-                    .with_max_size(NZUsize!(256)),
+                    .with_size_class_range(NZUsize!(256), NZUsize!(256), NZU32!(4096)),
             ),
         );
         executor.start(|context| async move {
@@ -870,8 +869,7 @@ mod test {
             deterministic::Config::new().with_network_buffer_pool_config(
                 BufferPoolConfig::for_network()
                     .with_pool_min_size(128)
-                    .with_min_size(NZUsize!(128))
-                    .with_max_size(NZUsize!(128)),
+                    .with_size_class_range(NZUsize!(128), NZUsize!(128), NZU32!(4096)),
             ),
         );
         executor.start(|context| async move {

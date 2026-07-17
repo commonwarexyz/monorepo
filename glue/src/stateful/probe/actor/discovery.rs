@@ -4,28 +4,28 @@ use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Decode, Encode, Error as CodecError, ReadExt};
 use commonware_consensus::{
+    Epochable,
     marshal::core::Variant,
     simplex::{
         scheme::Scheme,
         types::{Finalization, Proposal},
     },
     types::Epoch,
-    Epochable,
 };
 use commonware_cryptography::{
-    certificate::{Provider, Verifier},
     PublicKey,
+    certificate::{Provider, Verifier},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
     Faults, N3f1, NonZeroDuration,
+    channel::{fallible::OneshotExt, oneshot},
 };
 use futures::future::{self, Either};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -36,7 +36,7 @@ use tracing::debug;
 /// (after the floor has been consumed), it hands off to [`Service`].
 pub(super) struct Discovery<E, S, D, V, T, P, B>
 where
-    E: Spawner + CryptoRngCore + Clock + Metrics,
+    E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
@@ -57,7 +57,7 @@ where
 
 impl<E, S, D, V, T, P, B> Discovery<E, S, D, V, T, P, B>
 where
-    E: Spawner + CryptoRngCore + Clock + Metrics,
+    E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,

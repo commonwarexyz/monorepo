@@ -8,8 +8,9 @@
 use crate::{Hasher, Key, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, buffer};
 use commonware_storage::{
+    Context,
     journal::contiguous::fixed::Config as FConfig,
     merkle::{
         full::Config as MmrConfig,
@@ -22,7 +23,7 @@ use commonware_storage::{
         sync::compact,
     },
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use std::num::NonZeroU64;
 use tracing::error;
 
@@ -84,7 +85,7 @@ pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -110,7 +111,7 @@ where
                     batch = batch.append(value);
                 }
                 Operation::Commit(metadata, floor) => {
-                    let merkleized = batch.merkleize(self, metadata, floor);
+                    let merkleized = batch.merkleize(self, metadata, floor).await;
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
@@ -135,13 +136,13 @@ where
 
 impl<E> super::Syncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
-    async fn size(&self) -> Location {
+    fn size(&self) -> Location {
         self.bounds().end
     }
 
-    async fn sync_boundary(&self) -> Location {
+    fn sync_boundary(&self) -> Location {
         self.sync_boundary()
     }
 
@@ -161,9 +162,9 @@ where
 
 impl<E> super::CompactSyncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
 {
-    async fn target(&self) -> compact::Target<Self::Family, Key> {
+    fn target(&self) -> compact::Target<Self::Family, Key> {
         compact::Target::new(self.root(), self.bounds().end)
     }
 }

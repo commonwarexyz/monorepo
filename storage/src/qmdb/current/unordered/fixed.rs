@@ -8,16 +8,16 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
+    Context,
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     merkle::{Graftable, Location},
     qmdb::{
-        any::{unordered::fixed::Operation, value::FixedEncoding, FixedValue},
-        current::FixedConfig as Config,
         Error,
+        any::{FixedValue, unordered::fixed::Operation, value::FixedEncoding},
+        current::FixedConfig as Config,
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -37,15 +37,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 >;
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context,
+    K: Array,
+    V: FixedValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, K, V, H, T, N, S>
 {
     /// Initializes a [Db] authenticated database from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -83,16 +83,16 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable,
-            E: Context,
-            K: Array,
-            V: FixedValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            const N: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, N, S>
+        F: Graftable,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -110,11 +110,11 @@ pub mod test {
         qmdb::current::{tests::fixed_config, unordered::tests as shared},
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
-    use commonware_utils::test_rng_seeded;
-    use rand::RngCore as _;
+    use commonware_runtime::{Metrics, Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::TestRng;
+    use rand::Rng as _;
     use std::collections::HashMap;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
@@ -171,11 +171,10 @@ pub mod test {
         });
     }
 
-    /// Reads on a batch cache resolved locations that `merkleize` consumes to skip re-reading
-    /// those keys. The root must match a write-only batch's `merkleize`, both rooted at the DB
-    /// (D=0) and through one pending ancestor (D=1).
+    /// Reads on a batch must not perturb `merkleize`: the root must match a write-only batch's
+    /// `merkleize`, both rooted at the DB (D=0) and through one pending ancestor (D=1).
     #[test_traced("WARN")]
-    pub fn test_current_unordered_fixed_resolved_merkleize_parity() {
+    pub fn test_current_unordered_fixed_read_merkleize_parity() {
         fn key(i: u64) -> Digest {
             Sha256::hash(&i.to_be_bytes())
         }
@@ -195,7 +194,7 @@ pub mod test {
             db.commit().await.unwrap();
 
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
-                let mut rng = test_rng_seeded(salt);
+                let mut rng = TestRng::new(salt);
                 let mut out = Vec::new();
                 for _ in 0..600 {
                     let r = rng.next_u32() % 100;
@@ -249,6 +248,95 @@ pub mod test {
                 let fused_root = fb.merkleize(&db, None).await.unwrap().root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
             }
+        });
+    }
+
+    crate::qmdb::current::tests::staged_merkleize_parity_test!(
+        test_current_unordered_fixed_staged_merkleize_parity,
+        open_db
+    );
+
+    /// A staged read that resolved in a grandparent's diff must survive that grandparent
+    /// committing and being freed before `Staged::merkleize`, through the current layer:
+    /// the re-derived bases feed the grafted bitmap and `compute_current_layer`, so the
+    /// staged root must match the explicit path's and the full lifecycle must read back.
+    /// Mirrors the `any::unordered::variable` coverage of this interleaving (see
+    /// `StagedLoc`).
+    #[test_traced("WARN")]
+    pub fn test_current_unordered_fixed_staged_ancestor_commit_before_merkleize() {
+        fn key(i: u64) -> Digest {
+            Sha256::hash(&i.to_be_bytes())
+        }
+        fn val(i: u64) -> Digest {
+            Sha256::hash(&(i + 10000).to_be_bytes())
+        }
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db(ctx.child("current"), "staged-ancestor".to_string()).await;
+
+            // Committed base state, so the grandparent's write of key(0) supersedes a
+            // committed location. Its create of key(100) supersedes none.
+            let mut seed = db.new_batch();
+            for i in 0..8u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Grandparent -> parent chain. The parent touches neither staged key, so the
+            // staged reads resolve in the grandparent's diff.
+            let grandparent = db
+                .new_batch()
+                .write(key(0), Some(val(1_000)))
+                .write(key(100), Some(val(1_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .write(key(1), Some(val(1_002)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let read_keys = [key(0), key(100)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let (values, staged) = parent
+                .new_batch::<Sha256>()
+                .stage(&keys, &db)
+                .await
+                .unwrap();
+            assert_eq!(values, vec![Some(val(1_000)), Some(val(1_001))]);
+
+            // Commit and free the grandparent: the staged resolutions' locations migrate
+            // into the committed region, retiring their recorded bases.
+            db.apply_batch(grandparent).await.unwrap();
+
+            let updates = vec![(0, Some(val(2_000))), (1, Some(val(2_001)))];
+            let staged = staged
+                .merkleize(updates, Vec::new(), None, &db)
+                .await
+                .unwrap();
+
+            // The explicit path over the same post-commit state must agree.
+            let explicit_root = parent
+                .new_batch::<Sha256>()
+                .write(key(0), Some(val(2_000)))
+                .write(key(100), Some(val(2_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap()
+                .root();
+            assert_eq!(staged.root(), explicit_root);
+
+            db.apply_batch(parent).await.unwrap();
+            db.apply_batch(staged).await.unwrap();
+            db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(2_000)));
+            assert_eq!(db.get(&key(100)).await.unwrap(), Some(val(2_001)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1_002)));
         });
     }
 

@@ -2,18 +2,18 @@
 
 use super::{fixed, variable};
 use crate::{
+    Context,
     merkle::Graftable,
     qmdb::{
         any::{
+            FixedValue, VariableValue,
             unordered::{
                 fixed::Operation as FixedOperation, variable::Operation as VariableOperation,
             },
-            FixedValue, VariableValue,
         },
         current::BitmapPrunedBits,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
@@ -63,15 +63,15 @@ crate::qmdb::any::traits::impl_db_any! {
 // =============================================================================
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > BitmapPrunedBits for fixed::Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context,
+    K: Array,
+    V: FixedValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> BitmapPrunedBits for fixed::Db<F, E, K, V, H, T, N, S>
 {
     fn pruned_bits(&self) -> u64 {
         self.any.bitmap.pruned_bits()
@@ -81,21 +81,21 @@ impl<
         self.any.bitmap.get_bit(index)
     }
 
-    async fn oldest_retained(&self) -> u64 {
+    fn oldest_retained(&self) -> u64 {
         *self.any.bounds().start
     }
 }
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > BitmapPrunedBits for variable::Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context,
+    K: Array,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> BitmapPrunedBits for variable::Db<F, E, K, V, H, T, N, S>
 where
     VariableOperation<F, K, V>: Read,
 {
@@ -107,7 +107,7 @@ where
         self.any.bitmap.get_bit(index)
     }
 
-    async fn oldest_retained(&self) -> u64 {
+    fn oldest_retained(&self) -> u64 {
         *self.any.bounds().start
     }
 }
@@ -132,16 +132,16 @@ crate::qmdb::any::traits::impl_db_any! {
 }
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const P: usize,
-        const N: usize,
-        S: Strategy,
-    > BitmapPrunedBits for fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
+    F: Graftable,
+    E: Context,
+    K: Array,
+    V: FixedValue,
+    H: Hasher,
+    T: Translator,
+    const P: usize,
+    const N: usize,
+    S: Strategy,
+> BitmapPrunedBits for fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
 {
     fn pruned_bits(&self) -> u64 {
         self.any.bitmap.pruned_bits()
@@ -151,7 +151,7 @@ impl<
         self.any.bitmap.get_bit(index)
     }
 
-    async fn oldest_retained(&self) -> u64 {
+    fn oldest_retained(&self) -> u64 {
         *self.any.bounds().start
     }
 }
@@ -177,16 +177,16 @@ crate::qmdb::any::traits::impl_db_any! {
 }
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const P: usize,
-        const N: usize,
-        S: Strategy,
-    > BitmapPrunedBits for variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
+    F: Graftable,
+    E: Context,
+    K: Array,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+    const P: usize,
+    const N: usize,
+    S: Strategy,
+> BitmapPrunedBits for variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
 where
     VariableOperation<F, K, V>: Codec,
 {
@@ -198,7 +198,7 @@ where
         self.any.bitmap.get_bit(index)
     }
 
-    async fn oldest_retained(&self) -> u64 {
+    fn oldest_retained(&self) -> u64 {
         *self.any.bounds().start
     }
 }

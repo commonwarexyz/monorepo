@@ -26,7 +26,7 @@ impl Limiter {
     /// Attempt to reserve a slot. Returns `None` when the limiter is saturated.
     pub fn try_acquire(&self) -> Option<Reservation> {
         self.current
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
                 (current < self.max).then_some(current + 1)
             })
             .map(|_| Reservation {

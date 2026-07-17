@@ -5,6 +5,7 @@
 //! - [`Processing`] manages the pending-tip DAG and drives the inner application.
 
 use crate::stateful::{
+    Application,
     actor::{
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
@@ -12,7 +13,6 @@ use crate::stateful::{
         syncer::{self, SyncPlan, SyncResult},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
-    Application,
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -22,13 +22,12 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_runtime::{
-    spawn_cell, telemetry::metrics::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-};
+use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
+use commonware_storage::Context;
 use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
-use rand::Rng;
+use rand_core::Rng;
 use std::{num::NonZeroUsize, sync::Arc};
 
 mod mailbox;
@@ -83,7 +82,7 @@ impl PruneConfig {
 /// Configuration for constructing a [`Stateful`] application.
 pub struct Config<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -127,7 +126,7 @@ where
 /// application and verifying traits.
 pub struct Stateful<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -165,7 +164,7 @@ where
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
@@ -208,7 +207,7 @@ where
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor).await;
         } else if self.plan.requires_state_sync_floor() {
-            panic!("interrupted state sync must resume from a newly selected floor");
+            panic!("interrupted state sync is missing its persisted floor");
         } else {
             self.start_from_marshal().await;
         }
@@ -299,25 +298,25 @@ mod tests {
         tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
     };
     use commonware_consensus::{
+        Application as _, CertifiableBlock as _,
         marshal::{self, ancestry, core::Actor as MarshalActor},
         simplex::{
             mocks::scheme as scheme_mocks,
             types::{Finalization, Finalize, Proposal},
         },
         types::{Epoch, FixedEpocher, Round, View, ViewDelta},
-        Application as _, CertifiableBlock as _,
     };
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider},
+        certificate::{ConstantProvider, mocks::Fixture},
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
+        Clock as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc, sync::TracedAsyncRwLock};
     use std::{convert::Infallible, sync::Arc, time::Duration};
 
     #[derive(Clone)]

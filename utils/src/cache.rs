@@ -22,8 +22,8 @@
 //! in place. Eviction, [Clock::remove], and [Clock::retain] never free
 //! a slot's value; they detach the key and keep the slot (and its allocation)
 //! for the next insert. [Clock::get_or_insert_mut] exposes the reused slot
-//! as `&mut V` so callers holding pooled buffers can overwrite in place instead
-//! of reallocating. The value-returning inserts ([Clock::put],
+//! (and its index) so callers holding pooled buffers can overwrite in place
+//! instead of reallocating. The value-returning inserts ([Clock::put],
 //! [Clock::get_or_insert_with]) drop the displaced value as usual.
 //!
 //! # Concurrency
@@ -78,11 +78,13 @@ type Hasher = ahash::RandomState;
 /// A single cache slot.
 ///
 /// A slot is live when its key is present in the index, and free otherwise.
-/// Free slots keep their (now stale) `key` and `value` until the slot is reused.
+/// Free slots keep their (now stale) `key` and `value` until the slot is reused,
+/// with `live` cleared so [Clock::get_at] cannot resolve them.
 struct Slot<K, V> {
     key: K,
     value: V,
     referenced: AtomicBool,
+    live: bool,
 }
 
 /// A fixed-capacity key-value cache that evicts entries using the CLOCK
@@ -173,6 +175,30 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
         Some(&slot.value)
     }
 
+    /// Returns a reference to the value in `slot` if that slot currently holds
+    /// `key` as a live entry, recording use.
+    ///
+    /// This is the read half of an external slot index: callers that recorded a
+    /// key's slot (via [Self::get_or_insert_mut]) can resolve it with a
+    /// key compare instead of a hash lookup. Any stale index entry reads as a
+    /// miss rather than a wrong value: a slot reused for another key fails the
+    /// key compare, a slot freed by [Self::remove] or [Self::retain] is not
+    /// live, and an out-of-range slot does not exist. External indexes
+    /// therefore need no maintenance beyond tolerating misses.
+    #[inline]
+    pub fn get_at(&self, slot: usize, key: &K) -> Option<&V> {
+        let slot = self.slots.get(slot)?;
+        if !slot.live || slot.key != *key {
+            return None;
+        }
+
+        // Skip the store when the bit is already set (see [Self::get]).
+        if !slot.referenced.load(Ordering::Relaxed) {
+            slot.referenced.store(true, Ordering::Relaxed);
+        }
+        Some(&slot.value)
+    }
+
     /// Returns a mutable reference to the value for `key`, recording use.
     #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
@@ -235,8 +261,8 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
         Ok(&self.slots[slot].value)
     }
 
-    /// Returns a mutable reference to the slot for `key`, reusing an existing
-    /// allocation where possible.
+    /// Returns the slot index and a mutable reference to the slot for `key`,
+    /// reusing an existing allocation where possible.
     ///
     /// On a hit, records use and returns the current value. On a miss into a
     /// reused slot (a freed slot or an eviction victim), the returned reference
@@ -244,7 +270,11 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     /// overwrite. Only when the cache grows is `make` called to produce a fresh
     /// value. This lets callers holding pooled buffers overwrite in place
     /// rather than allocating on every insert.
-    pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> &mut V {
+    ///
+    /// The slot index identifies the entry until it is evicted or removed, so
+    /// callers can record it in an external index and resolve later reads with
+    /// [Self::get_at] instead of a hash lookup.
+    pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> (usize, &mut V) {
         let slot = match self.index.get(&key) {
             Some(&slot) => {
                 self.slots[slot].referenced.store(true, Ordering::Relaxed);
@@ -254,6 +284,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
                 Some(slot) => {
                     self.slots[slot].key = key.clone();
                     self.slots[slot].referenced.store(true, Ordering::Relaxed);
+                    self.slots[slot].live = true;
                     self.index.insert(key, slot);
                     slot
                 }
@@ -263,7 +294,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
                 }
             },
         };
-        &mut self.slots[slot].value
+        (slot, &mut self.slots[slot].value)
     }
 
     /// Removes `key`, returning whether it was present.
@@ -274,6 +305,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
         match self.index.remove(key) {
             Some(slot) => {
                 self.slots[slot].referenced.store(false, Ordering::Relaxed);
+                self.slots[slot].live = false;
                 self.free.push(slot);
                 true
             }
@@ -292,6 +324,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
             let keep = keep(key, &slots[slot].value);
             if !keep {
                 slots[slot].referenced.store(false, Ordering::Relaxed);
+                slots[slot].live = false;
                 free.push(slot);
             }
             keep
@@ -317,6 +350,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
             key,
             value,
             referenced: AtomicBool::new(true),
+            live: true,
         });
         slot
     }
@@ -328,6 +362,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
                 self.slots[slot].key = key.clone();
                 self.slots[slot].value = value;
                 self.slots[slot].referenced.store(true, Ordering::Relaxed);
+                self.slots[slot].live = true;
                 self.index.insert(key, slot);
                 slot
             }
@@ -379,6 +414,7 @@ impl<K: Hash + Eq + Clone + Default, V> Clock<K, V> {
                 key: K::default(),
                 value: make(),
                 referenced: AtomicBool::new(false),
+                live: false,
             });
             self.free.push(slot);
         }
@@ -425,6 +461,10 @@ mod tests {
                 assert!(!free.contains(&slot), "slot {slot} both live and free");
                 assert!(seen.insert(slot), "slot {slot} mapped twice");
                 assert!(self.slots[slot].key == *key);
+                assert!(self.slots[slot].live, "indexed slot {slot} not live");
+            }
+            for &slot in &self.free {
+                assert!(!self.slots[slot].live, "free slot {slot} still live");
             }
         }
     }
@@ -571,10 +611,12 @@ mod tests {
         assert_eq!(cache.len(), 1);
 
         // Reusing the freed slot does not call the factory or grow.
-        *cache.get_or_insert_mut(3, || {
-            makes.set(makes.get() + 1);
-            30
-        }) = 30;
+        *cache
+            .get_or_insert_mut(3, || {
+                makes.set(makes.get() + 1);
+                30
+            })
+            .1 = 30;
         assert_eq!(
             makes.get(),
             2,
@@ -614,7 +656,7 @@ mod tests {
         let makes = Cell::new(0);
         let mut cache: Clock<u64, u64> = Clock::new(NZUsize!(3));
         for k in 0..100u64 {
-            let v = cache.get_or_insert_mut(k, || {
+            let (_, v) = cache.get_or_insert_mut(k, || {
                 makes.set(makes.get() + 1);
                 0
             });
@@ -643,10 +685,12 @@ mod tests {
 
         // Churn many keys; no further factory calls, slot vector stays at capacity.
         for k in 0..100u64 {
-            *cache.get_or_insert_mut(k, || {
-                makes.set(makes.get() + 1);
-                0
-            }) = k;
+            *cache
+                .get_or_insert_mut(k, || {
+                    makes.set(makes.get() + 1);
+                    0
+                })
+                .1 = k;
         }
         assert_eq!(makes.get(), 3, "prefilled slots must be reused");
         assert_eq!(cache.slots.len(), 3);
@@ -739,6 +783,88 @@ mod tests {
             },
         );
         assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn test_get_at_validates_key() {
+        let mut cache = Clock::new(NZUsize!(2));
+        let (slot1, v) = cache.get_or_insert_mut(1u64, || 0u64);
+        *v = 10;
+        let (slot2, v) = cache.get_or_insert_mut(2u64, || 0u64);
+        *v = 20;
+
+        // A recorded slot resolves with a key compare, no hash lookup.
+        assert_eq!(cache.get_at(slot1, &1).copied(), Some(10));
+        assert_eq!(cache.get_at(slot2, &2).copied(), Some(20));
+
+        // The wrong key for a slot and an out-of-range slot both read as misses.
+        assert_eq!(cache.get_at(slot1, &2), None);
+        assert_eq!(cache.get_at(cache.capacity(), &1), None);
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn test_get_at_stale_slot_after_eviction() {
+        // Evicting key 1 reuses its slot for key 3: the stale index entry fails
+        // the key compare while the new key resolves at the same slot.
+        let mut cache = Clock::new(NZUsize!(1));
+        let (slot, v) = cache.get_or_insert_mut(1u64, || 0u64);
+        *v = 10;
+        let (reused, v) = cache.get_or_insert_mut(3u64, || 0u64);
+        *v = 30;
+        assert_eq!(slot, reused);
+        assert_eq!(cache.get_at(slot, &1), None);
+        assert_eq!(cache.get_at(slot, &3).copied(), Some(30));
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn test_get_at_freed_slot_is_a_miss() {
+        // remove() keeps the slot's stale key for allocation reuse, but get_at must not
+        // resolve it: freed entries read as misses without any external index hygiene.
+        let mut cache = Clock::new(NZUsize!(2));
+        let (slot, v) = cache.get_or_insert_mut(1u64, || 0u64);
+        *v = 10;
+        assert!(cache.remove(&1));
+        assert_eq!(cache.get_at(slot, &1), None);
+
+        // Reusing the slot for another key resolves the new key only.
+        let (reused, v) = cache.get_or_insert_mut(2u64, || 0u64);
+        *v = 20;
+        assert_eq!(reused, slot);
+        assert_eq!(cache.get_at(slot, &1), None);
+        assert_eq!(cache.get_at(slot, &2).copied(), Some(20));
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn test_get_at_records_use() {
+        // Mirrors test_peek_does_not_record_use's setup: after it, slot1=key2
+        // and slot2=key3 are unreferenced with the hand at slot1. get_at on
+        // key2 must set its bit so the next insert evicts key3 instead.
+        let mut c = Clock::new(NZUsize!(3));
+        c.put(1u64, 10u64);
+        c.put(2, 20);
+        c.put(3, 30);
+        c.put(4, 40); // evicts key1, clears key2/key3 bits, hand -> slot1
+
+        let slot = *c.index.get(&2).unwrap();
+        assert_eq!(c.get_at(slot, &2).copied(), Some(20));
+        c.put(5, 50);
+        assert!(c.contains(&2), "get_at must protect key2 from eviction");
+        assert!(!c.contains(&3));
+        c.check_invariants();
+    }
+
+    #[test]
+    fn test_get_or_insert_mut_slot_stable_on_hit() {
+        let mut cache = Clock::new(NZUsize!(2));
+        let (slot, v) = cache.get_or_insert_mut(1u64, || 0u64);
+        *v = 10;
+        let (hit_slot, v) = cache.get_or_insert_mut(1u64, || unreachable!());
+        assert_eq!(slot, hit_slot);
+        assert_eq!(*v, 10);
+        cache.check_invariants();
     }
 
     #[test]
@@ -870,7 +996,7 @@ mod tests {
                         prop_assert_eq!(cache.peek(&k).copied(), Some(stored));
                     }
                     Op::GetOrInsertMut(k, v) => {
-                        *cache.get_or_insert_mut(k, || v) = v;
+                        *cache.get_or_insert_mut(k, || v).1 = v;
                         model.insert(k, v);
                         prop_assert_eq!(cache.peek(&k).copied(), Some(v));
                     }

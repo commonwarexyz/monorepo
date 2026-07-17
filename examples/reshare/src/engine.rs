@@ -1,11 +1,11 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{genesis, Application, Block, EpochProvider, Provider},
-    dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
+    BLOCKS_PER_EPOCH,
+    application::{Application, Block, EpochProvider, Provider, genesis},
+    dkg::{self, MAX_SUPPORTED_MODE, UpdateCallBack},
     orchestrator,
     setup::PeerConfig,
-    BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -19,23 +19,23 @@ use commonware_consensus::{
     types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
+    BatchVerifier, Hasher, Signer,
     bls12381::{
         dkg::feldman_desmedt::Output,
         primitives::{group, variant::Variant},
     },
     ed25519::Batch,
-    BatchVerifier, Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Network, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{union, NZUsize, NZU16, NZU32, NZU64};
+use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, union};
 use futures::future::try_join_all;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZero, NonZeroU16, NonZeroUsize},
@@ -82,7 +82,7 @@ where
 
 pub struct Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -126,7 +126,7 @@ where
 
 impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,

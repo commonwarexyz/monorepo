@@ -14,14 +14,15 @@
 //! baselines would need ~40+ GB at that size).
 
 use commonware_runtime::{
-    telemetry::metrics::{Metric, Registered, Registration},
     Metrics, Name, Supervisor,
+    telemetry::metrics::{Metric, Registered, Registration},
 };
 use commonware_storage::{
-    index::{ordered, partitioned, unordered, Unordered},
+    index::{Unordered, ordered, partitioned, unordered},
     translator::{Cap, EightCap},
 };
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use commonware_utils::TestRng;
+use rand::Rng;
 use std::{
     hint::black_box,
     time::{Duration, Instant},
@@ -73,14 +74,14 @@ impl Metrics for DummyMetrics {
 /// replay the identical sequence. A fast RNG keeps per-key generation negligible next to the index
 /// op, so the numbers stay comparable to materialized keys.
 fn measure<I: Unordered<Value = u64>>(mut index: I, items: u64) -> (Duration, Duration) {
-    let mut rng = StdRng::seed_from_u64(SEED);
+    let mut rng = TestRng::new(SEED);
     let start = Instant::now();
     for value in 0..items {
         index.insert(&rng.next_u64().to_be_bytes(), value);
     }
     let insert = start.elapsed();
 
-    let mut rng = StdRng::seed_from_u64(SEED);
+    let mut rng = TestRng::new(SEED);
     let start = Instant::now();
     for _ in 0..items {
         black_box(index.get(&rng.next_u64().to_be_bytes()).next().is_some());

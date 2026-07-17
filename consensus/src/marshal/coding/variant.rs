@@ -1,22 +1,22 @@
 use crate::{
+    CertifiableBlock,
     marshal::{
         ancestry::BlockProvider,
         coding::{
             shards,
-            types::{coding_config_for_participants, CodedBlock, CodedBlockCfg, StoredCodedBlock},
+            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
         },
         core::{Buffer, CommitmentFallback, Mailbox, Variant},
     },
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
-    types::{coding::Commitment, Round},
-    CertifiableBlock,
+    types::{Round, coding::Commitment},
 };
 use commonware_codec::Read;
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{certificate::Scheme, Committable, Digestible, Hasher, PublicKey};
+use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 /// The coding variant of Marshal, which uses erasure coding for block dissemination.
 ///
@@ -84,6 +84,14 @@ where
         block.into_inner()
     }
 
+    fn into_inner_shared(block: Arc<Self::Block>) -> Arc<Self::ApplicationBlock> {
+        block.inner_shared()
+    }
+
+    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
+        block.into_inner_shared()
+    }
+
     fn from_application_block(
         block: Self::ApplicationBlock,
         payload: Self::Commitment,
@@ -104,25 +112,25 @@ where
     async fn find_by_digest(
         &self,
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
-    ) -> Option<CodedBlock<B, C, H>> {
+    ) -> Option<Arc<CodedBlock<B, C, H>>> {
         self.get_by_digest(digest).await
     }
 
-    async fn find_by_commitment(&self, commitment: Commitment) -> Option<CodedBlock<B, C, H>> {
+    async fn find_by_commitment(&self, commitment: Commitment) -> Option<Arc<CodedBlock<B, C, H>>> {
         self.get(commitment).await
     }
 
     fn subscribe_by_digest(
         &self,
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
-    ) -> Option<oneshot::Receiver<CodedBlock<B, C, H>>> {
+    ) -> Option<oneshot::Receiver<Arc<CodedBlock<B, C, H>>>> {
         Some(self.subscribe_by_digest(digest))
     }
 
     fn subscribe_by_commitment(
         &self,
         commitment: Commitment,
-    ) -> Option<oneshot::Receiver<CodedBlock<B, C, H>>> {
+    ) -> Option<oneshot::Receiver<Arc<CodedBlock<B, C, H>>>> {
         Some(self.subscribe(commitment))
     }
 
@@ -130,9 +138,9 @@ where
         self.prune(commitment);
     }
 
-    fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
+    fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
-        self.proposed(round, block);
+        self.proposed_shared(round, block);
     }
 }
 
@@ -149,7 +157,7 @@ where
     fn subscribe_parent(
         &self,
         block: &Self::Block,
-    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
         let receiver = block.height().previous().map(|parent_height| {
             self.subscribe_by_commitment(
                 block.context().parent.1,
@@ -158,13 +166,7 @@ where
                 },
             )
         });
-        async move {
-            let receiver = receiver?;
-            receiver
-                .await
-                .ok()
-                .map(<Coding<B, C, H, P> as Variant>::into_inner)
-        }
+        async move { receiver?.await.ok().map(|block| block.inner_shared()) }
     }
 }
 
@@ -179,13 +181,13 @@ mod tests {
     use commonware_codec::{EncodeSize, Error, Read, Write};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
+        Digest as _, Digestible, Signer as _,
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Sha256},
-        Digest as _, Digestible, Signer as _,
     };
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, NZU16};
+    use commonware_utils::{NZU16, test_rng};
 
     type TestContext = Context<Commitment, PublicKey>;
     type InnerBlock = MockBlock<Sha256Digest, TestContext>;

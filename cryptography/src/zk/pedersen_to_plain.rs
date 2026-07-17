@@ -101,7 +101,7 @@ use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space},
     synthetic::Synthetic,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Generators used by the proof system.
 ///
@@ -288,7 +288,7 @@ where
 /// This is a low-level constructor and assumes that `claim` and `witness`
 /// correspond. It does not check that relationship for you.
 pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<G>,
     claim: &Claim<G>,
@@ -343,7 +343,7 @@ where
 ///
 /// Returns `true` if the proof is valid for the current transcript state.
 pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode + PartialEq>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<Synthetic<F, G>>,
     claim: &Claim<G>,
@@ -393,7 +393,7 @@ mod conformance {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
-    use crate::bls12381::primitives::group::{Scalar as F, G1 as G};
+    use crate::bls12381::primitives::group::{G1 as G, Scalar as F};
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup};
     use commonware_parallel::Sequential;
@@ -491,7 +491,7 @@ pub mod fuzz {
             self.honest
         }
 
-        fn verify(self, rng: &mut impl CryptoRngCore) -> bool {
+        fn verify(self, rng: &mut impl CryptoRng) -> bool {
             let ns = if self.bad_namespace {
                 BAD_NAMESPACE
             } else {
@@ -583,7 +583,7 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod test {
-    use super::{fuzz, Claim, Proof, Setup};
+    use super::{Claim, Proof, Setup, fuzz};
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::test::{F, G};

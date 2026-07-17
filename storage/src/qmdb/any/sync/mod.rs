@@ -2,20 +2,22 @@
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
 //! (ordered/unordered, fixed/variable).
 //!
-//! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
+//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, fixed, variable},
     },
-    merkle::{self, full, Location},
+    merkle::{self, Location, full},
     qmdb::{
         self,
         any::{
-            db::{Db, Metrics},
-            operation::{update::Update, Operation},
+            FixedConfig, FixedValue, VariableConfig, VariableValue,
+            db::Db,
+            operation::{Operation, update::Update},
             ordered::{
                 fixed::{
                     Db as OrderedFixedDb, Operation as OrderedFixedOp, Update as OrderedFixedUpdate,
@@ -35,17 +37,16 @@ use crate::{
                     Update as UnorderedVariableUpdate,
                 },
             },
-            FixedConfig, FixedValue, VariableConfig, VariableValue,
         },
+        metrics::Metrics,
         operation::{Committable, Key},
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_utils::{range::NonEmptyRange, Array};
+use commonware_utils::{Array, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 
 #[cfg(test)]
@@ -155,42 +156,20 @@ macro_rules! impl_sync_database {
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
                 journal: &Self::Journal,
             ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-                if target.range.start() == Location::new(0) {
-                    return Ok(None);
-                }
-
-                let bounds = journal.bounds();
-                if Location::new(bounds.start) > target.range.start()
-                    || Location::new(bounds.end) != target.range.end()
+                if target.range.start() == Location::new(0)
+                    || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
                 {
                     return Ok(None);
                 }
 
-                let hasher = qmdb::hasher::<H>();
-                let merkle = full::Merkle::<F, _, _, S>::init(
-                    context.child("local_boundary_merkle"),
-                    &hasher,
+                // The target's range starts at the inactivity floor.
+                qmdb::sync::local_boundary_nodes::<F, _, H, S>(
+                    context,
                     config.merkle_config.clone(),
-                )
-                .await?;
-                let bounds = merkle.bounds();
-                if bounds.start > target.range.start() || bounds.end != target.range.end() {
-                    return Ok(None);
-                }
-
-                let inactive_peaks = F::inactive_peaks(
-                    F::location_to_position(target.range.end()),
+                    target,
                     target.range.start(),
-                );
-                if merkle.root(&hasher, inactive_peaks)? != target.root {
-                    return Ok(None);
-                }
-
-                merkle
-                    .pinned_nodes_at(target.range.start())
-                    .await
-                    .map(Some)
-                    .map_err(Into::into)
+                )
+                .await
             }
 
             fn root(&self) -> Self::Digest {

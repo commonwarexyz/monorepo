@@ -1,8 +1,8 @@
 //! Utilities for working with histograms.
 
-use super::{raw, Histogram, MetricsExt as _};
+use super::{Histogram, MetricsExt as _, raw};
 use crate::{Clock, Metrics};
-use std::{sync::Arc, time::SystemTime};
+use std::{future::Future, sync::Arc, time::SystemTime};
 
 /// Convenience methods for Prometheus histograms.
 pub trait HistogramExt {
@@ -66,6 +66,11 @@ impl Timed {
         Self { histogram }
     }
 
+    /// Register a duration histogram (see [`duration_histogram`]) wrapped for timing.
+    pub fn register<M: Metrics>(context: &M, name: &'static str, help: &'static str) -> Self {
+        Self::new(duration_histogram(context, name, help))
+    }
+
     /// Create a new timer that can record a duration from the current time.
     pub fn timer<C: Clock>(&self, clock: &C) -> Timer {
         let start = clock.current();
@@ -75,10 +80,14 @@ impl Timed {
         }
     }
 
-    /// Time an operation, recording only if it returns `Some`.
-    pub fn time_some<C: Clock, T, F: FnOnce() -> Option<T>>(&self, clock: &C, f: F) -> Option<T> {
+    /// Time an operation, recording a sample only if it resolves to `Some`.
+    pub async fn time_some<C: Clock, T>(
+        &self,
+        clock: &C,
+        op: impl Future<Output = Option<T>>,
+    ) -> Option<T> {
         let start = clock.current();
-        let result = f();
+        let result = op.await;
         if result.is_some() {
             self.histogram.observe_between(start, clock.current());
         }
@@ -150,7 +159,7 @@ pub fn duration_histogram<M: Metrics>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Runner as _, Supervisor as _};
+    use crate::{Runner as _, Supervisor as _, deterministic};
     use std::time::Duration;
 
     #[test]

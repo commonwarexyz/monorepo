@@ -1,15 +1,15 @@
 use commonware_cryptography::{
+    Signer as _,
     bls12381::{
         dkg::feldman_desmedt::deal,
         primitives::{self, sharing::Mode, variant::MinSig},
     },
     ed25519::PrivateKey,
-    Signer as _,
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Faults, N3f1, NZUsize, TryCollect};
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
@@ -33,7 +33,7 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
                         |b| {
                             b.iter_batched(
                                 || {
-                                    let mut rng = StdRng::seed_from_u64(0);
+                                    let mut rng = test_rng();
                                     let players = (0..n)
                                         .map(|i| PrivateKey::from_seed(i as u64).public_key())
                                         .try_collect()
