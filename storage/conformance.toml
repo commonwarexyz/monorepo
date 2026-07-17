@@ -1,14 +1,10 @@
 ["commonware_storage::archive::conformance::StorageConformance<ArchiveImmutableWorkload>"]
 n_cases = 128
-hash = "29a826bf29320a26b0a20c1016ac47355e5bbfe55b66da846f3aafdc98cfd30e"
+hash = "dc16fa6cd790841b5d7cfb02f5eae196ffc6718f1b3a0dc64f8ff9935312c904"
 
 ["commonware_storage::archive::conformance::StorageConformance<ArchivePrunableWorkload>"]
 n_cases = 128
-hash = "5d3ea89212450380ef96fded963c69f084ab7b94405e73a66aacadc63ac4a833"
-
-["commonware_storage::archive::immutable::storage::conformance::CodecConformance<Record>"]
-n_cases = 65536
-hash = "892ba87ed9fa60ee60f694f927de60c3ee7fcdddd5a04d330c7511533cc2ca8d"
+hash = "8e81c683ee047fd42918b310095e39b68c5c7635184bbf92218c5f95eda2b653"
 
 ["commonware_storage::archive::prunable::storage::conformance::CodecConformance<Record<U64>>"]
 n_cases = 65536
@@ -32,19 +28,11 @@ hash = "9add8634d4f06c3fb7f6dfd80630f38013ecb20849c18accd0579d7eb2ca11d5"
 
 ["commonware_storage::freezer::conformance::StorageConformance<FreezerWorkload>"]
 n_cases = 512
-hash = "bfaf47d0635c94993013a8e722580e4b9684b2900dba3ab64d19b6611e35f9ca"
-
-["commonware_storage::freezer::storage::conformance::CodecConformance<Checkpoint>"]
-n_cases = 65536
-hash = "7788e346e6513bdb1ffd1332ca60737940df0879b5972b4bd1127bbeae54688a"
+hash = "fb45207ace52d7d077c405ac9ad326e885e690abd2da6df276955bd6dc77e843"
 
 ["commonware_storage::freezer::storage::conformance::CodecConformance<Cursor>"]
 n_cases = 65536
 hash = "fa5e588e9074776440c9d7e46729cc60c8d0cea87e5afc4326640106abcea7ba"
-
-["commonware_storage::freezer::storage::conformance::CodecConformance<Entry>"]
-n_cases = 65536
-hash = "572cd3da262e0bb13d2c6780c5be7bbadb21f93e4dbf2c787febecdba62671df"
 
 ["commonware_storage::freezer::storage::conformance::CodecConformance<Record<U64>>"]
 n_cases = 65536
@@ -60,11 +48,11 @@ hash = "6eeb67c8d1be229dc93df478a6f358a6cf47fe677cc2db55b4ea33618025004f"
 
 ["commonware_storage::journal::conformance::StorageConformance<ContiguousFixedWorkload>"]
 n_cases = 512
-hash = "f536d20df0e6403396c4806cf773d4f3e47817b251558151172cf169c8798abe"
+hash = "fd64a9dbdf709e12081af87f258b27a867383bcdd885c18d6958689c68d16621"
 
 ["commonware_storage::journal::conformance::StorageConformance<ContiguousVariableWorkload>"]
 n_cases = 512
-hash = "9620cb74707e548225d2abdd48ad4ea05a04bcc2fe46854b9a9ee4d44d9bdf9a"
+hash = "47b4a061f714ef59a7f86a0272f4ad59de39629bf6986c55ddade78a298b7430"
 
 ["commonware_storage::journal::conformance::StorageConformance<SegmentedFixedWorkload>"]
 n_cases = 512
@@ -72,15 +60,15 @@ hash = "833612c5cd5b517bf15d709bcdd3eaf210c87571e66768d60c8206f0ba896bee"
 
 ["commonware_storage::journal::conformance::StorageConformance<SegmentedGlobWorkload>"]
 n_cases = 512
-hash = "daab2a0b252b8b9bbc12833acc1af2fdf973981a38258f273b5e9f610a28521e"
+hash = "ace3e5f82be50f5cc5cd0c1739b6407e0400e6541676f52f8db2790b9218b5d6"
 
 ["commonware_storage::journal::conformance::StorageConformance<SegmentedOversizedWorkload>"]
 n_cases = 512
-hash = "88aaaaf38e23e1473ecb0f1fe4995c80c86fa425868f8fa838637d04819fe861"
+hash = "4e63d40c6083aae68c2596004b4d27f82908797f4d58285990a456fe40343138"
 
 ["commonware_storage::journal::conformance::StorageConformance<SegmentedVariableWorkload>"]
 n_cases = 512
-hash = "7b9035a6bad006125d555cf12e03b72e38107b951277e4ba306bd3bdcfd78c63"
+hash = "eb5be6809d05492e4a7757146a71808374036b0bc58c6776e8486a107ea618a3"
 
 ["commonware_storage::merkle::conformance::tests::MmbRootStability"]
 n_cases = 200
@@ -104,7 +92,7 @@ hash = "f6c441a49ff8828cd4f3f41d44e5575267754b6d358faab14ff2cefd6b7808ec"
 
 ["commonware_storage::metadata::conformance::StorageConformance<MetadataWorkload>"]
 n_cases = 256
-hash = "6c04c8d3c636fc64c602741cca2059faae3b899d8733593e1793f80dfb1b093a"
+hash = "9ad20f536c808f68a1b88ecec202c03946d528da7f35056d31f25e0235ff87f9"
 
 ["commonware_storage::ordinal::conformance::StorageConformance<OrdinalWorkload>"]
 n_cases = 256
@@ -508,4 +496,4 @@ hash = "f742d92a0af0af78a9519bf637bc52ea869965a85a84101a4c53f53eb39325ca"
 
 ["commonware_storage::queue::conformance::StorageConformance<QueueWorkload>"]
 n_cases = 512
-hash = "e37e4e7c9a9dc2fbe3654c268db5220969bc187537022a2bfb0075b59f66f0df"
+hash = "2ee6d2073ca42e1088521d92dbfa3ba4131e78ed788b404a1da350fce274fcdb"
