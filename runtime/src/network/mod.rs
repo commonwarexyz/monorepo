@@ -622,6 +622,44 @@ mod tests {
         client_result.expect("Client task failed");
     }
 
+    /// Test a network backend's connect timeout against a real TCP connection.
+    ///
+    /// This is Linux-only because the behavior of a zero-length listen backlog is
+    /// platform-specific. Linux permits one connection to occupy the accept queue, and
+    /// while that connection remains unaccepted another connection attempt is left
+    /// pending rather than completing. Other operating systems may clamp the backlog to a
+    /// different value or handle an overflowing accept queue differently.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn test_network_connect_timeout<N: crate::Network>(
+        network: N,
+        connect_timeout: Duration,
+    ) {
+        // Create a loopback listener with the smallest possible accept queue.
+        let socket = tokio::net::TcpSocket::new_v4().expect("Failed to create TCP socket");
+        socket
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("Failed to bind TCP socket");
+        let listener = socket.listen(0).expect("Failed to listen on TCP socket");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+
+        // Establish one connection without accepting it. Keeping both the listener
+        // and this connection alive fills the accept queue, so the next connection
+        // remains pending long enough for the backend's connect timeout to fire.
+        let _queued_connection = tokio::net::TcpStream::connect(listener_addr)
+            .await
+            .expect("Failed to fill listener accept queue");
+
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(connect_timeout * 2, network.dial(listener_addr))
+            .await
+            .expect("Dial did not honor connect timeout");
+
+        assert!(matches!(result, Err(crate::Error::Timeout)));
+
+        // Confirm the dial remained pending for the configured budget.
+        assert!(start.elapsed() >= connect_timeout);
+    }
+
     /// Network stress tests
     pub(super) async fn stress_test_network_trait<N, F>(new_network: F)
     where

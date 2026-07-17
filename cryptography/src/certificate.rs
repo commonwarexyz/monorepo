@@ -556,9 +556,8 @@ impl Signers {
     /// Iterates over signer indices in ascending order.
     pub fn iter(&self) -> impl Iterator<Item = Participant> + '_ {
         self.bitmap
-            .iter()
-            .enumerate()
-            .filter_map(|(index, bit)| bit.then_some(Participant::from_usize(index)))
+            .ones_iter()
+            .map(|index| Participant::from_usize(index as usize))
     }
 }
 

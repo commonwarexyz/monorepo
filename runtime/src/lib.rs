@@ -66,8 +66,8 @@ stability_scope!(BETA {
 
     pub mod iobuf;
     pub use iobuf::{
-        BufferPool, BufferPoolConfig, BufferPoolThreadCache, Builder as IoBufsBuilder, IoBuf,
-        IoBufMut, IoBufs, IoBufsMut, cache_line_size, page_size,
+        BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache,
+        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut, cache_line_size, page_size,
     };
 
     pub mod utils;
@@ -4024,13 +4024,19 @@ mod tests {
             assert!(storage_buf.capacity() >= 4096);
 
             // Verify pools have expected configurations
-            assert_eq!(
-                context.network_buffer_pool().config().max_per_class.get(),
-                expected_network_max_per_class
+            assert!(
+                context
+                    .network_buffer_pool()
+                    .config()
+                    .size_classes()
+                    .all(|class| class.max_buffers.get() == expected_network_max_per_class)
             );
-            assert_eq!(
-                context.storage_buffer_pool().config().max_per_class.get(),
-                expected_storage_max_per_class
+            assert!(
+                context
+                    .storage_buffer_pool()
+                    .config()
+                    .size_classes()
+                    .all(|class| class.max_buffers.get() == expected_storage_max_per_class)
             );
         });
     }
