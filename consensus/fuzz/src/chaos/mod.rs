@@ -3,16 +3,23 @@
 //! (`tools/chaos`) for the in-process libfuzzer harness.
 //!
 //! Where byzzfuzz owns bounded protocol-round Byzantine faults and mallory owns
-//! the adaptive Byzantine adversary, chaos owns the CRASH-FAULT axis. Its four
-//! firsts relative to every existing mode:
+//! the adaptive Byzantine adversary, chaos owns the CRASH-FAULT axis. It checks
+//! SAFETY only. Its firsts relative to every existing mode:
 //!
 //! - lifecycle faults on ANY node (mallory pins lifecycle to node 0);
 //! - multiple concurrently broken nodes (a killed node beside a disconnected
 //!   one), composed by the schedule's per-node conditions;
-//! - deliberate below-quorum windows with an ONLINE tip-freeze oracle
-//!   (progress without quorum is a safety finding, not a silent counter);
-//! - mid-run liveness-stall detection with laggard naming (every other mode
-//!   asserts liveness only at episode end).
+//! - the `crate::invariants` suite asserted at EVERY step boundary (not just
+//!   at episode end), plus a step-level finalized-payload-uniqueness oracle
+//!   over the reporters' append-only finalize-vote maps (loss-free across
+//!   polls).
+//!
+//! Both `SimplexId` and `SimplexCertificateMock` targets ship, and both run the
+//! finalized-payload-uniqueness check: the harness reports individual finalize
+//! votes to the reporter directly (no `AttributableReporter` wrapper), so the
+//! append-only `finalizes` map is populated regardless of scheme
+//! attributability, and a conflicting finalization landing between two polls is
+//! never lost (unlike the overwrite-only certificate map).
 //!
 //! Vocabulary, mapped onto the mechanisms it reuses:
 //!
@@ -29,13 +36,16 @@
 //! saved input replays the execution exactly; findings panic (libfuzzer keeps
 //! the input) and the decision log is dumped when `CONSENSUS_FUZZ_LOG` is set.
 //!
-//! Out of scope, deliberately: a graceful per-node stop (the engine only
-//! honors a runtime-wide stop signal, so "stop" would be kill with extra
-//! steps); degraded-but-live network weather (the netem analog; mallory's
-//! packet-fault pump is the natural future home); indefinite-run bug classes
-//! such as slow leaks (an episode is bounded by its finalization budget); and
-//! the reference's unexpected-death check (the deterministic runtime already
-//! propagates any engine task panic into the run).
+//! Out of scope, deliberately: liveness (a sound liveness oracle would need a
+//! journal-replay / catch-up completion signal the harness does not expose, and
+//! the finalization monitors are lossy, so chaos asserts none, at any point);
+//! a graceful per-node stop (the engine only honors a runtime-wide stop signal,
+//! so "stop" would be kill with extra steps); degraded-but-live network weather
+//! (the netem analog; mallory's packet-fault pump is the natural future home);
+//! indefinite-run bug classes such as slow leaks (an episode is bounded by its
+//! finalization budget); and the reference's unexpected-death check (the
+//! deterministic runtime already propagates any engine task panic into the
+//! run).
 
 pub(crate) mod log;
 pub(crate) mod runner;

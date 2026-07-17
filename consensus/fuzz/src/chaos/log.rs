@@ -1,8 +1,7 @@
 //! On-panic decision log for chaos runs.
 //!
 //! The chaos runner pushes one line per step (the enacted action, the believed
-//! conditions, the live count, and the liveness expectation), mirroring the
-//! reference rig's journal fields. The buffer is bounded and quiet by default;
+//! conditions, and the live count). The buffer is bounded and quiet by default;
 //! entries are only surfaced by [`take`], which `fuzz()` calls in its
 //! panic-catching path. Successful runs flush the buffer so the next run starts
 //! clean.

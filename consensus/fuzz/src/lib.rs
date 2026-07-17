@@ -2801,21 +2801,17 @@ impl FuzzMode for MalloryContainer {
 /// Each episode runs four honest validators (N4F0C4, quorum three) and drives a
 /// reactive loop: each step draws one action (kill, durable restart, bounded
 /// reload, per-node disconnect, reconnect) from a pure quorum-aware schedule
-/// seeded entirely by the fuzzer input, under one invariant: the schedule
-/// always knows whether the committee should be live. It never takes the
-/// healthy set below quorum except through a rare, deliberately sanctioned and
-/// bounded outage window, and every fault is scheduled together with its own
-/// heal. The `invariants` safety suite runs at EVERY step boundary with an
-/// EMPTY Byzantine set (everyone is honest, so any equivocation, fault
-/// evidence, or invalid report is a finding the moment it appears), and an
-/// online checker cross-references every observation against the schedule's
-/// published expectations for what the suite cannot see: finalized-digest
-/// stability across re-reports, no progress while quorum is deliberately held
-/// away (after a settle margin), and no liveness stall while quorum is
-/// expected. The episode-end oracle heals everything, requires all four nodes
-/// to finalize past the highest pre-heal frontier, and runs the same suite
-/// once more. Chaos keeps no cross-input state, so replaying a saved input
-/// reproduces the run exactly. See `chaos`.
+/// seeded entirely by the fuzzer input. The schedule never takes the healthy
+/// set below quorum except through a rare, deliberately sanctioned and bounded
+/// outage window, and every fault is scheduled together with its own heal, so
+/// it never permanently wedges the cluster. Chaos checks SAFETY only: the
+/// `invariants` suite runs at EVERY step boundary with an EMPTY Byzantine set
+/// (everyone is honest, so any conflicting finalization, equivocation, fault
+/// evidence, or invalid report is a finding the moment it appears), plus a
+/// step-level finalized-payload-uniqueness check over the reporters'
+/// append-only finalize-vote maps. It asserts no liveness. Chaos keeps no
+/// cross-input state, so replaying a saved input reproduces the run exactly.
+/// See `chaos`.
 pub struct Chaos;
 impl FuzzMode for Chaos {
     const MODE: Mode = Mode::Chaos;

@@ -13,6 +13,17 @@
 
 use rand::{Rng, RngExt as _};
 
+/// Soonest and latest a fault's paired heal is scheduled, in steps after the
+/// fault. Every heal is drawn from and allocated within `[MIN, MAX]`, so the
+/// window has `MAX - MIN + 1 = 5` distinct due steps. [`Schedule::schedule_heal`]
+/// gives each pending heal a unique step; a free one exists whenever the window
+/// has at least `n` slots, and at most `n - 1` heals are already pending when a
+/// new fault is drawn (a sanctioned outage can break the last healthy node), so
+/// the fit is guaranteed for `n <= 5`. Chaos ships N4, so the past-the-window
+/// fallback in `schedule_heal` is never taken and only guards against a hang.
+const HEAL_HORIZON_MIN: u64 = 2;
+const HEAL_HORIZON_MAX: u64 = 6;
+
 /// One validator's condition as the schedule believes it to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Condition {
@@ -34,20 +45,15 @@ pub(crate) enum Action {
     /// Bounded-downtime restart in one step: abort, fixed downtime, then the
     /// same durable rebuild as [`Action::Start`]. Self-healing (the condition
     /// stays [`Condition::Healthy`]), so it is only drawn while the remaining
-    /// live set sustains the liveness expectation through the downtime.
+    /// live set stays at or above quorum through the downtime.
     Reload(usize),
     /// Remove every network link adjacent to the node.
     Disconnect(usize),
     /// Restore the node's links to every currently-connected peer.
     Reconnect(usize),
-}
-
-impl Action {
-    /// Whether enacting this action restores health rather than breaking it.
-    /// Faults publish expectations before landing; heals land before publishing.
-    pub(crate) fn is_heal(&self) -> bool {
-        matches!(self, Action::Start(_) | Action::Reconnect(_))
-    }
+    /// Let standing faults ride to their scheduled heal: healing early on
+    /// every non-breaking draw would starve the disruption horizon of coverage.
+    Wait,
 }
 
 /// The pure decision core: owns the believed cluster state and produces one
@@ -74,7 +80,9 @@ impl Schedule {
         self.conditions.clone()
     }
 
-    /// Validators expected to participate in consensus right now.
+    /// Healthy (participating) validators right now. Drives fault legality:
+    /// the schedule keeps this at or above quorum except in a sanctioned
+    /// outage, so it never permanently wedges the cluster.
     pub(crate) fn live_count(&self) -> usize {
         self.conditions
             .iter()
@@ -82,26 +90,20 @@ impl Schedule {
             .count()
     }
 
-    /// Whether the committee is expected to finalize right now: the fact the
-    /// watcher needs to decide if a stalled chain is a finding or the
-    /// schedule's own doing.
-    pub(crate) fn expect_liveness(&self) -> bool {
-        self.live_count() >= self.quorum
-    }
-
     /// Produces the next action. Due heals always go first; otherwise a fault is
     /// drawn, constrained so the healthy set stays at or above quorum, except
     /// in a deliberately sanctioned outage (a rare draw), which is followed by
     /// its heal within a small bounded horizon. The sanction menu excludes
-    /// [`Action::Reload`]: its downtime would hide below-quorum time under a
-    /// standing liveness expectation.
+    /// [`Action::Reload`]: its transient downtime is not an outage.
     pub(crate) fn next_action(&mut self, rng: &mut impl Rng) -> Action {
         self.step += 1;
 
-        if let Some(position) = self
-            .pending_heals
-            .iter()
-            .position(|(due, _)| *due <= self.step)
+        // Enact the earliest-due heal that has come due. Due steps are unique
+        // (see `schedule_heal`), so at most one heal is due per step and none
+        // is ever stranded a step late behind another sharing its deadline.
+        if let Some(position) = (0..self.pending_heals.len())
+            .filter(|&i| self.pending_heals[i].0 <= self.step)
+            .min_by_key(|&i| self.pending_heals[i].0)
         {
             let (_, heal) = self.pending_heals.remove(position);
             self.apply(heal);
@@ -121,36 +123,66 @@ impl Schedule {
 
         let action = if can_break && rng.random_ratio(2, 3) {
             let target = healthy[rng.random_range(0..healthy.len())];
-            let heal_in = rng.random_range(2..=6u64);
+            let heal_in = rng.random_range(HEAL_HORIZON_MIN..=HEAL_HORIZON_MAX);
             let menu = if above_quorum { 3 } else { 2 };
             match rng.random_range(0..menu) {
                 0 => {
-                    self.pending_heals
-                        .push((self.step + heal_in, Action::Start(target)));
+                    self.schedule_heal(self.step + heal_in, Action::Start(target));
                     Action::Kill(target)
                 }
                 1 => {
-                    self.pending_heals
-                        .push((self.step + heal_in, Action::Reconnect(target)));
+                    self.schedule_heal(self.step + heal_in, Action::Reconnect(target));
                     Action::Disconnect(target)
                 }
                 _ => Action::Reload(target),
             }
+        } else if self.pending_heals.is_empty() {
+            // Everything healthy and the dice said "don't break": kill-and-
+            // restart is the most valuable default exercise.
+            let target = healthy[rng.random_range(0..healthy.len())];
+            self.pending_heals
+                .push((self.step + 1, Action::Start(target)));
+            Action::Kill(target)
         } else {
-            // Heal something early, or, with everything healthy, default to the
-            // most valuable exercise: kill-and-restart.
-            match self.pending_heals.pop() {
-                Some((_, heal)) => heal,
-                None => {
-                    let target = healthy[rng.random_range(0..healthy.len())];
-                    self.pending_heals
-                        .push((self.step + 1, Action::Start(target)));
-                    Action::Kill(target)
-                }
-            }
+            Action::Wait
         };
         self.apply(action);
         action
+    }
+
+    /// Push a heal at a UNIQUE due step, so the one-heal-per-step drain never
+    /// leaves a second heal that shared a deadline to fire late. Prefers
+    /// `base_due` (already drawn within the horizon); otherwise the earliest
+    /// free step in the horizon window. A free slot always exists for `n <= 5`
+    /// (see [`HEAL_HORIZON_MAX`]), so the past-the-window fallback is never
+    /// taken by the shipped N4 targets and only guards against a hang.
+    fn schedule_heal(&mut self, base_due: u64, heal: Action) {
+        fn is_taken(heals: &[(u64, Action)], due: u64) -> bool {
+            heals.iter().any(|(existing, _)| *existing == due)
+        }
+        let mut due = base_due;
+        if is_taken(&self.pending_heals, due) {
+            due = self.step + HEAL_HORIZON_MAX + 1;
+            for candidate in self.step + HEAL_HORIZON_MIN..=self.step + HEAL_HORIZON_MAX {
+                if !is_taken(&self.pending_heals, candidate) {
+                    due = candidate;
+                    break;
+                }
+            }
+        }
+        self.pending_heals.push((due, heal));
+    }
+
+    /// Pop and apply the next pending heal, earliest-due first (first index on
+    /// ties, so a replay drains deterministically). Returns `None` when none
+    /// remain. The finishing phase calls this after the last drawn fault so
+    /// every scheduled recovery is enacted, even when the episode budget ended
+    /// before the heal came due.
+    pub(crate) fn drain_heal(&mut self) -> Option<Action> {
+        let position = (0..self.pending_heals.len()).min_by_key(|&i| self.pending_heals[i].0)?;
+        let (_, heal) = self.pending_heals.remove(position);
+        self.apply(heal);
+        Some(heal)
     }
 
     fn apply(&mut self, action: Action) {
@@ -160,30 +192,9 @@ impl Schedule {
             Action::Start(index) | Action::Reconnect(index) | Action::Reload(index) => {
                 (index, Condition::Healthy)
             }
+            Action::Wait => return,
         };
         self.conditions[index] = condition;
-    }
-
-    /// The heals that restore full health, enacted at episode end so the
-    /// post-heal liveness oracle runs over the whole committee. Applies them to
-    /// the believed conditions as well: the expectations published after
-    /// healing must reflect the healed cluster, or the watcher would judge
-    /// legitimate post-heal catch-up against a frozen below-quorum baseline.
-    pub(crate) fn heal_everything(&mut self) -> Vec<Action> {
-        let heals: Vec<Action> = self
-            .conditions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, condition)| match condition {
-                Condition::Healthy => None,
-                Condition::Killed => Some(Action::Start(index)),
-                Condition::Disconnected => Some(Action::Reconnect(index)),
-            })
-            .collect();
-        for heal in &heals {
-            self.apply(*heal);
-        }
-        heals
     }
 }
 
@@ -207,21 +218,22 @@ mod tests {
 
     #[test]
     fn outages_are_sanctioned_and_bounded() {
-        // Below-quorum health must only ever follow a deliberate sanction, and
-        // must heal within the bounded horizon (no permanent outage).
+        // Below-quorum health must only ever follow a deliberate sanction,
+        // each carrying a heal due within the bounded horizon. Sanctions can
+        // chain, so the bound is per-sanction (a due heal always exists), not
+        // a fixed streak length.
         for seed in 0..50 {
             let mut rng = TestRng::new(seed);
             let mut schedule = Schedule::new(4, 3);
-            let mut below_quorum_streak = 0u32;
             for _ in 0..2_000 {
                 schedule.next_action(&mut rng);
-                if schedule.expect_liveness() {
-                    below_quorum_streak = 0;
-                } else {
-                    below_quorum_streak += 1;
+                if schedule.live_count() < 3 {
                     assert!(
-                        below_quorum_streak <= 12,
-                        "seed {seed}: outage lasted longer than its bounded heal horizon",
+                        schedule
+                            .pending_heals
+                            .iter()
+                            .any(|(due, _)| *due <= schedule.step + HEAL_HORIZON_MAX),
+                        "seed {seed}: below quorum with no heal due within the horizon",
                     );
                 }
             }
@@ -229,23 +241,33 @@ mod tests {
     }
 
     #[test]
-    fn healing_everything_restores_full_health_and_the_liveness_expectation() {
-        for seed in 0..50 {
+    fn faults_survive_to_their_scheduled_heal() {
+        // Heals fire at their due step (no early healing), so every fault
+        // window lasts its drawn horizon: 1 for the default kill-and-restart,
+        // HEAL_HORIZON_MIN..=HEAL_HORIZON_MAX for menu faults.
+        for seed in 0..20 {
             let mut rng = TestRng::new(seed);
             let mut schedule = Schedule::new(4, 3);
-            for _ in 0..500 {
-                schedule.next_action(&mut rng);
+            let mut broken_at: [Option<u64>; 4] = [None; 4];
+            let mut saw_horizon = false;
+            for _ in 0..2_000 {
+                let action = schedule.next_action(&mut rng);
+                match action {
+                    Action::Kill(i) | Action::Disconnect(i) => {
+                        broken_at[i] = Some(schedule.step);
+                    }
+                    Action::Start(i) | Action::Reconnect(i) => {
+                        let gap = schedule.step - broken_at[i].take().unwrap();
+                        assert!(
+                            (1..=HEAL_HORIZON_MAX).contains(&gap),
+                            "seed {seed}: heal gap {gap} outside the horizon",
+                        );
+                        saw_horizon |= gap >= HEAL_HORIZON_MIN;
+                    }
+                    Action::Reload(_) | Action::Wait => {}
+                }
             }
-            let heals = schedule.heal_everything();
-            assert_eq!(schedule.live_count(), 4, "seed {seed}");
-            assert!(
-                schedule.expect_liveness(),
-                "seed {seed}: expectations published after healing must expect liveness",
-            );
-            assert!(schedule.heal_everything().is_empty(), "seed {seed}");
-            for heal in heals {
-                assert!(heal.is_heal(), "seed {seed}: heal_everything must only heal");
-            }
+            assert!(saw_horizon, "seed {seed}: no fault ever rode its horizon");
         }
     }
 
@@ -276,11 +298,11 @@ mod tests {
                     Action::Reload(i) => {
                         assert_eq!(schedule.conditions[i], Condition::Healthy);
                         assert!(
-                            schedule.expect_liveness(),
+                            schedule.live_count() >= 3,
                             "seed {seed}: reload drawn without quorum slack",
                         );
                     }
-                    Action::Start(_) | Action::Reconnect(_) => {}
+                    Action::Start(_) | Action::Reconnect(_) | Action::Wait => {}
                 }
                 let broken = schedule
                     .conditions

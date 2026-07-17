@@ -1,48 +1,38 @@
 //! The chaos episode loop: an all-honest committee under a fuzzer-driven
-//! crash/network fault schedule, watched online.
+//! crash/network fault schedule.
 //!
-//! Each episode builds four honest [`ManagedValidator`]s over the simulated
-//! network and drives a reactive loop. Each step first observes the cluster
-//! under the PREVIOUS step's expectations (so a heal can never retroactively
-//! excuse a violation that preceded it), then draws one [`Action`] from the
-//! pure [`Schedule`], publishes the schedule's updated beliefs (faults publish
-//! before landing; heals land before publishing), enacts it after a small
+//! Each step draws one [`Action`] from the pure [`Schedule`], sleeps an
 //! RNG-drawn jitter (so faults are not phase-locked to finalization
-//! boundaries), and waits for the next finalization past the step baseline or
-//! a deterministic timeout. The episode stops once it has observed the input's
-//! `required_containers` distinct finalization boundaries, or at the step cap.
+//! boundaries), enacts it, then waits for a finalization past the step baseline
+//! or a deterministic timeout (pure pacing; a timeout is a normal outcome). The
+//! `crate::invariants` safety suite plus the finalized-payload-uniqueness check
+//! run at every step boundary with an EMPTY Byzantine set. When the input's
+//! finalization budget or the step cap is reached, the loop stops drawing
+//! faults and a finishing phase drains every pending heal through the same
+//! paced, safety-checked path, so a recovery the last drawn fault scheduled
+//! (whose due step the budget cut short) still exercises restart / journal
+//! replay / reconnection safety. A final fixed-window settle then lets any
+//! still-runnable recovery work emit before a last safety check, since a paced
+//! step returns on the first post-heal finalization and can beat replay /
+//! backfill. Chaos asserts no liveness.
 //!
-//! Enactment maps the schedule vocabulary onto existing harness primitives:
-//! Kill is `mallory::lifecycle::crash_stop`, Start and Reload are a durable
-//! restart (re-register, rebuild on the same storage partition with the
-//! retained reporter, journal replay), and Disconnect/Reconnect are surgical
-//! per-edge link changes (only edges adjacent to the changed node are touched,
-//! so in-flight traffic between healthy quorum members is never dropped by the
-//! harness itself).
-//!
-//! The episode-end oracle heals everything, requires every node to finalize
-//! past the highest pre-heal frontier within [`POST_GST_WINDOW`], and then runs
-//! the safety invariants over all four reporters with an EMPTY Byzantine set:
-//! the committee is honest, so any equivocation, fault evidence, or invalid
-//! report is a finding.
-//!
-//! A failed harness operation (a link change or rebuild that cannot succeed)
-//! panics immediately with wording distinct from the `chaos:` oracle findings:
-//! in a deterministic in-process rig a failed injection means the harness's
-//! state model is wrong, and the scene is exactly reproducible from the input.
+//! Kill is `mallory::lifecycle::crash_stop`; Start/Reload are durable restarts
+//! (same partition, retained reporter, journal replay); Disconnect/Reconnect
+//! are surgical per-edge link changes, so the harness never drops in-flight
+//! traffic between healthy quorum members. A failed harness operation panics
+//! with wording distinct from `chaos:` oracle findings.
 
 use super::{
     log,
     schedule::{Action, Condition, Schedule},
-    watch,
     watch::Checker,
 };
 use crate::{
-    CertifyChoice, ManagedValidator, N4F0C4, POST_GST_WINDOW, PublicKeyOf, bounds,
-    build_validator, build_validator_with_reporter, invariants,
+    CertifyChoice, ManagedValidator, N4F0C4, PublicKeyOf, bounds, build_validator,
+    build_validator_with_reporter, invariants,
     mallory::{
         lifecycle,
-        runner::{FinalizationClock, StepBoundary, liveness_target, wait_for_step_boundary},
+        runner::{FinalizationClock, StepBoundary, wait_for_step_boundary},
     },
     simplex::Simplex,
     utils::Partition,
@@ -55,18 +45,11 @@ use commonware_consensus::{
 use commonware_cryptography::{
     PublicKey, certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
 };
-use commonware_macros::select;
-use commonware_p2p::simulated::{Link, Oracle};
-use commonware_runtime::{Clock, Runner, Spawner, Supervisor, deterministic};
+use commonware_p2p::simulated::{Error as SimError, Link, Oracle};
+use commonware_runtime::{Clock, Runner, Supervisor, deterministic};
 use commonware_utils::{FuzzRng, channel::mpsc::Receiver as ViewReceiver};
-use futures::future::join_all;
 use rand::RngExt as _;
-use std::{
-    collections::HashSet,
-    fmt::Write as _,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 /// Base episode step count; the hard cap is `max(CHAOS_EPISODE_STEPS,
 /// required_containers)` so the episode can attempt its finalization budget.
@@ -79,30 +62,27 @@ const CHAOS_STEP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Fixed deterministic downtime inside a [`Action::Reload`], between abort and
 /// rebuild.
 const CHAOS_RESTART_DOWNTIME: Duration = Duration::from_secs(2);
-/// How long after losing the liveness expectation in-flight finalizations may
-/// still land before the tip freezes. At least one full step, not a
-/// link-latency estimate: pre-loss votes drain through whole steps.
-const CHAOS_SETTLE_MARGIN: Duration = Duration::from_secs(10);
-/// How long the tip may stand still while the committee is expected live.
-/// Sized from protocol constants, generously: `timeout_retry` is 10s, a
-/// dead-leader view costs a few seconds, and a restarted quorum member needs
-/// seconds of catch-up; deterministic time is cheap and a false positive
-/// poisons the corpus.
-const CHAOS_LIVENESS_WINDOW: Duration = Duration::from_secs(60);
 /// Upper bound of the RNG-drawn jitter before each enactment, roughly one view
 /// time: the fuzzer controls the protocol phase a fault lands in.
 const CHAOS_JITTER_MS: u64 = 2_000;
+/// Deterministic window run after the last heal, before the final safety
+/// check, so recovery work still runnable after a benign post-heal
+/// finalization gets to emit any conflicting or invalid activity before the
+/// root future returns. Journal replay is local and finishing-phase restarts
+/// use zero downtime, so that activity emerges early; one step timeout is
+/// enough, and a larger window would simulate whole extra views of consensus
+/// per fuzz iteration for no added coverage. An ordinary observation boundary,
+/// never a liveness assertion.
+const CHAOS_FINISH_SETTLE: Duration = CHAOS_STEP_TIMEOUT;
 
-/// The reporter type the runner snapshots for the checker and the episode-end
-/// oracle.
+/// The reporter type the runner snapshots for the safety checker.
 type ChaosReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
 
-/// Surgical connectivity controller: tracks the disconnected set and touches
-/// only the edges adjacent to the node whose state changes. Edges between
-/// connected peers are never removed and re-added, so the harness never drops
-/// in-flight traffic between healthy quorum members (a full-topology reset
-/// would, and lost votes are only rebroadcast on the engines' 10s retry).
+/// Surgical connectivity controller: touches only the edges adjacent to the
+/// node whose state changes. A full-topology reset (`apply_partition`) would
+/// drop in-flight traffic between healthy quorum members, which is only
+/// repaired by the engines' 10s retry.
 struct Connectivity<P: PublicKey> {
     oracle: Oracle<P, deterministic::Context>,
     participants: Vec<P>,
@@ -121,58 +101,82 @@ impl<P: PublicKey> Connectivity<P> {
         }
     }
 
-    /// Remove every edge adjacent to `node`. Idempotent.
+    /// Remove both directed edges between `node` and each currently-connected
+    /// peer, then mark it disconnected. Already-disconnected peers hold no edge
+    /// to `node` and are skipped; the state is updated only after every removal
+    /// lands, so a harness failure cannot leave a "disconnected" node still
+    /// linked.
     async fn disconnect(&mut self, node: usize) {
         if self.disconnected[node] {
             return;
         }
-        self.disconnected[node] = true;
-        for peer in 0..self.participants.len() {
-            if peer == node {
-                continue;
-            }
-            let a = self.participants[node].clone();
-            let b = self.participants[peer].clone();
-            self.oracle.remove_link(a.clone(), b.clone()).await.ok();
-            self.oracle.remove_link(b, a).await.ok();
-        }
-    }
-
-    /// Restore `node`'s edges to every peer that is itself connected.
-    /// Idempotent (each edge is removed before it is re-added).
-    async fn reconnect(&mut self, node: usize) {
-        if !self.disconnected[node] {
-            return;
-        }
-        self.disconnected[node] = false;
         for peer in 0..self.participants.len() {
             if peer == node || self.disconnected[peer] {
                 continue;
             }
-            let a = self.participants[node].clone();
-            let b = self.participants[peer].clone();
-            self.oracle.remove_link(a.clone(), b.clone()).await.ok();
-            self.oracle
-                .add_link(a.clone(), b.clone(), self.link.clone())
-                .await
-                .expect("chaos harness: add_link failed on reconnect");
-            self.oracle.remove_link(b.clone(), a.clone()).await.ok();
-            self.oracle
-                .add_link(b, a, self.link.clone())
-                .await
-                .expect("chaos harness: add_link failed on reconnect");
+            self.remove_edge(node, peer).await;
+            self.remove_edge(peer, node).await;
+        }
+        self.disconnected[node] = true;
+    }
+
+    /// Restore both directed edges between `node` and each currently-connected
+    /// peer, then mark it connected. The state is updated only after every add
+    /// lands.
+    async fn reconnect(&mut self, node: usize) {
+        if !self.disconnected[node] {
+            return;
+        }
+        for peer in 0..self.participants.len() {
+            if peer == node || self.disconnected[peer] {
+                continue;
+            }
+            self.add_edge(node, peer).await;
+            self.add_edge(peer, node).await;
+        }
+        self.disconnected[node] = false;
+    }
+
+    /// Remove one directed edge. A live edge removes cleanly; `LinkMissing`
+    /// (already absent) is the only tolerated error. Anything else
+    /// (`NetworkClosed`, `PeerMissing`, ...) is a harness failure and panics,
+    /// so a failed injection is never mistaken for a successful run.
+    async fn remove_edge(&self, from: usize, to: usize) {
+        match self
+            .oracle
+            .remove_link(self.participants[from].clone(), self.participants[to].clone())
+            .await
+        {
+            Ok(()) | Err(SimError::LinkMissing) => {}
+            Err(error) => {
+                panic!("chaos harness: remove_link failed for {from}->{to}: {error}")
+            }
+        }
+    }
+
+    /// Add one directed edge. An absent edge adds cleanly; `LinkExists`
+    /// (already present) is the only tolerated error. Anything else panics.
+    async fn add_edge(&self, from: usize, to: usize) {
+        match self
+            .oracle
+            .add_link(
+                self.participants[from].clone(),
+                self.participants[to].clone(),
+                self.link.clone(),
+            )
+            .await
+        {
+            Ok(()) | Err(SimError::LinkExists) => {}
+            Err(error) => panic!("chaos harness: add_link failed for {from}->{to}: {error}"),
         }
     }
 }
 
-/// Durable restart of one managed validator: abort both handles (a no-op if a
-/// crash already took them), wait `downtime`, re-register its three channels
-/// (which overwrites the node's mailboxes and disconnects the dead
-/// incarnation's receivers), and rebuild engine + application on the SAME
-/// storage partition with the RETAINED reporter, so the engine replays its
-/// journal and catches up via resolver backfill. This is
-/// `mallory::runner::restart` minus the packet-pump / sniffer / dispatch
-/// re-wrap, which chaos does not install.
+/// Durable restart: abort both handles (no-op after a crash), wait `downtime`,
+/// re-register (overwriting mailboxes disconnects the dead incarnation), and
+/// rebuild on the SAME partition with the RETAINED reporter, so the engine
+/// replays its journal and backfills. `mallory::runner::restart` minus the
+/// pump/sniffer/dispatch re-wrap chaos does not install.
 #[allow(clippy::too_many_arguments)]
 async fn restart_durable<P: Simplex>(
     mv: &mut ManagedValidator<P>,
@@ -225,7 +229,6 @@ async fn restart_durable<P: Simplex>(
     mv.adopt(rebuilt);
 }
 
-/// Enact one schedule action against the cluster.
 #[allow(clippy::too_many_arguments)]
 async fn enact<P: Simplex>(
     action: Action,
@@ -268,68 +271,87 @@ async fn enact<P: Simplex>(
         }
         Action::Disconnect(i) => net.disconnect(i).await,
         Action::Reconnect(i) => net.reconnect(i).await,
+        Action::Wait => {}
     }
 }
 
-/// Snapshot the cluster for the checker: the clock's per-node frontiers, the
-/// highest view with any recorded vote/certificate activity, and each
-/// reporter's finalized `(view, digest)` pairs (sorted, so a multi-violation
-/// observation trips deterministically).
-fn snapshot_poll<P: Simplex>(
-    clock: &FinalizationClock,
-    reporters: &[ChaosReporter<P>],
-) -> watch::Poll {
-    let mut activity_frontier = 0u64;
-    let mut finalized = Vec::with_capacity(reporters.len());
+/// Every finalize-voted `(view, payload)` from the reporters' append-only
+/// `finalizes` maps (so a conflict landing between two polls is never lost).
+fn finalize_votes<P: Simplex>(reporters: &[ChaosReporter<P>]) -> Vec<(u64, Sha256Digest)> {
+    let mut votes = Vec::new();
     for reporter in reporters {
-        for view in reporter.notarizes.lock().keys() {
-            activity_frontier = activity_frontier.max(view.get());
+        for (view, by_payload) in reporter.finalizes.lock().iter() {
+            for payload in by_payload.keys() {
+                votes.push((view.get(), *payload));
+            }
         }
-        for view in reporter.nullifies.lock().keys() {
-            activity_frontier = activity_frontier.max(view.get());
-        }
-        for view in reporter.finalizes.lock().keys() {
-            activity_frontier = activity_frontier.max(view.get());
-        }
-        for view in reporter.notarizations.lock().keys() {
-            activity_frontier = activity_frontier.max(view.get());
-        }
-        for view in reporter.nullifications.lock().keys() {
-            activity_frontier = activity_frontier.max(view.get());
-        }
-        let mut entries: Vec<(u64, Sha256Digest)> = reporter
-            .finalizations
-            .lock()
-            .iter()
-            .map(|(view, certificate)| (view.get(), certificate.proposal.payload))
-            .collect();
-        entries.sort_unstable_by_key(|(view, _)| *view);
-        if let Some((view, _)) = entries.last() {
-            activity_frontier = activity_frontier.max(*view);
-        }
-        finalized.push(entries);
     }
-    watch::Poll {
-        latest_views: clock.latest.clone(),
-        activity_frontier,
-        finalized,
-    }
+    votes
 }
 
-/// Publish the schedule's current beliefs, timestamping the moment the
-/// liveness expectation last flipped (the settle margin and the liveness
-/// window both count from that moment).
-fn publish_expectations(
-    expectations: &mut watch::Expectations,
-    schedule: &Schedule,
-    now: SystemTime,
-) {
-    let expect_liveness = schedule.expect_liveness();
-    if expect_liveness != expectations.expect_liveness {
-        expectations.since = now;
+/// Run the full safety suite over the honest reporters. The Byzantine set is
+/// EMPTY: every node is honest and restarts are durable, so any conflicting
+/// finalization, equivocation, fault evidence, or invalid report is a finding.
+fn check_safety<P: Simplex>(checker: &mut Checker, reporters: &[ChaosReporter<P>], n: usize) {
+    // The finalize-vote uniqueness check reads the append-only `finalizes` map.
+    // The harness reports individual finalize votes to the reporter directly
+    // (no `AttributableReporter` wrapper), so this map is populated for every
+    // scheme, attributable or not, and a conflict landing between polls is not
+    // lost. On a healthy committee a view holds one payload, so this never
+    // false-positives.
+    checker.observe(&finalize_votes::<P>(reporters));
+    for reporter in reporters {
+        reporter.assert_no_faults();
     }
-    expectations.expect_liveness = expect_liveness;
-    expectations.conditions = schedule.conditions();
+    invariants::check_no_invalid_reports(reporters);
+    invariants::check_vote_invariants_with_byzantine(&HashSet::new(), reporters);
+    let states = invariants::extract(reporters.to_vec(), n);
+    invariants::check::<P>(n as u32, states);
+}
+
+/// Enact one action, then wait a bounded observation window (a finalization
+/// past the step baseline over the live set, or a deterministic timeout, which
+/// is normal pacing, never a finding), then run the safety suite. Shared by the
+/// fault loop and the heal-draining finishing phase, so every enacted action,
+/// including a recovery drawn after the episode budget ended, gets a runtime
+/// window before it is safety-checked.
+#[allow(clippy::too_many_arguments)]
+async fn paced_enact<P: Simplex>(
+    action: Action,
+    managed: &mut [ManagedValidator<P>],
+    net: &mut Connectivity<PublicKeyOf<P>>,
+    context: &mut deterministic::Context,
+    oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    relay: &Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    input: &crate::FuzzInput,
+    clock: &mut FinalizationClock,
+    conditions: &[Condition],
+    checker: &mut Checker,
+    reporters: &[ChaosReporter<P>],
+    n: usize,
+) -> StepBoundary
+where
+    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
+        Clone + Send + Sync + 'static,
+{
+    enact(action, managed, net, context, oracle, participants, relay, input).await;
+
+    // The live set is the current healthy nodes, over a fresh drain, so a
+    // just-killed node's stale events cannot close the step.
+    clock.drain();
+    let live: HashSet<usize> = conditions
+        .iter()
+        .enumerate()
+        .filter(|(_, condition)| **condition == Condition::Healthy)
+        .map(|(index, _)| index)
+        .collect();
+    let baseline = clock.baseline(&live);
+    let deadline = context.current() + CHAOS_STEP_TIMEOUT;
+    let boundary = wait_for_step_boundary(context, clock, &live, baseline, deadline).await;
+
+    check_safety::<P>(checker, reporters, n);
+    boundary
 }
 
 /// Run one chaos episode. The deterministic runtime is seeded from
@@ -369,9 +391,8 @@ where
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        // `oracle` and `participants` are retained: restarts re-register
-        // channels through the oracle and rebuild engines over the participant
-        // set. The connectivity controller gets its own oracle clone.
+        // `oracle` and `participants` are retained: restarts re-register and
+        // rebuild through them; the connectivity controller gets its own clone.
         let (mut oracle, participants, schemes, mut registrations) =
             crate::setup_network::<P>(&mut context, &input).await;
         crate::print_fuzz_input(crate::Mode::Chaos, &input);
@@ -414,7 +435,7 @@ where
             participants.clone(),
             crate::default_link(),
         );
-        let mut reporters: Vec<ChaosReporter<P>> = managed.iter().map(|m| m.reporter()).collect();
+        let reporters: Vec<ChaosReporter<P>> = managed.iter().map(|m| m.reporter()).collect();
 
         // Persistent finalization clock: subscribe ONCE per reporter and keep
         // the monitors so each step drains them synchronously. A durable
@@ -431,17 +452,7 @@ where
         }
 
         let mut schedule = Schedule::new(n, quorum);
-        let mut checker = Checker::new(
-            n,
-            context.current(),
-            CHAOS_SETTLE_MARGIN,
-            CHAOS_LIVENESS_WINDOW,
-        );
-        let mut expectations = watch::Expectations {
-            conditions: schedule.conditions(),
-            expect_liveness: schedule.expect_liveness(),
-            since: context.current(),
-        };
+        let mut checker = Checker::new();
 
         let finalization_budget = required_containers as usize;
         let mut observed_finalizations: HashSet<u64> = HashSet::new();
@@ -449,97 +460,32 @@ where
         loop {
             step += 1;
 
-            // (a) Authoritative pre-enact cut, observed under the PREVIOUS
-            // step's expectations: a violation that landed before this step's
-            // action is judged against the world that produced it, so a heal
-            // can never clear a frozen baseline it should have tripped.
-            clock.drain();
-            let poll = snapshot_poll::<P>(&clock, &reporters);
-            log::push(format!(
-                "observe pre step={step} now={:?} since={:?} expect={} views={:?} frontier={} {}",
-                context.current(),
-                expectations.since,
-                expectations.expect_liveness,
-                poll.latest_views,
-                poll.activity_frontier,
-                checker.debug_state(),
-            ));
-            checker.observe(context.current(), &expectations, &poll);
-
-            // (b) Decide, then jitter so the enactment is not phase-locked to
-            // the step boundary that woke us.
             let action = schedule.next_action(&mut context);
             let jitter = Duration::from_millis(context.random_range(0..=CHAOS_JITTER_MS));
             context.sleep(jitter).await;
 
-            // (c) Faults publish expectations first and then land; heals land
-            // first and then publish.
-            let heals = action.is_heal();
-            if !heals {
-                publish_expectations(&mut expectations, &schedule, context.current());
-            }
-            enact(
+            log::push(format!(
+                "step={step} action={action:?} conditions={:?} live={}/{n}",
+                schedule.conditions(),
+                schedule.live_count(),
+            ));
+
+            let boundary = paced_enact::<P>(
                 action,
                 &mut managed,
                 &mut net,
-                &context,
+                &mut context,
                 &mut oracle,
                 &participants,
                 &relay,
                 &input,
+                &mut clock,
+                &schedule.conditions(),
+                &mut checker,
+                &reporters,
+                n,
             )
             .await;
-            if heals {
-                publish_expectations(&mut expectations, &schedule, context.current());
-            }
-
-            log::push(format!(
-                "step={step} action={action:?} conditions={:?} live={}/{n} expect_liveness={}",
-                expectations.conditions,
-                schedule.live_count(),
-                expectations.expect_liveness,
-            ));
-
-            // (d) The live set comes from POST-action conditions, and the
-            // baseline is the pre-enact cut restricted to it, so a just-killed
-            // node's stale events and a just-restarted node's replayed events
-            // can never close the step.
-            let live: HashSet<usize> = expectations
-                .conditions
-                .iter()
-                .enumerate()
-                .filter(|(_, condition)| **condition == Condition::Healthy)
-                .map(|(index, _)| index)
-                .collect();
-            let baseline = clock.baseline(&live);
-            let deadline = context.current() + CHAOS_STEP_TIMEOUT;
-            let boundary =
-                wait_for_step_boundary(&mut context, &mut clock, &live, baseline, deadline).await;
-
-            // (e) Post-boundary observation under the current expectations.
-            let poll = snapshot_poll::<P>(&clock, &reporters);
-            log::push(format!(
-                "observe post step={step} boundary={boundary:?} now={:?} since={:?} expect={} views={:?} frontier={} {}",
-                context.current(),
-                expectations.since,
-                expectations.expect_liveness,
-                poll.latest_views,
-                poll.activity_frontier,
-                checker.debug_state(),
-            ));
-            checker.observe(context.current(), &expectations, &poll);
-
-            // The `invariants` safety oracle runs ONLINE at every step
-            // boundary (and again at episode end): the committee is honest,
-            // so a violation is a finding the moment it appears, attributed
-            // to the step that produced it.
-            for reporter in &reporters {
-                reporter.assert_no_faults();
-            }
-            invariants::check_no_invalid_reports(&reporters);
-            invariants::check_vote_invariants_with_byzantine(&HashSet::new(), &reporters);
-            let states = invariants::extract(reporters.clone(), n);
-            invariants::check::<P>(input.configuration.n, states);
 
             if let StepBoundary::Finalized { view, .. } = boundary {
                 observed_finalizations.insert(view);
@@ -549,102 +495,44 @@ where
             }
         }
 
-        // Episode end: heal everything so the liveness oracle runs over the
-        // whole committee (heals land, then publish).
-        for heal in schedule.heal_everything() {
-            enact(
+        // Finishing phase: stop drawing faults and drain every pending heal
+        // through the same paced, safety-checked path, so a recovery scheduled
+        // by the last drawn fault (whose due step the episode budget cut short)
+        // still exercises restart / journal replay / reconnection safety.
+        while let Some(heal) = schedule.drain_heal() {
+            step += 1;
+            log::push(format!(
+                "finish step={step} action={heal:?} conditions={:?} live={}/{n}",
+                schedule.conditions(),
+                schedule.live_count(),
+            ));
+            paced_enact::<P>(
                 heal,
                 &mut managed,
                 &mut net,
-                &context,
+                &mut context,
                 &mut oracle,
                 &participants,
                 &relay,
                 &input,
+                &mut clock,
+                &schedule.conditions(),
+                &mut checker,
+                &reporters,
+                n,
             )
             .await;
         }
-        publish_expectations(&mut expectations, &schedule, context.current());
 
-        // Post-heal liveness over ALL FOUR nodes: every node must finalize one
-        // view past the highest pre-heal frontier (proving it caught up after
-        // the last fault/heal/restart), never below `required_containers`.
-        let mut watch_targets: Vec<(usize, u64)> = Vec::with_capacity(n);
-        let mut watcher_inputs = Vec::with_capacity(n);
-        for (node, reporter) in reporters.iter_mut().enumerate() {
-            let (latest, monitor): (View, ViewReceiver<View>) = reporter.subscribe().await;
-            watch_targets.push((node, latest.get()));
-            watcher_inputs.push((node, latest, monitor));
-        }
-        let max_baseline = watch_targets
-            .iter()
-            .map(|&(_, baseline)| baseline)
-            .max()
-            .unwrap_or(0);
-        let target = liveness_target(required_containers, max_baseline);
-        let mut watchers = Vec::with_capacity(watcher_inputs.len());
-        for (node, mut latest, mut monitor) in watcher_inputs {
-            watchers.push(
-                context
-                    .child("chaos_liveness_watcher")
-                    .with_attribute("index", node)
-                    .spawn(move |_| async move {
-                        while latest.get() < target {
-                            let Some(next) = monitor.recv().await else {
-                                return false;
-                            };
-                            latest = next;
-                        }
-                        true
-                    }),
-            );
-        }
-        let live = select! {
-            results = join_all(watchers) => {
-                results.iter().all(|r| matches!(r, Ok(true)))
-            },
-            _ = context.sleep(POST_GST_WINDOW) => false,
-        };
-        if !live {
-            let mut diag = String::new();
-            for &(node, baseline) in &watch_targets {
-                let (latest, _): (View, ViewReceiver<View>) = reporters[node].subscribe().await;
-                let _ = write!(
-                    diag,
-                    " node{node}={{baseline={baseline} current={}}}",
-                    latest.get()
-                );
-            }
-            panic!(
-                "chaos: no post-episode liveness within {POST_GST_WINDOW:?} (target={target} required_containers={required_containers} max_baseline={max_baseline});{diag}"
-            );
-        }
-
-        // Final synchronous observation (digest stability and agreement over
-        // anything that landed during catch-up), then the safety invariants
-        // over the honest reporters. The Byzantine set is EMPTY: every node is
-        // honest and restarts are durable, so any equivocation, packaged fault
-        // evidence, or invalid report is a finding.
+        // Terminal settle: a paced step returns on the FIRST post-heal
+        // finalization, which can beat the just-restarted node's replay and
+        // backfill. Run a fixed deterministic window so all still-runnable
+        // recovery work executes, then check safety once more, so a conflicting
+        // or invalid activity emitted during that catch-up is not missed by the
+        // root future returning first. Not a liveness assertion.
+        context.sleep(CHAOS_FINISH_SETTLE).await;
         clock.drain();
-        let poll = snapshot_poll::<P>(&clock, &reporters);
-        log::push(format!(
-            "observe final now={:?} since={:?} expect={} views={:?} frontier={} {}",
-            context.current(),
-            expectations.since,
-            expectations.expect_liveness,
-            poll.latest_views,
-            poll.activity_frontier,
-            checker.debug_state(),
-        ));
-        checker.observe(context.current(), &expectations, &poll);
-
-        for reporter in &reporters {
-            reporter.assert_no_faults();
-        }
-        invariants::check_no_invalid_reports(&reporters);
-        invariants::check_vote_invariants_with_byzantine(&HashSet::new(), &reporters);
-        let states = invariants::extract(reporters, n);
-        invariants::check::<P>(input.configuration.n, states);
+        check_safety::<P>(&mut checker, &reporters, n);
     });
 }
 
@@ -655,9 +543,11 @@ mod tests {
     use commonware_consensus::simplex::ForwardingPolicy;
     use std::num::NonZeroUsize;
 
+    use crate::simplex::SimplexCertificateMock;
+
     /// Episode length the ignored integration tests run: short (versus the
-    /// production cap) so a full deterministic episode, runtime, schedule,
-    /// healing, liveness, and invariants, finishes in seconds.
+    /// production cap) so a full deterministic episode, runtime, schedule, and
+    /// safety checks, finishes in seconds.
     const TEST_STEPS: usize = 3;
 
     fn chaos_input(seed: u64) -> FuzzInput {
@@ -679,23 +569,17 @@ mod tests {
         }
     }
 
-    /// A full deterministic episode across several seeds: schedule, enactment
-    /// (kills, restarts, link surgery), the online checker, episode-end
-    /// healing, liveness, and invariants. Ignored: runs whole episodes.
+    /// Full deterministic episodes across several seeds, then a byte-exact
+    /// replay check (chaos has no cross-input state). One test, not two: the
+    /// decision log is process-global, so concurrent test threads would
+    /// interleave their trails.
     #[test]
     #[ignore]
-    fn short_episodes_complete() {
+    fn episodes_complete_and_replay_exactly() {
         for seed in [7u64, 21, 42] {
             run_with::<SimplexId>(chaos_input(seed), TEST_STEPS);
             let _ = log::take();
         }
-    }
-
-    /// Same input bytes, same decision log: the episode is a pure function of
-    /// the input (no campaign or cross-input state). Ignored: runs episodes.
-    #[test]
-    #[ignore]
-    fn replay_is_exact() {
         run_with::<SimplexId>(chaos_input(11), TEST_STEPS);
         let first = log::take();
         assert!(!first.is_empty(), "an episode must record its decisions");
@@ -705,5 +589,17 @@ mod tests {
             first, second,
             "replaying identical bytes must reproduce the schedule"
         );
+    }
+
+    /// The certificate-mock backend runs the full oracle (shared invariant
+    /// suite, finalized-payload uniqueness, all lifecycle/network coverage);
+    /// a full episode must complete.
+    #[test]
+    #[ignore]
+    fn cert_mock_episode_completes() {
+        for seed in [3u64, 19, 55] {
+            run_with::<SimplexCertificateMock>(chaos_input(seed), TEST_STEPS);
+            let _ = log::take();
+        }
     }
 }
