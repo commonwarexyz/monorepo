@@ -932,7 +932,7 @@ where
         (journal, _) = journal.append(&i).await.unwrap();
     }
 
-    // Try to rewind forward (invalid).
+    // Try to rewind forward (invalid)
     let result = journal.rewind(20).await;
     assert!(matches!(result, Err(Error::InvalidRewind(20))));
 
@@ -955,7 +955,7 @@ where
     // Prune first 10 items
     let (journal, _) = journal.prune(10).await.unwrap();
 
-    // Try to rewind to pruned position (invalid).
+    // Try to rewind to pruned position (invalid)
     let result = journal.rewind(5).await;
     assert!(matches!(result, Err(Error::ItemPruned(5))));
 
@@ -1062,7 +1062,7 @@ where
     assert_eq!(journal.read(20).await.unwrap(), 999);
     assert_eq!(journal.bounds().start, 10);
 
-    // Attempt to rewind to a pruned position should fail.
+    // Attempt to rewind to a pruned position should fail
     let result = journal.rewind(5).await;
     assert!(matches!(result, Err(Error::ItemPruned(5))));
 

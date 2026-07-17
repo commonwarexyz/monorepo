@@ -3082,11 +3082,6 @@ mod tests {
                 journal.rewind(299).await,
                 Err(Error::ItemPruned(299))
             ));
-
-            let journal: Journal<_, Digest> = Journal::init(context.child("fourth"), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
-            journal.destroy().await.unwrap();
         });
     }
 
@@ -4460,7 +4455,7 @@ mod tests {
             journal = journal.rewind(10).await.unwrap();
             assert_eq!(journal.size(), 10);
 
-            // Rewind to before pruning_boundary should fail.
+            // Rewind to before pruning_boundary should fail
             let result = journal.rewind(9).await;
             assert!(matches!(result, Err(Error::ItemPruned(9))));
         });

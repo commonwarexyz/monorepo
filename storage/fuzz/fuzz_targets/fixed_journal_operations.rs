@@ -288,7 +288,7 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::AppendMany { count } => {
                     if *count == 0 {
-                        // Exercise the EmptyAppend error path.
+                        // Exercise the EmptyAppend error path
                         let err = journal.append_many(Many::Flat(&[])).await;
                         assert!(matches!(err, Err(Error::EmptyAppend)));
                         let (journal, size, start) = reopen(&context, &cfg, &mut restarts).await;
