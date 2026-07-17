@@ -143,15 +143,15 @@ fn remaining_bucket(finalization_budget: usize, observed: usize) -> u64 {
 /// is authoritative, there is no intermediate forwarder task whose async copy could
 /// let a pre-cut finalization arrive after the next fault is enacted. `latest[node]`
 /// is the highest finalized view drained from `node` (0 for never-honest indices).
-struct FinalizationClock {
-    latest: Vec<u64>,
-    monitors: Vec<(usize, ViewReceiver<View>)>,
+pub(crate) struct FinalizationClock {
+    pub(crate) latest: Vec<u64>,
+    pub(crate) monitors: Vec<(usize, ViewReceiver<View>)>,
 }
 
 impl FinalizationClock {
     /// Fold every event already queued in every SOURCE monitor into `latest`, without
     /// blocking. This is the authoritative synchronous frontier snapshot.
-    fn drain(&mut self) {
+    pub(crate) fn drain(&mut self) {
         for (node, monitor) in &mut self.monitors {
             while let Ok(view) = monitor.try_recv() {
                 self.latest[*node] = self.latest[*node].max(view.get());
@@ -161,7 +161,7 @@ impl FinalizationClock {
 
     /// The step baseline: the highest finalized view across the given live-correct
     /// set. Call [`drain`](Self::drain) first. `0` if the set is empty.
-    fn baseline(&self, live_correct: &HashSet<usize>) -> u64 {
+    pub(crate) fn baseline(&self, live_correct: &HashSet<usize>) -> u64 {
         live_correct
             .iter()
             .map(|node| self.latest[*node])
@@ -174,7 +174,7 @@ impl FinalizationClock {
 /// node reached a view past the step baseline), or the deterministic step timeout
 /// (the fault suppressed progress).
 #[derive(Clone, Copy, Debug)]
-enum StepBoundary {
+pub(crate) enum StepBoundary {
     Finalized { node: usize, view: u64 },
     Timeout,
 }
@@ -197,7 +197,7 @@ enum StepBoundary {
 /// POST-enact set, so a crashed / amnesiac node's stale events never close the step.
 /// Waiting for EVERY honest node is exclusively an episode-end liveness
 /// responsibility; here one live-correct node closes the step.
-async fn wait_for_step_boundary(
+pub(crate) async fn wait_for_step_boundary(
     context: &mut deterministic::Context,
     clock: &mut FinalizationClock,
     live_correct: &HashSet<usize>,
@@ -270,7 +270,7 @@ fn live_correct_nodes<P: Simplex>(
 /// highest pre-heal frontier `max_baseline`, proving each caught up after the last
 /// fault/heal/restart, but never below the absolute `required_containers`. On overflow
 /// of `max_baseline + 1` the absolute target is kept.
-fn liveness_target(required_containers: u64, max_baseline: u64) -> u64 {
+pub(crate) fn liveness_target(required_containers: u64, max_baseline: u64) -> u64 {
     match max_baseline.checked_add(1) {
         Some(next) => required_containers.max(next),
         None => required_containers,

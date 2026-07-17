@@ -6,6 +6,7 @@ pub mod aggregation_certificate_mock;
 pub mod aggregation_decode;
 pub mod bounds;
 pub mod byzzfuzz;
+pub(crate) mod chaos;
 pub mod disrupter;
 pub mod happens_before;
 pub mod id_mock;
@@ -2596,6 +2597,7 @@ pub enum Mode {
     FaultyNet,
     Byzzfuzz,
     MalloryContainer,
+    Chaos,
 }
 
 pub trait FuzzMode {
@@ -2793,6 +2795,32 @@ impl FuzzMode for MalloryContainer {
     const MODE: Mode = Mode::MalloryContainer;
 }
 
+/// **Chaos** - an all-honest committee under a fuzzer-driven crash/network
+/// fault schedule, adapted from the zksync-os-server chaos rig.
+///
+/// Each episode runs four honest validators (N4F0C4, quorum three) and drives a
+/// reactive loop: each step draws one action (kill, durable restart, bounded
+/// reload, per-node disconnect, reconnect) from a pure quorum-aware schedule
+/// seeded entirely by the fuzzer input, under one invariant: the schedule
+/// always knows whether the committee should be live. It never takes the
+/// healthy set below quorum except through a rare, deliberately sanctioned and
+/// bounded outage window, and every fault is scheduled together with its own
+/// heal. The `invariants` safety suite runs at EVERY step boundary with an
+/// EMPTY Byzantine set (everyone is honest, so any equivocation, fault
+/// evidence, or invalid report is a finding the moment it appears), and an
+/// online checker cross-references every observation against the schedule's
+/// published expectations for what the suite cannot see: finalized-digest
+/// stability across re-reports, no progress while quorum is deliberately held
+/// away (after a settle margin), and no liveness stall while quorum is
+/// expected. The episode-end oracle heals everything, requires all four nodes
+/// to finalize past the highest pre-heal frontier, and runs the same suite
+/// once more. Chaos keeps no cross-input state, so replaying a saved input
+/// reproduces the run exactly. See `chaos`.
+pub struct Chaos;
+impl FuzzMode for Chaos {
+    const MODE: Mode = Mode::Chaos;
+}
+
 /// Install (once per process) a panic-hook chain that drains and prints the
 /// ByzzFuzz decision log when the `CONSENSUS_FUZZ_LOG` environment variable is
 /// set (any value). Off by default to keep the libfuzzer crash output
@@ -2817,6 +2845,31 @@ fn install_byzzfuzz_panic_hook() {
                         eprintln!("{line}");
                     }
                     eprintln!("---- end of ByzzFuzz decision log ----");
+                }
+            }
+            prev(info);
+        }));
+    });
+}
+
+/// Install (once per process) a panic-hook chain that drains and prints the
+/// chaos decision log when `CONSENSUS_FUZZ_LOG` is set (any value). Mirrors
+/// [`install_byzzfuzz_panic_hook`] over the separate chaos log; the same
+/// ordering (log -> default message -> libfuzzer trace) applies.
+fn install_chaos_panic_hook() {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let dump = std::env::var_os(FUZZ_LOG_ENV).is_some();
+        let prev = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if dump {
+                let log = chaos::log::take();
+                if !log.is_empty() {
+                    eprintln!("---- Chaos decision log ({} entries) ----", log.len());
+                    for line in &log {
+                        eprintln!("{line}");
+                    }
+                    eprintln!("---- end of Chaos decision log ----");
                 }
             }
             prev(info);
@@ -2854,6 +2907,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         install_byzzfuzz_panic_hook();
     } else if matches!(M::MODE, Mode::MalloryContainer) {
         install_mallory_panic_hook();
+    } else if matches!(M::MODE, Mode::Chaos) {
+        install_chaos_panic_hook();
     } else {
         if matches!(M::MODE, Mode::FaultyNet) {
             // We run only fuzzing with network faults, populated later by the
@@ -2886,6 +2941,9 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Mode::MalloryContainer => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             mallory::runner::run::<P>(input, mallory::runner::Chooser::Learned)
         })),
+        Mode::Chaos => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            chaos::runner::run::<P>(input)
+        })),
     };
     match run_result {
         Ok(()) => {
@@ -2897,6 +2955,10 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
             // Same for the separate Mallory log.
             if matches!(M::MODE, Mode::MalloryContainer) {
                 let _ = mallory::log::take();
+            }
+            // And the separate chaos log.
+            if matches!(M::MODE, Mode::Chaos) {
+                let _ = chaos::log::take();
             }
         }
         Err(payload) => {
