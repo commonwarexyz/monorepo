@@ -1589,7 +1589,7 @@ impl IoBufsMut {
     }
 
     #[inline]
-    fn for_each_chunk_mut(&mut self, mut f: impl FnMut(&mut IoBufMut)) {
+    pub(crate) fn for_each_chunk_mut(&mut self, mut f: impl FnMut(&mut IoBufMut)) {
         match &mut self.inner {
             IoBufsMutInner::Single(buf) => f(buf),
             IoBufsMutInner::Pair(pair) => {

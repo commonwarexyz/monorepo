@@ -43,7 +43,7 @@ pub(super) const MAX_CHECKSUM_REFS: usize = 16;
 /// A planned write for the commit's WRITE phase.
 struct MetaWrite {
     physical: u64,
-    bytes: Vec<u8>,
+    bytes: IoBuf,
 }
 
 /// Everything captured by the SNAPSHOT phase.
@@ -131,23 +131,30 @@ pub(super) async fn commit_locked<S: crate::Storage>(
         }
     };
 
-    for write in &snapshot.writes {
-        let end = write.physical + write.bytes.len() as u64;
-        if let Err(e) = super::core::ensure_provisioned(ready, end).await {
-            let _ = ready.poisoned.set(e.clone());
-            return Err(e);
-        }
-        if let Err(e) = ready
-            .file
-            .write_at(write.physical, IoBuf::copy_from_slice(&write.bytes))
-            .await
-        {
-            let _ = ready.poisoned.set(e.clone());
-            return Err(e);
-        }
-    }
-
-    if let Err(e) = ready.file.sync().await {
+    // WRITE + FSYNC phase: provision once for the commit's furthest write,
+    // then issue every metadata write concurrently. The writes land in
+    // disjoint extents and all precede the one fsync, so issue order is
+    // free (the crash model already resolves each dirtied block
+    // independently); a small commit pays one write round-trip instead of
+    // one per write.
+    let written = async {
+        let end = snapshot
+            .writes
+            .iter()
+            .map(|write| write.physical + write.bytes.len() as u64)
+            .max()
+            .expect("a commit writes at least its table");
+        super::core::ensure_provisioned(ready, end).await?;
+        futures::future::try_join_all(
+            snapshot
+                .writes
+                .iter()
+                .map(|write| ready.file.write_at(write.physical, write.bytes.clone())),
+        )
+        .await?;
+        ready.file.sync().await
+    };
+    if let Err(e) = written.await {
         let _ = ready.poisoned.set(e.clone());
         return Err(e);
     }
@@ -455,7 +462,7 @@ async fn take_snapshot<S: crate::Storage>(
             });
             writes.push(MetaWrite {
                 physical: extent.offset,
-                bytes: cksum_bytes,
+                bytes: IoBuf::from(cksum_bytes),
             });
             meta.checksums.push(extent);
         }
@@ -467,7 +474,7 @@ async fn take_snapshot<S: crate::Storage>(
             entry.shadow = Some(extent.offset);
             writes.push(MetaWrite {
                 physical: extent.offset,
-                bytes: shadow,
+                bytes: IoBuf::from(shadow),
             });
             meta.shadow = Some(extent);
         }
@@ -575,11 +582,11 @@ async fn take_snapshot<S: crate::Storage>(
         };
         writes.push(MetaWrite {
             physical: extent.offset,
-            bytes,
+            bytes: IoBuf::from(bytes),
         });
         writes.push(MetaWrite {
             physical: superblock_offset,
-            bytes: sb.encode(),
+            bytes: IoBuf::from(sb.encode()),
         });
         (state.table_extent, extent)
     };

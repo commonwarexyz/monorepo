@@ -43,6 +43,66 @@ impl Blob {
         Ok(())
     }
 
+    /// Fill every chunk of `bufs` (lengths already set) from `offset` with
+    /// vectored positioned reads (`preadv`), `read_exact` semantics: a
+    /// short file is an error.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn read_vectored_at(file: &File, mut offset: u64, bufs: &mut IoBufsMut) -> Result<(), Error> {
+        let mut iovecs: Vec<libc::iovec> = Vec::new();
+        bufs.for_each_chunk_mut(|buf| {
+            if !buf.is_empty() {
+                iovecs.push(libc::iovec {
+                    iov_base: buf.as_mut().as_mut_ptr().cast(),
+                    iov_len: buf.len(),
+                });
+            }
+        });
+
+        let mut idx = 0;
+        while idx < iovecs.len() {
+            let batch = (iovecs.len() - idx).min(IOVEC_BATCH_SIZE);
+            // SAFETY: each iovec references a distinct live chunk of `bufs`,
+            // owned by this frame and untouched for the syscall's duration.
+            let ret = unsafe {
+                libc::preadv(
+                    file.as_raw_fd(),
+                    iovecs[idx..].as_ptr(),
+                    batch as libc::c_int,
+                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err.into());
+            }
+            if ret == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            let mut advanced = ret as usize;
+            offset = offset
+                .checked_add(ret as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            // Advance past filled iovecs; trim a partially filled head.
+            while advanced > 0 {
+                let head = &mut iovecs[idx];
+                if advanced >= head.iov_len {
+                    advanced -= head.iov_len;
+                    idx += 1;
+                } else {
+                    // SAFETY: `advanced < iov_len`, so the shifted base
+                    // stays inside the chunk it was created from.
+                    head.iov_base = unsafe { head.iov_base.cast::<u8>().add(advanced).cast() };
+                    head.iov_len -= advanced;
+                    advanced = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn write_vectored_at(
         file: &File,
         mut offset: u64,
@@ -123,6 +183,7 @@ impl crate::Blob for Blob {
         // SAFETY: `len` bytes are filled via read_exact below.
         unsafe { bufs.set_len(len) };
         let file = self.file.clone();
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let pool = self.pool.clone();
         let offset = offset
             .checked_add(Header::DATA_OFFSET_U64)
@@ -132,11 +193,18 @@ impl crate::Blob for Blob {
                 // Read directly into the single buffer (zero-copy).
                 file.read_exact_at(buf.as_mut(), offset)?;
             } else {
-                // Read into a temporary contiguous buffer and copy back to preserve structure.
-                // SAFETY: `len` bytes are filled via read_exact_at below.
-                let mut temp = unsafe { pool.alloc_len(len) };
-                file.read_exact_at(temp.as_mut(), offset)?;
-                bufs.copy_from_slice(temp.as_ref());
+                cfg_if! {
+                    if #[cfg(any(target_os = "linux", target_os = "macos"))] {
+                        // Scatter directly into the buffers (zero-copy).
+                        Self::read_vectored_at(&file, offset, &mut bufs)?;
+                    } else {
+                        // Read into a temporary contiguous buffer and copy back to preserve structure.
+                        // SAFETY: `len` bytes are filled via read_exact_at below.
+                        let mut temp = unsafe { pool.alloc_len(len) };
+                        file.read_exact_at(temp.as_mut(), offset)?;
+                        bufs.copy_from_slice(temp.as_ref());
+                    }
+                }
             }
             Ok(bufs)
         })

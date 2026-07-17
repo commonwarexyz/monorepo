@@ -2537,6 +2537,177 @@ async fn test_volume_recovery_seeds_verified_chunks() {
     assert_eq!(new_reads[0].2, 50, "seeded chunk read exactly, not widened");
 }
 
+/// Recovery's manifest verification loads only the checksum refs covering
+/// manifested chunks (older refs stay unread) and coalesces adjacent
+/// manifested chunks into single data reads.
+#[tokio::test]
+async fn test_volume_recovery_verification_reads_lazily() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let span = 4 * BLOCK as usize;
+    {
+        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let (blob, _) = volume.open("p", b"log").await.unwrap();
+        // Two append-shaped syncs: two delta refs of 4 chunks each. The
+        // newest commit's manifest covers only chunks 4-7 (the second ref).
+        blob.write_at(0, IoBuf::copy_from_slice(&vec![1u8; span]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        blob.write_at(span as u64, IoBuf::copy_from_slice(&vec![2u8; span]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+
+    // Reopen: recovery verifies the adopted commit's manifest.
+    let reads_before = recording.reads();
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"log").await.unwrap();
+    {
+        let log = recording.log.lock();
+        let new_reads: Vec<_> = log
+            .iter()
+            .filter(|(w, _, _)| !*w)
+            .skip(reads_before)
+            .collect();
+        // Each delta ref holds 4 values (16 bytes). Only the ref covering
+        // the manifested chunks is read.
+        let ref_reads = new_reads.iter().filter(|(_, _, len)| *len == 16).count();
+        assert_eq!(ref_reads, 1, "only the covering ref is read: {new_reads:?}");
+        // The four manifested chunks verify from ONE coalesced read.
+        let data_reads = new_reads.iter().filter(|(_, _, len)| *len == span).count();
+        assert_eq!(data_reads, 1, "one coalesced data read: {new_reads:?}");
+    }
+
+    // The manifested chunks hydrated verified; the rest still verify on
+    // first read (their ref loads lazily).
+    let got = blob.read_at(0, 2 * span).await.unwrap().coalesce();
+    assert_eq!(&got.as_ref()[..span], &vec![1u8; span][..]);
+    assert_eq!(&got.as_ref()[span..], &vec![2u8; span][..]);
+}
+
+/// A torn checksum extent must reject the candidate commit even when the
+/// commit's manifest covers none of the extent's chunks: a shrink whose
+/// only dirt is the partial frontier chunk rewrites the checksum array,
+/// and the frontier is verified from `tail_crc`, so no manifested chunk
+/// consults the new extent. Recovery guard-verifies the entry's LAST ref
+/// unconditionally (a commit's new ref is always last), so the tear rolls
+/// back to the previous commit instead of surfacing as read-time
+/// corruption on a pure power-loss history.
+#[tokio::test]
+async fn test_volume_torn_checksum_extent_outside_manifest_rejected() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let old = vec![3u8; 10 * BLOCK as usize];
+    {
+        let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+        let (blob, _) = volume.open("p", b"s").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&old))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        // Shrink to 1.5 chunks: the only dirty chunk is the partial
+        // frontier (chunk 1), and the coverage shrink forces a full
+        // rewrite of the checksum array (a new extent covering chunk 0).
+        blob.resize(BLOCK + BLOCK / 2).await.unwrap();
+        blob.sync().await.unwrap();
+    }
+
+    // Tear the newest commit's checksum extent (locate it through the
+    // adopted table).
+    let cfg = Config::default();
+    let (file, len) = inner.open(&cfg.partition, &cfg.name).await.unwrap();
+    let mut newest: Option<super::layout::Superblock> = None;
+    for slot in 0..2u8 {
+        let offset = super::layout::Superblock::slot_offset(slot);
+        let bytes = file
+            .read_at(offset, super::layout::Superblock::SIZE)
+            .await
+            .unwrap()
+            .coalesce();
+        if let Some(sb) = super::layout::Superblock::decode(bytes.as_ref()) {
+            if newest.as_ref().is_none_or(|n| sb.seq > n.seq) {
+                newest = Some(sb);
+            }
+        }
+    }
+    let sb = newest.expect("valid slot");
+    let table_bytes = file
+        .read_at(sb.table_offset, sb.table_len as usize)
+        .await
+        .unwrap()
+        .coalesce();
+    let table = super::layout::Table::decode(table_bytes.as_ref()).expect("bound table");
+    let entry = &table.blobs[0];
+    assert_eq!(entry.checksums.len(), 1, "full rewrite leaves one ref");
+    assert_eq!(
+        table.manifest,
+        vec![(entry.id, 1)],
+        "only the frontier chunk is manifested"
+    );
+    let torn = entry.checksums[0].offset;
+    let byte = file.read_at(torn, 1).await.unwrap().coalesce();
+    file.write_at(torn, IoBuf::copy_from_slice(&[byte.as_ref()[0] ^ 0xff]))
+        .await
+        .unwrap();
+    file.sync().await.unwrap();
+    drop(file);
+    let _ = len;
+
+    // Recovery must treat the newest commit as torn and roll back to the
+    // 10-chunk state: every byte reads back loudly-verified, never
+    // BlobCorrupt.
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"s").await.unwrap();
+    assert_eq!(size, old.len() as u64, "rolled back to the previous commit");
+    let got = blob.read_at(0, old.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &old[..]);
+}
+
+/// `span_verified` proves per-span all-verified state across touching
+/// segments and never admits pending, unverified, or uncovered chunks.
+#[test]
+fn test_chunk_map_span_verified() {
+    use super::core::{ChunkCrc, ChunkMap, ChunkState};
+    let ready = |verified| ChunkState {
+        crc: ChunkCrc::Ready(7),
+        verified,
+    };
+    let mut map = ChunkMap::default();
+    // Two touching segments created out of order (5 first, then 4), plus a
+    // separate range with an unverified chunk. Chunks 6-8 are uncovered.
+    map.insert(5, ready(true));
+    map.insert(4, ready(true));
+    map.insert(9, ready(true));
+    map.insert(10, ready(false));
+    map.audit();
+
+    assert!(map.span_verified(4, 5), "touching segments");
+    assert!(map.span_verified(9, 9));
+    assert!(!map.span_verified(10, 10), "unverified chunk");
+    assert!(!map.span_verified(9, 10));
+    assert!(!map.span_verified(5, 9), "uncovered 6-8");
+    assert!(!map.span_verified(0, 4), "uncovered below");
+    assert!(!map.span_verified(11, 12), "uncovered above");
+
+    // Pending chunks are excluded even with the verified bit set: their
+    // overlay is authoritative, so the fast path may not serve disk bytes.
+    map.insert(
+        5,
+        ChunkState {
+            crc: ChunkCrc::Pending,
+            verified: true,
+        },
+    );
+    map.audit();
+    assert!(!map.span_verified(4, 5), "pending chunk in span");
+    assert!(map.span_verified(4, 4));
+    map.finalize(5, || 7);
+    map.audit();
+    assert!(map.span_verified(4, 5), "finalized pending");
+}
+
 /// A request spanning verified and unverified chunks is served by ONE
 /// coalesced inner read that lands directly in the caller's buffer, and the
 /// read verifies every unverified chunk it covers (opportunistic

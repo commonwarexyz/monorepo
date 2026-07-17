@@ -29,11 +29,13 @@
 //! is the production model.
 //!
 //! Corruption loudness has ONE bounded exception: media corruption (bit
-//! rot) that lands inside the NEWEST commit's table, checksum extents, or
-//! delta-manifested chunks is indistinguishable from a torn commit at
+//! rot) that lands inside the NEWEST commit's table, its delta-manifested
+//! chunks, or the checksum extents its manifest verification loads (those
+//! covering manifested chunks) is indistinguishable from a torn commit at
 //! recovery, which then falls back to the previous confirmed commit and
 //! emits a warn-level event instead of returning an error (see `recover`).
-//! Corruption anywhere else — committed data, any older commit's metadata —
+//! Corruption anywhere else — committed data, any older commit's metadata,
+//! checksum extents the manifest does not consult —
 //! is always a loud [`crate::Error::BlobCorrupt`]. The crash contract
 //! itself is model-checked under crash and power loss, not under media
 //! corruption.

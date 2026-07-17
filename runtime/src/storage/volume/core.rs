@@ -142,7 +142,7 @@ struct CrcPage {
     values: Vec<u32>,
 }
 
-/// One contiguous backed chunk range's dense state: a verified bit per
+/// One contiguous backed chunk range's dense state: an unverified bit per
 /// chunk, plus pages of resident CRC values allocated only where a value
 /// is actually held. A fully hydrated-and-verified range therefore costs
 /// one bit per chunk. A fully process-written range costs ~4.2 bytes per
@@ -152,8 +152,9 @@ struct Segment {
     /// Chunk count: the segment covers `[start, start + len)` where
     /// `start` is its key in [`ChunkMap::segments`].
     len: u64,
-    /// Per-chunk verified bits.
-    verified: BitMap,
+    /// Per-chunk unverified bits (set = unverified), so an all-verified
+    /// span is provable word-at-a-time (see [`ChunkMap::span_verified`]).
+    unverified: BitMap,
     /// Resident CRC values in pages of [`CRC_PAGE_CHUNKS`] chunks.
     pages: Vec<Option<Box<CrcPage>>>,
 }
@@ -163,7 +164,7 @@ impl Segment {
     fn new(len: u64) -> Self {
         Self {
             len,
-            verified: BitMap::zeroes(len),
+            unverified: BitMap::ones(len),
             pages: (0..len.div_ceil(CRC_PAGE_CHUNKS)).map(|_| None).collect(),
         }
     }
@@ -207,7 +208,7 @@ impl Segment {
     /// [`ChunkCrc::Unloaded`]. Pending-set membership is the caller's.
     fn push(&mut self, state: ChunkState) {
         self.len += 1;
-        self.verified.push(state.verified);
+        self.unverified.push(!state.verified);
         let idx = ((self.len - 1) / CRC_PAGE_CHUNKS) as usize;
         if idx == self.pages.len() {
             self.pages.push(None);
@@ -230,7 +231,7 @@ impl Segment {
     /// Shrink to `new_len` chunks (0 < `new_len` < `len`).
     fn truncate(&mut self, new_len: u64) {
         debug_assert!(0 < new_len && new_len < self.len);
-        self.verified.truncate(new_len);
+        self.unverified.truncate(new_len);
         let pages = new_len.div_ceil(CRC_PAGE_CHUNKS) as usize;
         self.pages.truncate(pages);
         if let Some(page) = self.pages[pages - 1].as_deref_mut() {
@@ -254,7 +255,9 @@ impl Segment {
 /// [`Segment`] per contiguous backed chunk range, with running counts of
 /// the chunks that are unverified or pending. The counts let a read prove
 /// "every backed chunk is verified with a ready CRC" in O(1) — the common
-/// steady state — without walking anything. All mutation goes through
+/// steady state — without walking anything, and the per-segment unverified
+/// bits prove the same for one requested span word-at-a-time (see
+/// [`Self::span_verified`]). All mutation goes through
 /// methods that keep the counts exact.
 ///
 /// A chunk's CRC is resident when it was computed this process, and a
@@ -285,8 +288,41 @@ impl ChunkMap {
         let rel = chunk.checked_sub(start).filter(|&r| r < seg.len)?;
         Some(ChunkState {
             crc: self.crc_of(seg, rel, chunk),
-            verified: seg.verified.get(rel),
+            verified: !seg.unverified.get(rel),
         })
+    }
+
+    /// Whether every chunk in `[first, last]` is covered and verified with
+    /// no pending CRC (a pending chunk's overlay is authoritative, so its
+    /// disk bytes may not be served). Word-at-a-time over the unverified
+    /// bits: the check costs O(span/64) with no per-chunk state lookups.
+    pub fn span_verified(&self, first: u64, last: u64) -> bool {
+        if !self.pending.is_empty() && self.pending.range(first..=last).next().is_some() {
+            return false;
+        }
+        let start = self
+            .segments
+            .range(..=first)
+            .next_back()
+            .map_or(first, |(&s, _)| s);
+        let mut next = first;
+        for (&s, seg) in self.segments.range(start..=last) {
+            if s > next {
+                return false;
+            }
+            let end = s + seg.len;
+            if end <= next {
+                continue;
+            }
+            if !seg.unverified.is_unset(next - s..(last + 1).min(end) - s) {
+                return false;
+            }
+            next = end;
+            if next > last {
+                return true;
+            }
+        }
+        false
     }
 
     /// The CRC state of `chunk` at segment-relative index `rel` of `seg`.
@@ -320,7 +356,7 @@ impl ChunkMap {
                         chunk,
                         ChunkState {
                             crc: self.crc_of(seg, rel, chunk),
-                            verified: seg.verified.get(rel),
+                            verified: !seg.unverified.get(rel),
                         },
                     )
                 })
@@ -338,12 +374,12 @@ impl ChunkMap {
             let rel = chunk - start;
             if rel < seg.len {
                 // Replace in place.
-                match (seg.verified.get(rel), state.verified) {
-                    (true, false) => self.unverified += 1,
-                    (false, true) => self.unverified -= 1,
+                match (seg.unverified.get(rel), state.verified) {
+                    (false, false) => self.unverified += 1,
+                    (true, true) => self.unverified -= 1,
                     _ => {}
                 }
-                seg.verified.set(rel, state.verified);
+                seg.unverified.set(rel, !state.verified);
                 match state.crc {
                     ChunkCrc::Ready(value) => {
                         self.pending.remove(&chunk);
@@ -391,7 +427,7 @@ impl ChunkMap {
             return;
         };
         let rel = chunk - start;
-        if rel >= seg.len || seg.verified.get(rel) {
+        if rel >= seg.len || !seg.unverified.get(rel) {
             return;
         }
         if !self.pending.is_empty() && self.pending.contains(&chunk) {
@@ -400,7 +436,7 @@ impl ChunkMap {
         if seg.resident(rel).is_some_and(|value| value != crc) {
             return;
         }
-        seg.verified.set(rel, true);
+        seg.unverified.set(rel, false);
         self.unverified -= 1;
     }
 
@@ -411,8 +447,8 @@ impl ChunkMap {
             return;
         };
         let rel = chunk - start;
-        if rel < seg.len && !seg.verified.get(rel) {
-            seg.verified.set(rel, true);
+        if rel < seg.len && seg.unverified.get(rel) {
+            seg.unverified.set(rel, false);
             self.unverified -= 1;
         }
     }
@@ -455,13 +491,13 @@ impl ChunkMap {
     pub fn truncate(&mut self, last_kept: u64) {
         drop(self.pending.split_off(&(last_kept + 1)));
         for (_, seg) in self.segments.split_off(&(last_kept + 1)) {
-            self.unverified -= seg.len - seg.verified.count_ones();
+            self.unverified -= seg.unverified.count_ones();
         }
         if let Some((&start, seg)) = self.segments.range_mut(..=last_kept).next_back() {
             let keep = last_kept + 1 - start;
             if keep < seg.len {
                 for rel in keep..seg.len {
-                    if !seg.verified.get(rel) {
+                    if seg.unverified.get(rel) {
                         self.unverified -= 1;
                     }
                 }
@@ -561,9 +597,9 @@ impl ChunkMap {
         let mut pending = 0;
         for (&start, seg) in &self.segments {
             assert_eq!(
-                seg.verified.len(),
+                seg.unverified.len(),
                 seg.len,
-                "verified bitmap sized to segment"
+                "unverified bitmap sized to segment"
             );
             for (_, state) in self.iter_range(start, start + seg.len - 1) {
                 if !state.verified {
@@ -2155,7 +2191,7 @@ pub(super) fn merge_frozen_runs(runs: &mut BTreeMap<u64, RunMeta>) {
 }
 
 /// Decode a checksum extent's big-endian CRC values.
-fn decode_crcs(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
+pub(super) fn decode_crcs(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
     bytes
         .chunks_exact(4)
         .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
@@ -2398,29 +2434,32 @@ enum Planned {
 /// coalesce into one read whenever physically and logically contiguous —
 /// verified and unverified alike — bounded by [`MAX_READ_SPAN`].
 fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u32>)]) -> Planned {
-    // Steady-state fast path: when every backed chunk is verified with a
-    // ready CRC (O(1) to prove), a request covered by one run is a single
-    // exact read — no chunk-state walk at all. Other shapes (holes,
-    // run boundaries, unverified or pending chunks) take the full scan.
-    if inner.crcs.all_verified() {
-        if let Some((l, r)) = inner.covering(offset) {
-            if end <= l + r.len {
-                return Planned::Plan(ReadPlan {
-                    generation: inner.generation,
-                    head: Some(ReadGroup {
-                        physical: r.physical + (offset - l),
-                        logical: offset,
-                        len: end - offset,
-                        checks: Vec::new(),
-                    }),
-                    rest: Vec::new(),
-                    splices: Vec::new(),
-                });
-            }
-        }
-    }
+    // Steady-state fast path: a request covered by one run whose every
+    // chunk is verified with a ready CRC is a single exact read — no
+    // chunk-state walk at all. Proven volume-wide in O(1) when every
+    // backed chunk is verified, or per span otherwise (word-at-a-time over
+    // the requested chunks), so never-read ranges elsewhere in the blob do
+    // not tax reads of verified territory. Other shapes (holes, run
+    // boundaries, unverified or pending chunks in the span) take the full
+    // scan.
     let first = chunk_of(offset);
     let last = chunk_of(end - 1);
+    if let Some((l, r)) = inner.covering(offset) {
+        if end <= l + r.len && (inner.crcs.all_verified() || inner.crcs.span_verified(first, last))
+        {
+            return Planned::Plan(ReadPlan {
+                generation: inner.generation,
+                head: Some(ReadGroup {
+                    physical: r.physical + (offset - l),
+                    logical: offset,
+                    len: end - offset,
+                    checks: Vec::new(),
+                }),
+                rest: Vec::new(),
+                splices: Vec::new(),
+            });
+        }
+    }
     let mut head: Option<ReadGroup> = None;
     let mut rest: Vec<ReadGroup> = Vec::new();
     // Requested slices of pending chunks: (logical start, copy end).

@@ -14,11 +14,13 @@
 //!   losing slot is zeroed so a later crash cannot resurrect it. On crash
 //!   histories the rejected candidate is always an unacknowledged torn
 //!   commit (model I1-I3). Media corruption (bit rot) inside the NEWEST
-//!   commit's table, checksum extents, or delta-manifested chunks is
+//!   commit's table, its delta-manifested chunks, or the checksum extents
+//!   its manifest verification loads is
 //!   indistinguishable from such tearing, so recovery silently rolls back
 //!   that one commit instead of failing loudly — a warn-level event is the
 //!   only signal, emitted before zeroing destroys the evidence. Corruption
-//!   in any OLDER commit's state has no such window: it surfaces as a loud
+//!   in any OLDER commit's state — including checksum extents the manifest
+//!   does not consult — has no such window: it surfaces as a loud
 //!   [`crate::Error::BlobCorrupt`] at hydration or read.
 //! - Repairs (shadow splices + slot zeroing) are idempotent and re-run on a
 //!   crash during recovery.
@@ -26,15 +28,16 @@
 use super::{
     alloc::{block_align, Allocator, Extent},
     core::{
-        chunk_of, merge_frozen_runs, BlobInner, ChunkCrc, ChunkState, CommittedMeta, Ready,
-        RunMeta, State,
+        chunk_of, decode_crcs, merge_frozen_runs, window_value, BlobInner, ChunkCrc, ChunkState,
+        CommittedMeta, Ready, RunMeta, State,
     },
-    layout::{Entry, Superblock, Table},
+    layout::{ChecksumRef, Entry, Superblock, Table},
     Config, BLOCK,
 };
 use crate::{Blob as _, BufferPool, Error, IoBuf};
-use commonware_cryptography::Crc32;
+use commonware_cryptography::{Crc32, Hasher as _};
 use commonware_utils::sync::{AsyncMutex, Mutex};
+use futures::{stream, StreamExt as _};
 use std::collections::BTreeMap;
 
 /// Read one superblock slot, if valid.
@@ -89,55 +92,79 @@ fn entry_last_chunk(entry: &Entry) -> Option<u64> {
     entry.runs.last().map(|r| chunk_of(r.logical + r.len - 1))
 }
 
-/// Look up the expected CRC of `chunk` from an entry's checksum extents
-/// (loading + verifying the covering extent), with the frontier chunk served
-/// from `tail_crc`.
-struct ChecksumIndex {
-    /// (first_chunk, crcs) per loaded extent.
-    loaded: Vec<(u64, Vec<u32>)>,
+/// Bound on concurrently in-flight manifest-verification reads.
+const VERIFY_CONCURRENCY: usize = 16;
+
+/// Cap on one coalesced manifest-verification read.
+const VERIFY_READ_SPAN: u64 = 1 << 20;
+
+/// Load the value windows of committed checksum extent `r` named by
+/// `windows` (`[w0, w1)` value-index ranges within the ref, ascending and
+/// disjoint), verifying the extent's guard CRC by streaming its bytes once
+/// in bounded steps. `None` means the guard did not match (torn extent).
+///
+/// The guard must hold over the WHOLE extent even though the manifest
+/// consults only the windows: a torn full-rewrite extent would otherwise
+/// pass verification wherever the manifest does not reach, adopting a
+/// table that vouches for values that never landed — and a pure power-loss
+/// history would then surface as read-time corruption (first reads
+/// re-check the guard, see `core::load_committed_page`) instead of the
+/// mandated one-commit rollback.
+async fn load_ref_windows<B: crate::Blob>(
+    file: &B,
+    r: &ChecksumRef,
+    windows: &[(u64, u64)],
+) -> Result<Option<Vec<(u64, Vec<u32>)>>, Error> {
+    /// Streaming step for guard verification of large extents.
+    const STEP: u64 = 1 << 22;
+    let mut hasher = Crc32::new();
+    let mut out: Vec<(u64, Vec<u32>)> = windows
+        .iter()
+        .map(|&(w0, w1)| (r.first_chunk + w0, Vec::with_capacity((w1 - w0) as usize)))
+        .collect();
+    let total = r.count as u64 * 4;
+    let mut pos = 0;
+    while pos < total {
+        let step = STEP.min(total - pos);
+        let bytes = file
+            .read_at(r.offset + pos, step as usize)
+            .await?
+            .coalesce();
+        hasher.update(bytes.as_ref());
+        // Capture each window's intersection with this step.
+        for (&(w0, w1), (_, values)) in windows.iter().zip(out.iter_mut()) {
+            let lo = (w0 * 4).max(pos);
+            let hi = (w1 * 4).min(pos + step);
+            if hi > lo {
+                values.extend(decode_crcs(
+                    &bytes.as_ref()[(lo - pos) as usize..(hi - pos) as usize],
+                ));
+            }
+        }
+        pos += step;
+    }
+    Ok((hasher.finalize().as_u32() == r.crc).then_some(out))
 }
 
-impl ChecksumIndex {
-    /// `len` bounds candidate verification: an extent that reaches past the
-    /// file end never landed (`Ok(None)`). Pass `u64::MAX` for committed
-    /// entries, whose extents are known in bounds.
-    async fn load<B: crate::Blob>(
-        file: &B,
-        entry: &Entry,
-        len: u64,
-    ) -> Result<Option<Self>, Error> {
-        let mut loaded = Vec::new();
-        for r in &entry.checksums {
-            let end = r.offset.checked_add(r.count as u64 * 4);
-            match end {
-                Some(end) if end <= len => {}
-                _ => return Ok(None),
-            }
-            let bytes = file
-                .read_at(r.offset, r.count as usize * 4)
-                .await?
-                .coalesce();
-            if Crc32::checksum(bytes.as_ref()) != r.crc {
-                return Ok(None);
-            }
-            let crcs = bytes
-                .as_ref()
-                .chunks_exact(4)
-                .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
-                .collect();
-            loaded.push((r.first_chunk, crcs));
-        }
-        Ok(Some(Self { loaded }))
-    }
+/// One chunk's CRC check within a coalesced verification read.
+struct Check {
+    /// Span offset within the read.
+    at: usize,
+    /// Span length in bytes.
+    span: u64,
+    /// Expected CRC32C over the span.
+    expected: u32,
+    /// (blob id, chunk) to seed as recovery-verified when the check passes.
+    /// `None` for frontier chunks, which hydration re-verifies itself.
+    seed: Option<(u64, u64)>,
+}
 
-    fn get(&self, chunk: u64) -> Option<u32> {
-        for (first, crcs) in &self.loaded {
-            if chunk >= *first && chunk < first + crcs.len() as u64 {
-                return Some(crcs[(chunk - first) as usize]);
-            }
-        }
-        None
-    }
+/// One coalesced verification read: physically contiguous manifested spans
+/// checked from a single inner read.
+struct VerifyRead {
+    physical: u64,
+    len: u64,
+    checks: Vec<Check>,
 }
 
 /// Verify a candidate table's delta manifest against the disk.
@@ -147,73 +174,184 @@ impl ChecksumIndex {
 /// their verified bits so first reads skip re-verification (frontier chunks
 /// are excluded — hydration re-verifies the frontier itself when it loads
 /// the tail buffer). `None` means the manifest failed to verify.
+///
+/// Expected CRCs load lazily: only the value windows covering manifested
+/// chunks are retained (not whole checksum arrays), and the only refs
+/// read are those covering a manifested chunk plus each entry's LAST ref
+/// (the one extent the candidate commit may have written, hence torn).
+/// Every skipped ref was already referenced by the previous confirmed
+/// commit, whose fsync made it durable — tearing strikes only blocks the
+/// candidate commit wrote — so skipping its guard check trades nothing on
+/// crash histories (bit rot in it surfaces loudly at first read instead
+/// of rolling back the newest commit, see the module docs). Adjacent
+/// manifested chunks coalesce into single reads, issued with bounded
+/// concurrency so CRC work overlaps I/O.
 async fn verify_manifest<B: crate::Blob>(
     file: &B,
     len: u64,
     table: &Table,
 ) -> Result<Option<Vec<(u64, u64)>>, Error> {
-    // Load + verify the checksum extents of every manifested blob up front.
-    let mut indexes: BTreeMap<u64, ChecksumIndex> = BTreeMap::new();
-    for &(id, _) in &table.manifest {
+    // The manifest's order is untrusted input: sort per (blob, chunk) so
+    // window and read coalescing below see ascending chunks.
+    let mut manifest = table.manifest.clone();
+    manifest.sort_unstable();
+    manifest.dedup();
+
+    // Plan the verification reads per blob: resolve every manifested chunk
+    // to its backed span and expected CRC, coalescing physically contiguous
+    // spans into single reads.
+    let mut reads: Vec<VerifyRead> = Vec::new();
+    for group in manifest.chunk_by(|a, b| a.0 == b.0) {
+        let id = group[0].0;
         let Some(entry) = table.blobs.iter().find(|e| e.id == id) else {
             continue; // blob removed by this commit
         };
-        if indexes.contains_key(&id) {
-            continue;
-        }
-        let Some(loaded) = ChecksumIndex::load(file, entry, len).await? else {
-            return Ok(None); // torn checksum extent
-        };
-        indexes.insert(id, loaded);
-    }
-
-    let mut verified = Vec::new();
-    for &(id, chunk) in &table.manifest {
-        let Some(entry) = table.blobs.iter().find(|e| e.id == id) else {
-            continue; // blob removed by this commit
-        };
-        let Some((phys, span)) = entry_chunk_span(entry, chunk) else {
-            continue; // became a hole
-        };
-        if phys + span > len {
-            return Ok(None); // backing never landed
-        }
-        let frontier = entry_last_chunk(entry) == Some(chunk) && span < BLOCK;
-
-        // Expected CRC: frontier partial chunks come from the entry itself;
-        // others from the checksum extents.
-        let expected = if frontier {
-            entry.tail_crc
-        } else {
-            match indexes.get(&id).expect("preloaded").get(chunk) {
-                Some(crc) => crc,
-                None => return Ok(None),
+        // An extent that reaches past the file end never landed (arithmetic
+        // only; unread refs cost no I/O).
+        for r in &entry.checksums {
+            match r.offset.checked_add(r.count as u64 * 4) {
+                Some(end) if end <= len => {}
+                _ => return Ok(None),
             }
-        };
+        }
 
-        // Frontier chunks with a shadow: the shadow is authoritative for the
-        // frozen span (the on-disk block may be torn by post-snapshot
-        // appends; recovery splices it afterwards).
-        if frontier {
-            if let Some(shadow) = entry.shadow {
-                if shadow + span > len {
-                    return Ok(None);
-                }
-                let bytes = file.read_at(shadow, span as usize).await?.coalesce();
-                if Crc32::checksum(bytes.as_ref()) != expected {
-                    return Ok(None);
-                }
+        // Resolve each chunk's span; frontier partial chunks are served by
+        // `tail_crc`, everything else needs its committed value.
+        let last_chunk = entry_last_chunk(entry);
+        let mut spans: Vec<(u64, u64, u64, bool)> = Vec::with_capacity(group.len());
+        let mut need_value: Vec<u64> = Vec::new();
+        for &(_, chunk) in group {
+            let Some((phys, span)) = entry_chunk_span(entry, chunk) else {
+                continue; // became a hole
+            };
+            if phys + span > len {
+                return Ok(None); // backing never landed
+            }
+            let frontier = last_chunk == Some(chunk) && span < BLOCK;
+            if !frontier {
+                need_value.push(chunk);
+            }
+            spans.push((chunk, phys, span, frontier));
+        }
+
+        // Group the needed value windows by covering ref (coalescing
+        // contiguous chunks: manifests from bulk loads are dense ranges).
+        // A chunk outside every ref's coverage means the refs never landed.
+        let mut per_ref: Vec<Vec<(u64, u64)>> = vec![Vec::new(); entry.checksums.len()];
+        let mut ref_idx = 0;
+        for &chunk in &need_value {
+            while entry
+                .checksums
+                .get(ref_idx)
+                .is_some_and(|r| chunk >= r.first_chunk + r.count as u64)
+            {
+                ref_idx += 1;
+            }
+            let covering = entry
+                .checksums
+                .get(ref_idx)
+                .filter(|r| r.first_chunk <= chunk && chunk < r.first_chunk + r.count as u64);
+            let Some(r) = covering else {
+                return Ok(None); // manifested chunk without a committed CRC
+            };
+            let w = chunk - r.first_chunk;
+            let windows = &mut per_ref[ref_idx];
+            match windows.last_mut() {
+                Some((_, w1)) if *w1 == w => *w1 = w + 1,
+                _ => windows.push((w, w + 1)),
+            }
+        }
+
+        // Load every ref a manifested chunk needs, plus the LAST ref
+        // unconditionally: a commit adds at most one new checksum ref and
+        // always as the entry's last (delta commits append one, a full
+        // rewrite is the sole ref), so the last ref is exactly the extent
+        // this commit may have torn — and it may cover no manifested chunk
+        // at all (dirt confined to the partial frontier, or delta coverage
+        // over holes).
+        let mut loaded: Vec<(u64, Vec<u32>)> = Vec::new();
+        for (i, windows) in per_ref.iter().enumerate() {
+            if windows.is_empty() && i + 1 != entry.checksums.len() {
                 continue;
             }
+            let r = &entry.checksums[i];
+            let Some(mut got) = load_ref_windows(file, r, windows).await? else {
+                return Ok(None); // torn checksum extent
+            };
+            loaded.append(&mut got);
         }
 
-        let bytes = file.read_at(phys, span as usize).await?.coalesce();
-        if Crc32::checksum(bytes.as_ref()) != expected {
+        for (chunk, phys, span, frontier) in spans {
+            let expected = if frontier {
+                entry.tail_crc
+            } else {
+                window_value(&loaded, chunk).expect("loaded above")
+            };
+            // Frontier chunks with a shadow: the shadow is authoritative
+            // for the frozen span (the on-disk block may be torn by
+            // post-snapshot appends; recovery splices it afterwards).
+            let physical = if frontier {
+                match entry.shadow {
+                    Some(shadow) => {
+                        if shadow + span > len {
+                            return Ok(None);
+                        }
+                        shadow
+                    }
+                    None => phys,
+                }
+            } else {
+                phys
+            };
+            let check = Check {
+                at: 0,
+                span,
+                expected,
+                seed: (!frontier).then_some((id, chunk)),
+            };
+            match reads.last_mut() {
+                Some(read)
+                    if read.physical + read.len == physical
+                        && read.len + span <= VERIFY_READ_SPAN =>
+                {
+                    read.checks.push(Check {
+                        at: read.len as usize,
+                        ..check
+                    });
+                    read.len += span;
+                }
+                _ => reads.push(VerifyRead {
+                    physical,
+                    len: span,
+                    checks: vec![check],
+                }),
+            }
+        }
+    }
+
+    // Execute the reads with bounded concurrency, overlapping CRC work
+    // with in-flight I/O. `buffered` keeps results in plan order, so the
+    // returned chunk list is schedule-independent.
+    let mut verified = Vec::new();
+    let mut outcomes = stream::iter(reads.into_iter().map(|read| async move {
+        let bytes = file
+            .read_at(read.physical, read.len as usize)
+            .await?
+            .coalesce();
+        for check in &read.checks {
+            let span = &bytes.as_ref()[check.at..check.at + check.span as usize];
+            if Crc32::checksum(span) != check.expected {
+                return Ok(None);
+            }
+        }
+        Ok::<_, Error>(Some(read.checks))
+    }))
+    .buffered(VERIFY_CONCURRENCY);
+    while let Some(outcome) = outcomes.next().await {
+        let Some(checks) = outcome? else {
             return Ok(None);
-        }
-        if !frontier {
-            verified.push((id, chunk));
-        }
+        };
+        verified.extend(checks.into_iter().filter_map(|check| check.seed));
     }
     Ok(Some(verified))
 }
