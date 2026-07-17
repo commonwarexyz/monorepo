@@ -23,7 +23,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::Variant as BlsVariant,
     certificate::{Provider, Verifier},
 };
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::{
     Blocker, Channel, Manager, Message as P2pMessage, Receiver, Sender, TrackedPeers,
     utils::mux::{Builder, MuxHandle, Muxer},
@@ -69,6 +69,11 @@ impl Drop for ActiveEpoch {
     fn drop(&mut self) {
         self.handle.abort();
     }
+}
+
+enum EnterEpochError {
+    GateClosed,
+    Stopped,
 }
 
 /// Public boundary material used for one-time state-sync startup.
@@ -348,14 +353,28 @@ where
         );
         let epocher = FixedEpocher::new(self.blocks_per_epoch);
         let start = self.resolve_start(&epocher).await;
-        let mut active = self
+        let mut active = match self
             .enter_epoch(
                 start.epoch,
                 start.floor,
                 start.info.participants().tracked_peers(),
                 &mut channels,
             )
-            .await;
+            .await
+        {
+            Ok(active) => active,
+            Err(EnterEpochError::GateClosed) => {
+                debug!(
+                    epoch = start.epoch.get(),
+                    "epoch gate closed before startup"
+                );
+                return;
+            }
+            Err(EnterEpochError::Stopped) => {
+                debug!("context shutdown before startup epoch");
+                return;
+            }
+        };
 
         select_loop! {
             self.context,
@@ -385,14 +404,18 @@ where
                     block,
                     acknowledgement,
                 } => {
-                    self.handle_finalized(
-                        &epocher,
-                        &mut active,
-                        block,
-                        acknowledgement,
-                        &mut channels,
-                    )
-                    .await;
+                    let keep_running = self
+                        .handle_finalized(
+                            &epocher,
+                            &mut active,
+                            block,
+                            acknowledgement,
+                            &mut channels,
+                        )
+                        .await;
+                    if !keep_running {
+                        break;
+                    }
                 }
             },
         }
@@ -565,14 +588,15 @@ where
         block: Arc<MV::ApplicationBlock>,
         acknowledgement: ACK,
         channels: &mut Channels<P::Scheme, S, R>,
-    ) where
+    ) -> bool
+    where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         let height = block.height();
         if epocher.last(active.epoch) != Some(height) {
             acknowledgement.acknowledge();
-            return;
+            return true;
         }
 
         let next_epoch = active.epoch.next();
@@ -593,7 +617,7 @@ where
             .unwrap_or_else(|| panic!("missing finalized boundary block at height {height}"));
         let floor = Floor::Genesis(MV::commitment(&boundary));
 
-        *active = self
+        let next = self
             .enter_epoch(
                 next_epoch,
                 floor,
@@ -601,7 +625,21 @@ where
                 channels,
             )
             .await;
+        let next = match next {
+            Ok(next) => next,
+            Err(EnterEpochError::GateClosed) => {
+                debug!(%next_epoch, "epoch gate closed before boundary transition");
+                return false;
+            }
+            Err(EnterEpochError::Stopped) => {
+                debug!(%next_epoch, "context shutdown while waiting to enter epoch");
+                return false;
+            }
+        };
+
+        *active = next;
         acknowledgement.acknowledge();
+        true
     }
 
     /// Enter an epoch and return the active engine handle.
@@ -616,12 +654,23 @@ where
         floor: Floor<P::Scheme, MV::Commitment>,
         peers: impl Into<TrackedPeers<<P::Scheme as Verifier>::PublicKey>> + Send,
         channels: &mut Channels<P::Scheme, S, R>,
-    ) -> ActiveEpoch
+    ) -> Result<ActiveEpoch, EnterEpochError>
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        self.gate.wait(epoch).await;
+        let mut shutdown = self.context.stopped();
+        select! {
+            result = self.gate.wait(epoch) => {
+                if result.is_err() {
+                    return Err(EnterEpochError::GateClosed);
+                }
+            },
+            _ = &mut shutdown => {
+                return Err(EnterEpochError::Stopped);
+            },
+        };
+        drop(shutdown);
 
         let peer_set_id = epoch
             .get()
@@ -671,6 +720,6 @@ where
         let _ = self.latest_epoch.try_set(epoch.get());
 
         info!(%epoch, "entered epoch");
-        ActiveEpoch { epoch, handle }
+        Ok(ActiveEpoch { epoch, handle })
     }
 }
