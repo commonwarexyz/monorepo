@@ -393,7 +393,11 @@ impl Property<ed25519::PublicKey, ValidatorState> for FailedCeremonyCarryOver {
         states: &'a [&'a ValidatorState],
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            let Some(reference) = states.first() else {
+            let Some(reference) = states
+                .iter()
+                .find(|state| state.state_sync_height().is_some())
+                .or_else(|| states.first())
+            else {
                 return Err("no active validator states".to_string());
             };
 

@@ -850,12 +850,13 @@ mod tests {
             )
             .expect("terminal response decoded")
             .expect("terminal response tag");
-            let decoded = wire::read_response_block::<mocks::TestScheme, mocks::TestMarshalVariant>(
-                decoded.body,
-                decoded.finalization,
-                &(),
-            )
-            .expect("terminal response block decoded");
+            let decoded =
+                wire::read_response_block::<mocks::TestScheme, mocks::TestMarshalVariant>(
+                    decoded.body,
+                    decoded.finalization,
+                    &(),
+                )
+                .expect("terminal response block decoded");
             assert_eq!(decoded.finalization.epoch(), Epoch::new(u64::MAX));
 
             harness.source_boundary_sender.send(
@@ -960,18 +961,16 @@ mod tests {
                 mocks::TestScheme,
                 mocks::TestMarshalVariant,
                 _,
-            >(
-                message,
-                &harness.schemes[2].certificate_codec_config(),
-            )
+            >(message, &harness.schemes[2].certificate_codec_config())
             .expect("boundary response decoded")
             .expect("boundary response");
-            let response = wire::read_response_block::<mocks::TestScheme, mocks::TestMarshalVariant>(
-                response.body,
-                response.finalization,
-                &(),
-            )
-            .expect("boundary response block decoded");
+            let response =
+                wire::read_response_block::<mocks::TestScheme, mocks::TestMarshalVariant>(
+                    response.body,
+                    response.finalization,
+                    &(),
+                )
+                .expect("boundary response block decoded");
 
             assert_eq!(response.block.digest(), harness.boundary.digest());
             assert_eq!(response.block.height(), Height::new(1));

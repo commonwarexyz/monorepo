@@ -288,9 +288,7 @@ mod tests {
         types::{FixedEpocher, ViewDelta},
     };
     use commonware_cryptography::{
-        bls12381::primitives::sharing::Mode,
-        certificate::Verifier as _,
-        ed25519,
+        bls12381::primitives::sharing::Mode, certificate::Verifier as _, ed25519,
     };
     use commonware_p2p::{
         Receiver,
@@ -299,14 +297,11 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        IoBuf, Runner, Supervisor as _, deterministic,
-        buffer::paged::CacheRef,
+        IoBuf, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, NZU16, NZU32, NZU64, NZUsize,
-        acknowledgement::Exact,
-        ordered::Set,
+        Acknowledgement, NZU16, NZU32, NZU64, NZUsize, acknowledgement::Exact, ordered::Set,
     };
     use std::{
         collections::VecDeque,
@@ -458,9 +453,12 @@ mod tests {
                 vec![signer.public_key(), peer.clone()],
             )
             .await;
-            let marshal =
-                marshal_mailbox(context.child("marshal"), &signer, fixture.schemes[0].clone())
-                    .await;
+            let marshal = marshal_mailbox(
+                context.child("marshal"),
+                &signer,
+                fixture.schemes[0].clone(),
+            )
+            .await;
             let (fence, _gate) = Fence::new(Epoch::zero());
             let (mut actor, mut mailbox) = TestActor::new(
                 context.child("actor"),
@@ -507,17 +505,13 @@ mod tests {
             );
 
             let result = actor
-                .dealing(
-                    Epoch::zero(),
-                    &mut store,
-                    None,
-                    None,
-                    (sender, receiver),
-                )
+                .dealing(Epoch::zero(), &mut store, None, None, (sender, receiver))
                 .await;
 
             assert!(result.is_continue());
-            waiter.await.expect("finalized block should be acknowledged");
+            waiter
+                .await
+                .expect("finalized block should be acknowledged");
             assert_eq!(received.load(Ordering::SeqCst), 0);
         });
     }

@@ -281,9 +281,11 @@ mod tests {
 
     #[test]
     fn epoch_capacity_accepts_exact_bootstrap_slots() {
-        assert!(participants(2)
-            .validate_epoch_capacity::<MinPk>(NZU64!(5), None)
-            .is_ok());
+        assert!(
+            participants(2)
+                .validate_epoch_capacity::<MinPk>(NZU64!(5), None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -300,12 +302,9 @@ mod tests {
     #[test]
     fn epoch_capacity_rejects_insufficient_reshare_slots() {
         let players = keys(4);
-        let (previous, _) = deal::<MinPk, _, N3f1>(
-            TestRng::new(0),
-            Mode::NonZeroCounter,
-            players.clone(),
-        )
-        .expect("trusted deal");
+        let (previous, _) =
+            deal::<MinPk, _, N3f1>(TestRng::new(0), Mode::NonZeroCounter, players.clone())
+                .expect("trusted deal");
 
         assert_eq!(
             Participants {
@@ -324,20 +323,19 @@ mod tests {
     #[test]
     fn epoch_capacity_accepts_exact_reshare_slots() {
         let players = keys(4);
-        let (previous, _) = deal::<MinPk, _, N3f1>(
-            TestRng::new(1),
-            Mode::NonZeroCounter,
-            players.clone(),
-        )
-        .expect("trusted deal");
+        let (previous, _) =
+            deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, players.clone())
+                .expect("trusted deal");
 
-        assert!(Participants {
-            dealers: players.clone(),
-            players,
-            next_players: Set::default(),
-        }
-        .validate_epoch_capacity(NZU64!(7), Some(&previous))
-        .is_ok());
+        assert!(
+            Participants {
+                dealers: players.clone(),
+                players,
+                next_players: Set::default(),
+            }
+            .validate_epoch_capacity(NZU64!(7), Some(&previous))
+            .is_ok()
+        );
     }
 }
 
