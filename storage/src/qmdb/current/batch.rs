@@ -19,7 +19,7 @@ use crate::{
             operation::{Operation, update},
         },
         batch_chain::Bounds,
-        bitmap::Shared,
+        bitmap::{Shared, fill_from},
         current::{
             db::{compute_db_root, read_graft_inputs},
             grafting,
@@ -109,24 +109,16 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 }
 
-/// Bitmap-accelerated floor scan for a layered `BitmapBatch` chain. Fills `out` with up to
+/// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Fills `out` with up to
 /// `limit` floor-raise candidates in `[floor, tip)`, returning the next `floor`. Skips
-/// locations where the committed bitmap bit is unset, avoiding I/O reads for inactive
-/// operations.
+/// locations where the layered bitmap bit is unset (including locations superseded by
+/// uncommitted ancestors), avoiding I/O reads for inactive operations. Produces the same
+/// sequence as repeatedly calling the `next_candidate` test oracle over the chain.
 ///
-/// Mirrors the contract on `any::batch::fill_candidates`: may return only locations that are
-/// *possibly* active in `[floor, tip)`, may skip locations only when known inactive. The
-/// floor-raise loop revalidates each candidate, so false positives are tolerated; false
-/// negatives are forbidden.
-///
-/// Overlay `Layer`s are deliberately ignored: scanning them bit-by-bit costs a fresh chain
-/// walk and base-lock acquisition per candidate, while the terminal [`Shared`] serves the
-/// whole batch under one read guard. This can only widen the candidate set:
-/// - In the committed prefix, layers only clear bits (supersessions -- appends never land
-///   below the committed boundary), so a stale set bit read from the base is a false
-///   positive.
-/// - At or beyond the committed boundary, every location is emitted as a sequential
-///   candidate, which covers all layer appends.
+/// One scan iterator serves the whole batch: overlay chunks resolve lock-free and the
+/// committed base is locked once per untouched chunk, rather than several times per
+/// candidate. The iterator's chunk caching is sound here because bitmap mutators require
+/// `&mut` on the database, which cannot coexist with the `&db` a merkleize holds.
 pub(crate) fn fill_candidates<F: Graftable, const N: usize>(
     bitmap: &BitmapBatch<N>,
     floor: Location<F>,
@@ -135,7 +127,7 @@ pub(crate) fn fill_candidates<F: Graftable, const N: usize>(
     out: &mut Vec<Location<F>>,
 ) -> Location<F> {
     let mut raw: Vec<u64> = Vec::with_capacity(limit);
-    let next = bitmap.shared().fill_candidates(*floor, tip, limit, &mut raw);
+    let next = fill_from(bitmap, *floor, tip, limit, &mut raw);
     out.extend(raw.into_iter().map(Location::new));
     Location::new(next)
 }
@@ -1586,28 +1578,75 @@ mod tests {
     }
 
     #[test]
-    fn fill_candidates_ignores_layers() {
+    fn fill_candidates_filters_ancestor_clears() {
         let bits = [true, false, true, true, false, false, true, false];
         let base = make_bitmap(&bits);
         let shared = Arc::new(Shared::new(make_bitmap(&bits)));
-        // Layer clears committed bit 3 and appends bits 8..12 (only 9 set).
-        let mut overlay = ChunkOverlay::new(12, 2);
-        overlay.clear_bit(&base, 0, 3);
-        overlay.set_bit(&base, 9);
+
+        // Layer 1 clears committed bit 3 and appends bits 8..12 (only 9 set).
+        let mut overlay1 = ChunkOverlay::new(12, 2);
+        overlay1.clear_bit(&base, 0, 3);
+        overlay1.set_bit(&base, 9);
+        let chain1 = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+            parent: BitmapBatch::Base(Arc::clone(&shared)),
+            overlay: Arc::new(overlay1),
+            shared: Arc::clone(&shared),
+        }));
+
+        // Layer 2 (materialized against the layer-1 view, as `build_chunk_overlay` does)
+        // clears bits 6 and 9, and appends bits 12..14 (only 13 set).
+        let mut overlay2 = ChunkOverlay::new(14, 2);
+        overlay2.clear_bit(&chain1, 0, 6);
+        overlay2.clear_bit(&chain1, 0, 9);
+        overlay2.set_bit(&chain1, 13);
+        let chain2 = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+            parent: chain1.clone(),
+            overlay: Arc::new(overlay2),
+            shared,
+        }));
+
+        // Bits cleared by any layer are skipped (no wasted log reads), set bits -- committed
+        // or appended, from whichever layer materialized the chunk last -- are emitted
+        // ascending, and locations at or beyond the layered length up to `tip` are emitted
+        // sequentially.
+        let scan = |chain: &BitmapBatch<N>, tip: u64| {
+            let mut got = Vec::new();
+            fill_candidates(chain, Location::new(0), tip, 16, &mut got);
+            got
+        };
+        let want = |locs: &[u64]| locs.iter().copied().map(Location::new).collect::<Vec<_>>();
+        assert_eq!(scan(&chain1, 12), want(&[0, 2, 6, 9]));
+        assert_eq!(scan(&chain2, 14), want(&[0, 2, 13]));
+        assert_eq!(scan(&chain2, 16), want(&[0, 2, 13, 14, 15]));
+    }
+
+    #[test]
+    fn fill_candidates_mixes_overlay_and_base_chunks() {
+        // Base spans two chunks (N=4 -> 32-bit chunks): full chunk 0 plus a partial chunk 1.
+        let mut bits = [false; 40];
+        for i in [1, 30, 33, 35, 38] {
+            bits[i] = true;
+        }
+        let base = make_bitmap(&bits);
+        let shared = Arc::new(Shared::new(make_bitmap(&bits)));
+
+        // Layer touches only chunk 1: clears committed bit 35 and appends bits 40..44
+        // (only 41 set). Chunk 0 stays unmaterialized, so the scan must fall through to
+        // the committed base there.
+        let mut overlay = ChunkOverlay::new(44, 1);
+        overlay.clear_bit(&base, 0, 35);
+        overlay.set_bit(&base, 41);
         let chain = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
             parent: BitmapBatch::Base(Arc::clone(&shared)),
             overlay: Arc::new(overlay),
             shared,
         }));
+
+        // Chunk 0 bits come from the base, chunk 1 bits from the overlay (35 filtered,
+        // the appended 41 emitted).
         let mut got = Vec::new();
-        fill_candidates(&chain, Location::new(0), 12, 16, &mut got);
-        // Committed set bits (0, 2, 3, 6) are all emitted -- including 3, which the layer
-        // cleared (a permitted false positive) -- then 8..12 sequentially, covering the
-        // layer's appends without per-location filtering.
-        let want: Vec<Location> = [0, 2, 3, 6, 8, 9, 10, 11]
-            .into_iter()
-            .map(Location::new)
-            .collect();
+        fill_candidates(&chain, Location::new(0), 44, 16, &mut got);
+        let want: Vec<Location> = [1, 30, 33, 38, 41].into_iter().map(Location::new).collect();
         assert_eq!(got, want);
     }
 
