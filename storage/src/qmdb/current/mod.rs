@@ -577,7 +577,7 @@ pub mod tests {
                     }
                     let seed = seed.merkleize(&db, None).await.unwrap();
                     db.apply_batch(seed).await.unwrap();
-                    db.commit().await.unwrap();
+                    db.sync().await.unwrap();
 
                     for depth in [0u8, 1u8, 2u8] {
                         // Keep every uncommitted ancestor alive until the child is merkleized.
@@ -817,7 +817,7 @@ pub mod tests {
             }
             let merkleized = batch.merkleize(db, None).await?;
             db.apply_batch(merkleized).await?;
-            db.commit().await?;
+            db.sync().await?;
             Ok(())
         })
     }
@@ -1137,8 +1137,8 @@ pub mod tests {
 
     /// Run `test_sync_persists_bitmap_pruning_boundary` against a database factory.
     ///
-    /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
-    /// set during `commit()`. If `sync()` didn't call `write_pruned`, the
+    /// This test verifies that calling `sync()` persists the bitmap pruning boundary. If
+    /// `sync()` didn't stage the pruning metadata, the
     /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
     pub async fn test_sync_persists_bitmap_pruning_boundary<M, C, F, Fut>(
         mut context: Context,
@@ -1843,7 +1843,7 @@ pub mod tests {
         }
         let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
     }
 
     async fn commit_writes_with_metadata(
@@ -1857,7 +1857,7 @@ pub mod tests {
         }
         let merkleized = batch.merkleize(db, metadata).await.unwrap();
         let range = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         range
     }
 
@@ -1920,7 +1920,7 @@ pub mod tests {
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
             assert_eq!(db.get(&key(2)).await.unwrap(), None);
 
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             drop(db);
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
@@ -1949,7 +1949,7 @@ pub mod tests {
             assert_eq!(reopened.get(&key(1)).await.unwrap(), None);
             assert_eq!(reopened.get(&key(2)).await.unwrap(), None);
 
-            reopened.commit().await.unwrap();
+            reopened.sync().await.unwrap();
             drop(reopened);
 
             let reopened_initial: UnorderedVariableDb = UnorderedVariableDb::init(
@@ -2033,7 +2033,7 @@ pub mod tests {
             assert_eq!(db.bounds().end, target_size);
             assert_eq!(db.get(&key0).await.unwrap(), Some(target_value));
 
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             drop(db);
 
             let mut reopened: UnorderedVariableDb = UnorderedVariableDb::init(
@@ -2113,7 +2113,7 @@ pub mod tests {
                 batch = batch.write(k, expected);
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
                 db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
             }
 
             let root_before = db.root();
@@ -2178,7 +2178,7 @@ pub mod tests {
                 batch = batch.write(key0, Some(val(60_000 + round)));
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
                 db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
                 history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
 
@@ -2799,7 +2799,7 @@ pub mod tests {
             assert_eq!(db.get(&key0).await.unwrap(), Some(target_key0));
             assert_eq!(db.get(&key1).await.unwrap(), target_key1);
 
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             drop(db);
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
@@ -3098,7 +3098,7 @@ pub mod tests {
             }
             let merkleized = initial.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
             // the parent diff and must still be resolved through the committed
@@ -3125,7 +3125,7 @@ pub mod tests {
             let pending_ops_root = pending_child.ops_root();
 
             db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -3168,7 +3168,7 @@ pub mod tests {
             }
             let merkleized = initial.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
             // the parent diff and must still be resolved through the committed
@@ -3194,7 +3194,7 @@ pub mod tests {
             let pending_ops_root = pending_child.ops_root();
 
             db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -3217,7 +3217,7 @@ pub mod tests {
         });
     }
 
-    /// Applying without `commit()` publishes in memory but is not recovered after reopen.
+    /// Applying without `sync()` publishes in memory but is not recovered after reopen.
     #[test_traced("INFO")]
     fn test_current_batch_apply_requires_commit_for_recovery() {
         let executor = deterministic::Runner::default();
@@ -3282,10 +3282,10 @@ pub mod tests {
                 child = child.write(key(1), Some(val(1)));
                 child.merkleize(&db, None).await.unwrap()
             };
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             db.apply_batch(child_merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
@@ -3432,7 +3432,7 @@ pub mod tests {
             }
             let seed_m = seed.merkleize(&db, None).await.unwrap();
             db.apply_batch(seed_m).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
             let mut p = db.new_batch();
@@ -3441,7 +3441,7 @@ pub mod tests {
             }
             let p_m = p.merkleize(&db, None).await.unwrap();
             db.apply_batch(Arc::clone(&p_m)).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Build c off p_m; c is live and shares the committed bitmap via its chain.
             let c = p_m
@@ -3552,7 +3552,7 @@ pub mod tests {
             }
             let seed_m = seed.merkleize(&db, None).await.unwrap();
             db.apply_batch(seed_m).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
             let mut a_batch = db.new_batch();
@@ -3561,7 +3561,7 @@ pub mod tests {
             }
             let a = a_batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(Arc::clone(&a)).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Prune while `a` is still live. Mutates the shared bitmap's pruning boundary in place.
             db.prune(db.sync_boundary()).await.unwrap();
@@ -3625,7 +3625,7 @@ pub mod tests {
 
             // Apply only the tip. This is !skip_ancestors (DB hasn't changed).
             db.apply_batch(c_m).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // All nine keys must be accessible.
             for i in 0..9 {
@@ -3699,7 +3699,7 @@ pub mod tests {
                 .unwrap();
 
             db1.apply_batch(c).await.unwrap();
-            db1.commit().await.unwrap();
+            db1.sync().await.unwrap();
 
             // Build one more batch on top to exercise the bitmap state.
             let d1 = db1
@@ -3734,7 +3734,7 @@ pub mod tests {
                 .await
                 .unwrap();
             db2.apply_batch(a2).await.unwrap();
-            db2.commit().await.unwrap();
+            db2.sync().await.unwrap();
 
             let b2 = db2
                 .new_batch()
@@ -3744,7 +3744,7 @@ pub mod tests {
                 .await
                 .unwrap();
             db2.apply_batch(b2).await.unwrap();
-            db2.commit().await.unwrap();
+            db2.sync().await.unwrap();
 
             let c2 = db2
                 .new_batch()
@@ -3753,7 +3753,7 @@ pub mod tests {
                 .await
                 .unwrap();
             db2.apply_batch(c2).await.unwrap();
-            db2.commit().await.unwrap();
+            db2.sync().await.unwrap();
 
             let d2 = db2
                 .new_batch()
@@ -3803,7 +3803,7 @@ pub mod tests {
             }
             let seed_m = seed.merkleize(&db, None).await.unwrap();
             db.apply_batch(seed_m).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // P: overwrite keys 1..254. Does NOT touch key(0), but P's floor
             // raise moves key(0) from 255, advancing the floor past chunk 0.
@@ -3823,7 +3823,7 @@ pub mod tests {
 
             // Commit P, prune chunk 0, then apply C.
             db.apply_batch(p_m).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let floor = *db.inactivity_floor_loc();
             assert!(floor >= 256, "floor must be past chunk 0: floor={floor}",);
@@ -4001,7 +4001,7 @@ pub mod tests {
             let seed = (0..SEED_KEYS).fold(db.new_batch(), |b, i| b.write(key(i), Some(val(i))));
             let seed = seed.merkleize(&db, None).await.unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Setup sanity: the committed bitmap spans at least two chunks.
             assert!(

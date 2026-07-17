@@ -33,7 +33,7 @@ impl<E: Context, V: CodecShared> Clone for Writer<E, V> {
 
 impl<E: Context, V: CodecShared> Writer<E, V> {
     /// Enqueue an item, returning its position. The lock is held for the
-    /// full append + commit, so no reader can see the item until it is durable.
+    /// full append + sync, so no reader can see the item until it is durable.
     ///
     /// # Errors
     ///
@@ -50,13 +50,13 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
         Ok(pos)
     }
 
-    /// Enqueue a batch of items with a single commit, returning positions
+    /// Enqueue a batch of items with a single sync, returning positions
     /// `[start, end)`. The lock is held for the full batch, so no reader can
     /// see any item until the entire batch is durable.
     ///
     /// # Errors
     ///
-    /// Returns an error if any append or the final commit fails.
+    /// Returns an error if any append or the final sync fails.
     pub async fn enqueue_bulk(
         &self,
         items: impl IntoIterator<Item = V>,
@@ -68,7 +68,7 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
         }
         let end = queue.size();
         if end > start {
-            queue.commit().await?;
+            queue.sync().await?;
         }
         drop(queue);
 
@@ -79,9 +79,9 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
         Ok(start..end)
     }
 
-    /// Append an item without committing, returning its position. The item
+    /// Append an item without persisting, returning its position. The item
     /// is immediately visible to the reader but is **not durable** until
-    /// [Self::commit] or [Self::sync] is called.
+    /// [Self::sync] is called.
     ///
     /// # Errors
     ///
@@ -91,11 +91,6 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
         let _ = self.notify.try_send(());
         debug!(position = pos, "writer: appended item");
         Ok(pos)
-    }
-
-    /// See [Queue::commit](super::Queue::commit).
-    pub async fn commit(&self) -> Result<(), Error> {
-        self.queue.lock().await.commit().await
     }
 
     /// See [Queue::sync](super::Queue::sync).
@@ -290,25 +285,25 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_shared_append_commit() {
+    fn test_shared_append_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_append_commit", &context);
+            let cfg = test_config("test_shared_append_sync", &context);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
-            // Append several items without committing
+            // Append several items without persisting
             for i in 0..5u8 {
                 let pos = writer.append(vec![i]).await.unwrap();
                 assert_eq!(pos, i as u64);
             }
 
-            // Reader can see them before commit
+            // Reader can see them before sync
             let (pos, item) = reader.recv().await.unwrap().unwrap();
             assert_eq!(pos, 0);
             assert_eq!(item, vec![0]);
 
-            // Commit to make durable
-            writer.commit().await.unwrap();
+            // Sync to make durable
+            writer.sync().await.unwrap();
 
             // Remaining items still readable
             for i in 1..5 {

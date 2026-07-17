@@ -5,7 +5,7 @@
 //! Tests that:
 //! - Enqueued items survive crashes
 //! - Unacknowledged items are re-delivered after recovery
-//! - Acknowledged items (once committed) may or may not be re-delivered after crash
+//! - Acknowledged items (once synced) may or may not be re-delivered after crash
 //! - Queue state is consistent after recovery
 
 use arbitrary::{Arbitrary, Result, Unstructured};
@@ -49,10 +49,8 @@ fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
 enum QueueOperation {
     /// Enqueue a new item with the given value (repeated to fill ITEM_SIZE).
     Enqueue { value: u8 },
-    /// Append a new item without committing (not durable until Commit).
+    /// Append a new item without persisting (not durable until Sync).
     Append { value: u8 },
-    /// Commit appended items to disk.
-    Commit,
     /// Dequeue and acknowledge the next item.
     DequeueAndAck,
     /// Dequeue without acknowledging (item should be re-delivered on recovery).
@@ -61,7 +59,7 @@ enum QueueOperation {
     AckOffset { offset: u8 },
     /// Acknowledge all items up to a position.
     AckUpToOffset { offset: u8 },
-    /// Sync the queue (commit and prune).
+    /// Sync the queue (persist and prune).
     Sync,
     /// Reset read position to ack floor.
     Reset,
@@ -105,14 +103,14 @@ struct RecoveryState {
     committed: BTreeMap<u64, u8>,
 
     /// Items that were enqueued/appended but the operation may have failed,
-    /// or were appended but not yet committed.
+    /// or were appended but not yet synced.
     pending: Vec<u8>,
 
     /// Current in-memory ack floor (lost on crash).
     current_ack_floor: u64,
 
-    /// Items that were appended but not yet committed (position -> value).
-    /// These may be lost on crash. On commit, they move to `committed`.
+    /// Items that were appended but not yet synced (position -> value).
+    /// These may be lost on crash. On sync, they move to `committed`.
     uncommitted: BTreeMap<u64, u8>,
 
     /// Whether we observed a mutable storage error during the operation phase.
@@ -143,18 +141,18 @@ impl RecoveryState {
     }
 
     fn enqueue_succeeded(&mut self, pos: u64, value: u8) {
-        // Enqueue does append + commit, so success means it's durable at `pos`.
+        // Enqueue does append + sync, so success means it's durable at `pos`.
         self.committed.insert(pos, value);
     }
 
     fn enqueue_failed(&mut self, value: u8) {
-        // Enqueue may have partially succeeded (append but not commit).
+        // Enqueue may have partially succeeded (append but not sync).
         // Track as pending - it may or may not be persisted.
         self.pending.push(value);
     }
 
     fn append_succeeded(&mut self, pos: u64, value: u8) {
-        // Append only - not durable until committed.
+        // Append only - not durable until synced.
         self.uncommitted.insert(pos, value);
     }
 
@@ -162,7 +160,7 @@ impl RecoveryState {
         self.pending.push(value);
     }
 
-    fn commit_succeeded(&mut self) {
+    fn sync_succeeded(&mut self) {
         // All uncommitted items are now durable.
         let uncommitted = std::mem::take(&mut self.uncommitted);
         for (pos, value) in uncommitted {
@@ -170,7 +168,7 @@ impl RecoveryState {
         }
     }
 
-    fn commit_failed(&mut self) {
+    fn sync_failed(&mut self) {
         // Uncommitted items remain uncommitted; they may or may not be durable.
         // Move them to pending since we can't be sure.
         let uncommitted = std::mem::take(&mut self.uncommitted);
@@ -221,9 +219,9 @@ async fn run_operations(
                 let item = make_item(*value);
                 match queue.enqueue(item).await {
                     Ok(pos) => {
-                        // enqueue = append + commit, so success means ALL
+                        // enqueue = append + sync, so success means ALL
                         // previously uncommitted items are now durable too.
-                        state.commit_succeeded();
+                        state.sync_succeeded();
                         state.enqueue_succeeded(pos, *value);
                     }
                     Err(_) => {
@@ -247,17 +245,6 @@ async fn run_operations(
                     }
                 }
             }
-
-            QueueOperation::Commit => match queue.commit().await {
-                Ok(()) => {
-                    state.commit_succeeded();
-                }
-                Err(_) => {
-                    state.commit_failed();
-                    state.mark_mutable_error();
-                    return state;
-                }
-            },
 
             QueueOperation::DequeueAndAck => {
                 if let Ok(Some((pos, _item))) = queue.dequeue().await {
@@ -307,13 +294,13 @@ async fn run_operations(
             QueueOperation::Sync => {
                 match queue.sync().await {
                     Ok(()) => {
-                        // sync = commit + prune, so success means ALL
+                        // sync = persist + prune, so success means ALL
                         // previously uncommitted items are now durable too.
-                        state.commit_succeeded();
+                        state.sync_succeeded();
                         state.update_ack_floor(queue.ack_floor());
                     }
                     Err(_) => {
-                        state.commit_failed();
+                        state.sync_failed();
                         state.mark_mutable_error();
                         return state;
                     }

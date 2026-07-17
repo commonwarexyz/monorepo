@@ -30,12 +30,10 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum QueueOperation {
-    /// Enqueue a new item (append + commit).
+    /// Enqueue a new item (append + sync).
     Enqueue { value: u8 },
-    /// Append a new item without committing.
+    /// Append a new item without persisting.
     Append { value: u8 },
-    /// Commit appended items to disk.
-    Commit,
     /// Dequeue the next unacked item.
     Dequeue,
     /// Acknowledge a specific position.
@@ -44,7 +42,7 @@ enum QueueOperation {
     AckUpTo { pos_offset: u8 },
     /// Reset the read position.
     Reset,
-    /// Sync (commit and prune).
+    /// Sync (persist and prune).
     Sync,
 }
 
@@ -188,10 +186,6 @@ fn fuzz(input: FuzzInput) {
                     let pos = queue.append(vec![*value]).await.unwrap();
                     let ref_pos = reference.enqueue(*value);
                     assert_eq!(pos, ref_pos, "append position mismatch");
-                }
-
-                QueueOperation::Commit => {
-                    queue.commit().await.unwrap();
                 }
 
                 QueueOperation::Dequeue => {

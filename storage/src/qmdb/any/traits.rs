@@ -104,14 +104,6 @@ pub trait DbAny<F: Family>:
     fn prune(&mut self, loc: Location<F>) -> impl Future<Output = Result<(), Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash.
-    ///
-    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&mut self) -> impl Future<Output = Result<(), Error<F>>> + Send;
-
-    /// Durably persist the database, guaranteeing the current state will survive a crash, and that
-    /// no recovery will be needed on startup.
-    ///
-    /// This provides a stronger guarantee than [Self::commit] but may be slower.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error<F>>> + Send;
 
     /// Destroy the database, removing all data from disk.
@@ -207,10 +199,6 @@ macro_rules! impl_db_any {
                 loc: $crate::merkle::Location<$fam>,
             ) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
                 <$ty>::prune(self, loc).await
-            }
-
-            async fn commit(&mut self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
-                <$ty>::commit(self).await
             }
 
             async fn sync(&mut self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {

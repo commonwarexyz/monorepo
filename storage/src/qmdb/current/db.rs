@@ -555,8 +555,7 @@ where
     /// underlying Any database before this Current overlay finishes rebuilding. Callers must drop
     /// this database handle after any `Err` from `rewind` and reopen from storage.
     ///
-    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// A successful rewind is not restart-stable until a subsequent [`Db::sync`].
     #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
@@ -658,12 +657,23 @@ where
 
     /// Rebuild the in-memory pruning metadata from the bitmap and grafted tree. The new
     /// state is not persisted until the metadata store is synced.
+    ///
+    /// Skips the rebuild when the metadata already reflects the current pruning boundary:
+    /// the pinned nodes derive from frozen history below that boundary, so an unchanged
+    /// chunk count implies unchanged content. The skip keeps the store unmodified, so a
+    /// following staged sync writes nothing for it.
     fn rebuild_metadata(&mut self) -> Result<(), Error<F>> {
+        let pruned_chunks_u64 = self.any.bitmap.pruned_chunks() as u64;
+        let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
+        if self.metadata.get(&key).map(Vec::as_slice)
+            == Some(pruned_chunks_u64.to_be_bytes().as_slice())
+        {
+            return Ok(());
+        }
+
         self.metadata.clear();
 
         // Write the number of pruned chunks.
-        let pruned_chunks_u64 = self.any.bitmap.pruned_chunks() as u64;
-        let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
         self.metadata
             .put(key, pruned_chunks_u64.to_be_bytes().to_vec());
 
@@ -755,14 +765,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Durably commit the journal state published by prior [`Db::apply_batch`]
-    /// calls.
-    #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
-    pub async fn commit(&mut self) -> Result<(), Error<F>> {
-        self.any.commit().await
-    }
-
-    /// Sync all database state to disk.
+    /// Durably persist the journal state published by prior [`Db::apply_batch`] calls.
     #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
         let _timer = self.metrics.sync_timer();
@@ -817,8 +820,7 @@ where
     /// more details).
     ///
     /// This publishes the batch to the in-memory Current view and appends it to the journal,
-    /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
-    /// durability.
+    /// but does not durably persist it. Call [`Db::sync`] to guarantee durability.
     #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
     #[boxed]
     pub async fn apply_batch(
@@ -1411,7 +1413,7 @@ mod tests {
         }
         let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
     }
 
     #[test_traced]

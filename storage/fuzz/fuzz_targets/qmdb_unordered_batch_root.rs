@@ -130,7 +130,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         }
         let initial = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(initial).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         // Build a parent batch, then build the child while the parent is still
         // pending so the child must resolve through base_diff plus the stale
@@ -159,7 +159,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         // Commit the parent, then rebuild the same logical child from the
         // committed DB state. Both speculative roots must match.
         db.apply_batch(parent).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let mut batch = db.new_batch();
         for mutation in &input.child {

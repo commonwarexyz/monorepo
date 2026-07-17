@@ -290,7 +290,7 @@ pub(crate) mod test {
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths
@@ -605,7 +605,7 @@ pub(crate) mod test {
                 }
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
                 db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
             }
             db.prune(db.sync_boundary()).await.unwrap();
             let root = db.root();
@@ -665,7 +665,7 @@ pub(crate) mod test {
                 }
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
                 db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
             }
             let db = open_db(context.child("sixth")).await;
             assert!(db.bounds().end > op_count);
@@ -737,7 +737,7 @@ pub(crate) mod test {
                 }
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
                 db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
             }
             let db = open_db(context.child("sixth")).await;
             assert!(db.bounds().end > 1);
@@ -767,7 +767,7 @@ pub(crate) mod test {
                 }
                 let merkleized = batch.merkleize(&db, Some(metadata)).await.unwrap();
                 db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
             }
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             let k = Sha256::hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
@@ -781,14 +781,14 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Drop & reopen the db, making sure the re-opened db has exactly the same state.
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             let root = db.root();
             drop(db);
             let db = open_db(context.child("second")).await;
@@ -1346,7 +1346,7 @@ pub(crate) mod test {
         }
         let merkleized = batch.merkleize(db, metadata).await.unwrap();
         let range = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         range
     }
 
@@ -1537,7 +1537,7 @@ pub(crate) mod test {
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
         }
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         let root = db.root();
 
         drop(db);
@@ -1622,7 +1622,7 @@ pub(crate) mod test {
 
             // Apply and commit.
             db.apply_batch(child_m).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // K should be deleted.
             assert!(db.get(&key_k).await.unwrap().is_none());

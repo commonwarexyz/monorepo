@@ -24,7 +24,7 @@
 //! # Examples
 //!
 //! ```ignore
-//! // Simple mode: apply a batch, then durably commit it.
+//! // Simple mode: apply a batch, then durably persist it.
 //! // The third argument to merkleize is the inactivity floor -- operations
 //! // before this location are declared inactive by the application.
 //! let floor = db.inactivity_floor_loc();
@@ -32,7 +32,7 @@
 //!     .set(key, value)
 //!     .merkleize(&db, None, floor).await;
 //! db.apply_batch(merkleized).await?;
-//! db.commit().await?;
+//! db.sync().await?;
 //! ```
 //!
 //! ```ignore
@@ -51,11 +51,11 @@
 //!     .merkleize(&db, None, floor).await;
 //!
 //! db.apply_batch(child_a).await?;
-//! db.commit().await?;
+//! db.sync().await?;
 //! ```
 //!
 //! ```ignore
-//! // Advanced mode: while the previous batch is being committed, build exactly
+//! // Advanced mode: while the previous batch is being persisted, build exactly
 //! // one child batch from the newly published state.
 //! let floor = db.inactivity_floor_loc();
 //! let parent = db.new_batch()
@@ -63,18 +63,18 @@
 //!     .merkleize(&db, None, floor).await;
 //! db.apply_batch(parent).await?;
 //!
-//! let (child, commit_result) = futures::join!(
+//! let (child, sync_result) = futures::join!(
 //!     async {
 //!         db.new_batch()
 //!             .set(key_b, value_b)
 //!             .merkleize(&db, None, floor).await
 //!     },
-//!     db.commit(),
+//!     db.sync(),
 //! );
-//! commit_result?;
+//! sync_result?;
 //!
 //! db.apply_batch(child).await?;
-//! db.commit().await?;
+//! db.sync().await?;
 //! ```
 
 use crate::{
@@ -202,22 +202,11 @@ where
     T: Translator,
     S: Strategy,
 {
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
+    /// Durably persist the journal state published by prior [`Immutable::apply_batch`] calls.
     #[tracing::instrument(name = "qmdb.immutable.db.sync", level = "info", skip_all)]
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        self.journal.sync().await?;
-        Ok(())
-    }
-
-    /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
-    #[tracing::instrument(name = "qmdb.immutable.db.commit", level = "info", skip_all)]
-    pub async fn commit(&mut self) -> Result<(), Error<F>> {
-        let _timer = self.metrics.commit_timer();
-        self.metrics.commit_calls.inc();
         self.journal.sync().await?;
         Ok(())
     }
@@ -563,8 +552,7 @@ where
     /// before this method finishes rebuilding in-memory rewind state. Callers must drop this
     /// database handle after any `Err` from `rewind` and reopen from storage.
     ///
-    /// A successful rewind is not restart-stable until a subsequent [`Immutable::commit`] or
-    /// [`Immutable::sync`].
+    /// A successful rewind is not restart-stable until a subsequent [`Immutable::sync`].
     #[tracing::instrument(name = "qmdb.immutable.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
@@ -695,8 +683,8 @@ where
     /// On any floor error, the database state is unchanged.
     ///
     /// This publishes the batch to the in-memory database state and appends it to the
-    /// journal, but does not durably commit it. Call [`Immutable::commit`] or
-    /// [`Immutable::sync`] to guarantee durability.
+    /// journal, but does not durably persist it. Call [`Immutable::sync`] to
+    /// guarantee durability.
     #[tracing::instrument(name = "qmdb.immutable.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         &mut self,
@@ -829,49 +817,13 @@ pub(super) mod test {
         db.apply_batch(db.new_batch().merkleize(&db, None, Location::new(0)).await)
             .await
             .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.bounds().end, 2); // commit op added
         let root = db.root();
         drop(db);
 
         let db = open_db(context.child("third")).await;
         assert_eq!(db.root(), root);
-
-        db.destroy().await.unwrap();
-    }
-
-    #[boxed]
-    pub(crate) async fn test_immutable_commit_after_sync_recovery<F: Family, V, C>(
-        context: deterministic::Context,
-        open_db: impl Fn(
-            deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
-    ) where
-        V: ValueEncoding<Value = Digest>,
-        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
-        C::Item: EncodeShared,
-    {
-        let mut db = open_db(context.child("first")).await;
-        let k1 = Sha256::fill(1u8);
-        let k2 = Sha256::fill(2u8);
-        let v1 = Sha256::fill(3u8);
-        let v2 = Sha256::fill(4u8);
-
-        // Commit and sync the first key so recovery has an older persisted boundary.
-        commit_sets(&mut db, [(k1, v1)], None).await;
-        db.sync().await.unwrap();
-
-        // Commit a second key without syncing; reopen must replay it from journal data.
-        commit_sets(&mut db, [(k2, v2)], None).await;
-        let committed_bounds = db.bounds();
-        let committed_root = db.root();
-        drop(db);
-
-        let db = open_db(context.child("second")).await;
-        assert_eq!(db.bounds(), committed_bounds);
-        assert_eq!(db.root(), committed_root);
-        assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
-        assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
 
         db.destroy().await.unwrap();
     }
@@ -908,7 +860,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert!(db.get(&k2).await.unwrap().is_none());
         assert_eq!(db.bounds().end, 3);
@@ -923,7 +875,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
         assert_eq!(db.bounds().end, 5);
@@ -977,7 +929,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
@@ -1016,7 +968,7 @@ pub(super) mod test {
             )
             .await
             .unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
         }
 
         let root_before = db.root();
@@ -1140,7 +1092,7 @@ pub(super) mod test {
         assert!(child.get(&k3, &db).await.unwrap().is_none());
 
         db.apply_batch(child).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
@@ -1153,7 +1105,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
 
         db.destroy().await.unwrap();
@@ -1181,7 +1133,7 @@ pub(super) mod test {
         }
         let merkleized = batch.merkleize(&db, None, Location::new(0)).await;
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.bounds().end, 2_000 + 2);
 
         // Drop & reopen the db, making sure it has exactly the same state.
@@ -1236,7 +1188,7 @@ pub(super) mod test {
         }
         let merkleized = batch.merkleize(&db, None, Location::new(0)).await;
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.bounds().end, ELEMENTS + 2);
         db.sync().await.unwrap();
         let halfway_root = db.root();
@@ -1250,7 +1202,7 @@ pub(super) mod test {
         }
         let merkleized = batch.merkleize(&db, None, Location::new(0)).await;
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         drop(db); // Drop before syncing
 
         // Recovery should replay the log to regenerate the merkle structure.
@@ -1293,7 +1245,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         let first_commit_root = db.root();
 
         // Simulate failure. Sets that are never merkleized/applied are lost.
@@ -1517,7 +1469,7 @@ pub(super) mod test {
             .apply_batch(batch.merkleize(db, metadata, floor).await)
             .await
             .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         range
     }
 
@@ -1571,7 +1523,7 @@ pub(super) mod test {
         assert_eq!(db.get(&key3).await.unwrap(), None);
         assert_eq!(db.get(&key4).await.unwrap(), None);
 
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         drop(db);
         let db = open_db(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
@@ -2260,7 +2212,7 @@ pub(super) mod test {
         assert!(live == v1 || live == v2);
 
         // A restart must also serve one of the written values.
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         drop(db);
         let db = open_db_small_sections(context.child("reopen")).await;
         let reopened = db.get(&key).await.unwrap().unwrap();
@@ -2561,7 +2513,7 @@ pub(super) mod test {
         // Commit the parent, then rebuild the same logical child from the
         // committed DB state and compare roots.
         db.apply_batch(parent).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let committed_child = db
             .new_batch()
@@ -2763,7 +2715,6 @@ pub(super) mod test {
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
 
         // Floor persists across restart.
-        db.commit().await.unwrap();
         db.sync().await.unwrap();
         drop(db);
         let db = open_db(context.child("reopen")).await;
@@ -2855,7 +2806,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         let first_size = db.bounds().end;
         assert_eq!(db.inactivity_floor_loc(), Location::new(2));
 
@@ -2870,7 +2821,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(4));
 
         // Rewind to the first batch.
@@ -3371,7 +3322,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.last_commit_loc, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
@@ -3436,7 +3387,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.last_commit_loc, next_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
 
@@ -3484,7 +3435,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         // DB-level get_many.
         let results = db.get_many(&[&k1, &k2, &k_missing]).await.unwrap();
@@ -3541,7 +3492,7 @@ pub(super) mod test {
         )
         .await
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let bad_key = Sha256::fill(99u8);
         let bad_loc = db.last_commit_loc;

@@ -132,7 +132,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         }
         let initial = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(initial).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         // Build the child while the parent is still pending.
         let mut batch = db.new_batch();
@@ -159,7 +159,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         // Commit the parent, then rebuild the same logical child from the
         // committed wrapper state. Both canonical and ops roots must match.
         db.apply_batch(parent).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let mut batch = db.new_batch();
         for mutation in &input.child {

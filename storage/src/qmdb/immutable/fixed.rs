@@ -150,7 +150,6 @@ mod tests {
             db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
-            db.commit().await.unwrap();
             db.sync().await.unwrap();
             db.prune(crate::merkle::Location::new(0)).await.unwrap();
 
@@ -166,13 +165,11 @@ mod tests {
                 "db_lookups_requested_total 2",
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 2",
-                "db_commit_calls_total 1",
                 "db_sync_calls_total 1",
                 "db_prune_calls_total 1",
                 "db_get_duration_count 1",
                 "db_get_many_duration_count 1",
                 "db_apply_batch_duration_count 1",
-                "db_commit_duration_count 1",
                 "db_sync_duration_count 1",
                 "db_prune_duration_count 1",
             ] {
@@ -267,14 +264,6 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_empty(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_commit_after_sync_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_commit_after_sync_recovery(ctx, open::<mmr::Family>).await;
         });
     }
 
@@ -424,7 +413,7 @@ mod tests {
 
         db.apply_batch(retained).await.unwrap();
         compact.apply_batch(compact_batch).unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());

@@ -48,13 +48,13 @@ pub struct Config<C> {
 ///
 /// # Operations
 ///
-/// - [append](Self::append) / [commit](Self::commit): Write items to the journal
-///   buffer, then persist. Items are readable immediately after append (before commit),
-///   but are lost on restart if not committed.
-/// - [enqueue](Self::enqueue): Append + commit in one step; the item is durable before return.
+/// - [append](Self::append): Write items to the journal buffer. Items are readable
+///   immediately after append, but are lost on restart if not synced.
+/// - [enqueue](Self::enqueue): Append + sync in one step. The item is durable before return.
 /// - [dequeue](Self::dequeue): Return the next unacked item in FIFO order.
 /// - [ack](Self::ack) / [ack_up_to](Self::ack_up_to): Mark items as processed (in-memory only).
-/// - [sync](Self::sync): Commit, then prune completed sections below the ack floor.
+/// - [sync](Self::sync): Persist appended items and prune completed sections below the
+///   ack floor, in one atomic commit.
 ///
 /// # Acknowledgment
 ///
@@ -150,9 +150,9 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         position < self.ack_floor || self.acked_above.get(&position).is_some()
     }
 
-    /// Append an item without persisting. Call [Self::commit] or [Self::sync]
-    /// afterwards to make it durable. The item is readable immediately but
-    /// is not guaranteed to survive a crash until committed or synced.
+    /// Append an item without persisting. Call [Self::sync] afterwards to make
+    /// it durable. The item is readable immediately but is not guaranteed to
+    /// survive a crash until synced.
     ///
     /// # Errors
     ///
@@ -164,7 +164,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         Ok(pos)
     }
 
-    /// Append and commit an item in one step, returning its position.
+    /// Append and sync an item in one step, returning its position.
     /// The item is durable before this method returns.
     ///
     /// # Errors
@@ -172,7 +172,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     /// Returns an error if the underlying storage operation fails.
     pub async fn enqueue(&mut self, item: V) -> Result<u64, Error> {
         let pos = self.append(item).await?;
-        self.commit().await?;
+        self.sync().await?;
         Ok(pos)
     }
 
@@ -332,14 +332,6 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         self.journal.size().saturating_sub(self.read_pos)
     }
 
-    /// Durably persist the queue, guaranteeing the current state will survive a crash.
-    ///
-    /// Unlike [Self::sync], acknowledged items are not pruned.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.journal.sync().await?;
-        Ok(())
-    }
-
     /// Durably persist the queue, guaranteeing the current state will survive a crash, and
     /// prune acknowledged items: the sync and the prune land in ONE atomic commit.
     pub async fn sync(&mut self) -> Result<(), Error> {
@@ -448,7 +440,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_append_commit_batch() {
+    fn test_append_sync_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_batch", &context);
@@ -456,11 +448,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Append multiple items, then commit once
+            // Append multiple items, then sync once
             for i in 0..5u8 {
                 queue.append(vec![i]).await.unwrap();
             }
-            queue.commit().await.unwrap();
+            queue.sync().await.unwrap();
             assert_eq!(queue.size(), 5);
 
             // Dequeue and verify order
@@ -474,7 +466,7 @@ mod tests {
             for i in 5..8u8 {
                 queue.append(vec![i]).await.unwrap();
             }
-            queue.commit().await.unwrap();
+            queue.sync().await.unwrap();
             queue.enqueue(vec![8]).await.unwrap();
             assert_eq!(queue.size(), 9);
 
@@ -484,7 +476,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_append_commit_persistence() {
+    fn test_append_sync_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_batch_persist", &context);
@@ -496,7 +488,6 @@ mod tests {
                 for i in 0..4u8 {
                     queue.append(vec![i]).await.unwrap();
                 }
-                queue.commit().await.unwrap();
                 queue.sync().await.unwrap();
             }
 
@@ -511,46 +502,6 @@ mod tests {
                     assert_eq!(item, vec![i as u8]);
                 }
             }
-        });
-    }
-
-    #[test_traced]
-    fn test_commit_after_sync_recovers_without_second_sync() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_config("test_commit_after_sync_recovery", &context);
-
-            {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
-                    .await
-                    .unwrap();
-
-                // Establish a synced baseline so the recovery watermark is behind the next commit.
-                queue.append(b"synced".to_vec()).await.unwrap();
-                queue.commit().await.unwrap();
-                queue.sync().await.unwrap();
-
-                // Commit later data without syncing; reopen must replay it from the old watermark.
-                queue.append(b"committed-a".to_vec()).await.unwrap();
-                queue.append(b"committed-b".to_vec()).await.unwrap();
-                queue.commit().await.unwrap();
-            }
-
-            let mut queue = Queue::<_, Vec<u8>>::init(context.child("second"), cfg)
-                .await
-                .unwrap();
-            assert_eq!(queue.size(), 3);
-            for (expected_pos, expected_item) in [
-                (0, b"synced".to_vec()),
-                (1, b"committed-a".to_vec()),
-                (2, b"committed-b".to_vec()),
-            ] {
-                let (pos, item) = queue.dequeue().await.unwrap().unwrap();
-                assert_eq!(pos, expected_pos);
-                assert_eq!(item, expected_item);
-            }
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -1223,7 +1174,7 @@ mod tests {
                 encoded.contains("test_metrics_tip 1"),
                 "expected tip 1: {encoded}"
             );
-            queue.commit().await.unwrap();
+            queue.sync().await.unwrap();
 
             // Enqueue updates tip further
             for i in 1..10u8 {

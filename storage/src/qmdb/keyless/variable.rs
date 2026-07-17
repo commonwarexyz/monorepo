@@ -180,15 +180,6 @@ mod test {
         });
     }
 
-    #[test_traced("INFO")]
-    fn test_keyless_db_commit_after_sync_recovery() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
-            tests::test_keyless_db_commit_after_sync_recovery(ctx, db, reopen::<mmr::Family>())
-                .await;
-        });
-    }
-
     #[test_traced("WARN")]
     fn test_keyless_db_build_basic() {
         deterministic::Runner::default().start(|ctx| async move {
@@ -362,7 +353,7 @@ mod test {
 
         db.apply_batch(retained).await.unwrap();
         compact.apply_batch(compact_batch).unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());

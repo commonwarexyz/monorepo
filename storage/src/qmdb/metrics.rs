@@ -40,11 +40,7 @@ pub(crate) struct Metrics<E: Clock> {
     get_many_duration: Timed,
     /// Lookups requested by read paths, whether or not they are found.
     pub lookups_requested: Counter,
-    /// Durable commit calls.
-    pub commit_calls: Counter,
-    /// Duration of commit calls.
-    commit_duration: Timed,
-    /// Full sync calls.
+    /// Durable sync calls.
     pub sync_calls: Counter,
     /// Duration of sync calls.
     sync_duration: Timed,
@@ -91,12 +87,6 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
                 "lookups_requested",
                 "Number of lookups requested by get/get-many calls, including misses",
             ),
-            commit_calls: context.counter("commit_calls", "Number of commit calls"),
-            commit_duration: Timed::register(
-                &context,
-                "commit_duration",
-                "Duration of commit calls",
-            ),
             sync_calls: context.counter("sync_calls", "Number of sync calls"),
             sync_duration: Timed::register(&context, "sync_duration", "Duration of sync calls"),
             prune_calls: context.counter("prune_calls", "Number of prune calls"),
@@ -117,10 +107,6 @@ impl<E: Clock> Metrics<E> {
 
     pub(crate) fn get_many_timer(&self) -> ScopedTimer<E> {
         self.get_many_duration.scoped(&self.clock)
-    }
-
-    pub(crate) fn commit_timer(&self) -> ScopedTimer<E> {
-        self.commit_duration.scoped(&self.clock)
     }
 
     pub(crate) fn sync_timer(&self) -> ScopedTimer<E> {

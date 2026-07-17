@@ -538,8 +538,7 @@ where
     /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
     /// from `rewind` and reopen from storage.
     ///
-    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// A successful rewind is not restart-stable until a subsequent [`Db::sync`].
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",
@@ -635,7 +634,7 @@ where
 
         // Journal rewind happens before in-memory undo application. If any later step fails, this
         // handle may be internally diverged and must be dropped by the caller. This step is not
-        // restart-stable until a later commit/sync boundary.
+        // restart-stable until a later sync.
         self.log.rewind(rewind_size).await?;
 
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below
@@ -823,7 +822,8 @@ where
         Ok(db)
     }
 
-    /// Sync all database state to disk.
+    /// Durably persist the journal state published by prior [`Db::apply_batch`]
+    /// calls.
     #[tracing::instrument(
         name = "qmdb.any.db.sync",
         level = "info",
@@ -850,25 +850,6 @@ where
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.log.sync_into(batch).await?;
-        Ok(())
-    }
-
-    /// Durably commit the journal state published by prior [`Db::apply_batch`]
-    /// calls.
-    #[tracing::instrument(
-        name = "qmdb.any.db.commit",
-        level = "info",
-        skip_all,
-        fields(
-            db_size = *self.last_commit_loc + 1,
-            inactivity_floor = *self.inactivity_floor_loc,
-            active_keys = self.active_keys as u64,
-        ),
-    )]
-    pub async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
-        let _timer = self.metrics.commit_timer();
-        self.metrics.commit_calls.inc();
-        self.log.sync().await?;
         Ok(())
     }
 

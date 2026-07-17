@@ -193,7 +193,7 @@ mod harnesses {
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         db
     }
 
@@ -219,7 +219,7 @@ mod harnesses {
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         db
     }
 
@@ -245,7 +245,7 @@ mod harnesses {
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         db
     }
 
@@ -271,7 +271,7 @@ mod harnesses {
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         db
     }
 
@@ -508,7 +508,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
                 .await
                 .unwrap();
             target_db.apply_batch(merkleized).await.unwrap();
-            target_db.commit().await.unwrap();
+            target_db.sync().await.unwrap();
         }
 
         assert!(
@@ -600,7 +600,7 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
         }
         let prune_loc = crate::merkle::Location::new(256);
         assert!(db.sync_boundary() >= prune_loc);

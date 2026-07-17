@@ -96,7 +96,7 @@ pub mod tests {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert!(db.get_metadata().await.unwrap().is_none());
         let root1 = db.root();
@@ -119,7 +119,7 @@ pub mod tests {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
         let root2 = db.root();
 

@@ -566,7 +566,7 @@ pub(crate) use define_vec_variants;
 /// Seed a database with `num_elements` entries, then perform `num_operations` random
 /// updates/deletes. Commits periodically when `commit_frequency` is `Some`.
 ///
-/// `seed_batch` caps how many seeds accumulate before each merkleize+apply+commit (bounding peak
+/// `seed_batch` caps how many seeds accumulate before each merkleize+apply+sync (bounding peak
 /// memory); `None` seeds in a single batch. `prune_frequency` prunes to the inactivity floor every
 /// `Some(n)` commits to bound on-disk growth; `None` never prunes during generation.
 ///
@@ -602,7 +602,7 @@ pub async fn gen_random_kv<F, M>(
 
     // Seed the db with `num_elements` entries. `seed_batch` caps how many seeds accumulate before a
     // merkleize+apply (bounding the batch); `None` seeds in a single batch. Each apply is followed by
-    // a `commit`, whose merkle flush writes the in-memory merkle nodes to the journal and prunes
+    // a `sync`, whose merkle flush writes the in-memory merkle nodes to the journal and prunes
     // them from memory -- without that, a large build accumulates the whole merkle in RAM.
     {
         let mut batch = db.new_batch();
@@ -614,7 +614,7 @@ pub async fn gen_random_kv<F, M>(
             if seed_batch.is_some_and(|n| pending >= n) {
                 let merkleized = batch.merkleize(db, None).await.unwrap();
                 db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
                 commits += 1;
                 if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
                     let boundary = db.sync_boundary();
@@ -627,7 +627,7 @@ pub async fn gen_random_kv<F, M>(
         if pending > 0 {
             let merkleized = batch.merkleize(db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
         }
     }
 
@@ -655,7 +655,7 @@ pub async fn gen_random_kv<F, M>(
                 if rng.next_u32().is_multiple_of(freq) {
                     let merkleized = batch.merkleize(db, None).await.unwrap();
                     db.apply_batch(merkleized).await.unwrap();
-                    db.commit().await.unwrap();
+                    db.sync().await.unwrap();
                     commits += 1;
                     if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
                         let boundary = db.sync_boundary();
@@ -667,7 +667,7 @@ pub async fn gen_random_kv<F, M>(
         }
         let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
     }
 }
 
@@ -689,7 +689,7 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
     }
     let merkleized = batch.merkleize(db, None).await.unwrap();
     db.apply_batch(merkleized).await.unwrap();
-    db.commit().await.unwrap();
+    db.sync().await.unwrap();
 }
 
 /// Write `num_updates` random key updates into a batch.

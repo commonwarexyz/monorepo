@@ -394,7 +394,7 @@ mod test {
         let metadata = Sha256::fill(3u8);
         let merkleized = db.new_batch().merkleize(&db, Some(metadata)).await.unwrap();
         let range = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(range.start, Location::new(1));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
@@ -409,11 +409,11 @@ mod test {
         for _ in 1..100 {
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
             let _ = db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
         }
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         db.destroy().await.unwrap();
     }
 
@@ -444,7 +444,7 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
 
@@ -456,7 +456,7 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
@@ -467,7 +467,7 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
@@ -479,7 +479,7 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
         let merkleized = db
@@ -489,13 +489,13 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // Empty commit batch (no preceding uncommitted writes).
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         // Make sure key1 is already active.
         assert!(db.get(&key1).await.unwrap().is_some());
@@ -509,7 +509,7 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert!(db.get(&key2).await.unwrap().is_some());
         let merkleized = db
             .new_batch()
@@ -518,14 +518,14 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
         // Empty commit batch.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         // Multiple deletions of the same key should be a no-op.
         assert!(db.get(&key1).await.unwrap().is_none());
@@ -537,7 +537,7 @@ mod test {
         // Make sure closing/reopening gets us back to the same state.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         let op_count = db.bounds().end;
         let root = db.root();
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
@@ -552,7 +552,7 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let merkleized = db
             .new_batch()
@@ -561,7 +561,7 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let merkleized = db
             .new_batch()
@@ -570,7 +570,7 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let merkleized = db
             .new_batch()
@@ -579,7 +579,7 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let merkleized = db
             .new_batch()
@@ -588,12 +588,12 @@ mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         // Empty commit batch.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.bounds().end;
@@ -607,7 +607,7 @@ mod test {
         // root.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         assert!(db.root() != root);
 
@@ -652,7 +652,7 @@ mod test {
 
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         db.destroy().await.unwrap();
     }
 }

@@ -43,7 +43,7 @@
 //!     let v = Digest::random(&mut ctx);
 //!     let metadata = Some(Digest::random(&mut ctx));
 //!     db.apply_batch(db.new_batch().update(k, v).finalize(metadata)).await.unwrap();
-//!     db.commit().await.unwrap();
+//!     db.sync().await.unwrap();
 //!
 //!     // Fetch the value
 //!     let fetched_value = db.get(&k).await.unwrap();
@@ -51,7 +51,7 @@
 //!
 //!     // Delete the key's value
 //!     db.apply_batch(db.new_batch().delete(k).finalize(None)).await.unwrap();
-//!     db.commit().await.unwrap();
+//!     db.sync().await.unwrap();
 //!
 //!     // Fetch the value
 //!     let fetched_value = db.get(&k).await.unwrap();
@@ -63,15 +63,15 @@
 //! ```
 //!
 //! ```ignore
-//! // Apply a batch and commit it, then build a child batch from the newly published state
-//! // and apply it. `commit` takes `&mut self`, so committing and building share the same
+//! // Apply a batch and sync it, then build a child batch from the newly published state
+//! // and apply it. `sync` takes `&mut self`, so syncing and building share the same
 //! // exclusive borrow and run in sequence.
 //! db.apply_batch(db.new_batch().update(key_a, value_a).finalize(None)).await?;
-//! db.commit().await?;
+//! db.sync().await?;
 //!
 //! let child = db.new_batch().update(key_b, value_b).finalize(None);
 //! db.apply_batch(child).await?;
-//! db.commit().await?;
+//! db.sync().await?;
 //! ```
 
 use crate::{
@@ -403,9 +403,7 @@ where
         })
     }
 
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
+    /// Durably persist the journal state published by prior [`Db::apply_batch`] calls.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
@@ -435,7 +433,7 @@ where
     /// journal, returning the range of written locations.
     ///
     /// This publishes the batch to the in-memory database state and appends it to the journal, but
-    /// does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee durability.
+    /// does not durably persist it. Call [`Db::sync`] to guarantee durability.
     pub async fn apply_batch(&mut self, batch: Changeset<K, V>) -> Result<Range<Location>, Error> {
         let start_loc = self.last_commit_loc + 1;
         let (diff, metadata) = batch.into_parts();
@@ -501,11 +499,6 @@ where
 
         let end_loc = self.size();
         Ok(start_loc..end_loc)
-    }
-
-    /// Durably commit the journal state published by prior [`Db::apply_batch`] calls.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.log.sync().await.map_err(Into::into)
     }
 }
 
@@ -582,7 +575,7 @@ mod test {
             let range = db.apply_batch(batch).await.unwrap();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 2);
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.bounds().end, 2);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
@@ -597,10 +590,10 @@ mod test {
                 [(Digest::random(&mut context), Some(vec![1, 2, 3]))],
             )
             .await;
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             for _ in 1..100 {
                 db.apply_batch(db.new_batch().finalize(None)).await.unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
                 assert!(db.bounds().end - db.inactivity_floor_loc <= 3);
@@ -663,7 +656,7 @@ mod test {
                 .unwrap();
             assert_eq!(*range.start, 1);
             assert_eq!(*range.end, 4);
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
             assert_eq!(*db.bounds().end, 4);
@@ -693,10 +686,10 @@ mod test {
             // the previously committed metadata.
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
-            // commit() is just an fsync now, so bounds and floor are unchanged.
+            // sync() only persists, so bounds and floor are unchanged.
             assert_eq!(*db.bounds().end, 10);
             assert_eq!(*db.inactivity_floor_loc, 5);
 
@@ -709,13 +702,13 @@ mod test {
             let mut v1_updated = db.get(&k1).await.unwrap().unwrap();
             v1_updated.push(7);
             apply_entries(&mut db, [(k1, Some(v1_updated))]).await;
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), vec![2, 3, 4, 5, 6, 7]);
 
             // Create new key.
             let k3 = Digest::random(&mut ctx);
             apply_entries(&mut db, [(k3, Some(vec![8]))]).await;
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.get(&k3).await.unwrap().unwrap(), vec![8]);
 
             // Destroy the store
@@ -741,7 +734,6 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            db.commit().await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -786,7 +778,6 @@ mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
-            db.commit().await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -812,7 +803,7 @@ mod test {
             let k = Digest::random(&mut ctx);
             let v = vec![1, 2, 3, 4, 5];
             apply_entries(&mut db, [(k, Some(v.clone()))]).await;
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Fetch the value
             let fetched_value = db.get(&k).await.unwrap();
@@ -828,7 +819,7 @@ mod test {
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Commit the changes
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Re-open the store and ensure the key is still deleted
             let mut db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
@@ -841,7 +832,7 @@ mod test {
             assert_eq!(fetched_value.unwrap(), v);
 
             // Commit the changes
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Re-open the store and ensure the snapshot restores the key, after processing
             // the delete and the subsequent set.
@@ -854,7 +845,7 @@ mod test {
             let range = apply_entries(&mut db, [(k_n, None)]).await;
             assert_eq!(range.start, 9);
             assert_eq!(range.end, 11);
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             assert!(db.get(&k_n).await.unwrap().is_none());
             // Make sure k is still there
@@ -882,7 +873,7 @@ mod test {
             apply_entries(&mut db, [(k_a, Some(v_a.clone()))]).await;
             apply_entries(&mut db, [(k_b, Some(v_b.clone()))]).await;
 
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(*db.bounds().end, 7);
             assert_eq!(*db.inactivity_floor_loc, 3);
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_a);
@@ -890,7 +881,7 @@ mod test {
             apply_entries(&mut db, [(k_b, Some(v_a.clone()))]).await;
             apply_entries(&mut db, [(k_a, Some(v_c.clone()))]).await;
 
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(*db.bounds().end, 15);
             assert_eq!(*db.inactivity_floor_loc, 12);
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_c);
@@ -916,7 +907,7 @@ mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 apply_entries(&mut db, [(k, Some(v))]).await;
             }
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             let durable_floor = db.inactivity_floor_loc;
 
             // Apply (but do not commit) entries that advance the in-memory floor past the
@@ -971,7 +962,7 @@ mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 apply_entries(&mut db, [(k, Some(v.clone()))]).await;
             }
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Update every 3rd key and commit.
             for i in 0u64..ELEMENTS {
@@ -982,7 +973,7 @@ mod test {
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 apply_entries(&mut db, [(k, Some(v.clone()))]).await;
             }
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.snapshot.items(), 1000);
 
             // Delete every 7th key and commit.
@@ -993,7 +984,7 @@ mod test {
                 let k = Blake3::hash(&i.to_be_bytes());
                 apply_entries(&mut db, [(k, None)]).await;
             }
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             let final_count = db.bounds().end;
             let final_floor = db.inactivity_floor_loc;
 
@@ -1007,38 +998,6 @@ mod test {
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.log.bounds().start, *final_floor - *final_floor % 7);
             assert_eq!(db.snapshot.items(), 857);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    pub fn test_store_commit_after_sync_recovers_without_second_sync() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_store(context.child("store").with_attribute("index", 0)).await;
-            let key0 = Blake3::hash(&0u64.to_be_bytes());
-            let key1 = Blake3::hash(&1u64.to_be_bytes());
-            let value0 = vec![0, 1, 2];
-            let value1 = vec![3, 4, 5, 6];
-
-            // Commit and sync an initial update so restart recovery has an older watermark.
-            apply_entries(&mut db, [(key0, Some(value0.clone()))]).await;
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
-
-            // Persist a later commit without syncing; recovery must replay it after reopen.
-            apply_entries(&mut db, [(key1, Some(value1.clone()))]).await;
-            db.commit().await.unwrap();
-            let committed_end = db.bounds().end;
-            let committed_floor = db.inactivity_floor_loc();
-            drop(db);
-
-            let db = create_test_store(context.child("store").with_attribute("index", 1)).await;
-            assert_eq!(db.bounds().end, committed_end);
-            assert_eq!(db.inactivity_floor_loc(), committed_floor);
-            assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
-            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
 
             db.destroy().await.unwrap();
         });
@@ -1096,7 +1055,7 @@ mod test {
                 .unwrap();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 4);
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             drop(db);
 
@@ -1141,6 +1100,6 @@ mod test {
 
     #[allow(dead_code)]
     fn assert_commit_is_send(db: &mut Db<deterministic::Context, Digest, Vec<u8>, TwoCap>) {
-        is_send(db.commit());
+        is_send(db.sync());
     }
 }

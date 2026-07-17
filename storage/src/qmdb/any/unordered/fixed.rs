@@ -203,7 +203,7 @@ pub(crate) mod test {
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Mix in absent keys so some probes resolve to nothing.
             for _ in 0..100 {
@@ -256,7 +256,7 @@ pub(crate) mod test {
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Drop one merkleize after a single poll and race another against a timer, so the
             // future is abandoned at whatever stage it reached (possibly mid-hashing-job).
@@ -307,7 +307,7 @@ pub(crate) mod test {
                     .await
                     .unwrap();
                 db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
                 assert_eq!(db.get(&key).await.unwrap(), Some(value));
                 keys[0].1 = value;
                 for (key, value) in &keys[1..] {
@@ -383,7 +383,7 @@ pub(crate) mod test {
         }
         let merkleized = batch.merkleize(db, metadata).await.unwrap();
         let range = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         range
     }
 
@@ -405,7 +405,6 @@ pub(crate) mod test {
             let cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
             let mut db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
             apply_ops(&mut db, create_test_ops(10_000)).await;
-            db.commit().await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             drop(db);
@@ -444,7 +443,6 @@ pub(crate) mod test {
             db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&k).await.unwrap(), Some(v));
             assert_eq!(db.get_many(&[&k]).await.unwrap(), vec![Some(v)]);
-            db.commit().await.unwrap();
             db.sync().await.unwrap();
             db.prune(Location::new(0)).await.unwrap();
 
@@ -460,13 +458,11 @@ pub(crate) mod test {
                 "db_lookups_requested_total 2",
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 3",
-                "db_commit_calls_total 1",
                 "db_sync_calls_total 1",
                 "db_prune_calls_total 1",
                 "db_get_duration_count 1",
                 "db_get_many_duration_count 1",
                 "db_apply_batch_duration_count 1",
-                "db_commit_duration_count 1",
                 "db_sync_duration_count 1",
                 "db_prune_duration_count 1",
             ] {
@@ -501,7 +497,7 @@ pub(crate) mod test {
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
@@ -811,7 +807,7 @@ pub(crate) mod test {
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         let root = db.root();
 
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.

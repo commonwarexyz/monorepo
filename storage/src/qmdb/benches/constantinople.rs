@@ -199,7 +199,7 @@ macro_rules! run_pipeline {
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         // Churn: overwrite batches so inactive ops accumulate above the floor.
         for _ in 0..CHURN_BATCHES {
@@ -210,7 +210,6 @@ macro_rules! run_pipeline {
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
         }
-        db.commit().await.unwrap();
         db.sync().await.unwrap();
         eprintln!("seed+churn done in {:?}", seed_start.elapsed());
 

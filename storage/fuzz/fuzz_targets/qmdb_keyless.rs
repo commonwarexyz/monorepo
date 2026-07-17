@@ -274,7 +274,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     match expect_err {
                         None => {
                             db.apply_batch(merkleized).await.expect("Commit should not fail");
-                            db.commit().await.expect("Commit should not fail");
+                            db.sync().await.expect("Commit should not fail");
                         }
                         Some(kind) => {
                             // Snapshot state; the reject must not mutate.
@@ -368,7 +368,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let floor = Location::<F>::new(end.as_u64() + pending_count);
                     let merkleized = batch.merkleize(&db, None, floor).await;
                     db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                     db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
@@ -403,7 +403,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     }
                     let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
                     db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                     let _ = db.root();
                 }
 
@@ -421,7 +421,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     }
                     let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
                     db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc: Location<F> = Location::new(start_loc);
@@ -453,7 +453,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     }
                     let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
                     db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                     // Use post-commit op_count so it's consistent with the root.
                     let op_count = db.bounds().end;
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;

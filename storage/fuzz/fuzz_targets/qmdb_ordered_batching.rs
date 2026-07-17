@@ -76,7 +76,7 @@ async fn commit_pending<F: MerkleFamily>(
     db.apply_batch(merkleized)
         .await
         .expect("commit should not fail");
-    db.commit().await.expect("commit fsync should not fail");
+    db.sync().await.expect("commit fsync should not fail");
     for key in pending_deletes.drain() {
         committed_state.remove(&key);
     }

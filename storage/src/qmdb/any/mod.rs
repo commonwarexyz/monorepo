@@ -19,7 +19,7 @@
 //!     .merkleize(&db, None).await?;
 //! let root = batch.root();        // speculative root
 //! db.apply_batch(batch).await?;
-//! db.commit().await?;             // flush to disk
+//! db.sync().await?;             // flush to disk
 //! ```
 //!
 //! ```ignore
@@ -39,7 +39,7 @@
 //!
 //! db.apply_batch(parent).await?;           // apply parent
 //! db.apply_batch(child).await?;            // ancestors skipped automatically
-//! db.commit().await?;
+//! db.sync().await?;
 //! ```
 //!
 //! ```ignore
@@ -350,7 +350,7 @@ pub(crate) mod test {
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
         }
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         db.prune(db.sync_boundary()).await.unwrap();
         let root = db.root();
         let op_count = db.size();
@@ -415,7 +415,7 @@ pub(crate) mod test {
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
         }
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
         assert!(db.size() > op_count);
         assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -494,59 +494,11 @@ pub(crate) mod test {
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
         }
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
         assert!(db.size() > 1);
         assert_ne!(db.root(), root);
-
-        db.destroy().await.unwrap();
-    }
-
-    /// Test that a commit after an older sync boundary is recovered without another sync.
-    pub(crate) async fn test_any_db_commit_after_sync_recovery<F: Family, D, V>(
-        context: Context,
-        mut db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
-        make_value: impl Fn(u64) -> V,
-    ) where
-        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
-        V: Clone + CodecShared + Eq + std::fmt::Debug,
-    {
-        let key0 = Sha256::hash(&0u64.to_be_bytes());
-        let key1 = Sha256::hash(&1u64.to_be_bytes());
-        let value0 = make_value(100);
-        let value1 = make_value(200);
-
-        // Establish a synced baseline so recovery starts before the later commit.
-        let merkleized = db
-            .new_batch()
-            .write(key0, Some(value0.clone()))
-            .merkleize(&db, None)
-            .await
-            .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        db.sync().await.unwrap();
-
-        // Commit a second batch without syncing; reopen must replay it from the journal.
-        let merkleized = db
-            .new_batch()
-            .write(key1, Some(value1.clone()))
-            .merkleize(&db, None)
-            .await
-            .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        let committed_root = db.root();
-        let committed_size = db.size();
-        drop(db);
-
-        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
-        assert_eq!(db.root(), committed_root);
-        assert_eq!(db.size(), committed_size);
-        assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
-        assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
 
         db.destroy().await.unwrap();
     }
@@ -578,7 +530,7 @@ pub(crate) mod test {
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
         }
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         let durable_floor = db.inactivity_floor_loc();
 
         // Apply (but do not commit) a batch that advances the in-memory floor well past the
@@ -631,7 +583,7 @@ pub(crate) mod test {
         // Empty-batch rewind on an otherwise empty DB should apply no snapshot undos.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let empty_range = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(empty_range.start, initial_size);
         assert_eq!(db.size(), empty_range.end);
         db.rewind_to_size(initial_size).await.unwrap();
@@ -652,7 +604,7 @@ pub(crate) mod test {
             .await
             .unwrap();
         let range_a = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let root_a = db.root();
         let size_a = db.size();
@@ -672,7 +624,7 @@ pub(crate) mod test {
             .await
             .unwrap();
         let range_b = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(range_b.start, size_a);
         assert_ne!(db.root(), root_a);
 
@@ -688,7 +640,7 @@ pub(crate) mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         // Rewind across a tail where:
         // - the same key (`key0`) was updated multiple times
@@ -702,7 +654,7 @@ pub(crate) mod test {
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1_a));
         assert_eq!(db.get(&key2).await.unwrap(), None);
 
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         drop(db);
         let mut db = reopen_db(context.child("reopen_after_rewind")).await;
         assert_eq!(db.root(), root_a);
@@ -724,7 +676,7 @@ pub(crate) mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_d.clone()));
         assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
         assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
@@ -747,7 +699,7 @@ pub(crate) mod test {
         assert_eq!(db.get(&key1).await.unwrap(), None);
         assert_eq!(db.get(&key2).await.unwrap(), None);
 
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         drop(db);
         let db = reopen_db(context.child("reopen_initial_boundary")).await;
         assert_eq!(db.root(), initial_root);
@@ -872,7 +824,7 @@ pub(crate) mod test {
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
         }
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         let root = db.root();
 
         // Reopen and verify the state is preserved correctly.
@@ -1187,7 +1139,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
         }
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
         let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
@@ -1199,7 +1151,7 @@ pub(crate) mod test {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
 
@@ -1509,7 +1461,6 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_multiple_commits_delete_replayed, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_non_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_empty_recovery, "WARN");
-    test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
     test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
 
@@ -1533,7 +1484,7 @@ pub(crate) mod test {
         }
         let merkleized = batch.merkleize(&*db, metadata).await.unwrap();
         let range = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         range
     }
 
@@ -2179,7 +2130,7 @@ pub(crate) mod test {
         });
     }
 
-    /// Applying without `commit()` publishes in memory but is not recovered after reopen.
+    /// Applying without `sync()` publishes in memory but is not recovered after reopen.
     #[test_traced("INFO")]
     fn test_any_batch_apply_requires_commit_for_recovery() {
         let executor = deterministic::Runner::default();
@@ -2527,7 +2478,7 @@ pub(crate) mod test {
         }
         let merkleized = batch.merkleize(db, metadata).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
     }
 
     #[test_traced("INFO")]
@@ -2673,10 +2624,10 @@ pub(crate) mod test {
                 child = child.write(key(1), Some(val(1)));
                 child.merkleize(&db, None).await.unwrap()
             };
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             db.apply_batch(child_merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
@@ -2724,7 +2675,7 @@ mod bitmap_tests {
         let pre_len = db.bitmap.len();
         let pre_pruned = db.bitmap.pruned_bits();
 
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         drop(db);
 
         let db = open_db(context.child("reopen").with_attribute("case", label)).await;
@@ -2768,7 +2719,7 @@ mod bitmap_tests {
                 ));
                 db.apply_batch(batch).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Setup sanity: three strictly-increasing commit locations, all within the bitmap.
             assert_eq!(commit_locs.len(), 3);
@@ -2812,7 +2763,7 @@ mod bitmap_tests {
                 .await
                 .unwrap();
             db.apply_batch(b1).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             let size_after_first = Location::new(*db.last_commit_loc + 1);
 
             let b2 = db

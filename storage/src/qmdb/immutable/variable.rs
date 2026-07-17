@@ -246,14 +246,6 @@ mod tests {
         });
     }
 
-    #[test_traced("WARN")]
-    fn test_variable_commit_after_sync_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_commit_after_sync_recovery(ctx, open::<mmr::Family>).await;
-        });
-    }
-
     #[test_traced("DEBUG")]
     fn test_variable_build_basic() {
         let executor = deterministic::Runner::default();
@@ -356,7 +348,7 @@ mod tests {
 
         db.apply_batch(retained).await.unwrap();
         compact.apply_batch(compact_batch).unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());

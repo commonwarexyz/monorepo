@@ -179,7 +179,6 @@ async fn run_chained_growth<
     }
 
     // Flush buffered data so the timed region doesn't inherit setup fsync cost.
-    db.commit().await.unwrap();
     db.sync().await.unwrap();
 
     // Timed: grow more batches on top of the pre-built chain.

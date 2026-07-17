@@ -177,7 +177,7 @@ async fn apply_pending(db: &mut Db, writes: &[(Key, Option<Value>)]) {
     db.apply_batch(merkleized)
         .await
         .expect("commit should not fail");
-    db.commit().await.expect("commit fsync should not fail");
+    db.sync().await.expect("commit fsync should not fail");
 }
 
 fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {

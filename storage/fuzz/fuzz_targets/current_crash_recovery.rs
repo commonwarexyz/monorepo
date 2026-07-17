@@ -171,7 +171,7 @@ async fn commit_pending<F: Graftable>(
         forget_pending(pending, committed);
         return false;
     }
-    if db.commit().await.is_err() {
+    if db.sync().await.is_err() {
         forget_pending(pending, committed);
         return false;
     }
@@ -350,9 +350,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             db.apply_batch(batch)
                 .await
                 .expect("apply_batch after recovery should succeed");
-            db.commit()
-                .await
-                .expect("commit after recovery should succeed");
+            db.sync().await.expect("sync after recovery should succeed");
 
             db.destroy()
                 .await

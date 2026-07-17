@@ -232,7 +232,7 @@ pub mod tests {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert!(db.get_metadata().await.unwrap().is_none());
         let root1 = db.root();
@@ -255,7 +255,7 @@ pub mod tests {
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
         let root2 = db.root();
 
@@ -268,7 +268,7 @@ pub mod tests {
         assert!(db.get(&k1).await.unwrap().is_none());
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
         let root3 = db.root();
         assert_ne!(root3, root2);
 

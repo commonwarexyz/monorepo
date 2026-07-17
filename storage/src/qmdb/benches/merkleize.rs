@@ -392,7 +392,6 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
     }
-    db.commit().await.unwrap();
     db.sync().await.unwrap();
 
     let mut total = Duration::ZERO;

@@ -203,7 +203,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().end, db.root());
                 }
 
@@ -231,7 +231,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().end, db.root());
                     let start_loc = Location::<F>::new(*start_loc % (*F::MAX_LEAVES + 1));
                     let op_count = db.bounds().end;
@@ -258,7 +258,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().end, db.root());
                     let op_count = {
                         let idx = (*size as usize) % historical_roots.len();
@@ -314,7 +314,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().end, db.root());
                     let _ = db.root();
                 }

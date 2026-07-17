@@ -451,7 +451,7 @@ pub(crate) mod test {
 
             // Seed with initial data so the ordered index is non-trivial.
             apply_ops(&mut db, create_test_ops(10)).await;
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let base = db.to_batch();
 
@@ -476,11 +476,11 @@ pub(crate) mod test {
                 .unwrap();
 
             db.apply_batch(parent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Commit child.
             db.apply_batch(child_batch).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Both keys should be readable.
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
@@ -500,7 +500,7 @@ pub(crate) mod test {
             let mut db = create_test_db(context).await;
 
             apply_ops(&mut db, create_test_ops(5)).await;
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let base = db.to_batch();
 
@@ -521,12 +521,12 @@ pub(crate) mod test {
                 .unwrap();
 
             db.apply_batch(parent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_x);
 
             // Commit child.
             db.apply_batch(child_batch).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // key_x should be deleted.
             assert!(db.get(&key_x).await.unwrap().is_none());
@@ -544,7 +544,7 @@ pub(crate) mod test {
             let mut db = create_test_db(context).await;
 
             apply_ops(&mut db, create_test_ops(5)).await;
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let base = db.to_batch();
 
@@ -566,12 +566,12 @@ pub(crate) mod test {
                 .unwrap();
 
             db.apply_batch(parent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
             // Commit child.
             db.apply_batch(child_batch).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);
 

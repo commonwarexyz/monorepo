@@ -2784,8 +2784,8 @@ where
     /// [`crate::qmdb::batch_chain`] for more details).
     ///
     /// This publishes the batch to the in-memory database state and appends it to the
-    /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to
-    /// guarantee durability.
+    /// journal, but does not durably persist it. Call [`Db::sync`] to guarantee
+    /// durability.
     #[tracing::instrument(
         name = "qmdb.any.db.apply_batch",
         level = "info",
@@ -3769,7 +3769,7 @@ mod tests {
                         .await
                         .unwrap();
                     db.apply_batch(seed).await.unwrap();
-                    db.commit().await.unwrap();
+                    db.sync().await.unwrap();
 
                     // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
                     let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
@@ -4093,7 +4093,7 @@ mod tests {
                 .and_then(DiffEntry::loc)
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let explicit = db
                 .new_batch()
@@ -4268,7 +4268,7 @@ mod tests {
                         }
                         let seed = seed.merkleize(&db, None).await.unwrap();
                         db.apply_batch(seed).await.unwrap();
-                        db.commit().await.unwrap();
+                        db.sync().await.unwrap();
 
                         let mut grandparent = db.new_batch();
                         for i in 0..10u64 {
@@ -4295,7 +4295,7 @@ mod tests {
                                 child.stage(&keys[..split], &db).await.unwrap();
 
                             db.apply_batch(grandparent).await.unwrap();
-                            db.commit().await.unwrap();
+                            db.sync().await.unwrap();
 
                             let (range, suffix_values, staged) =
                                 staged.expand(&keys[split..], &db).await.unwrap();
@@ -4316,7 +4316,7 @@ mod tests {
                         } else {
                             let mut child = parent.new_batch::<Sha256>();
                             db.apply_batch(grandparent).await.unwrap();
-                            db.commit().await.unwrap();
+                            db.sync().await.unwrap();
                             for suffix in &suffixes {
                                 child = child.write(key(*suffix), Some(val(suffix + 3_000)));
                             }
@@ -4325,7 +4325,7 @@ mod tests {
 
                         db.apply_batch(parent).await.unwrap();
                         db.apply_batch(child).await.unwrap();
-                        db.commit().await.unwrap();
+                        db.sync().await.unwrap();
 
                         for suffix in &suffixes {
                             assert_eq!(
@@ -4393,7 +4393,7 @@ mod tests {
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
 
@@ -4475,7 +4475,7 @@ mod tests {
             }
             let initial = initial.merkleize(&db, None).await.unwrap();
             db.apply_batch(initial).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
             // parent.diff and must still be resolved through the committed
@@ -4507,7 +4507,7 @@ mod tests {
             let pending_root = pending_child.root();
 
             db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -4555,7 +4555,7 @@ mod tests {
             }
             let initial = initial.merkleize(&db, None).await.unwrap();
             db.apply_batch(initial).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
             // parent.diff and must still be resolved through the committed
@@ -4584,7 +4584,7 @@ mod tests {
             let pending_root = pending_child.root();
 
             db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -4632,7 +4632,7 @@ mod tests {
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Build batch A.
             let key_a = colliding_digest(0x02, 0);
@@ -4655,7 +4655,7 @@ mod tests {
                 .unwrap();
 
             db.apply_batch(batch_a).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Build the same logical B from committed DB for comparison.
             let committed_b = db
@@ -4702,7 +4702,7 @@ mod tests {
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Build batch A that updates the key.
             let val_a = colliding_digest(0x10, 2);
@@ -4730,7 +4730,7 @@ mod tests {
             // Commit A. The base_old_loc fixup is deferred to apply_batch,
             // which reads A's diff by reference.
             db.apply_batch(batch_a).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Verify B produces the same root as a fresh build.
             let committed_b = db
@@ -4775,7 +4775,7 @@ mod tests {
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Build batch A.
             let key_a = colliding_digest(0x21, 0);
@@ -4806,7 +4806,7 @@ mod tests {
                 .unwrap();
 
             db.apply_batch(batch_a).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Verify both produce correct roots.
             let committed_b = db
@@ -4875,11 +4875,11 @@ mod tests {
 
             // Commit grandparent.
             db.apply_batch(grandparent).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Commit parent.
             db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Commit child.
             db.apply_batch(child).await.unwrap();
@@ -4930,7 +4930,7 @@ mod tests {
                 .await
                 .unwrap();
             db.apply_batch(initial).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Parent: delete K0. K6 remains untouched.
             let parent = db
@@ -4952,7 +4952,7 @@ mod tests {
 
             // Commit the parent, then rebuild the same child.
             db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -5006,7 +5006,7 @@ mod tests {
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // DB-level get_many.
             let results = db.get_many(&[&key_db, &key_missing]).await.unwrap();

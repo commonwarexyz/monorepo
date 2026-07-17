@@ -211,7 +211,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                     db.apply_batch(merkleized)
                         .await
                         .expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                 }
 
                 Operation::Prune => {
@@ -238,7 +238,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                     let target = sync::Target::new(
                         db.root(),
                         non_empty_range!(db.sync_boundary(), db.bounds().end),

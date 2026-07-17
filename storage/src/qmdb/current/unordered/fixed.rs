@@ -191,7 +191,7 @@ pub mod test {
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
                 let mut rng = TestRng::new(salt);
@@ -282,7 +282,7 @@ pub mod test {
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
             db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
             // staged reads resolve in the grandparent's diff.
@@ -332,7 +332,7 @@ pub mod test {
 
             db.apply_batch(parent).await.unwrap();
             db.apply_batch(staged).await.unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(2_000)));
             assert_eq!(db.get(&key(100)).await.unwrap(), Some(val(2_001)));

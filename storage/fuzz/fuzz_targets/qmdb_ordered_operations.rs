@@ -99,7 +99,7 @@ async fn commit_pending<F: MerkleFamily>(
     db.apply_batch(merkleized)
         .await
         .expect("commit should not fail");
-    db.commit().await.expect("commit fsync should not fail");
+    db.sync().await.expect("commit fsync should not fail");
     for key in pending_deletes.drain() {
         committed_state.remove(&key);
     }
@@ -307,7 +307,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             db.apply_batch(batch)
                 .await
                 .expect("final commit should not fail");
-            db.commit()
+            db.sync()
                 .await
                 .expect("final commit fsync should not fail");
             db.destroy().await.expect("destroy should not fail");

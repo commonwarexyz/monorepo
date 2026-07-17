@@ -143,7 +143,7 @@ fn fuzz(input: FuzzInput) {
                     db.apply_batch(batch.finalize(metadata_bytes.clone()))
                         .await
                         .expect("Apply batch should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.sync().await.expect("Commit should not fail");
                 }
 
                 Operation::Get { key } => {
@@ -193,7 +193,7 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        db.commit().await.expect("Commit should not fail");
+        db.sync().await.expect("Commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }
