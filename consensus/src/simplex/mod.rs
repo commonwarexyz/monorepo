@@ -2736,16 +2736,15 @@ mod tests {
             // view 1.
             let stalled = View::new(1);
             loop {
-                let nullified = reporters
-                    .iter()
-                    .zip(participants.iter().skip(1))
-                    .all(|(reporter, validator)| {
+                let nullified = reporters.iter().zip(participants.iter().skip(1)).all(
+                    |(reporter, validator)| {
                         reporter
                             .nullifies
                             .lock()
                             .get(&stalled)
                             .is_some_and(|nullifiers| nullifiers.contains(validator))
-                    });
+                    },
+                );
                 if nullified {
                     break;
                 }
