@@ -1,6 +1,6 @@
 use crate::{
     dkg::{
-        ParticipantsProvider, Registrar, ReshareBlock, anchor,
+        ParticipantsProvider, Registrar, ReshareBlock, SecretStore, anchor,
         fence::Fence,
         orchestrator,
         reshare::{self, Input as ReshareInput},
@@ -78,7 +78,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -465,6 +465,35 @@ struct InitialState {
     shares: Map<ed25519::PublicKey, Share>,
 }
 
+impl InitialState {
+    async fn register_epoch_zero(
+        &self,
+        provider: &DynamicProvider,
+        store: &MemorySecretStore,
+    ) -> RegistrationRole {
+        let mut store = store.clone();
+        let participants = self.info.output.players();
+        let sharing = self.info.output.public();
+        store.get_share(Epoch::zero()).await.map_or_else(
+            || {
+                provider.register(
+                    Epoch::zero(),
+                    Scheme::verifier(NAMESPACE, participants.clone(), sharing.clone()),
+                );
+                RegistrationRole::Verifier
+            },
+            |share| {
+                provider.register(
+                    Epoch::zero(),
+                    Scheme::signer(NAMESPACE, participants.clone(), sharing.clone(), share)
+                        .expect("initial signer share"),
+                );
+                RegistrationRole::Signer
+            },
+        )
+    }
+}
+
 impl ReshareEngine {
     pub(super) fn new() -> Self {
         Self::with_committee(5, 4)
@@ -521,6 +550,21 @@ impl ReshareEngine {
     pub(super) const fn with_sharing_mode(mut self, sharing_mode: Mode) -> Self {
         self.sharing_mode = sharing_mode;
         self
+    }
+
+    fn store(&self, public_key: &ed25519::PublicKey) -> MemorySecretStore {
+        let mut stores = self.stores.lock();
+        match stores.entry(public_key.clone()) {
+            Entry::Occupied(entry) => entry.get().clone(),
+            Entry::Vacant(entry) => {
+                let store = MemorySecretStore::default();
+                if let Some(share) = self.initial.shares.get_value(public_key).cloned() {
+                    store.seed_share(Epoch::zero(), share);
+                }
+                entry.insert(store.clone());
+                store
+            }
+        }
     }
 }
 
@@ -584,34 +628,8 @@ impl EngineDefinition for ReshareEngine {
         .build();
         certificate_mux.start();
         let provider = DynamicProvider::new();
-        let store = self
-            .stores
-            .lock()
-            .entry(public_key.clone())
-            .or_default()
-            .clone();
-        if let Some(share) = self.initial.shares.get_value(public_key).cloned() {
-            store.seed_share(Epoch::zero(), share.clone());
-            provider.register(
-                Epoch::zero(),
-                Scheme::signer(
-                    NAMESPACE,
-                    self.initial.info.output.players().clone(),
-                    self.initial.info.output.public().clone(),
-                    share,
-                )
-                .expect("initial signer share"),
-            );
-        } else {
-            provider.register(
-                Epoch::zero(),
-                Scheme::verifier(
-                    NAMESPACE,
-                    self.initial.info.output.players().clone(),
-                    self.initial.info.output.public().clone(),
-                ),
-            );
-        }
+        let store = self.store(public_key);
+        self.initial.register_epoch_zero(&provider, &store).await;
 
         let resolver = marshal_resolver::init(
             context.child("marshal_resolver"),
@@ -977,6 +995,37 @@ impl ValidatorState {
     pub(super) fn state_sync_height(&self) -> Option<u64> {
         self.state_syncs.lock().get(&self.public_key).copied()
     }
+}
+
+#[test]
+fn restart_after_epoch_zero_pruning_does_not_reseed_share() {
+    let engine = ReshareEngine::new();
+    let public_key = engine
+        .initial
+        .shares
+        .get(0)
+        .cloned()
+        .expect("epoch-zero player");
+
+    let store = engine.store(&public_key);
+    assert!(store.has_share(Epoch::zero()));
+
+    futures::executor::block_on(async {
+        let mut pruned = store.clone();
+        pruned.prune(Epoch::new(1)).await;
+        assert!(pruned.get_share(Epoch::zero()).await.is_none());
+
+        let restarted = engine.store(&public_key);
+        let mut restarted_view = restarted.clone();
+        assert!(restarted_view.get_share(Epoch::zero()).await.is_none());
+
+        let provider = DynamicProvider::new();
+        let role = engine
+            .initial
+            .register_epoch_zero(&provider, &restarted)
+            .await;
+        assert_eq!(role, RegistrationRole::Verifier);
+    });
 }
 
 fn archive_config<C>(
