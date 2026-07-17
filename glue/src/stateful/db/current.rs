@@ -1181,12 +1181,9 @@ mod tests {
             fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
         },
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::{
-            InitParallelism,
-            current::{
-                ordered::{fixed as ordered_fixed, variable as ordered_variable},
-                unordered::fixed,
-            },
+        qmdb::current::{
+            ordered::{fixed as ordered_fixed, variable as ordered_variable},
+            unordered::fixed,
         },
         translator::TwoCap,
     };
@@ -1237,7 +1234,7 @@ mod tests {
     fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            init_parallelism: InitParallelism::Serial,
+            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
@@ -1264,7 +1261,7 @@ mod tests {
     ) -> VariableConfig<TwoCap, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_parallelism: InitParallelism::Serial,
+            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),

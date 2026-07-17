@@ -64,7 +64,7 @@ async fn build_db<F, E, U, I, H, C, T, S>(
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
     cache_size: Option<NonZeroUsize>,
-    parallelism: qmdb::InitParallelism,
+    workers: Option<NonZeroUsize>,
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
@@ -106,7 +106,7 @@ where
         log,
         None,
         cache_size,
-        parallelism,
+        workers,
         metrics,
     )
     .await?;
@@ -149,7 +149,7 @@ macro_rules! impl_sync_database {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
                 let cache_size = config.init_cache_size;
-                let parallelism = config.init_parallelism;
+                let workers = config.init_workers;
                 build_db::<F, _, $update<K, V>, _, H, _, T, S>(
                     context,
                     merkle_config,
@@ -159,7 +159,7 @@ macro_rules! impl_sync_database {
                     range,
                     apply_batch_size,
                     cache_size,
-                    parallelism,
+                    workers,
                 )
                 .await
             }

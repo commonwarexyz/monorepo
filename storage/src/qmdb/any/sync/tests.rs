@@ -9,7 +9,7 @@ use crate::{
     merkle::{self, Location, mmr},
     qmdb::{
         self,
-        any::{test::fixed_db_config_with_strategy, traits::DbAny},
+        any::{test::fixed_db_config, traits::DbAny},
         operation::Operation as OperationTrait,
         sync::{
             self, Engine, Target,
@@ -22,7 +22,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use commonware_macros::{select, test_traced};
-use commonware_parallel::{Manual, Sequential};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _, deterministic,
 };
@@ -3002,14 +3002,13 @@ sync_tests_for_harness!(
     unordered_variable_mmb
 );
 
-/// State-sync rebuilds must honor the configured `init_parallelism` rather than deriving a worker
-/// count from the strategy. The partitioned ordered index is the only index type with a parallel
-/// build, and no partitioned db implements [qmdb::sync::Database] yet, so this exercises the
-/// shared [super::build_db] helper directly: `Serial` must spawn no snapshot workers even though
-/// the strategy's hint allows them, `Workers(2)` must spawn them, and both must rebuild the
+/// State-sync rebuilds must honor the configured `init_workers`. The partitioned ordered
+/// index is the only index type with a parallel build, and no partitioned db implements
+/// [qmdb::sync::Database] yet, so this exercises the shared [super::build_db] helper directly:
+/// `None` must spawn no snapshot workers, `Some(2)` must spawn them, and both must rebuild the
 /// source root.
 #[test_traced]
-fn test_sync_build_honors_init_parallelism() {
+fn test_sync_build_honors_init_workers() {
     type PartDb = crate::qmdb::any::ordered::fixed::partitioned::Db<
         mmr::Family,
         deterministic::Context,
@@ -3018,21 +3017,14 @@ fn test_sync_build_honors_init_parallelism() {
         Sha256,
         TwoCap,
         1,
-        Manual<Sequential>,
+        Sequential,
     >;
 
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        // A strategy whose hint permits workers: a rebuild that ignored the configured
-        // `init_parallelism` would derive a parallel build from it.
-        let strategy = Manual::new(Sequential, NZUsize!(4));
-        let cfg = fixed_db_config_with_strategy::<TwoCap, _>(
-            "sync_honors_init_parallelism",
-            &context,
-            strategy,
-        );
+        let cfg = fixed_db_config::<TwoCap>("sync_honors_init_workers", &context);
 
-        // Build a committed source db (the test config's `init_parallelism` is `Serial`).
+        // Build a committed source db (the test config's `init_workers` is `None`).
         let mut db = PartDb::init(context.child("source"), cfg.clone())
             .await
             .unwrap();
@@ -3068,7 +3060,7 @@ fn test_sync_build_honors_init_parallelism() {
             non_empty_range!(lower, upper),
             1024,
             cfg.init_cache_size,
-            qmdb::InitParallelism::Serial,
+            None,
         )
         .await
         .unwrap();
@@ -3089,7 +3081,7 @@ fn test_sync_build_honors_init_parallelism() {
             non_empty_range!(lower, upper),
             1024,
             cfg.init_cache_size,
-            qmdb::InitParallelism::Workers(NZUsize!(2)),
+            Some(NZUsize!(2)),
         )
         .await
         .unwrap();

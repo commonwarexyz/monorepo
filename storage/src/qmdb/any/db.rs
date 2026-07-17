@@ -717,20 +717,19 @@ where
 {
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
-    /// from grafted metadata). `parallelism` selects how the snapshot build splits its work.
+    /// from grafted metadata). `workers` bounds how many tasks the snapshot build splits across.
     ///
     /// # Panics
     ///
     /// Panics if the last operation is not a commit floor operation. Empty logs are handled
     /// upstream by [`crate::qmdb::any::init_with_bitmap`].
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn init_from_log(
         context: E,
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
         cache_size: Option<NonZeroUsize>,
-        parallelism: crate::qmdb::InitParallelism,
+        workers: Option<NonZeroUsize>,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
@@ -740,7 +739,6 @@ where
     {
         // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
         // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
-        let strategy = log.strategy().clone();
         let log = Arc::new(log);
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let bounds = log.bounds();
@@ -757,9 +755,13 @@ where
             )
             .await?;
 
+            // Build the snapshot, collecting each replayed location's activity status.
+            let (active_keys, activity) = index
+                .build_snapshot(context, inactivity_floor_loc, &log, workers, cache_size)
+                .await?;
+
             // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
-            // [pruned_bits, bounds.start) correspond to pruned operations and remain 0; replay
-            // appends bits from the inactivity floor onward.
+            // [pruned_bits, bounds.start) correspond to pruned operations and remain 0.
             let bitmap = shared_bitmap.unwrap_or_else(|| {
                 let pruned_chunks =
                     (bounds.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
@@ -768,11 +770,12 @@ where
                 Arc::new(Shared::new(bm))
             });
 
-            // Extend the bitmap up to the inactivity floor (zero-fill).
+            // Extend the bitmap up to the inactivity floor (zero-fill), then append the replayed
+            // suffix, all under a single lock acquisition.
             {
                 let mut guard = bitmap.write();
                 // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
-                // inactivity floor; otherwise `extend_to` would silently leave gaps.
+                // inactivity floor. Anything past it would make `extend_to` silently leave gaps.
                 assert!(
                     guard.pruned_bits() <= *inactivity_floor_loc,
                     "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
@@ -780,31 +783,10 @@ where
                     *inactivity_floor_loc,
                 );
                 guard.extend_to(*inactivity_floor_loc);
+                for is_active in activity.iter() {
+                    guard.push(is_active);
+                }
             }
-
-            // The closure takes a brief lock per call (holding it across the build's `.await`s is
-            // not `Send`). `old_loc`, when set, clears a superseded bit. The serial build supplies
-            // it per op while the parallel build pre-resolves and passes `None`.
-            let active_keys = {
-                let bitmap = &bitmap;
-                index
-                    .build_snapshot(
-                        context,
-                        inactivity_floor_loc,
-                        &log,
-                        strategy,
-                        parallelism,
-                        cache_size,
-                        |is_active, old_loc| {
-                            let mut guard = bitmap.write();
-                            guard.push(is_active);
-                            if let Some(loc) = old_loc {
-                                guard.set_bit(*loc, false);
-                            }
-                        },
-                    )
-                    .await?
-            };
 
             (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
         };

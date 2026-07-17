@@ -105,7 +105,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
     cache_size: Option<NonZeroUsize>,
-    parallelism: qmdb::InitParallelism,
+    workers: Option<NonZeroUsize>,
     metadata_partition: String,
     strategy: S,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
@@ -160,7 +160,7 @@ where
         log,
         Some(bitmap),
         cache_size,
-        parallelism,
+        workers,
         any_metrics,
     )
     .await?;
@@ -284,7 +284,7 @@ macro_rules! impl_current_sync_database {
                 let strategy = config.merkle_config.strategy.clone();
                 let translator = config.translator.clone();
                 let cache_size = config.init_cache_size;
-                let parallelism = config.init_parallelism;
+                let workers = config.init_workers;
                 build_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
                     context,
                     merkle_config,
@@ -294,7 +294,7 @@ macro_rules! impl_current_sync_database {
                     range,
                     apply_batch_size,
                     cache_size,
-                    parallelism,
+                    workers,
                     metadata_partition,
                     strategy,
                 )
