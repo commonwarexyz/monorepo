@@ -25,17 +25,18 @@ use commonware_glue::{
     stateful::db::SyncEngineConfig,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Clock, Metrics, Storage, buffer::paged::CacheRef,
-};
+use commonware_runtime::{Buf, BufMut, buffer::paged::CacheRef};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
-    qmdb::any::{FixedConfig, unordered::fixed},
+    qmdb::{
+        any::{FixedConfig, unordered::fixed},
+        sync::Target,
+    },
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU64, NZUsize, non_empty_range,
+    Acknowledgement, NZU64, NZUsize,
     ordered::Set,
     range::NonEmptyRange,
     sequence::U64,
@@ -87,7 +88,7 @@ impl Block {
     pub fn genesis(
         leader: ed25519::PublicKey,
         info: dkg::types::EpochInfo<MinSig, ed25519::PublicKey>,
-        state_root: sha256::Digest,
+        target: Target<mmr::Family, sha256::Digest>,
     ) -> Self {
         Self {
             context: Context {
@@ -97,8 +98,8 @@ impl Block {
             },
             parent: sha256::Digest::EMPTY,
             height: Height::zero(),
-            state_root,
-            range: non_empty_range!(Location::new(0), Location::new(1)),
+            state_root: target.root,
+            range: target.range,
             payload: Some(Payload::EpochInfo(info)),
         }
     }
@@ -441,16 +442,6 @@ pub const fn sync_config() -> SyncEngineConfig {
     }
 }
 
-pub async fn empty_db_root<E>(context: E, config: FixedConfig<TwoCap, Sequential>) -> sha256::Digest
-where
-    E: Storage + Clock + Metrics + BufferPooler,
-{
-    Qmdb::init(context, config)
-        .await
-        .expect("failed to initialize empty QMDB")
-        .root()
-}
-
 pub fn genesis_path(node_dir: &Path) -> PathBuf {
     node_dir.join("genesis.json")
 }
@@ -620,25 +611,6 @@ mod tests {
         write_genesis(&path, &info).unwrap();
         assert_eq!(read_genesis(&path).unwrap(), info);
         let _ = std::fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn empty_root_matches_qmdb_schema() {
-        commonware_runtime::deterministic::Runner::default().start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-            let root = empty_db_root(
-                context.child("helper"),
-                db_config("empty_root_matches_qmdb_schema_helper", page_cache.clone()),
-            )
-            .await;
-            let db = Qmdb::init(
-                context.child("direct"),
-                db_config("empty_root_matches_qmdb_schema_direct", page_cache),
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.root(), root);
-        });
     }
 
     #[test]

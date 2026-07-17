@@ -27,7 +27,7 @@ use commonware_cryptography::{
 use commonware_glue::{
     dkg::{anchor, fence::Fence, orchestrator, reshare, SecretStore as _},
     stateful::{
-        db::p2p::standard as qmdb_resolver,
+        db::{DatabaseSet, p2p::standard as qmdb_resolver},
         probe::{Config as ProbeConfig, Probe},
         Config as StatefulConfig, Stateful, SyncPlan,
     },
@@ -196,15 +196,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
     .await
     .expect("blocks archive");
 
-    let genesis_state_root = types::empty_db_root(
-        context.child("genesis_qmdb"),
-        types::db_config(partition_prefix, page_cache.clone()),
-    )
-    .await;
+    let genesis_target =
+        <types::Database<tokio::Context> as DatabaseSet<tokio::Context>>::initial_sync_targets();
     let genesis = Block::genesis(
         network.participants[0].clone(),
         genesis_info.clone(),
-        genesis_state_root,
+        genesis_target,
     );
     let (anchor_actor, anchor_mailbox) = anchor::Actor::new(anchor::Config {
         context: context.child("anchor"),
