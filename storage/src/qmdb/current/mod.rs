@@ -381,9 +381,12 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
-    /// How the snapshot build parallelizes during init. Note that only certain index types (such
-    /// as the ordered-partitioned index) support parallel construction.
-    pub init_parallelism: super::InitParallelism,
+    /// Number of worker tasks the init-time snapshot build may split across; `None` builds on the
+    /// init task. Only certain index types (such as the ordered-partitioned index) build in
+    /// parallel. Counts past a few waste tasks without speeding up the build, and each task is
+    /// spawned as blocking-friendly shared work, so on runtimes with a bounded blocking pool keep
+    /// counts well below that pool's size.
+    pub init_workers: Option<NonZeroUsize>,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -393,7 +396,7 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             journal_config: cfg.journal_config,
             translator: cfg.translator,
             init_cache_size: cfg.init_cache_size,
-            init_parallelism: cfg.init_parallelism,
+            init_workers: cfg.init_workers,
         }
     }
 }
@@ -518,7 +521,6 @@ pub mod tests {
     use crate::{
         merkle::{self, mmb, mmr},
         qmdb::{
-            InitParallelism,
             any::{
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
@@ -528,7 +530,7 @@ pub mod tests {
         },
         translator::Translator,
     };
-    use commonware_parallel::{Sequential, Strategy};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         BufferPooler, Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
@@ -758,23 +760,15 @@ pub mod tests {
         partition_prefix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential> {
-        fixed_config_with_strategy(partition_prefix, pooler, Sequential)
-    }
-
-    pub(crate) fn fixed_config_with_strategy<T: Translator + Default, S: Strategy>(
-        partition_prefix: &str,
-        pooler: &impl BufferPooler,
-        strategy: S,
-    ) -> FixedConfig<T, S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            init_parallelism: InitParallelism::Serial,
+            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                strategy,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -796,7 +790,7 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_parallelism: InitParallelism::Serial,
+            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -1598,7 +1592,7 @@ pub mod tests {
         executor.start(|context| async move {
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
-                init_parallelism: InitParallelism::Serial,
+                init_workers: None,
                 merkle_config: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),

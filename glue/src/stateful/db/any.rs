@@ -823,7 +823,7 @@ mod tests {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
-            init_parallelism: Default::default(),
+            init_workers: None,
         }
     }
 

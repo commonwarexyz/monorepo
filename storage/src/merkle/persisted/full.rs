@@ -908,7 +908,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D,
     }
 }
 
-impl<F: Family, E: Context + Sync, D: Digest, S: Strategy> crate::merkle::storage::Storage<F>
+impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage<F>
     for Merkle<F, E, D, S>
 {
     type Digest = D;

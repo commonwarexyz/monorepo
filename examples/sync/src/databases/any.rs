@@ -9,7 +9,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     mmr::{self, Location, Proof, full::Config as MmrConfig},
     qmdb::{
-        self, InitParallelism,
+        self,
         any::{
             FixedConfig as Config,
             unordered::{
@@ -34,7 +34,7 @@ pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequential> {
     let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
-        init_parallelism: InitParallelism::Serial,
+        init_workers: None,
         merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),

@@ -402,8 +402,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         key: &[u8],
         value: Self::Value,
     ) -> Option<Self::Cursor<'a>> {
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
         // Map the global partition index to this instance's local slot (see `get_mut`).
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
         let i = i - self.offset;
         let k = self.translator.transform(sub);
         self.maybe_spill(i);
@@ -1049,6 +1049,53 @@ mod tests {
             // build, which records prunes on the full index directly).
             full.install_range(&mut worker);
             assert_eq!(full.pruned(), 2);
+        });
+    }
+
+    /// A worker with a nonzero offset must land its partitions AND its spilled entries at the
+    /// global slots `offset + local` when installed. The multi-worker equivalence tests never
+    /// spill inside a worker range (their per-partition load stays below the spill threshold), so
+    /// this is the only coverage of the spilled remap off offset zero.
+    #[test_traced]
+    fn test_install_range_nonzero_offset() {
+        deterministic::Runner::default().start(|context| async move {
+            // The full index spills once a partition holds two entries, as does the worker
+            // (`new_range` copies the threshold).
+            let mut full = new_index_spilling(context.child("full"));
+
+            // A worker covering global partitions [0x80, 0x82). Only `get_mut_or_insert` (and
+            // `get_mut`) are offset-aware, so all writes go through it: two distinct keys spill
+            // partition 0x80, and a third key stays inline in partition 0x81.
+            let mut worker = full.new_range(0x80, 2);
+            worker.get_mut_or_insert(&[0x80, 0x01], 1);
+            worker.get_mut_or_insert(&[0x80, 0x02], 2);
+            worker.get_mut_or_insert(&[0x81, 0x07], 3);
+            assert_eq!(worker.spilled_count(), 1);
+            assert_eq!(worker.keys(), 3);
+
+            // Installing must remap both the inline partition and the spilled entry to the
+            // worker's global range.
+            assert_eq!(full.install_range(&mut worker), 3);
+            assert_eq!(full.spilled_count(), 1);
+            assert_eq!(full.keys(), 3);
+            assert_eq!(full.items(), 3);
+            assert_eq!(
+                full.get(&[0x80, 0x01]).copied().collect::<Vec<_>>(),
+                vec![1]
+            );
+            assert_eq!(
+                full.get(&[0x80, 0x02]).copied().collect::<Vec<_>>(),
+                vec![2]
+            );
+            assert_eq!(
+                full.get(&[0x81, 0x07]).copied().collect::<Vec<_>>(),
+                vec![3]
+            );
+
+            // Nothing may land at the worker's local slots (global partitions 0x00 and 0x01),
+            // which is exactly where a remap that dropped the offset would file these entries.
+            assert!(full.get(&[0x00, 0x01]).next().is_none());
+            assert!(full.get(&[0x01, 0x07]).next().is_none());
         });
     }
 

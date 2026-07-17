@@ -133,9 +133,12 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
-    /// How the snapshot build parallelizes during init. Note that only certain index types (such
-    /// as the ordered-partitioned index) support parallel construction.
-    pub init_parallelism: super::InitParallelism,
+    /// Number of worker tasks the init-time snapshot build may split across; `None` builds on the
+    /// init task. Only certain index types (such as the ordered-partitioned index) build in
+    /// parallel. Counts past a few waste tasks without speeding up the build, and each task is
+    /// spawned as blocking-friendly shared work, so on runtimes with a bounded blocking pool keep
+    /// counts well below that pool's size.
+    pub init_workers: Option<NonZeroUsize>,
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
@@ -207,7 +210,7 @@ where
         log,
         bitmap,
         cfg.init_cache_size,
-        cfg.init_parallelism,
+        cfg.init_workers,
         metrics,
     )
     .await
@@ -219,10 +222,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::{
-            InitParallelism,
-            any::{FixedConfig, MerkleConfig, VariableConfig},
-        },
+        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig},
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
@@ -265,7 +265,7 @@ pub(crate) mod test {
     ) -> FixedConfig<T, S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            init_parallelism: InitParallelism::Serial,
+            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
@@ -291,7 +291,7 @@ pub(crate) mod test {
     ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_parallelism: InitParallelism::Serial,
+            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),

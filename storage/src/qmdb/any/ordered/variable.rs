@@ -149,15 +149,12 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::{
-            InitParallelism,
-            any::{
-                ordered::test::{
-                    test_ordered_any_db_basic, test_ordered_any_db_empty,
-                    test_ordered_any_update_collision_edge_case,
-                },
-                test::variable_db_config,
+        qmdb::any::{
+            ordered::test::{
+                test_ordered_any_db_basic, test_ordered_any_db_empty,
+                test_ordered_any_update_collision_edge_case,
             },
+            test::variable_db_config,
         },
         translator::TwoCap,
     };
@@ -176,32 +173,24 @@ pub(crate) mod test {
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) type VarConfig<S = Sequential> =
-        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), S>;
+    pub(crate) type VarConfig =
+        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
 
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
-        create_test_config_with_strategy(seed, pooler, Sequential)
-    }
-
-    pub(crate) fn create_test_config_with_strategy<S: Strategy>(
-        seed: u64,
-        pooler: &impl BufferPooler,
-        strategy: S,
-    ) -> VarConfig<S> {
         let page_cache =
             CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
-            init_parallelism: InitParallelism::Serial,
+            init_workers: None,
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
                 metadata_partition: format!("mmr-metadata-{seed}"),
                 items_per_blob: NZU64!(12), // intentionally small and janky size
                 write_buffer: NZUsize!(64),
-                strategy,
+                strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: crate::journal::contiguous::variable::Config {
@@ -286,10 +275,7 @@ pub(crate) mod test {
 
             for workers in [0usize, 3] {
                 let mut cfg = create_test_config(77, &context);
-                cfg.init_parallelism = match workers {
-                    0 => InitParallelism::Serial,
-                    n => InitParallelism::Workers(core::num::NonZeroUsize::new(n).unwrap()),
-                };
+                cfg.init_workers = core::num::NonZeroUsize::new(workers);
                 let ctx = context.child("reopen").with_attribute("workers", workers);
                 let db = PartDb::<Sequential>::init(ctx, cfg).await.unwrap();
                 assert_eq!(db.root(), root, "root mismatch at workers={workers}");

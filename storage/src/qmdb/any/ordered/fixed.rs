@@ -149,7 +149,7 @@ pub(crate) mod test {
                         test_ordered_any_update_collision_edge_case,
                     },
                 },
-                test::{fixed_db_config, fixed_db_config_with_strategy},
+                test::fixed_db_config,
             },
             verify_proof,
         },
@@ -158,7 +158,7 @@ pub(crate) mod test {
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_parallel::{Manual, Sequential};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
@@ -505,9 +505,7 @@ pub(crate) mod test {
     /// of worker counts (`0` for the serial path, `1` for the single-worker de-interleave, counts
     /// that round down to fewer workers with wider ranges, and counts above the partition count
     /// that clamp) all reconstruct the identical root and key-value state: the parallel build
-    /// replays the same immutable log, just split across workers owning disjoint partition ranges. A final reopen
-    /// uses [crate::qmdb::InitParallelism::Auto] with a [Manual] strategy hint to cover the
-    /// derived-count path.
+    /// replays the same immutable log, just split across workers owning disjoint partition ranges.
     async fn check_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
         partition: &'static str,
@@ -597,33 +595,13 @@ pub(crate) mod test {
         // original root and serve the expected value for every key.
         for &workers in worker_counts {
             let mut cfg = fixed_db_config::<OneCap>(partition, &context);
-            cfg.init_parallelism = match workers {
-                0 => crate::qmdb::InitParallelism::Serial,
-                n => {
-                    crate::qmdb::InitParallelism::Workers(core::num::NonZeroUsize::new(n).unwrap())
-                }
-            };
+            cfg.init_workers = core::num::NonZeroUsize::new(workers);
             let ctx = context.child("reopen").with_attribute("workers", workers);
             let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
             assert_eq!(db.root(), root, "root mismatch at P={P} workers={workers}");
             assert_expected_values(&db).await;
             drop(db);
         }
-
-        // One derived-count reopen: `Auto` with a hint of 4 reserves one core for routing and
-        // builds with the remaining workers.
-        let mut cfg = fixed_db_config_with_strategy::<OneCap, _>(
-            partition,
-            &context,
-            Manual::new(Sequential, NZUsize!(4)),
-        );
-        cfg.init_parallelism = crate::qmdb::InitParallelism::Auto;
-        let db = PartDb::<P, Manual<Sequential>>::init(context.child("reopen_auto"), cfg)
-            .await
-            .unwrap();
-        assert_eq!(db.root(), root, "root mismatch at P={P} auto");
-        assert_expected_values(&db).await;
-        drop(db);
     }
 
     /// A fresh db's log holds only the auto-appended CommitFloor. A multi-worker reopen must
@@ -642,8 +620,7 @@ pub(crate) mod test {
             drop(db);
 
             let mut cfg = fixed_db_config::<OneCap>("parallel_fresh", &context);
-            cfg.init_parallelism =
-                crate::qmdb::InitParallelism::Workers(core::num::NonZeroUsize::new(3).unwrap());
+            cfg.init_workers = core::num::NonZeroUsize::new(3);
             let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
                 .await
                 .unwrap();
@@ -703,15 +680,7 @@ pub(crate) mod test {
             // workers never read the log themselves.
             context.storage_fault_config().write().read_rate = Some(1.0);
             let result = index
-                .build_snapshot(
-                    context.child("build"),
-                    floor,
-                    &log,
-                    Sequential,
-                    crate::qmdb::InitParallelism::Workers(NZUsize!(3)),
-                    None,
-                    |_, _| {},
-                )
+                .build_snapshot(context.child("build"), floor, &log, Some(NZUsize!(3)), None)
                 .await;
             assert!(result.is_err(), "replay must fail under read faults");
 

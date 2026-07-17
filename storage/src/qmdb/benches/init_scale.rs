@@ -26,8 +26,8 @@
 //! reporting the total build time.
 //!
 //! `bench` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
-//! `0` = off) and `parallelism` (`0` = serial, `N` = N worker tasks, `auto` = derived from the
-//! strategy hint). It reports the replay-region size `R` (so a full-coverage cache is `cache = R`)
+//! `0` = off) and `parallelism` (`0` = serial, `N` = N worker tasks). It reports the
+//! replay-region size `R` (so a full-coverage cache is `cache = R`)
 //! and the elapsed time, and uses the P=3 partitioned ordered index (the inline-SoA config for large
 //! key sets) so the parallel `build_snapshot` override is exercised. Sweep cache/parallelism by
 //! driving the command from a shell loop.
@@ -45,10 +45,7 @@ use commonware_runtime::{
     Runner as _, Supervisor as _,
     tokio::{Config, Runner},
 };
-use commonware_storage::{
-    merkle::mmr::Family as Mmr,
-    qmdb::{InitParallelism, any::traits::DbAny as _},
-};
+use commonware_storage::{merkle::mmr::Family as Mmr, qmdb::any::traits::DbAny as _};
 use commonware_utils::{NZU64, NZUsize};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -78,27 +75,15 @@ const PRUNE_FREQUENCY: u32 = 100;
 /// workloads. Higher = more skew; ~1.0 is classic Zipf (near YCSB's 0.99).
 const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
-/// Map a worker count to an [InitParallelism]: `0` is the serial build, `n` spawns `n` worker tasks.
-const fn workers(n: usize) -> InitParallelism {
-    match n {
-        0 => InitParallelism::Serial,
-        n => InitParallelism::Workers(NonZeroUsize::new(n).unwrap()),
-    }
-}
-
-/// Parse a `parallelism` CLI argument: `auto` for [`InitParallelism::Auto`], otherwise a worker count
-/// (`0` = serial, `n` = `n` worker tasks).
-fn parse_parallelism(arg: &str) -> Option<InitParallelism> {
-    if arg == "auto" {
-        Some(InitParallelism::Auto)
-    } else {
-        arg.parse::<usize>().ok().map(workers)
-    }
+/// Parse a `parallelism` CLI argument into a snapshot-build worker count (`0` = serial, `n` = `n`
+/// worker tasks). The outer `Option` is parse success.
+fn parse_workers(arg: &str) -> Option<Option<NonZeroUsize>> {
+    arg.parse::<usize>().ok().map(NonZeroUsize::new)
 }
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  bench     <folder> <cache> <parallelism>   reopen + time one init (cache=entries, 0=off; parallelism=0 serial / N workers / auto)\n  destroy   <folder>                          delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  bench     <folder> <cache> <parallelism>   reopen + time one init (cache=entries, 0=off; parallelism=0 serial / N workers)\n  destroy   <folder>                          delete the database"
     );
 }
 
@@ -129,9 +114,9 @@ fn main() {
         Some("bench") => match (
             argv.get(1),
             argv.get(2).and_then(|a| a.parse().ok()),
-            argv.get(3).and_then(|a| parse_parallelism(a)),
+            argv.get(3).and_then(|a| parse_workers(a)),
         ) {
-            (Some(folder), Some(cache), Some(parallelism)) => bench(folder, cache, parallelism),
+            (Some(folder), Some(cache), Some(workers)) => bench(folder, cache, workers),
             _ => usage(),
         },
         Some("destroy") => match argv.get(1) {
@@ -188,9 +173,9 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
 }
 
 /// Reopen the database at `folder` (read-only) and time one `init` of the P=3 partitioned ordered
-/// index at the given init cache size (`cache` entries; `0` = off) and `parallelism`. Reports the
+/// index at the given init cache size (`cache` entries; `0` = off) and worker count. Reports the
 /// replay-region size `R` (a full-coverage cache is `cache = R`) and the elapsed time.
-fn bench(folder: &str, cache: usize, parallelism: InitParallelism) {
+fn bench(folder: &str, cache: usize, workers: Option<NonZeroUsize>) {
     if !db_dir_nonempty(folder) {
         eprintln!(
             "no database at {folder}; run `generate {folder} <keyspace> <num_updates>` first"
@@ -198,7 +183,7 @@ fn bench(folder: &str, cache: usize, parallelism: InitParallelism) {
         return;
     }
     let cfg = Config::default().with_storage_directory(folder);
-    let (elapsed, region) = time_init(&cfg, NonZeroUsize::new(cache), parallelism);
+    let (elapsed, region) = time_init(&cfg, NonZeroUsize::new(cache), workers);
     if region == 0 {
         eprintln!(
             "database at {folder} is empty; run `generate {folder} <keyspace> <num_updates>` first"
@@ -206,7 +191,7 @@ fn bench(folder: &str, cache: usize, parallelism: InitParallelism) {
         return;
     }
     println!(
-        "init_scale (any::ordered::fixed::p3::mmr) {folder} cache={cache} parallelism={parallelism:?} region={region} time={elapsed:?}"
+        "init_scale (any::ordered::fixed::p3::mmr) {folder} cache={cache} workers={workers:?} region={region} time={elapsed:?}"
     );
 }
 
@@ -219,17 +204,17 @@ fn destroy(folder: &str) {
 }
 
 /// Time a single `init` of the database at `cfg`'s folder with the given cache size and
-/// `parallelism`, returning the elapsed time and the replay-region size (`0` if the database is
+/// worker count, returning the elapsed time and the replay-region size (`0` if the database is
 /// empty/absent).
 fn time_init(
     cfg: &Config,
     cache_size: Option<NonZeroUsize>,
-    parallelism: InitParallelism,
+    workers: Option<NonZeroUsize>,
 ) -> (Duration, u64) {
     Runner::new(cfg.clone()).start(|ctx| async move {
         let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE);
         config.init_cache_size = cache_size;
-        config.init_parallelism = parallelism;
+        config.init_workers = workers;
         let start = Instant::now();
         let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
             .await

@@ -100,7 +100,9 @@ pub mod partitioned {
         Operation<F, K, V>: Codec,
     {
         /// Initializes a [Db] from the given `config`.
-        /// The configured [`Strategy`] is used to parallelize merkleization.
+        /// The configured [`Strategy`] is used to parallelize merkleization, and
+        /// `config.init_workers` bounds how many tasks the snapshot build splits across during
+        /// init.
         pub async fn init(
             context: E,
             config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,

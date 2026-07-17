@@ -93,8 +93,9 @@ pub mod partitioned {
     > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
-        /// The configured [`Strategy`] is used to parallelize merkleization and the snapshot
-        /// build during init.
+        /// The configured [`Strategy`] is used to parallelize merkleization, and
+        /// `config.init_workers` bounds how many tasks the snapshot build splits across during
+        /// init.
         pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
@@ -108,19 +109,16 @@ pub mod test {
         mmr,
         qmdb::{
             Error,
-            current::{
-                ordered::tests as shared,
-                tests::{fixed_config, fixed_config_with_strategy},
-            },
+            current::{ordered::tests as shared, tests::fixed_config},
         },
         translator::OneCap,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_parallel::{Manual, Sequential};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
-        NZU64, NZUsize,
+        NZU64,
         bitmap::{Prunable as BitMap, Readable as _},
     };
 
@@ -214,9 +212,7 @@ pub mod test {
     /// reopening it at a range of worker counts reconstructs the identical root and key-value
     /// state. Unlike the `any` equivalence tests, the current root commits to the activity bitmap,
     /// so this exercises the parallel build's bitmap reconstruction (`for_each_value` +
-    /// last-commit) over a pruned prefix, not just the snapshot index and MMR. A final reopen uses
-    /// [crate::qmdb::InitParallelism::Auto] with a [Manual] strategy hint to cover the
-    /// derived-count path.
+    /// last-commit) over a pruned prefix, not just the snapshot index and MMR.
     async fn check_current_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
         partition: &'static str,
@@ -286,12 +282,7 @@ pub mod test {
         // match the original root and serve the expected value for every key.
         for &workers in worker_counts {
             let mut cfg = fixed_config::<OneCap>(partition, &context);
-            cfg.init_parallelism = match workers {
-                0 => crate::qmdb::InitParallelism::Serial,
-                n => {
-                    crate::qmdb::InitParallelism::Workers(core::num::NonZeroUsize::new(n).unwrap())
-                }
-            };
+            cfg.init_workers = core::num::NonZeroUsize::new(workers);
             let ctx = context.child("reopen").with_attribute("workers", workers);
             let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
             assert_eq!(
@@ -309,28 +300,6 @@ pub mod test {
             }
             drop(db);
         }
-
-        // One derived-count reopen: `Auto` with a hint of 4 reserves one core for routing and
-        // builds with the remaining workers.
-        let mut cfg = fixed_config_with_strategy::<OneCap, _>(
-            partition,
-            &context,
-            Manual::new(Sequential, NZUsize!(4)),
-        );
-        cfg.init_parallelism = crate::qmdb::InitParallelism::Auto;
-        let db = PartDb::<P, Manual<Sequential>>::init(context.child("reopen_auto"), cfg)
-            .await
-            .unwrap();
-        assert_eq!(db.root(), root, "current root mismatch at P={P} auto");
-        for i in 0u64..2000 {
-            let k = Sha256::hash(&i.to_be_bytes());
-            assert_eq!(
-                db.get(&k).await.unwrap(),
-                expected_value(i),
-                "value mismatch for key {i}"
-            );
-        }
-        drop(db);
     }
 
     #[test_traced("WARN")]
