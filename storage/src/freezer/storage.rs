@@ -115,63 +115,6 @@ impl std::fmt::Display for Cursor {
     }
 }
 
-/// Marker of [Freezer] progress.
-///
-/// This can be used to restore the [Freezer] to a consistent
-/// state after shutdown.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct Checkpoint {
-    /// The section of the last committed operation.
-    section: u64,
-    /// The size of the oversized index journal in the last committed section.
-    oversized_size: u64,
-    /// The size of the table.
-    table_size: u32,
-}
-
-impl Checkpoint {
-    /// Initialize a new [Checkpoint].
-    const fn init(table_size: u32) -> Self {
-        Self {
-            table_size,
-            section: 0,
-            oversized_size: 0,
-        }
-    }
-
-    /// Return true if this checkpoint represents a fresh [Freezer].
-    const fn is_empty(&self) -> bool {
-        self.section == 0 && self.oversized_size == 0 && self.table_size == 0
-    }
-}
-
-impl Read for Checkpoint {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let section = u64::read(buf)?;
-        let oversized_size = u64::read(buf)?;
-        let table_size = u32::read(buf)?;
-        Ok(Self {
-            section,
-            oversized_size,
-            table_size,
-        })
-    }
-}
-
-impl CodecWrite for Checkpoint {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.section.write(buf);
-        self.oversized_size.write(buf);
-        self.table_size.write(buf);
-    }
-}
-
-impl FixedSize for Checkpoint {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
-}
-
 /// Name of the table blob.
 const TABLE_BLOB_NAME: &[u8] = b"table";
 
@@ -392,88 +335,48 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Entry::read_slot(&mut read_buf)
     }
 
-    /// Returns true if `entry` references a journal record past `checkpoint`.
-    const fn past_checkpoint(entry: &Entry, checkpoint: &Checkpoint) -> bool {
-        let committed_positions = checkpoint.oversized_size / Record::<K>::SIZE as u64;
-        entry.section > checkpoint.section
-            || (entry.section == checkpoint.section && entry.position >= committed_positions)
-    }
-
-    /// Restore every table slot to the chain head committed by `checkpoint`.
+    /// Scan the table, validating every slot and counting resizable entries.
     ///
-    /// A crash after the table sync but before the caller commits the returned
-    /// [Checkpoint] leaves the table "stale-ahead": slots reference journal records
-    /// past the checkpoint. [Freezer::sync_into] callers that stage the checkpoint in
-    /// the same batch (the immutable archive) never produce this state, but the
-    /// checkpoint contract does not require it: [Freezer::sync] makes the table
-    /// durable while the caller persists the returned checkpoint separately, and any
-    /// caller may reopen from an older checkpoint it kept. Every stale-ahead record
-    /// is durable (the journal is synced before the table) and its chain passes
-    /// through every older head for the slot, so walking the chain recovers the
-    /// committed head (or empties the slot when the whole chain is uncommitted).
-    /// Must run before the journal is rewound to the checkpoint.
+    /// Committed slots always reference committed journal records: [Freezer::sync_into]
+    /// commits the journals and the table atomically, and [Freezer::sync] commits the
+    /// journals before the table. A slot that does not decode, or that references a
+    /// record the journals do not hold, is therefore corruption or tampering, never a
+    /// state a crash can produce.
     ///
-    /// Returns (modified, resizable) where:
-    /// - modified: whether any slots were rewritten
-    /// - resizable: the number of entries that can be resized
-    async fn recover_table(
+    /// Returns the number of entries that can be resized.
+    async fn scan_table(
         pooler: &impl BufferPooler,
         blob: &E::Blob,
         oversized: &Oversized<E, Record<K>, V>,
-        checkpoint: &Checkpoint,
+        table_size: u32,
         table_resize_frequency: u8,
         table_replay_buffer: NonZeroUsize,
-    ) -> Result<(bool, u32), Error> {
+    ) -> Result<u32, Error> {
         // Create a buffered reader for efficient scanning
-        let blob_size = Self::table_offset(checkpoint.table_size);
+        let blob_size = Self::table_offset(table_size);
         let mut reader =
             buffer::Read::from_pooler(pooler, blob.clone(), blob_size, table_replay_buffer);
 
-        let mut modified = false;
         let mut resizable = 0u32;
-        for table_index in 0..checkpoint.table_size {
+        for _ in 0..table_size {
             let mut slot_buf = reader.read(Entry::SLOT_SIZE).await?;
-            let Some(mut entry) = Entry::read_slot(&mut slot_buf)? else {
+            let Some(entry) = Entry::read_slot(&mut slot_buf)? else {
                 continue;
             };
 
-            // Walk the collision chain until a committed head is found. The `added`
-            // counter committed with the old head is not recoverable, so a restored
-            // head restarts at zero (delaying a future resize, never corrupting one).
-            let mut walked = false;
-            let head = loop {
-                if !Self::past_checkpoint(&entry, checkpoint) {
-                    break Some(entry);
-                }
-                walked = true;
-                let record = oversized.get(entry.section, entry.position).await?;
-                match record.next() {
-                    Some((section, position)) => {
-                        entry = Entry {
-                            section,
-                            position,
-                            added: 0,
-                        };
-                    }
-                    None => break None,
-                }
-            };
-            if walked {
-                debug!(table_index, ?head, "restored committed chain head");
-                Self::write_head(pooler, blob, Self::table_offset(table_index), head.as_ref())
-                    .await?;
-                modified = true;
+            // Verify the chain head references a record the journals hold
+            let positions = oversized.size(entry.section)? / Record::<K>::SIZE as u64;
+            if entry.position >= positions {
+                return Err(Error::MissingRecord(entry.section, entry.position));
             }
 
             // If the entry has reached the resize frequency, increment the resizable entries
-            if let Some(entry) = &head {
-                if entry.added >= table_resize_frequency {
-                    resizable += 1;
-                }
+            if entry.added >= table_resize_frequency {
+                resizable += 1;
             }
         }
 
-        Ok((modified, resizable))
+        Ok(resizable)
     }
 
     /// Write a chain head to the table slot at `offset`.
@@ -499,36 +402,16 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(())
     }
 
-    /// Initialize a [Freezer] instance, aligning existing data to a [Checkpoint] when provided.
-    ///
-    /// Passing `None` or an empty [Checkpoint] deletes any existing freezer data and starts empty.
-    pub async fn init(
-        context: E,
-        config: Config<V::Cfg>,
-        checkpoint: Option<Checkpoint>,
-    ) -> Result<Self, Error> {
+    /// Initialize a [Freezer] instance, recovering existing data from its own committed
+    /// state (see the module's Recovery documentation).
+    pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate that initial_table_size is a power of 2
         assert!(
             config.table_initial_size > 0 && config.table_initial_size.is_power_of_two(),
             "table_initial_size must be a power of 2"
         );
 
-        // A missing or empty checkpoint starts fresh: delete all existing freezer data
-        let reset = checkpoint.is_none_or(|checkpoint| checkpoint.is_empty());
-        if reset {
-            for partition in [
-                &config.key_partition,
-                &config.value_partition,
-                &config.table_partition,
-            ] {
-                match context.remove(partition, None).await {
-                    Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
-                    Err(err) => return Err(Error::Runtime(err)),
-                }
-            }
-        }
-
-        // Initialize oversized journal (handles crash recovery)
+        // Initialize oversized journal (verifies cross-journal consistency)
         let oversized_cfg = OversizedConfig {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),
@@ -538,7 +421,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             compression: config.value_compression,
             codec_config: config.codec_config,
         };
-        let mut oversized: Oversized<E, Record<K>, V> =
+        let oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
         // Open table blob
@@ -546,66 +429,44 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
 
-        // Determine checkpoint based on initialization scenario
-        let (checkpoint, resizable) = match checkpoint {
-            // Non-empty checkpoint: align existing data to it
-            Some(checkpoint) if !checkpoint.is_empty() => {
-                // A non-empty checkpoint against an empty table references data that does not exist
-                if table_len == 0 {
-                    return Err(Error::CheckpointMismatch);
-                }
-                assert!(
-                    checkpoint.table_size > 0 && checkpoint.table_size.is_power_of_two(),
-                    "table_size must be a power of 2"
+        // Recover the table geometry from the blob length. The blob holds `table_size`
+        // slots plus one slot per landed resize chunk (the blob grows only as chunks are
+        // written, never up front), so the committed size is the largest power of two of
+        // slots the blob holds. Length past that boundary is a resize the freezer did not
+        // finish: the partially copied upper half is dropped and the resize restarts once
+        // triggered again.
+        let (table_size, resizable) = if table_len == 0 {
+            Self::init_table(&table, config.table_initial_size).await?;
+            (config.table_initial_size, 0)
+        } else {
+            let slots = table_len / Entry::SLOT_SIZE as u64;
+            let table_size = slots
+                .checked_ilog2()
+                .and_then(|bits| u32::try_from(1u64 << bits).ok())
+                .ok_or(Error::InvalidTableLength(table_len))?;
+            let expected_table_len = Self::table_offset(table_size);
+            if table_len != expected_table_len {
+                debug!(
+                    from = table_len,
+                    to = expected_table_len,
+                    "dropped interrupted resize"
                 );
-
-                // Resize table if needed (drops the upper half of an uncommitted resize)
-                let expected_table_len = Self::table_offset(checkpoint.table_size);
-                let mut modified = if table_len != expected_table_len {
-                    table.resize(expected_table_len).await?;
-                    true
-                } else {
-                    false
-                };
-
-                // Restore committed chain heads. This walks collision chains through the
-                // journal, so it must run before the journal is rewound below.
-                let (table_modified, resizable) = Self::recover_table(
-                    &context,
-                    &table,
-                    &oversized,
-                    &checkpoint,
-                    config.table_resize_frequency,
-                    config.table_replay_buffer,
-                )
-                .await?;
-                if table_modified {
-                    modified = true;
-                }
-
-                // Make the restored table durable before rewinding the journal: once the
-                // journal suffix is gone, the chains needed for restoration are too.
-                if modified {
-                    table.sync().await?;
-                }
-
-                // Rewind oversized to the committed section and key size
-                oversized
-                    .rewind(checkpoint.section, checkpoint.oversized_size)
-                    .await?;
-
-                // Sync oversized
-                oversized.sync(checkpoint.section).await?;
-
-                (checkpoint, resizable)
+                table.resize(expected_table_len).await?;
             }
-
-            // Missing or empty checkpoint: reset wiped any existing data, so initialize a new table
-            _ => {
-                Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
-            }
+            let resizable = Self::scan_table(
+                &context,
+                &table,
+                &oversized,
+                table_size,
+                config.table_resize_frequency,
+                config.table_replay_buffer,
+            )
+            .await?;
+            (table_size, resizable)
         };
+
+        // Resume appends in the newest committed section
+        let current_section = oversized.newest_section().unwrap_or(0);
 
         // Create metrics
         let puts = context.counter("puts", "number of put operations");
@@ -624,14 +485,14 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(Self {
             context,
             table_partition: config.table_partition,
-            table_size: checkpoint.table_size,
-            table_resize_threshold: checkpoint.table_size as u64 * RESIZE_THRESHOLD / 100,
+            table_size,
+            table_resize_threshold: table_size as u64 * RESIZE_THRESHOLD / 100,
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
             oversized,
             blob_target_size: config.value_target_size,
-            current_section: checkpoint.section,
+            current_section,
             modified_sections: BTreeSet::new(),
             resizable,
             resize_progress: None,
@@ -841,21 +702,22 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 
     /// Resize the table by doubling its size and split each entry into two.
-    async fn start_resize(&mut self) -> Result<(), Error> {
+    ///
+    /// The table blob is not extended here: it grows one slot per chunk entry as
+    /// [Self::advance_resize] writes the upper half, so the blob length always encodes
+    /// how far a resize progressed (see [Self::init]).
+    fn start_resize(&mut self) {
         self.resizes.inc();
 
         // Double the table size (if not already at the max size)
         let old_size = self.table_size;
         let Some(new_size) = old_size.checked_mul(2) else {
-            return Ok(());
+            return;
         };
-        self.table.resize(Self::table_offset(new_size)).await?;
 
         // Start the resize
         self.resize_progress = Some(0);
         debug!(old = old_size, new = new_size, "table resize started");
-
-        Ok(())
     }
 
     /// Continue a resize operation by processing the next chunk of entries.
@@ -929,14 +791,17 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// is complete.
     //
     // TODO:(<https://github.com/commonwarexyz/monorepo/issues/2910>): Make this non &mut.
-    pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
-        // Sync all modified sections for oversized journal
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        // Sync all modified sections for oversized journal. The journals must commit
+        // before the table: a crash between the two commits then leaves the table
+        // referencing only records the journals hold (any newer journal records stay
+        // unreferenced, bounded waste rather than a dangling slot).
         self.oversized.sync(&self.modified_sections).await?;
         self.modified_sections.clear();
 
         // Start a resize (if needed)
         if self.should_resize() && self.resize_progress.is_none() {
-            self.start_resize().await?;
+            self.start_resize();
         }
 
         // Continue a resize (if ongoing)
@@ -947,30 +812,23 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         // Sync updated table entries
         self.table.sync().await?;
 
-        // Get size from oversized
-        let oversized_size = self.oversized.size(self.current_section)?;
-
-        Ok(Checkpoint {
-            section: self.current_section,
-            oversized_size,
-            table_size: self.table_size,
-        })
+        Ok(())
     }
 
     /// [Self::sync], staged with `batch` instead of synced directly: the
     /// oversized journals and the table become durable when the batch is
-    /// applied, and the returned [Checkpoint] describes exactly that state.
+    /// applied.
     pub async fn sync_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
         &mut self,
         batch: &mut T,
-    ) -> Result<Checkpoint, Error> {
+    ) -> Result<(), Error> {
         self.oversized
             .sync_into(&self.modified_sections, batch)
             .await?;
         self.modified_sections.clear();
 
         if self.should_resize() && self.resize_progress.is_none() {
-            self.start_resize().await?;
+            self.start_resize();
         }
         if self.resize_progress.is_some() {
             self.advance_resize().await?;
@@ -980,25 +838,18 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         // durability with the batch.
         batch.sync(&self.table);
 
-        let oversized_size = self.oversized.size(self.current_section)?;
-        Ok(Checkpoint {
-            section: self.current_section,
-            oversized_size,
-            table_size: self.table_size,
-        })
+        Ok(())
     }
 
-    /// Close the [Freezer] and return a [Checkpoint] for recovery.
-    pub async fn close(mut self) -> Result<Checkpoint, Error> {
+    /// Close the [Freezer], making all pending data durable.
+    pub async fn close(mut self) -> Result<(), Error> {
         // If we're mid-resize, complete it
         while self.resize_progress.is_some() {
             self.advance_resize().await?;
         }
 
         // Sync any pending updates before closing
-        let checkpoint = self.sync().await?;
-
-        Ok(checkpoint)
+        self.sync().await
     }
 
     /// Close and remove any underlying blobs created by the [Freezer], in ONE atomic commit.
@@ -1052,7 +903,6 @@ mod conformance {
 
     commonware_conformance::conformance_tests! {
         CodecConformance<Cursor>,
-        CodecConformance<Checkpoint>,
         CodecConformance<Record<U64>>
     }
 }
@@ -1132,7 +982,7 @@ mod tests {
                 codec_config: (),
             };
             let mut freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone(), None)
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -1162,8 +1012,11 @@ mod tests {
         });
     }
 
+    /// A sync that leaves a resize mid-flight commits a table length between two powers
+    /// of two. Reopening must drop the partially copied upper half and keep committed
+    /// keys reachable.
     #[test_traced]
-    fn no_checkpoint_deletes_partial_sync_resize() {
+    fn reopen_truncates_interrupted_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
@@ -1184,13 +1037,10 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.child("first"),
-                    cfg.clone(),
-                    None,
-                )
-                .await
-                .unwrap();
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
                 freezer.put(key.clone(), 42).await.unwrap();
                 freezer.sync().await.unwrap();
 
@@ -1199,17 +1049,17 @@ mod tests {
             }
 
             let freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone(), None)
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
             assert_eq!(freezer.table_size, 2);
             assert_eq!(freezer.resizing(), None);
-            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
         });
     }
 
     #[test_traced]
-    fn empty_checkpoint_deletes_existing_data() {
+    fn reopen_recovers_completed_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
@@ -1223,196 +1073,45 @@ mod tests {
                 table_partition: "test-table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
-                table_resize_chunk_size: 1,
+                table_resize_chunk_size: 2,
                 table_replay_buffer: NZUsize!(64 * 1024),
                 codec_config: (),
             };
             let key = test_key_at_index(4, 3);
 
             {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.child("first"),
-                    cfg.clone(),
-                    None,
-                )
-                .await
-                .unwrap();
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
                 freezer.put(key.clone(), 42).await.unwrap();
                 freezer.sync().await.unwrap();
-                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
-            }
 
-            let checkpoint = Checkpoint {
-                section: 0,
-                oversized_size: 0,
-                table_size: 0,
-            };
-            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                context.child("second"),
-                cfg.clone(),
-                Some(checkpoint),
-            )
-            .await
-            .unwrap();
-            assert_eq!(freezer.table_size, 2);
-            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
-        });
-    }
-
-    #[test_traced]
-    fn no_checkpoint_deletes_close_started_partial_resize() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = super::super::Config {
-                key_partition: "test-key-index".into(),
-                key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test-value-journal".into(),
-                value_compression: None,
-                value_write_buffer: NZUsize!(1024),
-                value_target_size: 10 * 1024 * 1024,
-                table_partition: "test-table".into(),
-                table_initial_size: 2,
-                table_resize_frequency: 1,
-                table_resize_chunk_size: 1,
-                table_replay_buffer: NZUsize!(64 * 1024),
-                codec_config: (),
-            };
-            let key = test_key_at_index(4, 3);
-
-            {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.child("first"),
-                    cfg.clone(),
-                    None,
-                )
-                .await
-                .unwrap();
-                freezer.put(key.clone(), 42).await.unwrap();
-                let checkpoint = freezer.close().await.unwrap();
-                assert_eq!(checkpoint.table_size, 2);
-            }
-
-            let freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone(), None)
-                    .await
-                    .unwrap();
-            assert_eq!(freezer.table_size, 2);
-            assert_eq!(freezer.resizing(), None);
-            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
-        });
-    }
-
-    #[test_traced]
-    fn no_checkpoint_deletes_completed_resize() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = super::super::Config {
-                key_partition: "test-key-index".into(),
-                key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test-value-journal".into(),
-                value_compression: None,
-                value_write_buffer: NZUsize!(1024),
-                value_target_size: 10 * 1024 * 1024,
-                table_partition: "test-table".into(),
-                table_initial_size: 2,
-                table_resize_frequency: 1,
-                table_resize_chunk_size: 2,
-                table_replay_buffer: NZUsize!(64 * 1024),
-                codec_config: (),
-            };
-            let key = test_key_at_index(4, 3);
-
-            {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.child("first"),
-                    cfg.clone(),
-                    None,
-                )
-                .await
-                .unwrap();
-                freezer.put(key.clone(), 42).await.unwrap();
-                let checkpoint = freezer.sync().await.unwrap();
-
-                assert_eq!(checkpoint.table_size, 4);
+                assert_eq!(freezer.table_size, 4);
                 assert_eq!(freezer.resizing(), None);
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
             }
 
             let freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone(), None)
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
-            assert_eq!(freezer.table_size, 2);
-            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
+            assert_eq!(freezer.table_size, 4);
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
         });
     }
 
+    /// A table slot referencing a record the journals do not hold cannot be produced by
+    /// a crash (the journals commit before or atomically with the table), so
+    /// initialization must fail loudly instead of repairing it.
     #[test_traced]
-    fn checkpoint_rewinds_completed_resize() {
+    fn dangling_slot_is_loud() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test-value-journal".into(),
-                value_compression: None,
-                value_write_buffer: NZUsize!(1024),
-                value_target_size: 10 * 1024 * 1024,
-                table_partition: "test-table".into(),
-                table_initial_size: 2,
-                table_resize_frequency: 1,
-                table_resize_chunk_size: 2,
-                table_replay_buffer: NZUsize!(64 * 1024),
-                codec_config: (),
-            };
-            let key = test_key_at_index(4, 3);
-
-            let stale_checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.child("first"),
-                    cfg.clone(),
-                    None,
-                )
-                .await
-                .unwrap();
-                let stale_checkpoint = freezer.sync().await.unwrap();
-                assert_eq!(stale_checkpoint.table_size, 2);
-
-                freezer.put(key.clone(), 42).await.unwrap();
-                let checkpoint = freezer.sync().await.unwrap();
-                assert_eq!(checkpoint.table_size, 4);
-                assert_eq!(freezer.resizing(), None);
-                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
-
-                stale_checkpoint
-            };
-
-            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                context.child("second"),
-                cfg.clone(),
-                Some(stale_checkpoint),
-            )
-            .await
-            .unwrap();
-            assert_eq!(freezer.table_size, 2);
-            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
-        });
-    }
-
-    /// A crash after the table sync but before the caller commits the checkpoint leaves
-    /// table slots pointing past the checkpoint. Recovery must restore the committed
-    /// chain head (not clear the slot), keeping committed keys reachable by key, while
-    /// slots whose entire chain is uncommitted become empty.
-    #[test_traced]
-    fn stale_table_restores_committed_chain_head() {
-        fn test_cfg(pooler: &impl commonware_runtime::BufferPooler) -> super::super::Config<()> {
-            super::super::Config {
-                key_partition: "test-key-index".into(),
-                key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(pooler, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1423,83 +1122,42 @@ mod tests {
                 table_resize_chunk_size: 4,
                 table_replay_buffer: NZUsize!(64 * 1024),
                 codec_config: (),
+            };
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                freezer.put(test_key("key1"), 42).await.unwrap();
+                freezer.close().await.unwrap();
             }
-        }
 
-        // Two distinct keys sharing a table index (colliding chain) and one key at
-        // another index.
-        let shared = test_key_at_index(4, 1);
-        let mut overwriter = None;
-        for value in 0u64.. {
-            let mut buf = [0u8; 64];
-            buf[..8].copy_from_slice(&value.to_be_bytes());
-            let key = FixedBytes::new(buf);
-            if key != shared && Crc32::checksum(key.as_ref()) & 3 == 1 {
-                overwriter = Some(key);
-                break;
+            // Point the first slot at a record position the journals do not hold
+            {
+                let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+                let mut slot = Vec::with_capacity(Entry::SLOT_SIZE);
+                Entry::write_slot(
+                    &mut slot,
+                    Some(&Entry {
+                        section: 0,
+                        position: u64::MAX / Record::<FixedBytes<64>>::SIZE as u64,
+                        added: 0,
+                    }),
+                );
+                blob.write_at_sync(0, slot).await.unwrap();
             }
-        }
-        let overwriter = overwriter.unwrap();
-        let uncommitted = test_key_at_index(4, 2);
 
-        let executor = deterministic::Runner::default();
-        let (committed, checkpoint) = {
-            let (shared, overwriter, uncommitted) =
-                (shared.clone(), overwriter.clone(), uncommitted.clone());
-            executor.start_and_recover(|context| async move {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.child("first"),
-                    test_cfg(&context),
-                    None,
-                )
-                .await
-                .unwrap();
-
-                // Commit the shared key
-                freezer.put(shared, 1).await.unwrap();
-                let committed = freezer.sync().await.unwrap();
-
-                // Overwrite the shared slot and populate another slot, making the table
-                // and journal durable WITHOUT committing the resulting checkpoint
-                freezer.put(overwriter, 2).await.unwrap();
-                freezer.put(uncommitted, 3).await.unwrap();
-                freezer.sync().await.unwrap();
-
-                committed
-            })
-        };
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                context.child("second"),
-                test_cfg(&context),
-                Some(committed),
-            )
-            .await
-            .unwrap();
-
-            // The committed key is still reachable through the restored chain head
-            assert_eq!(
-                freezer.get(Identifier::Key(&shared)).await.unwrap(),
-                Some(1)
-            );
-            assert!(freezer.has(&shared).await.unwrap());
-
-            // The uncommitted keys are gone
-            assert_eq!(
-                freezer.get(Identifier::Key(&overwriter)).await.unwrap(),
-                None
-            );
-            assert_eq!(
-                freezer.get(Identifier::Key(&uncommitted)).await.unwrap(),
-                None
-            );
-            assert!(!freezer.has(&uncommitted).await.unwrap());
+            let result =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::MissingRecord(0, _))));
         });
     }
 
+    /// A table blob too short to hold a single slot cannot be produced by a crash, so
+    /// initialization must fail loudly.
     #[test_traced]
-    fn non_empty_checkpoint_against_empty_table_errors() {
+    fn sub_slot_table_is_loud() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
@@ -1518,18 +1176,15 @@ mod tests {
                 codec_config: (),
             };
 
-            let checkpoint = Checkpoint {
-                section: 0,
-                oversized_size: 0,
-                table_size: 2,
-            };
-            let result = Freezer::<_, FixedBytes<64>, i32>::init(
-                context.child("storage"),
-                cfg.clone(),
-                Some(checkpoint),
-            )
-            .await;
-            assert!(matches!(result, Err(Error::CheckpointMismatch)));
+            {
+                let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+                blob.write_at_sync(0, vec![0u8; 3]).await.unwrap();
+            }
+
+            let result =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("storage"), cfg.clone())
+                    .await;
+            assert!(matches!(result, Err(Error::InvalidTableLength(3))));
         });
     }
 }

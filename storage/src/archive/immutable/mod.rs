@@ -19,13 +19,12 @@
 //! # Durability and Recovery
 //!
 //! `put` updates the underlying [crate::freezer::Freezer] and [crate::ordinal::Ordinal]
-//! eagerly, but data is not committed until `sync` succeeds. Sync first makes the freezer
-//! and ordinal data durable, then rewrites a single-blob commit record naming the freezer
-//! checkpoint and ordinal section bits. The storage backend syncs blobs atomically, so a
-//! crash leaves either the old or the new record. On restart, this record is the source of
-//! truth: lower-layer data not described by it is treated as uncommitted and is rolled back
-//! during initialization. If no record has been committed yet, initialization starts from an
-//! empty archive.
+//! eagerly, but data is not committed until `sync` succeeds. Sync stages the freezer data,
+//! the ordinal data, and a single-blob commit record naming the ordinal section bits in ONE
+//! atomic batch, so a crash leaves every component at the same commit. On restart, the
+//! freezer recovers from its own committed state and the record's bits identify the ordinal
+//! records the last sync committed. If nothing has been committed yet, initialization starts
+//! from an empty archive.
 //!
 //! # Querying for Gaps
 //!
@@ -195,11 +194,11 @@ mod tests {
             archive.put(1, key1, 2000).await.unwrap();
             archive.put(2, key2, 2001).await.unwrap();
 
-            // Sync archive to save the checkpoint
+            // Sync archive to commit the record
             archive.sync().await.unwrap();
             drop(archive);
 
-            // Re-initialize archive (should load from checkpoint)
+            // Re-initialize archive (should load the committed state)
             let archive = Archive::init(context.child("third"), cfg).await.unwrap();
 
             // Verify data persisted

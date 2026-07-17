@@ -1,12 +1,10 @@
 use crate::{
     archive::{immutable::Config, Error, Identifier},
-    freezer::{self, Checkpoint, Cursor, Freezer},
+    freezer::{self, Cursor, Freezer},
     ordinal::{self, Ordinal},
     Context,
 };
-use commonware_codec::{
-    CodecShared, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write as CodecWrite,
-};
+use commonware_codec::{CodecShared, EncodeSize, RangeCfg, Read, Write as CodecWrite};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
@@ -19,7 +17,7 @@ use tracing::debug;
 /// Name of the commit record blob.
 const COMMIT_BLOB_NAME: &[u8] = b"commit";
 
-/// Ordinal section bitmaps committed alongside the freezer [Checkpoint].
+/// Ordinal section bitmaps naming the records committed by each sync.
 ///
 /// `None` marks a fully-populated section (every record available).
 type SectionBits = BTreeMap<u64, Option<BitMap>>;
@@ -42,10 +40,9 @@ pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared> {
 
     /// Commit record blob for the archive.
     ///
-    /// The record makes the freezer [Checkpoint] and the ordinal section bitmaps durable
-    /// atomically: it is encoded as the [Checkpoint] followed by [SectionBits], rewritten
-    /// wholesale, and synced last. The storage backend syncs blobs atomically, so a crash
-    /// leaves either the old or the new record, never a mix.
+    /// The record is the encoded [SectionBits], rewritten wholesale and staged in the
+    /// same batch as the freezer and ordinal data, so every sync commits the bitmaps
+    /// atomically with the records they describe.
     commit: E::Blob,
 
     /// Ordinal section bitmaps to publish with the next commit record.
@@ -66,26 +63,24 @@ pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared> {
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // Read the commit record. It is the source of truth for lower-layer storage: if
-        // no record was committed, Freezer::init treats existing freezer blobs as
-        // uncommitted and starts empty.
+        // Read the commit record. It names the ordinal records committed by the last
+        // sync (each sync commits it atomically with the freezer and ordinal data).
         let (commit, commit_len) = context
             .open(&cfg.metadata_partition, COMMIT_BLOB_NAME)
             .await?;
-        let (checkpoint, sections) = if commit_len == 0 {
-            (None, SectionBits::new())
+        let sections = if commit_len == 0 {
+            SectionBits::new()
         } else {
             let mut buf = commit.read_at(0, commit_len as usize).await?;
-            let checkpoint = Checkpoint::read(&mut buf).map_err(|_| Error::RecordCorrupted)?;
             let sections = SectionBits::read_cfg(&mut buf, &section_bits_cfg())
                 .map_err(|_| Error::RecordCorrupted)?;
             if buf.remaining() != 0 {
                 return Err(Error::RecordCorrupted);
             }
-            (Some(checkpoint), sections)
+            sections
         };
 
-        // Initialize table
+        // Initialize freezer (recovers from its own committed state)
         let freezer = Freezer::init(
             context.child("freezer"),
             freezer::Config {
@@ -103,7 +98,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
                 table_replay_buffer: cfg.replay_buffer,
                 codec_config: cfg.codec_config,
             },
-            checkpoint,
         )
         .await?;
 
@@ -230,12 +224,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         // last, so a sequentially replayed batch (the test-only mock
         // fallback) syncs it last (the pre-batch ordering).
         let mut batch = self.context.batch().await?;
-        let checkpoint = self.freezer.sync_into(&mut batch).await?;
+        self.freezer.sync_into(&mut batch).await?;
         self.ordinal.sync_into(&mut batch).await?;
 
-        let size = Checkpoint::SIZE + self.sections.encode_size();
+        let size = self.sections.encode_size();
         let mut buf = self.context.storage_buffer_pool().alloc(size);
-        checkpoint.write(&mut buf);
         self.sections.write(&mut buf);
         batch.write_at(&self.commit, 0, buf.freeze()).await?;
         batch.resize(&self.commit, size as u64).await?;

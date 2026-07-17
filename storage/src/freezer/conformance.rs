@@ -40,7 +40,7 @@ impl StorageWorkload for FreezerWorkload {
             codec_config: (),
         };
         let mut freezer =
-            super::Freezer::<_, FixedBytes<64>, i32>::init(context.child("freezer"), config, None)
+            super::Freezer::<_, FixedBytes<64>, i32>::init(context.child("freezer"), config)
                 .await?;
 
         // Insert random key-value pairs to trigger resizes

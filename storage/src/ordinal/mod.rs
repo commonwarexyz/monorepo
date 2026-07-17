@@ -56,9 +56,9 @@
 //! To recover existing data, pass `Some(bits)` to [Ordinal::init]. The bits identify which records
 //! were durably committed by the caller. [Ordinal] validates required records using their CRC32 and
 //! rebuilds the in-memory [crate::rmap::RMap]. Stored sections omitted from `bits` are removed, and
-//! stored records whose bits are unset are cleared before replay. Missing or invalid required records
-//! fail initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored sections and
-//! starts empty.
+//! stored records whose bits are unset are ignored during replay (unreachable through [Ordinal]).
+//! Missing or invalid required records fail initialization. Passing `Some(BTreeMap::new())` or
+//! `None` removes all stored sections and starts empty.
 //!
 //! # Example
 //!
@@ -714,7 +714,7 @@ mod tests {
                 blob.write_at_sync(36, vec![0xFF; 32]).await.unwrap();
             }
 
-            // Reopen without bits and verify uncheckpointed data is deleted.
+            // Reopen without bits and verify uncommitted data is deleted.
             {
                 let store =
                     Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
@@ -777,7 +777,7 @@ mod tests {
                     .unwrap();
             }
 
-            // Reopen without bits and verify uncheckpointed data is deleted.
+            // Reopen without bits and verify uncommitted data is deleted.
             {
                 let store =
                     Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
@@ -834,7 +834,7 @@ mod tests {
                 blob.write_at_sync(5, vec![0xFF; 4]).await.unwrap(); // Corrupt value of index 10
             }
 
-            // Reopen without bits and verify uncheckpointed data is deleted.
+            // Reopen without bits and verify uncommitted data is deleted.
             {
                 let store =
                     Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
@@ -894,7 +894,7 @@ mod tests {
                 blob.write_at_sync(size, garbage).await.unwrap();
             }
 
-            // Reopen without bits and verify uncheckpointed data is deleted.
+            // Reopen without bits and verify uncommitted data is deleted.
             {
                 let store =
                     Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
@@ -1644,7 +1644,7 @@ mod tests {
                 store.sync().await.unwrap();
             }
 
-            // Reinitialize with bits = None, deleting uncheckpointed data.
+            // Reinitialize with bits = None, deleting uncommitted data.
             {
                 let store =
                     Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
@@ -1707,7 +1707,7 @@ mod tests {
                 assert!(!store.has(20));
             }
 
-            // The explicit empty map deletes the uncheckpointed blobs.
+            // The explicit empty map deletes the uncommitted blobs.
             {
                 let mut section = BitMap::zeroes(10);
                 section.set(0, true);
@@ -1818,22 +1818,6 @@ mod tests {
                     store.get(18).await.unwrap().unwrap(),
                     FixedBytes::new([18u8; 32])
                 );
-            }
-
-            // Unselected records in a retained section are physically cleared.
-            {
-                let mut bitmap = BitMap::zeroes(10);
-                bitmap.set(0, true); // Index 10
-                let bitmap_option = Some(bitmap);
-                let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
-                bits_map.insert(1, &bitmap_option);
-                let result = Ordinal::<_, FixedBytes<32>>::init(
-                    context.child("third"),
-                    cfg.clone(),
-                    Some(bits_map),
-                )
-                .await;
-                assert!(matches!(result, Err(Error::MissingRecord(10))));
             }
         });
     }
@@ -2146,7 +2130,7 @@ mod tests {
                 store.sync().await.unwrap();
             }
 
-            // Reinitialize without bits and verify uncheckpointed data is deleted.
+            // Reinitialize without bits and verify uncommitted data is deleted.
             {
                 let store =
                     Ordinal::<_, DummyValue>::init(context.child("second"), cfg.clone(), None)
