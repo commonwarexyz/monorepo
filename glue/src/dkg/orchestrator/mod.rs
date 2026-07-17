@@ -102,7 +102,9 @@ mod tests {
         deterministic,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, ordered::Set};
+    use commonware_utils::{
+        N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact, ordered::Set,
+    };
     use std::time::Duration;
 
     const BACKFILL_CHANNEL: u64 = 0;
@@ -678,6 +680,139 @@ mod tests {
                 .stop(7, Some(Duration::from_secs(1)))
                 .await
                 .expect("shutdown should interrupt the boundary gate wait");
+        });
+    }
+
+    #[test]
+    fn marshal_shutdown_during_startup_resolution_stops_cleanly() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 1);
+            let participants = fixture.participants.clone();
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            network.start();
+
+            let public_key = participants[0].clone();
+            let control = oracle.control(public_key.clone());
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let partition_prefix = "orchestrator-marshal-shutdown".to_string();
+
+            let finalizations_by_height =
+                immutable::Archive::init(context.child("finalizations_by_height"), {
+                    let _: () = mocks::TestScheme::certificate_codec_config_unbounded();
+                    archive_config(
+                        &partition_prefix,
+                        "finalizations_by_height",
+                        page_cache.clone(),
+                        (),
+                    )
+                })
+                .await
+                .expect("failed to initialize finalizations archive");
+            let finalized_blocks = immutable::Archive::init(
+                context.child("finalized_blocks"),
+                archive_config(&partition_prefix, "finalized_blocks", page_cache, ()),
+            )
+            .await
+            .expect("failed to initialize finalized blocks archive");
+            let genesis = make_genesis_block(public_key.clone(), participants.iter().cloned());
+            let (marshal_actor, marshal, _): (_, mocks::TestMarshalMailbox, _) =
+                marshal::core::Actor::<_, _, _, _, _, _, _, Exact>::init(
+                    context.child("marshal"),
+                    finalizations_by_height,
+                    finalized_blocks,
+                    marshal::Config {
+                        provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
+                        epocher: FixedEpocher::new(NZU64!(2)),
+                        start: MarshalStart::Genesis(genesis),
+                        partition_prefix: partition_prefix.clone(),
+                        mailbox_size: NZUsize!(16),
+                        view_retention_timeout: ViewDelta::new(8),
+                        prunable_items_per_section: NZU64!(10),
+                        page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                        replay_buffer: NZUsize!(1024),
+                        key_write_buffer: NZUsize!(1024),
+                        value_write_buffer: NZUsize!(1024),
+                        block_codec_config: (),
+                        max_repair: NZUsize!(4),
+                        max_pending_acks: NZUsize!(4),
+                        strategy: Sequential,
+                    },
+                )
+                .await;
+
+            let (_fence, gate) = Fence::new(Epoch::new(1));
+            let (actor, _mailbox): (_, super::Mailbox<mocks::TestBlock, Exact>) = Actor::new(
+                context.child("orchestrator"),
+                Config {
+                    oracle: control.clone(),
+                    manager: oracle.manager(),
+                    provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
+                    marshal: marshal.clone(),
+                    application: mocks::MockApplication::default(),
+                    strategy: Sequential,
+                    simplex: mocks::simplex_config(),
+                    gate,
+                    state_sync: None,
+                    blocks_per_epoch: NZU64!(2),
+                    muxer_size: 16,
+                    mailbox_size: NZUsize!(16),
+                    partition_prefix,
+                },
+            );
+            let votes = control
+                .register(VOTE_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register vote channel");
+            let certificates = control
+                .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register certificate channel");
+            let (certificate_mux, certificates) = Muxer::builder(
+                context.child("certificate_mux"),
+                certificates.0,
+                certificates.1,
+                16,
+            )
+            .build();
+            certificate_mux.start();
+            let simplex_resolver = control
+                .register(RESOLVER_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register simplex resolver channel");
+
+            // The marshal actor is never started, so startup resolution parks
+            // on an unserved processed-height read.
+            let mut orchestrator_handle = actor.start(votes, certificates, simplex_resolver);
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Signal shutdown, then drop the marshal actor: its mailbox
+            // cancels the pending reads only after the stop signal is visible,
+            // mirroring marshal winning the shutdown race.
+            let stopper = context.child("stopper");
+            context.child("stop").spawn(|_| async move {
+                let _ = stopper.stop(0, None).await;
+            });
+            context.sleep(Duration::from_millis(10)).await;
+            drop(marshal_actor);
+
+            select! {
+                result = &mut orchestrator_handle => {
+                    result.expect("orchestrator should stop cleanly");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("orchestrator stayed alive after marshal shutdown");
+                },
+            };
         });
     }
 

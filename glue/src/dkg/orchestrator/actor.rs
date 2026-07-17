@@ -36,6 +36,7 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
+use futures::FutureExt as _;
 use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
@@ -353,7 +354,10 @@ where
             (resolver_sender, resolver_receiver),
         );
         let epocher = FixedEpocher::new(self.blocks_per_epoch);
-        let start = self.resolve_start(&epocher).await;
+        let Some(start) = self.resolve_start(&epocher).await else {
+            debug!("context shutdown while resolving startup epoch");
+            return;
+        };
         let mut active = match self
             .enter_epoch(
                 start.epoch,
@@ -435,16 +439,20 @@ where
     /// startup is the only exception: the node may know a recent public
     /// boundary from `dkg::anchor` before it has the previous boundary block in
     /// local marshal storage.
+    ///
+    /// Returns `None` when marshal becomes unavailable because the context is
+    /// shutting down.
     async fn resolve_start(
         &mut self,
         epocher: &FixedEpocher,
-    ) -> ResolvedStart<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey> {
+    ) -> Option<ResolvedStart<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey>>
+    {
         if let Some(state_sync) = &self.state_sync {
-            return ResolvedStart {
+            return Some(ResolvedStart {
                 epoch: state_sync.artifact.epoch,
                 floor: Floor::Finalized(state_sync.floor.clone()),
                 info: state_sync.artifact.info.clone(),
-            };
+            });
         }
 
         let epoch =
@@ -476,20 +484,28 @@ where
     /// previous epoch boundary block is not locally available yet. In that
     /// startup path, the anchor artifact is the trusted source of boundary
     /// epoch info.
+    ///
+    /// Returns `None` when marshal becomes unavailable because the context is
+    /// shutting down.
     async fn resolve_boundary(
         &mut self,
         epoch: Epoch,
         epocher: &FixedEpocher,
-    ) -> ResolvedStart<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey> {
+    ) -> Option<ResolvedStart<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey>>
+    {
         let height = epoch
             .previous()
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
-        let boundary = self
-            .marshal
-            .get_block(height)
-            .await
-            .unwrap_or_else(|| panic!("missing finalized boundary block at height {height}"));
+        let Some(boundary) = self.marshal.get_block(height).await else {
+            // Marshal cancels pending reads when it stops; only an
+            // intact-but-absent boundary block is a retention violation.
+            if self.context.stopped().now_or_never().is_some() {
+                debug!(%height, "boundary block read canceled during shutdown");
+                return None;
+            }
+            panic!("missing finalized boundary block at height {height}");
+        };
         let commitment = MV::commitment(&boundary);
         let block = MV::into_inner(boundary);
         let Some(Payload::EpochInfo(info)) = block.payload() else {
@@ -502,11 +518,11 @@ where
             );
         }
 
-        ResolvedStart {
+        Some(ResolvedStart {
             epoch,
             floor: Floor::Genesis(commitment),
             info,
-        }
+        })
     }
 
     /// Start the consensus channel muxers and return handles used to open
@@ -618,11 +634,15 @@ where
             );
         }
 
-        let boundary = self
-            .marshal
-            .get_block(height)
-            .await
-            .unwrap_or_else(|| panic!("missing finalized boundary block at height {height}"));
+        let Some(boundary) = self.marshal.get_block(height).await else {
+            // Marshal cancels pending reads when it stops; only an
+            // intact-but-absent boundary block is a retention violation.
+            if self.context.stopped().now_or_never().is_some() {
+                debug!(%height, "boundary block read canceled during shutdown");
+                return false;
+            }
+            panic!("missing finalized boundary block at height {height}");
+        };
         let floor = Floor::Genesis(MV::commitment(&boundary));
 
         let next = self
