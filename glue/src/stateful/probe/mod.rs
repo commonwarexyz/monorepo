@@ -1666,6 +1666,7 @@ mod test {
                 },
             )
             .await;
+            provider.insert(Epoch::zero(), harness.schemes[0].clone());
             provider.insert(Epoch::new(1), harness.schemes[0].clone());
             provider.insert(Epoch::new(2), harness.schemes[0].clone());
             harness.start_probes();
