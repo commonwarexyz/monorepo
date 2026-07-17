@@ -73,6 +73,7 @@ impl Drop for ActiveEpoch {
 
 enum EnterEpochError {
     GateClosed,
+    MuxClosed,
     Stopped,
 }
 
@@ -370,6 +371,13 @@ where
                 );
                 return;
             }
+            Err(EnterEpochError::MuxClosed) => {
+                debug!(
+                    epoch = start.epoch.get(),
+                    "consensus mux closed before startup epoch"
+                );
+                return;
+            }
             Err(EnterEpochError::Stopped) => {
                 debug!("context shutdown before startup epoch");
                 return;
@@ -631,6 +639,10 @@ where
                 debug!(%next_epoch, "epoch gate closed before boundary transition");
                 return false;
             }
+            Err(EnterEpochError::MuxClosed) => {
+                debug!(%next_epoch, "consensus mux closed before boundary transition");
+                return false;
+            }
             Err(EnterEpochError::Stopped) => {
                 debug!(%next_epoch, "context shutdown while waiting to enter epoch");
                 return false;
@@ -659,15 +671,17 @@ where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
+        // Shutdown is polled first so a stop signal wins over an
+        // already-marked gate.
         let mut shutdown = self.context.stopped();
         select! {
+            _ = &mut shutdown => {
+                return Err(EnterEpochError::Stopped);
+            },
             result = self.gate.wait(epoch) => {
                 if result.is_err() {
                     return Err(EnterEpochError::GateClosed);
                 }
-            },
-            _ = &mut shutdown => {
-                return Err(EnterEpochError::Stopped);
             },
         };
         drop(shutdown);
@@ -713,9 +727,19 @@ where
             },
         );
 
-        let vote = channels.vote.register(epoch.get()).await.unwrap();
-        let certificate = channels.certificate.register(epoch.get()).await.unwrap();
-        let resolver = channels.resolver.register(epoch.get()).await.unwrap();
+        // Each epoch is registered exactly once, so a registration failure
+        // means the muxer has stopped: the vote and resolver muxers exit with
+        // this context, and the externally owned certificate mux may be
+        // stopped by its owner at any time. Both are clean-stop conditions.
+        let Ok(vote) = channels.vote.register(epoch.get()).await else {
+            return Err(EnterEpochError::MuxClosed);
+        };
+        let Ok(certificate) = channels.certificate.register(epoch.get()).await else {
+            return Err(EnterEpochError::MuxClosed);
+        };
+        let Ok(resolver) = channels.resolver.register(epoch.get()).await else {
+            return Err(EnterEpochError::MuxClosed);
+        };
         let handle = engine.start(vote, certificate, resolver);
         let _ = self.latest_epoch.try_set(epoch.get());
 
