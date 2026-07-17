@@ -274,6 +274,11 @@ impl Driver {
 
     /// Submit a logical positioned write with per-write sync and wait for its
     /// completion.
+    ///
+    /// The kernel executes `RWF_SYNC` writes on its io-wq pool, which
+    /// serializes work per inode: concurrent synced writes to one file run
+    /// one at a time. Callers needing concurrent durable writes to a single
+    /// blob should prefer [Self::write_at] followed by [Self::sync].
     pub(crate) async fn write_at_sync(
         &self,
         file: Arc<File>,
