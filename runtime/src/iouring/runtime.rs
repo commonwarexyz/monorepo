@@ -49,6 +49,7 @@ use futures::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
+use rayon::ThreadPoolBuilder;
 use std::{
     cell::RefCell,
     collections::BinaryHeap,
@@ -1091,18 +1092,25 @@ impl crate::Spawner for Context {
     }
 }
 
-/// The runtime manages no worker threads, so the pool has no background workers: the
-/// executor thread registers itself as its sole member and all work executes inline.
-/// The requested parallelism still controls adaptive decisions and manual partitioning
-/// hints while Rayon executes on the sole registered thread.
+/// Rayon workers execute compute-only work and never submit ring operations,
+/// so the pool is backed by plain OS threads (one per unit of parallelism)
+/// rather than runtime tasks: [crate::Spawner::dedicated] is unavailable on
+/// this runtime, and pool completions wake awaiting tasks through the loop's
+/// latched cross-thread wake state.
 #[stability(BETA)]
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        Rayon::with_pool(
-            crate::utils::rayon::shared_thread_pool()
-                .expect("failed to create io_uring Rayon thread pool"),
-        )
-        .with_parallelism(parallelism)
+        let stack_size = self.executor().thread_stack_size;
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(parallelism.get())
+            .spawn_handler(move |thread| {
+                let stack_size = thread.stack_size().unwrap_or(stack_size);
+                utils::thread::spawn(stack_size, move || thread.run());
+                Ok(())
+            })
+            .build()
+            .expect("failed to create io_uring Rayon thread pool");
+        Rayon::with_pool(Arc::new(pool))
     }
 }
 

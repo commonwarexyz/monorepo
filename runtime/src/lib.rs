@@ -3823,11 +3823,14 @@ mod tests {
             });
         }
 
+        /// Pool work runs on dedicated worker threads, so awaiting a spawned
+        /// strategy task exercises the loop's cross-thread wake path.
         #[test]
-        fn test_iouring_nested_strategy_runs_inline() {
+        fn test_iouring_parallel_strategy_spawn_completes() {
             let executor = iouring::Runner::default();
             executor.start(|context| async move {
-                let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
+                let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+                assert_eq!(strategy.parallelism(), 2);
 
                 let output = strategy
                     .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
