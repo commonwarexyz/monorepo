@@ -275,6 +275,7 @@ impl Waiters {
     /// wake. Deadline scheduling happens separately at first staging.
     ///
     /// Panics if no free slot is available.
+    #[inline]
     pub fn insert(&mut self, request: Request, waker: Waker) -> WaiterId {
         let id = self
             .free
@@ -417,6 +418,7 @@ impl Waiters {
     ///
     /// Panics if `waiter_id` does not refer to a currently tracked pending
     /// waiter or if the waiter already has an operation SQE outstanding.
+    #[inline]
     pub fn stage(&mut self, waiter_id: WaiterId) -> StageOutcome {
         let index = waiter_id.index() as usize;
         let slot = self
@@ -439,21 +441,10 @@ impl Waiters {
                         freed: true,
                     }
                 } else {
-                    let Lifecycle::Pending(request) = std::mem::replace(
-                        &mut slot.lifecycle,
-                        Lifecycle::Ready(Output::Sync(Ok(()))),
-                    ) else {
-                        unreachable!("lifecycle verified pending above");
-                    };
+                    // The timeout output moves the owned buffer out of the
+                    // request, so the emptied shell drops in place.
                     let output = request.timeout();
-                    let waker = {
-                        let slot = self.entries[index]
-                            .as_mut()
-                            .expect("tracked waiter missing");
-                        slot.lifecycle = Lifecycle::Ready(output);
-                        slot.waker.take()
-                    };
-                    self.pending -= 1;
+                    let waker = self.park_output_at(index, output);
                     StageOutcome::Timeout {
                         waker,
                         freed: false,
@@ -490,6 +481,7 @@ impl Waiters {
     /// Panics if a non-cancel CQE does not refer to a currently tracked waiter,
     /// if it uses a stale waiter generation, or if the waiter has no operation
     /// SQE outstanding.
+    #[inline]
     pub fn on_completion(&mut self, user_data: UserData, result: i32) -> CompletionOutcome {
         let (waiter_id, is_cancel) = WaiterId::from_user_data(user_data);
         let index = waiter_id.index() as usize;
@@ -532,50 +524,45 @@ impl Waiters {
         slot.in_flight = false;
 
         let state = slot.state;
+        let orphaned = slot.orphaned;
         let orphan_stops = request.orphan_stops_progress();
-        let completed = request.on_cqe(slot.state, result);
-        if completed || (slot.orphaned && orphan_stops) {
-            // Either the request reached a terminal state, or the current SQE
-            // made non-terminal progress for a ticket that is already gone. In
-            // both cases, stop issuing SQEs for this waiter now.
-            let target_tick = match state {
-                WaiterState::Active { target_tick } => target_tick,
-                WaiterState::CancelRequested => None,
-            };
+        let output = request.on_cqe(state, result);
+        if output.is_none() && !(orphaned && orphan_stops) {
+            return CompletionOutcome::Requeue(waiter_id);
+        }
 
-            if slot.orphaned {
-                let Lifecycle::Pending(request) = self.take(index) else {
-                    unreachable!("lifecycle verified pending above");
-                };
-                // Drop the output: closing any owned resources (e.g. an
-                // accepted fd) without an observer.
-                drop(request.complete());
-                CompletionOutcome::Complete {
-                    waker: None,
-                    target_tick,
-                    freed: true,
-                }
-            } else {
-                let Lifecycle::Pending(request) =
-                    std::mem::replace(&mut slot.lifecycle, Lifecycle::Ready(Output::Sync(Ok(()))))
-                else {
-                    unreachable!("lifecycle verified pending above");
-                };
-                let output = request.complete();
-                let waker = self.park_output_at(index, output);
-                CompletionOutcome::Complete {
-                    waker,
-                    target_tick,
-                    freed: false,
-                }
+        // Either the request reached a terminal state, or the current SQE
+        // made non-terminal progress for a ticket that is already gone. In
+        // both cases, stop issuing SQEs for this waiter now.
+        let target_tick = match state {
+            WaiterState::Active { target_tick } => target_tick,
+            WaiterState::CancelRequested => None,
+        };
+
+        if orphaned {
+            // Free the slot (dropping the request shell in place) and drop
+            // the output: closing any owned resources (e.g. an accepted fd)
+            // without an observer.
+            let _ = self.take(index);
+            drop(output);
+            CompletionOutcome::Complete {
+                waker: None,
+                target_tick,
+                freed: true,
             }
         } else {
-            CompletionOutcome::Requeue(waiter_id)
+            let output = output.expect("non-orphaned completion is terminal");
+            let waker = self.park_output_at(index, output);
+            CompletionOutcome::Complete {
+                waker,
+                target_tick,
+                freed: false,
+            }
         }
     }
 
-    /// Store `output` in the slot at `index` (which must already hold a
-    /// placeholder) and return the parked waker.
+    /// Park `output` in the slot at `index`, dropping the pending request
+    /// shell in place, and return the parked waker.
     fn park_output_at(&mut self, index: usize, output: Output) -> Option<Waker> {
         let slot = self.entries[index]
             .as_mut()
@@ -590,6 +577,7 @@ impl Waiters {
     ///
     /// Panics if the waiter is not tracked or the id is stale: only the owning
     /// ticket frees a non-orphaned slot, so a miss is an invariant violation.
+    #[inline]
     pub fn poll_take(&mut self, waiter_id: WaiterId, waker: &Waker) -> Option<Output> {
         let index = waiter_id.index() as usize;
         let slot = self
@@ -696,7 +684,6 @@ mod tests {
         let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
         Request::Sync(SyncRequest {
             file: Arc::new(file),
-            result: None,
         })
     }
 
@@ -705,7 +692,6 @@ mod tests {
             fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
-            result: None,
         })
     }
 
@@ -717,7 +703,6 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         })
     }
 
@@ -732,7 +717,6 @@ mod tests {
             len: 8,
             read: 0,
             buf: IoBufMut::with_capacity(8),
-            result: None,
         })
     }
 
@@ -1116,7 +1100,6 @@ mod tests {
                 fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
                 write: IoBufs::from(IoBuf::from(b"hello")).into(),
                 deadline: Some(deadline),
-                result: None,
             }),
             noop_waker(),
         );

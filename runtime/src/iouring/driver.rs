@@ -164,10 +164,9 @@ impl Driver {
             fd,
             write: bufs.into(),
             deadline: Some(deadline),
-            result: None,
         });
         match Op::new(self, request).await {
-            Output::Send(result) => result,
+            Output::Send(result) => result.map_err(|e| *e),
             _ => unreachable!("send op produced foreign output"),
         }
     }
@@ -194,10 +193,9 @@ impl Driver {
             len,
             exact,
             deadline: Some(deadline),
-            result: None,
         });
         match Op::new(self, request).await {
-            Output::Recv(result) => result,
+            Output::Recv(result) => result.map_err(|e| *e),
             _ => unreachable!("recv op produced foreign output"),
         }
     }
@@ -219,7 +217,6 @@ impl Driver {
             fd,
             addr: RawSocketAddr::zeroed(),
             deadline: Some(deadline),
-            result: None,
         });
         AcceptTicket(Ticket::admit(self, request).await)
     }
@@ -235,10 +232,9 @@ impl Driver {
             fd,
             addr: RawSocketAddr::boxed_from_socket_addr(&addr),
             deadline: Some(deadline),
-            result: None,
         });
         match Op::new(self, request).await {
-            Output::Connect(result) => result,
+            Output::Connect(result) => result.map_err(|e| *e),
             _ => unreachable!("connect op produced foreign output"),
         }
     }
@@ -259,10 +255,9 @@ impl Driver {
             len,
             read: 0,
             buf,
-            result: None,
         });
         match Op::new(self, request).await {
-            Output::ReadAt(result) => result,
+            Output::ReadAt(result) => result.map_err(|e| *e),
             _ => unreachable!("read_at op produced foreign output"),
         }
     }
@@ -301,10 +296,9 @@ impl Driver {
             written: 0,
             write: bufs.into(),
             sync,
-            result: None,
         });
         match Op::new(self, request).await {
-            Output::WriteAt(result) => result,
+            Output::WriteAt(result) => result.map_err(|e| *e),
             _ => unreachable!("write_at op produced foreign output"),
         }
     }
@@ -320,7 +314,7 @@ impl Driver {
     /// Admission applies the same backpressure as every other request. The
     /// returned ticket resolves once the fsync completes.
     pub(crate) async fn start_sync(self: &Arc<Self>, file: Arc<File>) -> SyncTicket {
-        let request = Request::Sync(SyncRequest { file, result: None });
+        let request = Request::Sync(SyncRequest { file });
         SyncTicket(Ticket::admit(self, request).await)
     }
 }
@@ -421,11 +415,13 @@ enum Admission {
 ///
 /// The queued request rides inside the future until admission (boxing it
 /// would put an allocation on the op hot path), so the variant sizes
-/// legitimately diverge.
+/// legitimately diverge. The option is always `Some` while queued: it exists
+/// so admission can move the request out in place instead of round-tripping
+/// the whole state through a stack temporary on every poll.
 #[allow(clippy::large_enum_variant)]
 enum OpState {
     /// Not yet admitted: the future still owns the request and its buffers.
-    Queued(Request),
+    Queued(Option<Request>),
     /// Admitted: the slot owns the request, the future holds the reservation.
     Waiting(WaiterId),
     /// The output was delivered.
@@ -447,7 +443,7 @@ impl<'a> Op<'a> {
     const fn new(driver: &'a Driver, request: Request) -> Self {
         Self {
             driver,
-            state: OpState::Queued(request),
+            state: OpState::Queued(Some(request)),
         }
     }
 }
@@ -457,26 +453,21 @@ impl Future for Op<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Output> {
         let this = self.get_mut();
-        match &this.state {
-            OpState::Queued(_) => {
-                let OpState::Queued(request) = std::mem::replace(&mut this.state, OpState::Done)
-                else {
-                    unreachable!("state verified queued above");
-                };
-                let mut request = Some(request);
-                match poll_admission(this.driver, &mut request, cx) {
+        match &mut this.state {
+            OpState::Queued(request) => {
+                match poll_admission(this.driver, request, cx) {
                     // Completion cannot be ready before the loop's next turn,
                     // so an admitted op always returns pending here.
                     Poll::Ready(Ok(id)) => {
                         this.state = OpState::Waiting(id);
                         Poll::Pending
                     }
-                    Poll::Ready(Err(output)) => Poll::Ready(output),
-                    Poll::Pending => {
-                        let request = request.take().expect("request lost on full slab");
-                        this.state = OpState::Queued(request);
-                        Poll::Pending
+                    Poll::Ready(Err(output)) => {
+                        this.state = OpState::Done;
+                        Poll::Ready(output)
                     }
+                    // A full slab leaves the request in place: no bytes move.
+                    Poll::Pending => Poll::Pending,
                 }
             }
             OpState::Waiting(id) => {
@@ -583,7 +574,7 @@ impl Future for AcceptTicket {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match std::task::ready!(Pin::new(&mut self.0).poll(cx)) {
-            Output::Accept(result) => Poll::Ready(result),
+            Output::Accept(result) => Poll::Ready(result.map_err(|e| *e)),
             _ => unreachable!("accept op produced foreign output"),
         }
     }
@@ -598,7 +589,7 @@ impl Future for SyncTicket {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match std::task::ready!(Pin::new(&mut self.0).poll(cx)) {
-            Output::Sync(result) => Poll::Ready(result),
+            Output::Sync(result) => Poll::Ready(result.map_err(|e| *e)),
             _ => unreachable!("sync op produced foreign output"),
         }
     }
