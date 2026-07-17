@@ -1,9 +1,10 @@
 //! The commit: snapshot -> write -> fsync -> finalize.
 //!
 //! Commits serialize on `Ready::commit_lock` and are SELECTIVE: a commit
-//! captures only the blobs it is rooted at (the synced blob, a batch's
-//! blobs, a removal's ids), expanded across applied-batch groups so an
-//! applied batch is never split across commits. Every other blob's table
+//! captures only the blobs it is rooted at (the synced blob — pooled with
+//! every concurrently queued sync's blob by [`commit`]'s coalescing — a
+//! batch's blobs, a removal's ids), expanded across applied-batch groups so
+//! an applied batch is never split across commits. Every other blob's table
 //! entry is served verbatim from its cached committed encoding; uncaptured
 //! dirty state (dirty marks, manifest chunks, content frees) stays pending
 //! for a later commit that captures the blob.
@@ -24,7 +25,10 @@ use super::{
 use crate::{Blob as _, Error, IoBuf};
 use bytes::Bytes;
 use commonware_cryptography::Crc32;
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, OnceLock},
+};
 
 /// Cap on a blob's checksum refs: an append-shaped commit that would exceed
 /// it rewrites the full array as one ref instead (compaction). Bounds the
@@ -53,13 +57,47 @@ struct Snapshot {
 }
 
 /// Commit the dirty state of the blobs rooted at `roots` (expanded across
-/// applied-batch groups). Returns without I/O when that state is clean.
+/// applied-batch groups), coalescing with concurrent syncs: callers pool
+/// their roots, and whichever queued caller acquires the commit lock first
+/// drains the pool and commits the UNION, so one fsync acknowledges every
+/// pooled caller. Each caller's durability promise is met exactly — the
+/// union's snapshot begins after every pooled registration — and a failed
+/// union commit fails every pooled caller (they were promised durability,
+/// and the poison latch stands for everyone). Returns without I/O when the
+/// captured state is clean.
+///
+/// Coalescing is keyed off the commit-lock queue alone (no timers): under
+/// the deterministic runtime, identical schedules produce identical commit
+/// grouping.
 pub(super) async fn commit<S: crate::Storage>(
     ready: &Ready<S>,
     roots: &[u64],
 ) -> Result<(), Error> {
+    // Register under the CURRENT ticket before queueing: the first leader
+    // to drain the pool after this point covers these roots.
+    let ticket = {
+        let mut pending = ready.pending.lock();
+        pending.roots.extend(roots.iter().copied());
+        pending.ticket.clone()
+    };
     let _commit = ready.commit_lock.lock().await;
-    commit_locked(ready, roots).await
+    // Resolved while queued: a leader's commit already covered our roots.
+    if let Some(result) = ticket.get() {
+        return result.clone();
+    }
+    // Leader: drain the pool (these roots plus everything registered since
+    // the previous drain) and commit the union.
+    let (union, ticket) = {
+        let mut pending = ready.pending.lock();
+        let union: Vec<u64> = std::mem::take(&mut pending.roots).into_iter().collect();
+        let ticket = std::mem::replace(&mut pending.ticket, Arc::new(OnceLock::new()));
+        (union, ticket)
+    };
+    let result = commit_locked(ready, &union).await;
+    ticket
+        .set(result.clone())
+        .expect("only the draining leader resolves a ticket");
+    result
 }
 
 /// [`commit`] with `Ready::commit_lock` already held by the caller.

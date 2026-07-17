@@ -526,6 +526,22 @@ impl State {
     }
 }
 
+/// Capture roots pooled by syncs queued on the commit lock, with the
+/// completion latch their commit resolves.
+///
+/// Whichever queued sync acquires the commit lock first drains the pool and
+/// commits the UNION, so one fsync acknowledges every pooled sync (commit
+/// coalescing, see `commit::commit`). The ticket is swapped out atomically
+/// with the roots at drain: a ticket therefore resolves exactly when a
+/// commit whose snapshot began after every covered registration completes,
+/// and a failed commit resolves it with the poisoning error (every pooled
+/// sync was promised durability).
+#[derive(Default)]
+pub(super) struct PendingCommit {
+    pub roots: BTreeSet<u64>,
+    pub ticket: Arc<OnceLock<Result<(), Error>>>,
+}
+
 /// The volume once recovery has run.
 pub(super) struct Ready<S: crate::Storage> {
     /// The single inner blob backing the volume.
@@ -533,6 +549,8 @@ pub(super) struct Ready<S: crate::Storage> {
     pub state: Mutex<State>,
     /// Serializes commits.
     pub commit_lock: AsyncMutex<()>,
+    /// Roots (and ticket) of syncs queued for the next commit.
+    pub pending: Mutex<PendingCommit>,
     /// Latched on the first failed commit: a failed fsync leaves the page
     /// cache undefined, so a later "successful" commit could vouch for bytes
     /// that never land. Every subsequent operation fails.

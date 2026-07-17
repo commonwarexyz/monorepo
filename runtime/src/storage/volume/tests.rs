@@ -1530,13 +1530,15 @@ async fn test_volume_batch_stages_over_pending_chunk() {
 }
 
 /// A one-shot pause point for inner I/O: while armed, the next matching
-/// operation signals `reached` and blocks until released. Later operations
-/// pass through untouched.
+/// operation signals `reached` and blocks until released (or, when armed to
+/// fail, returns an error outright). Later operations pass through
+/// untouched.
 #[derive(Clone, Default)]
 struct Gate {
     armed: Arc<std::sync::atomic::AtomicBool>,
     reached: Arc<std::sync::atomic::AtomicBool>,
     released: Arc<std::sync::atomic::AtomicBool>,
+    fail: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Gate {
@@ -1547,15 +1549,25 @@ impl Gate {
         self.armed.store(true, SeqCst);
     }
 
-    /// Pause here (once) while armed.
-    async fn pass(&self) {
+    /// Fail the next matching operation outright.
+    fn arm_fail(&self) {
         use std::sync::atomic::Ordering::SeqCst;
+        self.fail.store(true, SeqCst);
+    }
+
+    /// Pause (or fail) here (once) while armed.
+    async fn pass(&self) -> Result<(), Error> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.fail.swap(false, SeqCst) {
+            return Err(Error::WriteFailed);
+        }
         if self.armed.swap(false, SeqCst) {
             self.reached.store(true, SeqCst);
             while !self.released.load(SeqCst) {
                 tokio::task::yield_now().await;
             }
         }
+        Ok(())
     }
 
     async fn wait_reached(&self) {
@@ -1579,6 +1591,9 @@ struct Gated<S: crate::Storage> {
     inner: S,
     read_gate: Gate,
     write_gate: Gate,
+    sync_gate: Gate,
+    /// Completed inner syncs (fsyncs that reached the backend).
+    syncs: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl<S: crate::Storage> Gated<S> {
@@ -1587,7 +1602,13 @@ impl<S: crate::Storage> Gated<S> {
             inner,
             read_gate: Gate::default(),
             write_gate: Gate::default(),
+            sync_gate: Gate::default(),
+            syncs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    fn syncs(&self) -> u64 {
+        self.syncs.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -1606,6 +1627,8 @@ impl<S: crate::Storage> crate::Storage for Gated<S> {
                 inner: blob,
                 read_gate: self.read_gate.clone(),
                 write_gate: self.write_gate.clone(),
+                sync_gate: self.sync_gate.clone(),
+                syncs: self.syncs.clone(),
             },
             len,
             version,
@@ -1626,11 +1649,13 @@ struct GatedBlob<B: crate::Blob> {
     inner: B,
     read_gate: Gate,
     write_gate: Gate,
+    sync_gate: Gate,
+    syncs: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl<B: crate::Blob> crate::Blob for GatedBlob<B> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_gate.pass().await;
+        self.read_gate.pass().await?;
         self.inner.read_at(offset, len).await
     }
 
@@ -1640,12 +1665,12 @@ impl<B: crate::Blob> crate::Blob for GatedBlob<B> {
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        self.read_gate.pass().await;
+        self.read_gate.pass().await?;
         self.inner.read_at_buf(offset, len, bufs).await
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.write_gate.pass().await;
+        self.write_gate.pass().await?;
         self.inner.write_at(offset, bufs).await
     }
 
@@ -1663,7 +1688,10 @@ impl<B: crate::Blob> crate::Blob for GatedBlob<B> {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.inner.sync().await
+        self.sync_gate.pass().await?;
+        self.inner.sync().await?;
+        self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     async fn start_sync(&self) -> crate::Handle<()> {
@@ -1882,6 +1910,150 @@ async fn test_volume_unverified_read_races_pending_overwrite() {
         .expect("pending overwrite must never surface as corruption")
         .coalesce();
     assert_eq!(got.as_ref(), &[0x11u8; 100]);
+}
+
+/// Concurrent syncs of DIFFERENT blobs coalesce: syncs queued behind an
+/// in-flight commit pool their roots, and the next commit captures the
+/// union — three concurrent syncs cost two inner fsyncs (the in-flight one
+/// plus ONE shared by both queued syncs) — while every caller's data is
+/// durable when its sync returns.
+#[tokio::test]
+async fn test_volume_concurrent_syncs_coalesce() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    let (c, _) = volume.open("p", b"c").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    b.write_at(0, IoBuf::copy_from_slice(&[0x2u8; 200]))
+        .await
+        .unwrap();
+    c.write_at(0, IoBuf::copy_from_slice(&[0x3u8; 300]))
+        .await
+        .unwrap();
+
+    // Park the first commit inside its inner fsync (commit lock held).
+    let before = gated.syncs();
+    gated.sync_gate.arm();
+    let ta = {
+        let a = a.clone();
+        tokio::spawn(async move { a.sync().await })
+    };
+    gated.sync_gate.wait_reached().await;
+
+    // Queue two more syncs behind the parked commit, waiting until both
+    // roots are pooled (registration precedes queueing on the commit lock,
+    // so the pool size proves the next commit covers both).
+    let tb = {
+        let b = b.clone();
+        tokio::spawn(async move { b.sync().await })
+    };
+    let tc = {
+        let c = c.clone();
+        tokio::spawn(async move { c.sync().await })
+    };
+    let ready = volume.shared.ready.get().expect("recovered").clone();
+    while ready.pending.lock().roots.len() < 2 {
+        tokio::task::yield_now().await;
+    }
+
+    gated.sync_gate.release();
+    ta.await.unwrap().unwrap();
+    tb.await.unwrap().unwrap();
+    tc.await.unwrap().unwrap();
+
+    // The parked commit plus ONE coalesced commit for both queued syncs.
+    assert_eq!(
+        gated.syncs() - before,
+        2,
+        "queued syncs must share a commit"
+    );
+
+    // Every sync's promise held: reopen and read back all three.
+    drop((a, b, c));
+    drop(volume);
+    let volume = Volume::new(gated.clone(), pool, Config::default());
+    let (a, size) = volume.open("p", b"a").await.unwrap();
+    assert_eq!(size, 100);
+    assert_eq!(
+        a.read_at(0, 100).await.unwrap().coalesce().as_ref(),
+        &[0x1u8; 100]
+    );
+    let (b, size) = volume.open("p", b"b").await.unwrap();
+    assert_eq!(size, 200);
+    assert_eq!(
+        b.read_at(0, 200).await.unwrap().coalesce().as_ref(),
+        &[0x2u8; 200]
+    );
+    let (c, size) = volume.open("p", b"c").await.unwrap();
+    assert_eq!(size, 300);
+    assert_eq!(
+        c.read_at(0, 300).await.unwrap().coalesce().as_ref(),
+        &[0x3u8; 300]
+    );
+}
+
+/// A failed coalesced commit fails EVERY pooled sync — each was promised
+/// durability by exactly that commit — and poisons the volume.
+#[tokio::test]
+async fn test_volume_coalesced_commit_failure_poisons_waiters() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    let (c, _) = volume.open("p", b"c").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    b.write_at(0, IoBuf::copy_from_slice(&[0x2u8; 200]))
+        .await
+        .unwrap();
+    c.write_at(0, IoBuf::copy_from_slice(&[0x3u8; 300]))
+        .await
+        .unwrap();
+
+    // Park the first commit inside its inner fsync, queue two syncs behind
+    // it, then make the NEXT inner fsync — the coalesced commit — fail.
+    gated.sync_gate.arm();
+    let ta = {
+        let a = a.clone();
+        tokio::spawn(async move { a.sync().await })
+    };
+    gated.sync_gate.wait_reached().await;
+    let tb = {
+        let b = b.clone();
+        tokio::spawn(async move { b.sync().await })
+    };
+    let tc = {
+        let c = c.clone();
+        tokio::spawn(async move { c.sync().await })
+    };
+    let ready = volume.shared.ready.get().expect("recovered").clone();
+    while ready.pending.lock().roots.len() < 2 {
+        tokio::task::yield_now().await;
+    }
+    gated.sync_gate.arm_fail();
+    gated.sync_gate.release();
+
+    // The parked commit succeeds; both pooled syncs fail together.
+    ta.await.unwrap().unwrap();
+    assert!(
+        tb.await.unwrap().is_err(),
+        "pooled sync must see the failure"
+    );
+    assert!(
+        tc.await.unwrap().is_err(),
+        "pooled sync must see the failure"
+    );
+
+    // The failure latched: every later operation fails.
+    assert!(a.sync().await.is_err(), "volume must be poisoned");
 }
 
 /// A relocation generation bump landing between a fast-path `read_at_buf`'s

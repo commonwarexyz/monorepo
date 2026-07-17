@@ -171,6 +171,9 @@ impl Report {
                 println!("sync_every={}", cfg.sync_mode);
             }
         }
+        if cfg.workload == Workload::AppendSync {
+            println!("readers={}", cfg.readers);
+        }
 
         if let Some(read) = &self.read {
             read.print("read");
@@ -199,6 +202,7 @@ impl Report {
                 .then(|| cfg.sync_mode.to_string()),
             "sync_method": (cfg.workload == Workload::WriteSync)
                 .then(|| cfg.sync_method.to_string()),
+            "readers": (cfg.workload == Workload::AppendSync).then_some(cfg.readers),
             "seed": cfg.seed,
             "elapsed_ns": self.elapsed.as_nanos() as u64,
             "read": self.read.as_ref().map(OperationReport::to_json),

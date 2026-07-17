@@ -6,8 +6,8 @@ use crate::{
     filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
     report::Report,
     runner::{
-        random_blocks, run_read_loop, run_sync_write_loop, run_write_loop, sequential_blocks,
-        warm_read_loop,
+        random_blocks, run_append_sync_loop, run_read_loop, run_sync_write_loop, run_write_loop,
+        sequential_blocks, warm_read_loop,
     },
 };
 use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
@@ -26,6 +26,8 @@ use std::{
 const PARTITION: &str = "storage-bench";
 /// Key for the single blob within the partition.
 const BLOB_NAME: &[u8] = b"blob";
+/// Key for the prefilled read blob of the `append_sync` workload.
+const READ_BLOB_NAME: &[u8] = b"read-blob";
 
 type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
 
@@ -37,6 +39,7 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
         Workload::WriteAppend => run_write_append(cfg, &context).await,
         Workload::WriteSync => run_write_sync(cfg, &context).await,
         Workload::ReadWriteAppend => run_read_write_append(cfg, &context).await,
+        Workload::AppendSync => run_append_sync(cfg, &context).await,
     };
     let _ = context.remove(PARTITION, None).await;
     result
@@ -317,6 +320,85 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
         Some(read_workers),
         Some(vec![write_stats]),
         final_file_size,
+    ))
+}
+
+/// Run N append+sync writers, each on its own blob, plus optional random
+/// readers on a separate prefilled blob.
+///
+/// Worker `w` appends to blob `blob-w`, syncing every `--sync-every`
+/// appends: concurrent durable commits to DISTINCT blobs, the shape that
+/// exercises cross-blob sync scaling (per-file fsyncs on a filesystem
+/// backend, commit serialization on a volume backend).
+async fn run_append_sync(cfg: &Config, context: &Context) -> Result<Report> {
+    let SyncMode::Every(every) = cfg.sync_mode else {
+        unreachable!("validated: append_sync requires --sync-every N");
+    };
+    let mut rng = TestRng::new(cfg.seed);
+    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
+
+    // One empty blob per writer.
+    let mut blobs = Vec::with_capacity(cfg.inflight);
+    for worker in 0..cfg.inflight {
+        let name = format!("blob-{worker}").into_bytes();
+        blobs.push(prepare_blob(context, &cfg.root, PARTITION, &name, 0).await?);
+    }
+
+    // Readers share one prefilled blob (reads racing concurrent commits).
+    let read_blob = if cfg.readers > 0 {
+        let file_size = cfg.file_size();
+        let blob = prepare_filled_blob(
+            &mut rng,
+            context,
+            &cfg.root,
+            PARTITION,
+            READ_BLOB_NAME,
+            file_size,
+        )
+        .await?;
+        prepare_cache(cfg, &blob, file_size / cfg.io_size as u64).await?;
+        Some((blob, file_size / cfg.io_size as u64))
+    } else {
+        None
+    };
+
+    let start = Instant::now();
+    let deadline = start + cfg.duration();
+
+    let writers = blobs
+        .into_iter()
+        .map(|blob| {
+            let payload = payload.clone();
+            async move { run_append_sync_loop(blob, deadline, cfg.io_size, payload, every).await }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>();
+
+    let readers = read_blob
+        .iter()
+        .flat_map(|(blob, total_blocks)| {
+            (0..cfg.readers).map(|worker| {
+                let blob = blob.clone();
+                run_read_loop(
+                    blob,
+                    deadline,
+                    cfg.io_size,
+                    0,
+                    random_blocks(worker_seed(cfg.seed, worker), *total_blocks),
+                )
+            })
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>();
+
+    let (write_workers, read_workers) = futures::try_join!(writers, readers)?;
+    let total_bytes: u64 = write_workers.iter().map(|s| s.bytes).sum();
+
+    Ok(Report::new(
+        start.elapsed(),
+        (cfg.readers > 0).then_some(read_workers),
+        Some(write_workers),
+        total_bytes,
     ))
 }
 

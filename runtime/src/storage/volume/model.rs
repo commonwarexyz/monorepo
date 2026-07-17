@@ -2012,6 +2012,26 @@ mod tests {
         Action::Crash,
     ];
 
+    /// Coalescing workload: one commit captures the UNION of two dirty
+    /// blobs — two queued syncs acknowledged by one fsync, the
+    /// implementation's commit coalescing — while a third dirty blob stays
+    /// uncaptured, then a later commit captures the straggler. A union
+    /// capture is ordinary selective capture (a multi-bit mask), so no rule
+    /// changes here; this workload pins the interleaving, which no other
+    /// workload reaches with dirty content on both captured blobs.
+    /// (Overwrites are omitted to bound the space: COW under selective
+    /// capture is exercised by SELECTIVE and BATCH_COW.)
+    const COALESCE: &[Action] = &[
+        Action::Append(0),
+        Action::Append(1),
+        Action::Append(2),
+        Action::Snapshot(0b011),
+        Action::Snapshot(0b100),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
     /// Batch workload: cross-blob staging (fresh blocks and in-place
     /// shared-tail appends), publish, drop, and selective commits that must
     /// respect batch groups.
@@ -2144,6 +2164,11 @@ mod tests {
     #[test]
     fn spec_holds_selective() {
         assert_holds(SELECTIVE, 8, 2, 10_000);
+    }
+
+    #[test]
+    fn spec_holds_coalesce() {
+        assert_holds(COALESCE, 7, 2, 10_000);
     }
 
     #[test]

@@ -127,6 +127,45 @@ pub async fn run_write_loop(
     Ok(stats)
 }
 
+/// Timed append+sync loop on one blob: append `io_size` blocks at the
+/// frontier, syncing every `every` appends (plus a final flush of any
+/// partial tail).
+///
+/// Every sync is timed and recorded as a latency sample — ops and bytes
+/// count appends — so the reported percentiles measure durable-commit
+/// latency rather than buffered-write cost.
+#[inline]
+pub async fn run_append_sync_loop(
+    blob: impl Blob,
+    deadline: Instant,
+    io_size: usize,
+    payload: IoBufs,
+    every: u64,
+) -> Result<Stats> {
+    let mut stats = Stats::default();
+    let mut offset = 0u64;
+    let mut writes_since_sync = 0u64;
+    let io_size = io_size as u64;
+    while should_continue(deadline, stats.ops) {
+        blob.write_at(offset, payload.clone()).await?;
+        offset += io_size;
+        stats.record(io_size, None);
+        writes_since_sync += 1;
+        if writes_since_sync == every {
+            let started = Instant::now();
+            blob.sync().await?;
+            stats.latency_samples.push(started.elapsed());
+            writes_since_sync = 0;
+        }
+    }
+    if writes_since_sync != 0 {
+        let started = Instant::now();
+        blob.sync().await?;
+        stats.latency_samples.push(started.elapsed());
+    }
+    Ok(stats)
+}
+
 /// Timed durable write loop with caller-defined offset selection.
 #[inline]
 pub async fn run_sync_write_loop(

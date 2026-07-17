@@ -27,6 +27,14 @@ pub enum Workload {
     /// One append writer plus many random readers of the visible prefix.
     #[value(name = "read_write_append")]
     ReadWriteAppend,
+    /// N append+sync writers, each on its OWN blob (worker w writes blob w),
+    /// syncing every `--sync-every` appends, plus optional `--readers`
+    /// random readers on a separate prefilled blob. Write latency
+    /// percentiles report per-SYNC durations (ops and bytes count appends),
+    /// so they measure durable-commit latency under concurrent multi-blob
+    /// sync pressure.
+    #[value(name = "append_sync")]
+    AppendSync,
 }
 
 impl Workload {
@@ -39,6 +47,7 @@ impl Workload {
                 | Self::WriteAppend
                 | Self::WriteSync
                 | Self::ReadWriteAppend
+                | Self::AppendSync
         )
     }
 
@@ -191,6 +200,11 @@ pub struct Config {
     #[arg(long = "sync-every", default_value = "end", value_parser = parse_sync_mode)]
     pub sync_mode: SyncMode,
 
+    /// Concurrent random readers on a separate prefilled blob (append_sync
+    /// only). Requires --file-size and --cache for the read blob.
+    #[arg(long, default_value_t = 0)]
+    pub readers: usize,
+
     /// Byte shift added to every read offset (misaligned-read testing).
     #[arg(long, default_value_t = 0)]
     pub offset_shift: u64,
@@ -251,7 +265,39 @@ impl Config {
         if self.offset_shift >= self.io_size as u64 {
             return Err("--offset-shift must be smaller than --io-size".into());
         }
+        if self.readers > 0 && self.workload != Workload::AppendSync {
+            return Err("--readers is only valid for append_sync".into());
+        }
         match self.workload {
+            Workload::AppendSync => {
+                if !matches!(self.sync_mode, SyncMode::Every(_)) {
+                    return Err("append_sync requires --sync-every N".into());
+                }
+                if self.readers > 0 {
+                    let file_size = self
+                        .file_size
+                        .ok_or_else(|| "--file-size is required when --readers > 0".to_string())?;
+                    let io_size = self.io_size as u64;
+                    if file_size < io_size {
+                        return Err("--file-size must be at least --io-size".into());
+                    }
+                    if !file_size.is_multiple_of(io_size) {
+                        return Err("--file-size must be a multiple of --io-size".into());
+                    }
+                    if self.cache.is_none() {
+                        return Err("--cache is required when --readers > 0".into());
+                    }
+                } else {
+                    if self.file_size.is_some() {
+                        return Err(
+                            "--file-size is only used by append_sync when --readers > 0".into()
+                        );
+                    }
+                    if self.cache.is_some() {
+                        return Err("--cache is only used by append_sync when --readers > 0".into());
+                    }
+                }
+            }
             Workload::WriteAppend => {
                 if self.file_size.is_some() {
                     return Err("--file-size is not used by write_append".into());
@@ -301,7 +347,7 @@ impl Config {
             if self.cache.is_none() {
                 return Err("--cache is required for read-heavy workloads".into());
             }
-        } else if self.cache.is_some() {
+        } else if self.cache.is_some() && self.workload != Workload::AppendSync {
             return Err("--cache is only valid for read-heavy workloads".into());
         }
         if matches!(self.cache, Some(CacheMode::Cold))

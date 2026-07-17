@@ -10,9 +10,11 @@
 //! > happens on any [`crate::Blob::sync`] / [`crate::Blob::write_at_sync`],
 //! > on [`crate::Storage`] blob creation/removal, and on
 //! > [`Batch::apply_sync`]. It atomically
-//! > covers the CAPTURED blobs: the synced blob (or the applying batch's
-//! > blobs), expanded across applied-batch groups so an applied [`Batch`]
-//! > is never split across commits. Reads are CRC32C-verified: each chunk
+//! > covers the CAPTURED blobs: the synced blob (pooled with every
+//! > concurrently queued sync's blob, see Concurrency below) or the
+//! > applying batch's blobs, expanded across applied-batch groups so an
+//! > applied [`Batch`] is never split across commits. Reads are
+//! > CRC32C-verified: each chunk
 //! > is checked once per process lifetime — on its first read, by
 //! > construction for chunks written this process, or by recovery's own
 //! > manifest verification — and a mismatch is loud corruption, never
@@ -61,11 +63,59 @@
 //! crash before one. A batch dropped without apply (or lost to a crash)
 //! never happened.
 //!
+//! # Concurrency
+//!
+//! Data paths parallelize, commits serialize, and commit COALESCING keeps
+//! the serialization from becoming a bottleneck:
+//!
+//! - Writes to different blobs run concurrently. Each blob has its own
+//!   async write lock, and a writer touches the volume-wide state mutex
+//!   only for microsecond-scale planning and publish sections per stretch
+//!   (measured uncontended at 16 concurrent appenders: ~50ns waits, ~2us
+//!   holds). Reads take no locks across I/O at all (generation-validated
+//!   retry). File growth serializes on a provision lock but is rare (once
+//!   per growth quantum).
+//! - Commits serialize on ONE commit lock, and every commit ends in an
+//!   fsync of the ONE volume file. Concurrent syncs therefore COALESCE:
+//!   syncs arriving while a commit is in flight pool their blobs, and
+//!   whichever queued sync acquires the lock first commits the pooled
+//!   UNION under a single fsync, acknowledging every pooled sync at once
+//!   (see `commit::commit`). Callers see only their own `sync` return.
+//!   Coalescing is keyed off the lock queue alone — no timers — so the
+//!   deterministic runtime stays deterministic, and a serial caller (no
+//!   overlap) commits exactly as without coalescing. With 16 concurrent
+//!   appenders syncing distinct blobs this measured ~5.6x the throughput
+//!   of unpooled serialized commits and lower sync latency than one file
+//!   per blob (each pooled fsync covers many syncs, where per-file
+//!   backends pay one flush each).
+//!
+//! ## Why two superblock slots suffice
+//!
+//! An alternative to coalescing is more superblock slots (A/B -> A..G),
+//! pipelining commit N+1's snapshot and metadata writes under commit N's
+//! in-flight fsync, each commit targeting its own slot. Measured phase
+//! attribution rules this out: all commits fsync the SAME file, and
+//! same-file fsyncs serialize at the kernel/device, so extra slots can
+//! only overlap a commit's CPU and pagecache phases (snapshot + metadata
+//! writes, measured 0.2-0.4ms) with the previous fsync (measured ~3.7ms)
+//! — a <10% ceiling that shrinks further under coalescing (the union
+//! snapshot amortizes over every pooled sync) and does not reduce the
+//! per-sync latency floor of one full fsync. Against that ceiling, K>2
+//! slots cost a superblock format change and a harder recovery protocol:
+//! candidate CHAINS with fallback across multiple torn commits, a
+//! generalized sacred-slot rule ("newest confirmed slot is never
+//! written"), and losing-slot zeroing of all-but-adopted — all new model
+//! workloads and mutations. Two slots (newest confirmed + one in-flight)
+//! are exactly the states a serialized commit protocol can occupy, so the
+//! extra slots would buy nothing until the physics change (a backend with
+//! sub-file fsync domains, where same-file flushes could overlap).
+//!
 //! # Formal model
 //!
 //! The commit protocol (freeze-rule copy-on-write, capture-gated deferred
 //! frees, sacred superblock slot, shadowed frontier chunks, content-bound
-//! tables, poison latch, selective capture, and batch staging/publish with
+//! tables, poison latch, selective capture, coalesced union capture, and
+//! batch staging/publish with
 //! the never-split rule) is specified and exhaustively model-checked under
 //! crash and power loss in the `model` module (compiled with tests); the implementation follows the
 //! model's decisions exactly. Read the model docs before changing anything
