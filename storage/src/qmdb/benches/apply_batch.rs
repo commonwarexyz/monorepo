@@ -197,6 +197,7 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
 }
 
 // Immutable databases are insert-only, so every batch writes fresh keys drawn from `counter`.
+#[boxed]
 async fn seed_imm_db(db: ImmDb, keys: u64, counter: &mut u64, rng: &mut TestRng) -> ImmDb {
     let mut batch = db.new_batch();
     for _ in 0..keys {
