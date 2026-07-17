@@ -49,10 +49,11 @@ use commonware_storage::archive;
 use commonware_utils::{FuzzRng, NZUsize, channel::oneshot, vec::NonEmptyVec};
 use futures::{FutureExt, StreamExt, future::BoxFuture, task::noop_waker_ref};
 use std::{
-    collections::{BTreeSet, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     future::Future,
     hint::black_box,
     num::NonZeroUsize,
+    ops::Range,
     sync::Arc,
     task::{Context, Poll},
     time::Duration,
@@ -98,6 +99,7 @@ fn apply_pending_floor(
     finalized_available: &mut HashSet<u64>,
     processed_height: &mut u64,
     segment_starts: &mut [u64],
+    last_applied_floor: &mut Option<u64>,
 ) -> bool {
     let h = height.get();
     if *pending_floor != Some(h) {
@@ -109,8 +111,24 @@ fn apply_pending_floor(
     if let Some(start) = segment_starts.last_mut() {
         *start = h;
     }
+    *last_applied_floor = Some(h);
     *pending_floor = None;
     true
+}
+
+fn can_install_floor(
+    pending_floor: Option<u64>,
+    floor_height: u64,
+    processed_height: u64,
+    last_applied_floor: Option<u64>,
+    current_segment_empty: bool,
+    only_genesis_pending: bool,
+) -> bool {
+    pending_floor.is_none()
+        && floor_height == processed_height + 1
+        && last_applied_floor.is_none_or(|last| floor_height > last)
+        && current_segment_empty
+        && only_genesis_pending
 }
 
 fn block_available(
@@ -152,23 +170,28 @@ fn block_available(
 /// application queue after already-stale handles are added to the stale queue.
 fn queue_floor_orphaned_acks(
     stale_to_skip: &mut VecDeque<Height>,
-    application_ordering_exclusions: &mut BTreeSet<usize>,
+    application_candidate_stale_ranges: &mut Vec<Range<usize>>,
     pending_acks: &[Height],
     pending_start_idx: usize,
     floor_height: u64,
     ready_prefix: u64,
 ) {
     let stale_len = stale_to_skip.len();
-    let mut pending_iter = pending_acks.iter().enumerate().skip(stale_len);
+    let mut pending_iter = pending_acks.iter().skip(stale_len);
+    let candidate_start = pending_start_idx + stale_len;
+    let mut candidate_len = 0;
     for expected in (floor_height..=ready_prefix).map(Height::new) {
-        let Some((pending_offset, observed)) = pending_iter.next() else {
+        let Some(observed) = pending_iter.next() else {
             break;
         };
         if *observed != expected {
             break;
         }
-        application_ordering_exclusions.insert(pending_start_idx + pending_offset);
         stale_to_skip.push_back(expected);
+        candidate_len += 1;
+    }
+    if candidate_len > 0 {
+        application_candidate_stale_ranges.push(candidate_start..candidate_start + candidate_len);
     }
 }
 
@@ -507,7 +530,7 @@ where
         // repair.
         let mut processed_height: u64 = setup.height.map_or(0, |h| h.get());
         let mut delivery_log: Vec<Height> = Vec::new();
-        let mut application_ordering_exclusions: BTreeSet<usize> = BTreeSet::new();
+        let mut application_candidate_stale_ranges: Vec<Range<usize>> = Vec::new();
         // segment_bounds split the ack-observation log for runner-local
         // bookkeeping. application_segment_bounds split the append-only
         // application delivery log for end-of-run delivery invariants.
@@ -525,6 +548,12 @@ where
         let mut stale_to_skip: VecDeque<Height> = VecDeque::new();
         let mut restart_counter: usize = 0;
         let mut pending_floor: Option<u64> = None;
+        // Applying a floor advances marshal's processed round before the
+        // application acknowledges the floor block. Because this harness maps
+        // each height to the same-numbered round, remember the last applied
+        // floor within the actor lifetime so a duplicate SetFloor is modeled as
+        // stale instead of as another pending-ack-clearing floor transition.
+        let mut last_applied_floor: Option<u64> = None;
         let mut subscriptions = Vec::new();
         let mut parked_queries: Vec<BoxFuture<'static, ()>> = Vec::new();
         let ancestry_fetch_duration = Timed::new(context.histogram(
@@ -559,6 +588,7 @@ where
                         &mut finalized_available,
                         &mut processed_height,
                         &mut segment_starts,
+                        &mut last_applied_floor,
                     );
                 }
                 MarshalEvent::Verify { block_idx } => {
@@ -574,6 +604,7 @@ where
                         &mut finalized_available,
                         &mut processed_height,
                         &mut segment_starts,
+                        &mut last_applied_floor,
                     );
                 }
                 MarshalEvent::Certify { block_idx } => {
@@ -591,6 +622,7 @@ where
                         &mut finalized_available,
                         &mut processed_height,
                         &mut segment_starts,
+                        &mut last_applied_floor,
                     );
                 }
                 MarshalEvent::ReportFinalization { block_idx } => {
@@ -625,6 +657,7 @@ where
                             &mut finalized_available,
                             &mut processed_height,
                             &mut segment_starts,
+                            &mut last_applied_floor,
                         );
                     } else if block_available(&durable_available, &variant_available, h)
                         && h > processed_height
@@ -663,6 +696,7 @@ where
                             &mut finalized_available,
                             &mut processed_height,
                             &mut segment_starts,
+                            &mut last_applied_floor,
                         );
                     }
                     if block_available(&durable_available, &variant_available, h)
@@ -876,11 +910,14 @@ where
                     let current_segment_empty =
                         delivery_log.len() == *segment_bounds.last().unwrap();
                     let mut burst_floor = false;
-                    if pending_floor.is_none()
-                        && floor_height.get() == processed_height + 1
-                        && current_segment_empty
-                        && only_genesis_pending
-                    {
+                    if can_install_floor(
+                        pending_floor,
+                        floor_height.get(),
+                        processed_height,
+                        last_applied_floor,
+                        current_segment_empty,
+                        only_genesis_pending,
+                    ) {
                         handle.mailbox.set_floor(floor_finalization.clone());
                         handle.mailbox.set_floor(floor_finalization);
                         finalization_reported.insert(floor_height.get());
@@ -1072,6 +1109,7 @@ where
                             &mut finalized_available,
                             &mut processed_height,
                             &mut segment_starts,
+                            &mut last_applied_floor,
                         );
                     }
                 }
@@ -1087,11 +1125,14 @@ where
                     let only_genesis_pending = live_pending_acks.iter().all(|h| h.get() == 0);
                     let current_segment_empty =
                         delivery_log.len() == *segment_bounds.last().unwrap();
-                    if pending_floor.is_none()
-                        && h == processed_height + 1
-                        && current_segment_empty
-                        && only_genesis_pending
-                    {
+                    if can_install_floor(
+                        pending_floor,
+                        h,
+                        processed_height,
+                        last_applied_floor,
+                        current_segment_empty,
+                        only_genesis_pending,
+                    ) {
                         let proposal = Proposal::new(
                             round_for_height(height),
                             parent_view(height),
@@ -1110,6 +1151,7 @@ where
                                 &mut finalized_available,
                                 &mut processed_height,
                                 &mut segment_starts,
+                                &mut last_applied_floor,
                             );
                         }
                     }
@@ -1175,6 +1217,7 @@ where
                                 &mut finalized_available,
                                 &mut processed_height,
                                 &mut segment_starts,
+                                &mut last_applied_floor,
                             );
                         }
                     }
@@ -1297,6 +1340,7 @@ where
                     // never got acked do NOT advance this floor.
                     processed_height = setup.height.map_or(0, |h| h.get());
                     pending_floor = None;
+                    last_applied_floor = None;
                 }
                 MarshalEvent::Idle => {}
             }
@@ -1329,7 +1373,7 @@ where
                 let pending_start_idx = application.delivered().len() - pending_acks.len();
                 queue_floor_orphaned_acks(
                     &mut stale_to_skip,
-                    &mut application_ordering_exclusions,
+                    &mut application_candidate_stale_ranges,
                     &pending_acks,
                     pending_start_idx,
                     floor_height,
@@ -1373,7 +1417,7 @@ where
         invariant::check_all::<H>(
             ready_prefix,
             &application_segment_bounds,
-            &application_ordering_exclusions,
+            &application_candidate_stale_ranges,
             &segment_starts,
             &expected_redeliveries,
             &application.delivered(),
