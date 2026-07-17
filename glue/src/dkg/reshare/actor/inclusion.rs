@@ -1,7 +1,7 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     reshare::{
-        Actor, Message,
+        Actor, EpochInfoResponse, Message,
         actor::Mode,
         metrics::Phase,
         store::{Dealer, Store},
@@ -168,7 +168,7 @@ where
                         if response.is_closed() {
                             return;
                         }
-                        let payload = self
+                        let artifact = self
                             .artifact(
                                 epoch,
                                 info,
@@ -177,9 +177,19 @@ where
                                 &mut next_players,
                                 &mut artifact_cache,
                             )
-                            .await
-                            .map(|artifact| Payload::EpochInfo(artifact.info));
-                        let _ = response.send_lossy(payload);
+                            .await;
+                        let result = match artifact {
+                            Some(artifact) => {
+                                EpochInfoResponse::Available(Some(Payload::EpochInfo(
+                                    artifact.info,
+                                )))
+                            }
+                            None if matches!(self.mode, Mode::Dkg { .. }) => {
+                                EpochInfoResponse::Available(None)
+                            }
+                            None => EpochInfoResponse::Unavailable,
+                        };
+                        let _ = response.send_lossy(result);
                     }
                     .instrument(process)
                     .await;
@@ -338,7 +348,7 @@ where
         finalized_tip: Option<Height>,
         final_height: Height,
         mut ancestry: crate::dkg::reshare::mailbox::ErasedAncestry<B>,
-        response: &oneshot::Sender<Option<Payload<V, C>>>,
+        response: &oneshot::Sender<EpochInfoResponse<V, C>>,
     ) -> Option<PendingLogs<V, C::PublicKey>> {
         let mut blocks = Vec::new();
         while let Some(block) = ancestry.next().await {

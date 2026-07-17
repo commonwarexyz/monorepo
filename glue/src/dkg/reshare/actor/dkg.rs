@@ -1,7 +1,7 @@
 use super::setup::{EpochPreparation, PreparedEpoch};
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
-    reshare::{Actor, Message, actor::Mode, metrics::Phase, store::Store},
+    reshare::{Actor, EpochInfoResponse, Message, actor::Mode, metrics::Phase, store::Store},
     types::Participants,
 };
 use commonware_consensus::{
@@ -176,7 +176,7 @@ where
                         "dkg.reshare.actor.dkg_terminal.epoch_info"
                     );
                     process.in_scope(|| {
-                        let _ = response.send(None);
+                        let _ = response.send(EpochInfoResponse::Available(None));
                     });
                 }
                 Message::Finalized {

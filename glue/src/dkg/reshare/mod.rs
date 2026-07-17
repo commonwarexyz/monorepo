@@ -179,7 +179,7 @@ pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v1();
 pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
 
 mod mailbox;
-pub use mailbox::{Mailbox, Message};
+pub use mailbox::{EpochInfoResponse, Mailbox, Message};
 
 mod actor;
 pub(crate) use actor::DkgConfig;

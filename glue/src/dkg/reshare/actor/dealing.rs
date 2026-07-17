@@ -1,7 +1,7 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     reshare::{
-        Actor, Message as MailboxMessage,
+        Actor, EpochInfoResponse, Message as MailboxMessage,
         metrics::Phase,
         store::{Dealer, Player, Store},
     },
@@ -97,7 +97,7 @@ where
                 MailboxMessage::EpochInfo { span, response, .. } => {
                     let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
                     process.in_scope(|| {
-                        let _ = response.send_lossy(None);
+                        let _ = response.send_lossy(EpochInfoResponse::Pending);
                     });
                 }
                 MailboxMessage::Finalized {

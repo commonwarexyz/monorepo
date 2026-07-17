@@ -1,6 +1,6 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
-    reshare::{Actor, Message, metrics::Phase, store::Store},
+    reshare::{Actor, EpochInfoResponse, Message, metrics::Phase, store::Store},
     types::Payload,
 };
 use commonware_consensus::{marshal::core::Variant as MarshalVariant, types::Epocher};
@@ -67,7 +67,7 @@ where
                     let process =
                         info_span!(parent: &span, "dkg.reshare.actor.follower.epoch_info");
                     process.in_scope(|| {
-                        let _ = response.send_lossy(None);
+                        let _ = response.send_lossy(EpochInfoResponse::Unavailable);
                     });
                 }
                 Message::Finalized {
