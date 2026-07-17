@@ -70,20 +70,6 @@ where
                 debug!("shutdown signal received");
                 return ControlFlow::Break(());
             },
-            Ok(message) = receiver.recv() else {
-                debug!("dealing channel closed, shutting down");
-                return ControlFlow::Break(());
-            } => {
-                self.handle_message(
-                    epoch,
-                    store,
-                    dealer.as_deref_mut(),
-                    player.as_deref_mut(),
-                    &mut sender,
-                    message,
-                )
-                .await
-            },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 return ControlFlow::Break(());
@@ -148,6 +134,20 @@ where
                         return ControlFlow::Continue(());
                     }
                 }
+            },
+            Ok(message) = receiver.recv() else {
+                debug!("dealing channel closed, shutting down");
+                return ControlFlow::Break(());
+            } => {
+                self.handle_message(
+                    epoch,
+                    store,
+                    dealer.as_deref_mut(),
+                    player.as_deref_mut(),
+                    &mut sender,
+                    message,
+                )
+                .await
             },
         };
 
@@ -269,5 +269,255 @@ where
                 debug!(?epoch, ?recipient, "sent share");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dkg::{
+        fence::Fence,
+        reshare::actor::Config,
+        tests::mocks::{self, MemorySecretStore},
+    };
+    use commonware_actor::Feedback;
+    use commonware_consensus::{
+        Reporter,
+        marshal::{self, Start as MarshalStart, core::Actor as MarshalActor},
+        types::{FixedEpocher, ViewDelta},
+    };
+    use commonware_cryptography::{
+        bls12381::primitives::sharing::Mode,
+        certificate::Verifier as _,
+        ed25519,
+    };
+    use commonware_p2p::{
+        Receiver,
+        simulated::{Config as NetworkConfig, Network},
+        utils::mocks::inert_channel,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        IoBuf, Runner, Supervisor as _, deterministic,
+        buffer::paged::CacheRef,
+    };
+    use commonware_storage::archive::immutable;
+    use commonware_utils::{
+        Acknowledgement, NZU16, NZU32, NZU64, NZUsize,
+        acknowledgement::Exact,
+        ordered::Set,
+    };
+    use std::{
+        collections::VecDeque,
+        convert::Infallible,
+        marker::PhantomData,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_DEALING_TEST";
+
+    type TestActor = Actor<
+        deterministic::Context,
+        mocks::TestBlock,
+        mocks::TestBlsVariant,
+        mocks::TestSigner,
+        mocks::TestManager,
+        mocks::TestBlocker,
+        StaticParticipants,
+        MemorySecretStore,
+        Sequential,
+        ed25519::Batch,
+        mocks::TestScheme,
+        mocks::TestMarshalVariant,
+        mocks::MockConsumer,
+    >;
+
+    #[derive(Clone)]
+    struct StaticParticipants(Set<mocks::TestPublicKey>);
+
+    impl ParticipantsProvider for StaticParticipants {
+        type PublicKey = mocks::TestPublicKey;
+
+        async fn participants(&mut self, _epoch: Epoch) -> Set<Self::PublicKey> {
+            self.0.clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct QueuedReceiver {
+        peer: mocks::TestPublicKey,
+        messages: VecDeque<IoBuf>,
+        received: Arc<AtomicUsize>,
+    }
+
+    impl Receiver for QueuedReceiver {
+        type Error = Infallible;
+        type PublicKey = mocks::TestPublicKey;
+
+        async fn recv(&mut self) -> Result<NetworkMessage<Self::PublicKey>, Self::Error> {
+            let Some(message) = self.messages.pop_front() else {
+                futures::future::pending().await
+            };
+            self.received.fetch_add(1, Ordering::SeqCst);
+            Ok((self.peer.clone(), message))
+        }
+    }
+
+    async fn marshal_mailbox(
+        context: deterministic::Context,
+        signer: &mocks::TestSigner,
+        scheme: mocks::TestScheme,
+    ) -> mocks::TestMarshalMailbox {
+        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+        let finalizations_by_height =
+            immutable::Archive::init(context.child("finalizations_by_height"), {
+                let _: () = mocks::TestScheme::certificate_codec_config_unbounded();
+                archive_config("dealing-priority", "finalizations", page_cache.clone(), ())
+            })
+            .await
+            .expect("finalizations archive");
+        let finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config("dealing-priority", "blocks", page_cache.clone(), ()),
+        )
+        .await
+        .expect("blocks archive");
+
+        let (_actor, mailbox, _) = MarshalActor::<_, _, _, _, _, _, _, Exact>::init(
+            context.child("marshal"),
+            finalizations_by_height,
+            finalized_blocks,
+            marshal::Config {
+                provider: mocks::TestProvider::new(scheme),
+                epocher: FixedEpocher::new(NZU64!(2)),
+                start: MarshalStart::Genesis(mocks::genesis_block(signer.public_key())),
+                partition_prefix: "dealing-priority-marshal".into(),
+                mailbox_size: NZUsize!(16),
+                view_retention_timeout: ViewDelta::new(8),
+                prunable_items_per_section: NZU64!(10),
+                page_cache,
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                block_codec_config: (),
+                max_repair: NZUsize!(4),
+                max_pending_acks: NZUsize!(4),
+                strategy: Sequential,
+            },
+        )
+        .await;
+        mailbox
+    }
+
+    fn archive_config<C>(
+        prefix: &str,
+        name: &str,
+        page_cache: CacheRef,
+        codec_config: C,
+    ) -> immutable::Config<C> {
+        immutable::Config {
+            metadata_partition: format!("{prefix}-{name}-metadata"),
+            freezer_table_partition: format!("{prefix}-{name}-freezer-table"),
+            freezer_table_initial_size: 64,
+            freezer_table_resize_frequency: 10,
+            freezer_table_resize_chunk_size: 10,
+            freezer_key_partition: format!("{prefix}-{name}-freezer-key"),
+            freezer_key_page_cache: page_cache,
+            freezer_value_partition: format!("{prefix}-{name}-freezer-value"),
+            freezer_value_target_size: 1024,
+            freezer_value_compression: None,
+            ordinal_partition: format!("{prefix}-{name}-ordinal"),
+            items_per_section: NZU64!(10),
+            codec_config,
+            replay_buffer: NZUsize!(1024),
+            freezer_key_write_buffer: NZUsize!(1024),
+            freezer_value_write_buffer: NZUsize!(1024),
+            ordinal_write_buffer: NZUsize!(1024),
+        }
+    }
+
+    #[test]
+    fn finalized_message_is_acknowledged_before_ready_peer_traffic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 1);
+            let signer = ed25519::PrivateKey::from_seed(0);
+            let peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let participants = Set::from_iter_dedup([signer.public_key(), peer.clone()]);
+            let (_network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                vec![signer.public_key(), peer.clone()],
+            )
+            .await;
+            let marshal =
+                marshal_mailbox(context.child("marshal"), &signer, fixture.schemes[0].clone())
+                    .await;
+            let (fence, _gate) = Fence::new(Epoch::zero());
+            let (mut actor, mut mailbox) = TestActor::new(
+                context.child("actor"),
+                Config {
+                    signer: signer.clone(),
+                    manager: oracle.manager(),
+                    blocker: oracle.control(signer.public_key()),
+                    participants_provider: StaticParticipants(participants),
+                    secret_store: MemorySecretStore::default(),
+                    strategy: Sequential,
+                    registrar: mocks::MockConsumer::default(),
+                    marshal,
+                    state_sync_floor: None,
+                    fence,
+                    namespace: TEST_NAMESPACE,
+                    sharing_mode: Mode::NonZeroCounter,
+                    mailbox_size: NZUsize!(16),
+                    partition_prefix: "dealing-priority-actor".into(),
+                    max_participants: NZU32!(16),
+                    blocks_per_epoch: NZU64!(2),
+                    batch_verifier: PhantomData::<ed25519::Batch>,
+                },
+            );
+
+            let mut store = Store::init(
+                context.child("store"),
+                "dealing-priority-store",
+                NZU32!(16),
+                MemorySecretStore::default(),
+            )
+            .await;
+            let received = Arc::new(AtomicUsize::new(0));
+            let receiver = QueuedReceiver {
+                peer: peer.clone(),
+                messages: (0..8).map(|_| IoBuf::from(vec![0xff])).collect(),
+                received: received.clone(),
+            };
+            let (sender, _) = inert_channel([peer]);
+            let block = Arc::new(mocks::genesis_block(signer.public_key()));
+            let (ack, waiter) = Exact::handle();
+            assert_eq!(
+                mailbox.report(marshal::Update::Block(block, ack)),
+                Feedback::Ok
+            );
+
+            let result = actor
+                .dealing(
+                    Epoch::zero(),
+                    &mut store,
+                    None,
+                    None,
+                    (sender, receiver),
+                )
+                .await;
+
+            assert!(result.is_continue());
+            waiter.await.expect("finalized block should be acknowledged");
+            assert_eq!(received.load(Ordering::SeqCst), 0);
+        });
     }
 }
