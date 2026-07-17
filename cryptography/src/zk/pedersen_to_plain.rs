@@ -390,7 +390,7 @@ mod conformance {
 }
 
 #[commonware_macros::stability(ALPHA)]
-#[cfg(all(feature = "blst", any(test, feature = "fuzz")))]
+#[cfg(all(feature = "bls12381", any(test, feature = "fuzz")))]
 pub mod fuzz {
     use super::*;
     use crate::bls12381::primitives::group::{G1 as G, Scalar as F};
@@ -623,7 +623,7 @@ mod test {
     }
 
     #[test]
-    #[cfg(feature = "blst")]
+    #[cfg(feature = "bls12381")]
     fn test_fuzz() {
         minifuzz::test(|u| {
             u.arbitrary::<super::fuzz::Plan>()?.run(u)?;

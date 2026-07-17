@@ -17,7 +17,7 @@
 //!   setup required, and widely supported by hardware security modules. Unlike ed25519, does not
 //!   benefit from batch verification. Certificates contain individual signatures from each signer.
 #![cfg_attr(
-    feature = "blst",
+    feature = "bls12381",
     doc = "
 - [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
   can be aggregated into a single multi-signature for compact certificates while preserving
@@ -53,13 +53,13 @@
 //! whereas the signing key is used for producing and verifying signatures/certificates.
 //!
 #![cfg_attr(
-    feature = "blst",
+    feature = "bls12381",
     doc = "Some cryptographic schemes are only performant when used in batch verification (like
 [`bls12381_multisig`]) and/or are refreshed frequently (like [`bls12381_threshold`])."
 )]
 //! Refer to [ed25519] for an example of a scheme that uses the same key for both purposes.
 
-#[cfg(feature = "blst")]
+#[cfg(feature = "bls12381")]
 pub use crate::bls12381::certificate::{
     multisig as bls12381_multisig, threshold as bls12381_threshold,
 };
