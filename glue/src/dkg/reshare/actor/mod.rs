@@ -249,7 +249,8 @@ where
     /// Runtime-storage partition prefix.
     pub partition_prefix: String,
 
-    /// Maximum participants accepted in decoded protocol values.
+    /// Maximum participants accepted in decoded protocol values and
+    /// provider-supplied future participant sets.
     pub max_participants: NonZeroU32,
 
     /// Epoch schedule used to interpret finalized block heights.
