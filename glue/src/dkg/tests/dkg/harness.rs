@@ -8,18 +8,24 @@ use crate::{
     simulate::{
         action::Crash,
         engine::{EngineDefinition, InitContext},
-        exit::ProcessedHeightAtLeast,
+        exit::{ExitCondition as _, ProcessedHeightAtLeast},
         plan::PlanBuilder,
         processed::ProcessedHeight,
+        tracker::ProgressTracker,
     },
 };
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     Signer as _,
-    bls12381::primitives::{sharing::Mode, variant::MinPk},
+    bls12381::primitives::{
+        group::{Private, Share},
+        sharing::Mode,
+        variant::MinPk,
+    },
     ed25519,
 };
 use commonware_macros::select;
+use commonware_math::algebra::Random;
 use commonware_p2p::{
     Manager as _,
     simulated::{self, Link, Network},
@@ -29,7 +35,9 @@ use commonware_runtime::{
     Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
     telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{NZU32, NZU64, NZUsize, channel::oneshot, ordered::Set, sync::Mutex};
+use commonware_utils::{
+    NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, sync::Mutex, test_rng,
+};
 use futures::future::pending;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -145,11 +153,9 @@ impl DkgEngine {
     }
 
     fn state_inner(&self, public_key: &ed25519::PublicKey) -> Arc<Mutex<NodeStateInner>> {
-        self.states
-            .lock()
-            .entry(public_key.clone())
-            .or_default()
-            .clone()
+        let inner = Arc::new(Mutex::new(NodeStateInner::default()));
+        self.states.lock().insert(public_key.clone(), inner.clone());
+        inner
     }
 }
 
@@ -292,6 +298,46 @@ pub(super) fn run_plan(
         builder = builder.crash(crash);
     }
     builder.run().expect("DKG simulation");
+}
+
+pub(super) fn run_restart_completion_state_is_fresh() {
+    let engine = DkgEngine::new(1);
+    let public_key = engine.participant(0);
+    let old_state = NodeState {
+        store: engine.store(&public_key),
+        inner: engine.state_inner(&public_key),
+    };
+    let replacement_state = NodeState {
+        store: engine.store(&public_key),
+        inner: engine.state_inner(&public_key),
+    };
+
+    let share = Share::new(Participant::new(0), Private::random(test_rng()));
+    old_state.store.seed_share(Epoch::zero(), share);
+    assert!(
+        replacement_state.has_share(Epoch::zero()),
+        "restart must retain the persistent secret store"
+    );
+
+    old_state.inner.lock().completed = true;
+    assert!(
+        !replacement_state.completed(),
+        "stale completion changed replacement state"
+    );
+
+    let runner = deterministic::Runner::timed(Duration::from_secs(1));
+    runner.start(|_| async move {
+        let tracker = ProgressTracker::<ed25519::PublicKey>::default();
+        let states = [&replacement_state];
+        let reached = ProcessedHeightAtLeast::new(1)
+            .reached(&tracker, &states, 1)
+            .await
+            .expect("exit condition should evaluate");
+        assert!(
+            !reached,
+            "exit condition should wait for the current incarnation"
+        );
+    });
 }
 
 pub(super) fn good_link() -> Link {
