@@ -352,7 +352,7 @@ where
                     parent_commitment,
                     core::CommitmentFallback::FetchByRound {
                         round: Round::new(consensus_context.epoch(), parent_view),
-                        known_certified: true,
+                        certified: true,
                     },
                 );
 
@@ -516,7 +516,7 @@ where
             payload,
             core::CommitmentFallback::FetchByRound {
                 round,
-                known_certified: false,
+                certified: false,
             },
         );
         let mut marshaled = self.clone();
@@ -775,7 +775,7 @@ where
                     parent_commitment,
                     core::CommitmentFallback::FetchByRound {
                         round: Round::new(consensus_context.epoch(), parent_view),
-                        known_certified: true,
+                        certified: true,
                     },
                 );
 

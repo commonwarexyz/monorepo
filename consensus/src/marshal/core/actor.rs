@@ -1000,13 +1000,13 @@ where
         match key {
             Key::Block {
                 commitment,
-                known_certified,
+                certified,
             } => {
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "block missing on request");
                     return;
                 };
-                if known_certified {
+                if certified {
                     response.send_lossy(V::into_inner_shared(block).encode());
                 } else {
                     response.send_lossy(block.encode());
@@ -1023,10 +1023,7 @@ where
                 };
                 response.send_lossy((finalization, V::into_inner(block)).encode());
             }
-            Key::Notarized {
-                round,
-                known_certified,
-            } => {
+            Key::Notarized { round, certified } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
                     debug!(?round, "notarization missing on request");
                     return;
@@ -1036,7 +1033,7 @@ where
                     debug!(?commitment, "block missing on request");
                     return;
                 };
-                if known_certified {
+                if certified {
                     response.send_lossy((notarization, V::into_inner_shared(block)).encode());
                 } else {
                     response.send_lossy((notarization, block).encode());
@@ -1080,16 +1077,13 @@ where
         // not known before the request. Height-based fetching is only for callers
         // that already have a validated pruning height.
         match fallback {
-            CommitmentFallback::FetchByRound {
-                round,
-                known_certified,
-            } => {
+            CommitmentFallback::FetchByRound { round, certified } => {
                 // Fetch the notarized proposal for this round. The response
                 // must include a certificate so the commitment is tied to the
                 // certified round context. The decoded block is heightable, but
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
-                let request = if known_certified {
+                let request = if certified {
                     Request::certified(round)
                 } else {
                     Request::notarized(round)
@@ -1387,10 +1381,9 @@ where
         match key {
             Key::Block {
                 commitment,
-                known_certified,
+                certified,
             } => {
-                let Some(block) = self.decode_resolver_block(value, commitment, known_certified)
-                else {
+                let Some(block) = self.decode_resolver_block(value, commitment, certified) else {
                     response.send_lossy(false);
                     return;
                 };
@@ -1506,10 +1499,7 @@ where
                     response,
                 });
             }
-            Key::Notarized {
-                round,
-                known_certified,
-            } => {
+            Key::Notarized { round, certified } => {
                 let Some(scheme) = self.provider.scheme(round.epoch()) else {
                     debug!(
                         ?round,
@@ -1539,8 +1529,7 @@ where
                     response.send_lossy(false);
                     return;
                 }
-                let Some(block) = self.decode_resolver_block(value, commitment, known_certified)
-                else {
+                let Some(block) = self.decode_resolver_block(value, commitment, certified) else {
                     response.send_lossy(false);
                     return;
                 };
@@ -1557,9 +1546,9 @@ where
         &self,
         value: Bytes,
         commitment: V::Commitment,
-        known_certified: bool,
+        certified: bool,
     ) -> Option<DecodedBlock<V>> {
-        if known_certified {
+        if certified {
             let block = V::ApplicationBlock::decode_cfg(value, &self.block_codec_config).ok()?;
             if block.digest() != V::commitment_to_inner(commitment) {
                 return None;

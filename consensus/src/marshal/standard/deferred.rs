@@ -403,7 +403,7 @@ where
                     parent_commitment,
                     CommitmentFallback::FetchByRound {
                         round: Round::new(embedded_context.epoch(), parent_view),
-                        known_certified: true,
+                        certified: true,
                     },
                 );
 
@@ -573,7 +573,7 @@ where
                     parent_commitment,
                     CommitmentFallback::FetchByRound {
                         round: Round::new(consensus_context.epoch(), parent_view),
-                        known_certified: true,
+                        certified: true,
                     },
                 );
 
@@ -712,7 +712,7 @@ where
                         parent_commitment,
                         CommitmentFallback::FetchByRound {
                             round: Round::new(context.epoch(), parent_view),
-                            known_certified: true,
+                            certified: true,
                         },
                     )
                 });

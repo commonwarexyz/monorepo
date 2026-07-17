@@ -542,7 +542,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Notarized {
                                 round,
-                                known_certified: false,
+                                certified: false,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization { round },
@@ -612,7 +612,7 @@ mod tests {
                 fetch.key,
                 handler::Key::Block {
                     commitment: requested,
-                    known_certified: true,
+                    certified: true,
                 } if requested == commitment
             )));
             assert_eq!(block.commitment(), commitment);
@@ -656,7 +656,7 @@ mod tests {
                     commitment,
                     core::CommitmentFallback::FetchByRound {
                         round,
-                        known_certified: true,
+                        certified: true,
                     },
                 )
                 .await
@@ -667,7 +667,7 @@ mod tests {
                 fetch.key,
                 handler::Key::Notarized {
                     round: requested,
-                    known_certified: true,
+                    certified: true,
                 } if requested == round
             )));
             assert_eq!(block.commitment(), commitment);
@@ -711,7 +711,7 @@ mod tests {
                     commitment,
                     core::CommitmentFallback::FetchByRound {
                         round,
-                        known_certified: false,
+                        certified: false,
                     },
                 )
                 .await
@@ -722,7 +722,7 @@ mod tests {
                 fetch.key,
                 handler::Key::Notarized {
                     round: requested,
-                    known_certified: false,
+                    certified: false,
                 } if requested == round
             )));
             assert_eq!(block.commitment(), commitment);
@@ -848,7 +848,7 @@ mod tests {
                 commitment,
                 core::CommitmentFallback::FetchByRound {
                     round,
-                    known_certified: true,
+                    certified: true,
                 },
             );
 
@@ -898,7 +898,7 @@ mod tests {
                     .enqueue(handler::Message::Produce {
                         key: handler::Key::Block {
                             commitment,
-                            known_certified: true,
+                            certified: true,
                         },
                         response,
                     })
@@ -915,7 +915,7 @@ mod tests {
                     .enqueue(handler::Message::Produce {
                         key: handler::Key::Notarized {
                             round,
-                            known_certified: true,
+                            certified: true,
                         },
                         response,
                     })
@@ -1080,7 +1080,7 @@ mod tests {
                     (
                         handler::Key::Notarized {
                             round: request_round,
-                            known_certified: false,
+                            certified: false,
                         },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
@@ -1157,7 +1157,7 @@ mod tests {
                     (
                         handler::Key::Notarized {
                             round: request_round,
-                            known_certified: false,
+                            certified: false,
                         },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
@@ -2220,7 +2220,7 @@ mod tests {
                 missing_commitment,
                 core::CommitmentFallback::FetchByRound {
                     round,
-                    known_certified: false,
+                    certified: false,
                 },
             );
 

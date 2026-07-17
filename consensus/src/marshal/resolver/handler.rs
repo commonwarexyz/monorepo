@@ -221,7 +221,7 @@ pub enum Key<D: Digest> {
         /// The requested consensus commitment.
         commitment: D,
         /// Whether the requester already trusts the commitment.
-        known_certified: bool,
+        certified: bool,
     },
     Finalized {
         height: Height,
@@ -233,7 +233,7 @@ pub enum Key<D: Digest> {
         ///
         /// The notarization still authenticates the proposal commitment before
         /// the block is reconstructed.
-        known_certified: bool,
+        certified: bool,
     },
 }
 
@@ -252,7 +252,7 @@ impl<D: Digest> Key<D> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RequestKind<D: Digest> {
     /// Fetch a notarized proposal for a round.
-    Notarized { round: Round, known_certified: bool },
+    Notarized { round: Round, certified: bool },
     /// Fetch a finalization for a height.
     Finalized { height: Height },
     /// Fetch a certified-chain block by commitment.
@@ -275,7 +275,7 @@ impl<D: Digest> Request<D> {
         Self {
             kind: RequestKind::Notarized {
                 round,
-                known_certified: false,
+                certified: false,
             },
         }
     }
@@ -288,7 +288,7 @@ impl<D: Digest> Request<D> {
         Self {
             kind: RequestKind::Notarized {
                 round,
-                known_certified: true,
+                certified: true,
             },
         }
     }
@@ -347,13 +347,10 @@ impl<D: Digest> Request<D> {
     /// providers understand; local processing annotations are unaffected.
     pub(crate) fn into_inner(self, hinted: bool) -> ResolverFetch<Key<D>, Annotation> {
         let (key, subscriber) = match self.kind {
-            RequestKind::Notarized {
-                round,
-                known_certified,
-            } => (
+            RequestKind::Notarized { round, certified } => (
                 Key::Notarized {
                     round,
-                    known_certified: known_certified && hinted,
+                    certified: certified && hinted,
                 },
                 Annotation::Notarization { round },
             ),
@@ -364,21 +361,21 @@ impl<D: Digest> Request<D> {
             RequestKind::CertifiedBlock { commitment, height } => (
                 Key::Block {
                     commitment,
-                    known_certified: hinted,
+                    certified: hinted,
                 },
                 Annotation::Certified { height },
             ),
             RequestKind::FinalizedBlockByHeight { commitment, height } => (
                 Key::Block {
                     commitment,
-                    known_certified: hinted,
+                    certified: hinted,
                 },
                 Annotation::Finalized(Finalized::ByHeight { height }),
             ),
             RequestKind::FinalizedBlockByRound { commitment, round } => (
                 Key::Block {
                     commitment,
-                    known_certified: hinted,
+                    certified: hinted,
                 },
                 Annotation::Finalized(Finalized::ByRound { round }),
             ),
@@ -437,21 +434,18 @@ impl<D: Digest> Write for Key<D> {
         match self {
             Self::Block {
                 commitment,
-                known_certified,
+                certified,
             } => {
                 commitment.write(buf);
-                if *known_certified {
-                    known_certified.write(buf);
+                if *certified {
+                    certified.write(buf);
                 }
             }
             Self::Finalized { height } => height.write(buf),
-            Self::Notarized {
-                round,
-                known_certified,
-            } => {
+            Self::Notarized { round, certified } => {
                 round.write(buf);
-                if *known_certified {
-                    known_certified.write(buf);
+                if *certified {
+                    certified.write(buf);
                 }
             }
         }
@@ -468,10 +462,10 @@ impl<D: Digest> Read for Key<D> {
         let request = match u8::read(buf)? {
             BLOCK_REQUEST => {
                 let commitment = D::read(buf)?;
-                let known_certified = buf.has_remaining() && bool::read(buf)?;
+                let certified = buf.has_remaining() && bool::read(buf)?;
                 Self::Block {
                     commitment,
-                    known_certified,
+                    certified,
                 }
             }
             FINALIZED_REQUEST => Self::Finalized {
@@ -479,11 +473,8 @@ impl<D: Digest> Read for Key<D> {
             },
             NOTARIZED_REQUEST => {
                 let round = Round::read(buf)?;
-                let known_certified = buf.has_remaining() && bool::read(buf)?;
-                Self::Notarized {
-                    round,
-                    known_certified,
-                }
+                let certified = buf.has_remaining() && bool::read(buf)?;
+                Self::Notarized { round, certified }
             }
             i => return Err(CodecError::InvalidEnum(i)),
         };
@@ -496,13 +487,10 @@ impl<D: Digest> EncodeSize for Key<D> {
         1 + match self {
             Self::Block {
                 commitment,
-                known_certified,
-            } => commitment.encode_size() + usize::from(*known_certified),
+                certified,
+            } => commitment.encode_size() + usize::from(*certified),
             Self::Finalized { height } => height.encode_size(),
-            Self::Notarized {
-                round,
-                known_certified,
-            } => round.encode_size() + usize::from(*known_certified),
+            Self::Notarized { round, certified } => round.encode_size() + usize::from(*certified),
         }
     }
 }
@@ -515,22 +503,22 @@ impl<D: Digest> PartialEq for Key<D> {
             (
                 Self::Block {
                     commitment: a,
-                    known_certified: a_certified,
+                    certified: a_certified,
                 },
                 Self::Block {
                     commitment: b,
-                    known_certified: b_certified,
+                    certified: b_certified,
                 },
             ) => (a, a_certified) == (b, b_certified),
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a == b,
             (
                 Self::Notarized {
                     round: a,
-                    known_certified: a_certified,
+                    certified: a_certified,
                 },
                 Self::Notarized {
                     round: b,
-                    known_certified: b_certified,
+                    certified: b_certified,
                 },
             ) => (a, a_certified) == (b, b_certified),
             _ => false,
@@ -546,22 +534,22 @@ impl<D: Digest> Ord for Key<D> {
             (
                 Self::Block {
                     commitment: a,
-                    known_certified: a_certified,
+                    certified: a_certified,
                 },
                 Self::Block {
                     commitment: b,
-                    known_certified: b_certified,
+                    certified: b_certified,
                 },
             ) => (a, a_certified).cmp(&(b, b_certified)),
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a.cmp(b),
             (
                 Self::Notarized {
                     round: a,
-                    known_certified: a_certified,
+                    certified: a_certified,
                 },
                 Self::Notarized {
                     round: b,
-                    known_certified: b_certified,
+                    certified: b_certified,
                 },
             ) => (a, a_certified).cmp(&(b, b_certified)),
             (a, b) => a.subject().cmp(&b.subject()),
@@ -581,18 +569,15 @@ impl<D: Digest> Hash for Key<D> {
         match self {
             Self::Block {
                 commitment,
-                known_certified,
+                certified,
             } => {
                 commitment.hash(state);
-                known_certified.hash(state);
+                certified.hash(state);
             }
             Self::Finalized { height } => height.hash(state),
-            Self::Notarized {
-                round,
-                known_certified,
-            } => {
+            Self::Notarized { round, certified } => {
                 round.hash(state);
-                known_certified.hash(state);
+                certified.hash(state);
             }
         }
     }
@@ -603,16 +588,12 @@ impl<D: Digest> Display for Key<D> {
         match self {
             Self::Block {
                 commitment,
-                known_certified,
-            } => write!(
-                f,
-                "Block({commitment:?}, known_certified={known_certified})"
-            ),
+                certified,
+            } => write!(f, "Block({commitment:?}, certified={certified})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
-            Self::Notarized {
-                round,
-                known_certified,
-            } => write!(f, "Notarized({round:?}, known_certified={known_certified})"),
+            Self::Notarized { round, certified } => {
+                write!(f, "Notarized({round:?}, certified={certified})")
+            }
         }
     }
 }
@@ -633,14 +614,14 @@ where
         match choice {
             0 => Ok(Self::Block {
                 commitment: u.arbitrary()?,
-                known_certified: u.arbitrary()?,
+                certified: u.arbitrary()?,
             }),
             1 => Ok(Self::Finalized {
                 height: u.arbitrary()?,
             }),
             2 => Ok(Self::Notarized {
                 round: u.arbitrary()?,
-                known_certified: u.arbitrary()?,
+                certified: u.arbitrary()?,
             }),
             _ => unreachable!(),
         }
@@ -687,14 +668,14 @@ mod tests {
     const fn block(commitment: D) -> Key<D> {
         Key::Block {
             commitment,
-            known_certified: false,
+            certified: false,
         }
     }
 
     const fn notarized(round: Round) -> Key<D> {
         Key::Notarized {
             round,
-            known_certified: false,
+            certified: false,
         }
     }
 
@@ -866,11 +847,11 @@ mod tests {
         let hinted = [
             Key::Block {
                 commitment,
-                known_certified: true,
+                certified: true,
             },
             Key::Notarized {
                 round,
-                known_certified: true,
+                certified: true,
             },
         ];
         for request in hinted {
@@ -892,14 +873,14 @@ mod tests {
             (
                 Key::Block {
                     commitment,
-                    known_certified: true,
+                    certified: true,
                 },
                 legacy_block,
             ),
             (
                 Key::Notarized {
                     round,
-                    known_certified: true,
+                    certified: true,
                 },
                 vec![0x02, 0x03, 0x07],
             ),
@@ -924,14 +905,14 @@ mod tests {
                 block(commitment),
                 Key::Block {
                     commitment,
-                    known_certified: true,
+                    certified: true,
                 },
             ),
             (
                 notarized(round),
                 Key::Notarized {
                     round,
-                    known_certified: true,
+                    certified: true,
                 },
             ),
         ];
@@ -1012,14 +993,14 @@ mod tests {
                 block(commitment),
                 Key::Block {
                     commitment,
-                    known_certified: true,
+                    certified: true,
                 },
             ),
             (
                 notarized(round),
                 Key::Notarized {
                     round,
-                    known_certified: true,
+                    certified: true,
                 },
             ),
         ];
@@ -1039,35 +1020,30 @@ mod tests {
     fn test_into_inner_gates_certification_hints() {
         let commitment = Sha256::hash(b"hint-gating");
         let round = Round::new(Epoch::new(3), View::new(7));
-        let certified = [
+        let requests = [
             Request::certified(round),
             Request::certified_block(commitment, Height::new(7)),
             Request::finalized_block_by_height(commitment, Height::new(7)),
             Request::finalized_block_by_round(commitment, round),
         ];
 
-        let known_certified = |key: &Key<D>| match key {
-            Key::Block {
-                known_certified, ..
-            }
-            | Key::Notarized {
-                known_certified, ..
-            } => *known_certified,
+        let is_certified = |key: &Key<D>| match key {
+            Key::Block { certified, .. } | Key::Notarized { certified, .. } => *certified,
             Key::Finalized { .. } => unreachable!("finalized keys carry no hint"),
         };
-        for request in certified {
+        for request in requests {
             let hinted = request.into_inner(true);
             let unhinted = request.into_inner(false);
-            assert!(known_certified(&hinted.key));
-            assert!(!known_certified(&unhinted.key));
+            assert!(is_certified(&hinted.key));
+            assert!(!is_certified(&unhinted.key));
             // Only the peer-visible key changes; local processing does not.
             assert_eq!(hinted.subscriber, unhinted.subscriber);
         }
 
         // Fully validated notarized fetches never carry the hint.
         let notarized = Request::notarized(round);
-        assert!(!known_certified(&notarized.into_inner(true).key));
-        assert!(!known_certified(&notarized.into_inner(false).key));
+        assert!(!is_certified(&notarized.into_inner(true).key));
+        assert!(!is_certified(&notarized.into_inner(false).key));
     }
 
     #[test]

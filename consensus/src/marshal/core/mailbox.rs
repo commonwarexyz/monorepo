@@ -239,7 +239,7 @@ impl From<DigestFallback> for CommitmentFallback {
             DigestFallback::Wait => Self::Wait,
             DigestFallback::FetchByRound { round } => Self::FetchByRound {
                 round,
-                known_certified: false,
+                certified: false,
             },
         }
     }
@@ -269,7 +269,7 @@ pub enum CommitmentFallback {
         ///
         /// Trusted requests transfer only the application block and rebuild any
         /// variant-specific wrapper from the certified commitment.
-        known_certified: bool,
+        certified: bool,
     },
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
@@ -1327,7 +1327,7 @@ mod tests {
             2,
             CommitmentFallback::FetchByRound {
                 round: round(2),
-                known_certified: true,
+                certified: true,
             },
         );
         let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_message(
@@ -1355,7 +1355,7 @@ mod tests {
             TestMessage::SubscribeByCommitment {
                 fallback: CommitmentFallback::FetchByRound {
                     round: found,
-                    known_certified: true,
+                    certified: true,
                 },
                 ..
             } if *found == round(2)
@@ -1383,7 +1383,7 @@ mod tests {
             2,
             CommitmentFallback::FetchByRound {
                 round: round(2),
-                known_certified: true,
+                certified: true,
             },
         );
         overflow

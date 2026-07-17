@@ -2001,7 +2001,7 @@ mod tests {
                         (
                             handler::Key::Notarized {
                                 round: request_round,
-                                known_certified: false,
+                                certified: false,
                             },
                             handler::Annotation::Notarization { round: subscriber_round },
                         ) if *request_round == round && *subscriber_round == round
@@ -2115,7 +2115,7 @@ mod tests {
                         (
                             handler::Key::Notarized {
                                 round: request_round,
-                                known_certified: false,
+                                certified: false,
                             },
                             handler::Annotation::Notarization { round: subscriber_round },
                         ) if *request_round == round && *subscriber_round == round
@@ -2199,7 +2199,7 @@ mod tests {
                     (
                         handler::Key::Notarized {
                             round: request_round,
-                            known_certified: false,
+                            certified: false,
                         },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
@@ -2271,7 +2271,7 @@ mod tests {
                                 fetch.key,
                                 handler::Key::Notarized {
                                     round,
-                                    known_certified: true,
+                                    certified: true,
                                 } if round == parent_round
                             ) && matches!(
                                 fetch.subscriber,
@@ -2400,7 +2400,7 @@ mod tests {
                         producer: StaticProducer::new(
                             handler::Key::Notarized {
                                 round: parent_round,
-                                known_certified: true,
+                                certified: true,
                             },
                             Bytes::from_static(b"not a valid notarization"),
                         ),
@@ -3846,7 +3846,7 @@ mod tests {
             resolver.enqueue(handler::Message::Produce {
                 key: handler::Key::Block {
                     commitment: StandardHarness::commitment(&served),
-                    known_certified: true,
+                    certified: true,
                 },
                 response,
             });
@@ -4986,7 +4986,7 @@ mod tests {
                 missing,
                 CommitmentFallback::FetchByRound {
                     round: stale_floor_round,
-                    known_certified: false,
+                    certified: false,
                 },
             );
             wait_until(
@@ -5175,7 +5175,7 @@ mod tests {
                 missing,
                 CommitmentFallback::FetchByRound {
                     round: floor_round,
-                    known_certified: false,
+                    certified: false,
                 },
             );
             wait_until(
@@ -5342,7 +5342,7 @@ mod tests {
                 notarization.proposal.payload,
                 CommitmentFallback::FetchByRound {
                     round,
-                    known_certified: false,
+                    certified: false,
                 },
             );
 
@@ -5357,7 +5357,7 @@ mod tests {
                             (
                                 handler::Key::Notarized {
                                     round: request_round,
-                                    known_certified: false,
+                                    certified: false,
                                 },
                                 handler::Annotation::Notarization { round: subscriber_round },
                             ) if *request_round == round && *subscriber_round == round
@@ -5374,7 +5374,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Notarized {
                                 round,
-                                known_certified: false,
+                                certified: false,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization { round },
@@ -5437,7 +5437,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Notarized {
                                 round: requested_round,
-                                known_certified: false,
+                                certified: false,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization {
@@ -5487,7 +5487,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Notarized {
                                 round,
-                                known_certified: false,
+                                certified: false,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization { round },
@@ -5655,7 +5655,7 @@ mod tests {
                 Sha256::hash(b"missing-subscription-at-processed-round"),
                 CommitmentFallback::FetchByRound {
                     round,
-                    known_certified: false,
+                    certified: false,
                 },
             );
 
@@ -5871,7 +5871,7 @@ mod tests {
                 Sha256::hash(b"missing-subscription-after-restart"),
                 CommitmentFallback::FetchByRound {
                     round,
-                    known_certified: false,
+                    certified: false,
                 },
             );
 
@@ -5940,7 +5940,7 @@ mod tests {
                 StandardHarness::commitment(&block),
                 CommitmentFallback::FetchByRound {
                     round,
-                    known_certified: false,
+                    certified: false,
                 },
             );
             context.sleep(Duration::from_millis(100)).await;
@@ -5959,7 +5959,7 @@ mod tests {
                             (
                                 handler::Key::Notarized {
                                     round: request_round,
-                                    known_certified: false,
+                                    certified: false,
                                 },
                                 handler::Annotation::Notarization { round: subscriber_round },
                             ) if *request_round == round && *subscriber_round == round
@@ -5976,7 +5976,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Notarized {
                                 round,
-                                known_certified: false,
+                                certified: false,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization { round },
@@ -6073,7 +6073,7 @@ mod tests {
                 Sha256::hash(b"missing-before-anchor-ack"),
                 CommitmentFallback::FetchByRound {
                     round: floor_round,
-                    known_certified: false,
+                    certified: false,
                 },
             );
             let barrier = make_raw_block(floor_block.digest(), Height::new(6), 600);
@@ -6134,7 +6134,7 @@ mod tests {
                 missing,
                 CommitmentFallback::FetchByRound {
                     round,
-                    known_certified: false,
+                    certified: false,
                 },
             );
             wait_until(
@@ -6329,7 +6329,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Notarized {
                                 round: Round::new(Epoch::zero(), View::new(1)),
-                                known_certified: false,
+                                certified: false,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Notarization {
@@ -6864,7 +6864,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Block {
                                 commitment: StandardHarness::commitment(&next),
-                                known_certified: true,
+                                certified: true,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Finalized(handler::Finalized::ByHeight {
@@ -6886,7 +6886,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Block {
                                 commitment: StandardHarness::commitment(&above),
-                                known_certified: true,
+                                certified: true,
                             },
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Finalized(handler::Finalized::ByHeight {

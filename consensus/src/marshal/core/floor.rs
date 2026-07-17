@@ -45,7 +45,6 @@ impl FetchAdmission {
 pub(super) struct Floor<S: Scheme, C: Digest> {
     processed: ProcessedFloor,
     pending: Option<Finalization<S, C>>,
-    /// Epoch at which issued fetches begin carrying certification hints.
     hint_activation: Option<Epoch>,
 }
 
@@ -481,12 +480,7 @@ mod tests {
             .fetches()
             .iter()
             .map(|fetch| match fetch.key {
-                Key::Block {
-                    known_certified, ..
-                }
-                | Key::Notarized {
-                    known_certified, ..
-                } => known_certified,
+                Key::Block { certified, .. } | Key::Notarized { certified, .. } => certified,
                 Key::Finalized { .. } => unreachable!("no finalized requests issued"),
             })
             .collect::<Vec<_>>();
@@ -521,7 +515,7 @@ mod tests {
         assert!(matches!(
             resolver.targeted()[..],
             [Key::Block {
-                known_certified: false,
+                certified: false,
                 ..
             }]
         ));
@@ -529,7 +523,7 @@ mod tests {
             resolver.fetches()[..],
             [Fetch {
                 key: Key::Notarized {
-                    known_certified: false,
+                    certified: false,
                     ..
                 },
                 ..
