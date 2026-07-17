@@ -30,10 +30,17 @@ where
     /// `None` is a legitimate response only for a failed one-shot DKG final
     /// block, which intentionally carries no epoch artifact.
     Available(Option<Payload<V, C>>),
-    /// The actor cannot answer yet, but may be able to after local epoch
-    /// progress catches up.
+    /// The actor cannot answer this request yet.
+    ///
+    /// This is not evidence that a proposed artifact is invalid. Verification
+    /// remains pending until the request is canceled or local progress catches up.
     Pending,
-    /// The actor cannot derive the artifact in its current local mode.
+    /// The actor is following the epoch without its protocol history.
+    ///
+    /// It cannot derive the artifact, but that absence is not evidence that a
+    /// proposed artifact is invalid.
+    Following,
+    /// The actor was expected to derive the artifact but cannot produce it.
     Unavailable,
 }
 
