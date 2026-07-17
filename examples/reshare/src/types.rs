@@ -85,7 +85,7 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn genesis(
+    pub const fn genesis(
         leader: ed25519::PublicKey,
         info: dkg::types::EpochInfo<MinSig, ed25519::PublicKey>,
         target: Target<mmr::Family, sha256::Digest>,
@@ -521,7 +521,7 @@ mod tests {
     };
     use commonware_glue::dkg::SecretStore as _;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{Runner as _, Supervisor as _};
+    use commonware_runtime::Runner as _;
     use commonware_utils::{N3f1, TestRng, ordered::Set, test_rng};
 
     fn keys(n: usize) -> Vec<ed25519::PublicKey> {

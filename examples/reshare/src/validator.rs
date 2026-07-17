@@ -117,6 +117,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         Quota::per_second(NZU32!(128)),
         MESSAGE_BACKLOG,
     );
+    let p2p_handle = p2p.start();
 
     let (certificate_mux, certificate_mux_handle, certificate_backup) = Muxer::builder(
         context.child("certificate_mux"),
@@ -408,7 +409,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
     anchor_mailbox.attach(marshal.clone());
     probe_mailbox.attach(marshal.clone());
     let stateful_handle = stateful_actor.start();
-    let p2p_handle = p2p.start();
 
     if let Err(err) = try_join_all(vec![
         p2p_handle,
