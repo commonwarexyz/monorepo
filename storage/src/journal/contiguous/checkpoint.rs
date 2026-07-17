@@ -181,20 +181,11 @@ mod tests {
     /// to plant states the production API only produces inside a batch: a boundary hint, or
     /// an undecodable record.
     impl<E: Context> Checkpoint<E> {
-        /// Rewrite the record wholesale and make it durable.
+        /// [Checkpoint::write_into] with an immediately applied batch.
         async fn write(&mut self, record: Record) -> Result<(), Error> {
-            let bytes = record.encode();
-            // Trim any longer previous record before the sync publishes the new one atomically.
-            self.blob
-                .resize(bytes.len() as u64)
-                .await
-                .map_err(Error::Runtime)?;
-            self.blob
-                .write_at_sync(0, bytes)
-                .await
-                .map_err(Error::Runtime)?;
-            self.record = record;
-            Ok(())
+            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+            self.write_into(record, &mut batch).await?;
+            batch.apply_sync().await.map_err(Error::Runtime)
         }
 
         /// [Checkpoint::persist_into] with an immediately applied batch.

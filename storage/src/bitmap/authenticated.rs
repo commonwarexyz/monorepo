@@ -348,8 +348,8 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     }
 
     /// Write the information necessary to restore the bitmap in its fully pruned state at its last
-    /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
-    /// retained elements.
+    /// pruning boundary, in ONE atomic commit. Restoring the entire bitmap state is then possible
+    /// by replaying the retained elements.
     pub async fn write_pruned(&mut self) -> Result<(), Error> {
         let pruned_loc = Location::new(self.bitmap.pruned_chunks() as u64);
         assert!(

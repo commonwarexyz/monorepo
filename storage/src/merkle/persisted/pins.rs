@@ -9,8 +9,9 @@
 //! # Format
 //!
 //! The record is a single codec-encoded blob (blob name `pins` in the configured metadata
-//! partition), rewritten wholesale on every boundary change and then synced. The storage
-//! backend's per-blob atomic sync makes each rewrite an old-record-or-new-record transition.
+//! partition), rewritten wholesale on every boundary change and staged with a batch — the
+//! owner's, or a one-op batch for [Pins::write]. The storage backend's atomic commit makes
+//! each rewrite (its resize and its bytes together) an old-record-or-new-record transition.
 //! An empty blob is a never-pruned record. Any other content must decode exactly — a `u64`
 //! boundary followed by precisely the digests `nodes_to_pin` prescribes for it — or the record
 //! is corrupt.
@@ -121,26 +122,16 @@ impl<F: Family, E: Context, D: Digest> Pins<F, E, D> {
         bytes
     }
 
-    /// Durably rewrite the record wholesale (see [Self::encode] for the `nodes` contract).
+    /// Durably rewrite the record wholesale (see [Self::encode] for the `nodes` contract), in
+    /// ONE atomic commit.
     pub(crate) async fn write(
         &mut self,
         pruned_to: Location<F>,
         nodes: BTreeMap<Position<F>, D>,
     ) -> Result<(), Error<F>> {
-        let bytes = Self::encode(pruned_to, &nodes);
-
-        // Trim any longer previous record before the sync publishes the new one atomically.
-        self.blob
-            .resize(bytes.len() as u64)
-            .await
-            .map_err(Error::Runtime)?;
-        self.blob
-            .write_at_sync(0, bytes)
-            .await
-            .map_err(Error::Runtime)?;
-        self.pruned_to = pruned_to;
-        self.nodes = nodes;
-        Ok(())
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        self.write_into(pruned_to, nodes, &mut batch).await?;
+        batch.apply_sync().await.map_err(Error::Runtime)
     }
 
     /// [Self::write], staged with `batch`: the rewrite lands when the caller applies the
