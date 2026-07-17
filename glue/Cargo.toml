@@ -37,6 +37,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 commonware-broadcast.workspace = true
+commonware-coding.workspace = true
 commonware-codec.workspace = true
 commonware-conformance.workspace = true
 commonware-consensus = { workspace = true, features = ["mocks"] }

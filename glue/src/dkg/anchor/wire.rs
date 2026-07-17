@@ -51,6 +51,16 @@ where
     pub(crate) block: V::Block,
 }
 
+/// Boundary response after decoding the tag and finalization.
+pub(crate) struct ResponseHeader<S, V, R>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+{
+    pub(crate) finalization: Finalization<S, V::Commitment>,
+    pub(crate) body: R,
+}
+
 /// Anchor boundary request/response.
 pub(crate) enum Message<S, V>
 where
@@ -128,15 +138,15 @@ pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Epoch>, Error>
     Ok(Some(Epoch::decode(reader)?))
 }
 
-/// Decode a boundary response.
-pub(crate) fn read_response<S, V>(
-    mut reader: impl Buf,
+/// Decode the tag and finalization of a boundary response.
+pub(crate) fn read_response_finalization<S, V, R>(
+    mut reader: R,
     certificate_cfg: &<S::Certificate as Read>::Cfg,
-    block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
-) -> Result<Option<Response<S, V>>, Error>
+) -> Result<Option<ResponseHeader<S, V, R>>, Error>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
+    R: Buf,
 {
     let tag = Tag::read(&mut reader)?;
     if tag != Tag::Response {
@@ -144,13 +154,29 @@ where
     }
 
     let finalization = Finalization::read_cfg(&mut reader, certificate_cfg)?;
+    Ok(Some(ResponseHeader {
+        finalization,
+        body: reader,
+    }))
+}
+
+/// Decode the block body of a boundary response using an authenticated finalization.
+pub(crate) fn read_response_block<S, V>(
+    reader: impl Buf,
+    finalization: Finalization<S, V::Commitment>,
+    block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+) -> Result<Response<S, V>, Error>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+{
     let block_cfg = V::block_cfg(block_codec_config, finalization.proposal.payload);
     let block = V::Block::decode_cfg(reader, &block_cfg)?;
 
-    Ok(Some(Response {
+    Ok(Response {
         finalization,
         block,
-    }))
+    })
 }
 
 #[cfg(all(test, feature = "arbitrary"))]
