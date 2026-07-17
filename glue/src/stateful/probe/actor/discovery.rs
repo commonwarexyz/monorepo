@@ -207,24 +207,24 @@ where
 
     /// Verifies a [`Finalization`] from `peer`.
     ///
-    /// Peers outside the epoch's participant set or sending invalid finalizations are blocked. If
-    /// no scheme is available for the finalization's epoch, the payload is ignored without blocking
-    /// because it cannot be judged.
+    /// Peers outside the solicited participant set or sending invalid finalizations are blocked.
+    /// If no scheme is available for the finalization's epoch, the payload is ignored without
+    /// blocking because it cannot be judged.
     fn verify_finalization(
         &mut self,
         peer: P,
         finalization: Finalization<S, V::Commitment>,
     ) -> Option<(P, Finalization<S, V::Commitment>)> {
-        let epoch = finalization.epoch();
-        let scheme = self.provider.scheme(epoch)?;
-        if scheme.participants().position(&peer).is_none() {
+        let response_epoch = finalization.epoch();
+        let sample_scheme = self.provider.scheme(self.minimum_epoch)?;
+        if sample_scheme.participants().position(&peer).is_none() {
             commonware_p2p::block!(self.blocker, peer, "finalization sent by non-participant");
             return None;
         }
 
         // Verify against the certificate scheme for the finalization's epoch. If no verifier is
         // available for that epoch, we cannot judge the payload, so ignore it without blocking.
-        let scoped = self.provider.scoped(epoch)?;
+        let scoped = self.provider.scoped(response_epoch)?;
         if !finalization.verify(self.context.as_present_mut(), &scoped, &self.strategy) {
             commonware_p2p::block!(self.blocker, peer, "invalid finalization");
             return None;
@@ -245,7 +245,7 @@ where
             finalizations
                 .values()
                 .fold((None, 0), |(floor, replies), finalization| {
-                    if self.sample_size(finalization.epoch()).is_none() {
+                    if self.provider.scoped(finalization.epoch()).is_none() {
                         return (floor, replies);
                     }
                     let floor = floor
@@ -259,7 +259,7 @@ where
         let Some(floor) = floor else {
             return;
         };
-        let Some(sample_size) = self.sample_size(floor.epoch()) else {
+        let Some(sample_size) = self.sample_size(self.minimum_epoch) else {
             return;
         };
         if replies < sample_size {
