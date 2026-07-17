@@ -141,6 +141,7 @@ mod tests {
     #[test]
     fn test_vec_read_vec_bounds_preallocation() {
         let mut buf = [0u8; 1].as_slice();
+
         // Without the fix, calling read_vec with usize::MAX would call Vec::with_capacity(usize::MAX)
         // and panic (capacity overflow).
         // With the fix, capacity is bounded by buf.remaining() (1), so it doesn't panic.
