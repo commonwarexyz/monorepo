@@ -20,10 +20,16 @@ use commonware_cryptography::{
     ed25519,
 };
 use commonware_macros::select;
-use commonware_p2p::simulated::Link;
+use commonware_p2p::{
+    Manager as _,
+    simulated::{self, Link, Network},
+};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Handle, Quota, Spawner as _, Supervisor as _, deterministic};
-use commonware_utils::{NZU32, NZU64, channel::oneshot, ordered::Set, sync::Mutex};
+use commonware_runtime::{
+    Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
+    telemetry::metrics::count_running_tasks,
+};
+use commonware_utils::{NZU32, NZU64, NZUsize, channel::oneshot, ordered::Set, sync::Mutex};
 use futures::future::pending;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -294,4 +300,84 @@ pub(super) fn good_link() -> Link {
         jitter: Duration::from_millis(5),
         success_rate: 1.0,
     }
+}
+
+pub(super) fn run_closed_network_receiver() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(5));
+    runner.start(|context| async move {
+        let (network, oracle) = Network::<_, ed25519::PublicKey>::new(
+            context.child("network"),
+            simulated::Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            },
+        );
+        network.start();
+
+        let engine = DkgEngine::new(1);
+        let public_key = engine.participant(0);
+        oracle
+            .manager()
+            .track(0, Set::from_iter_dedup(engine.participants()));
+
+        let control = oracle.control(public_key.clone());
+        let mut channels = Vec::new();
+        for (channel, quota) in engine.channels() {
+            channels.push(
+                control
+                    .register(channel, quota)
+                    .await
+                    .expect("channel registration failed"),
+            );
+        }
+
+        let _replacement_broadcast = control
+            .register(BROADCAST, TEST_QUOTA)
+            .await
+            .expect("replacement channel registration failed");
+
+        let store = engine.store(&public_key);
+        let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _>::new(
+            context.child("dkg"),
+            bootstrap::Config {
+                signer: engine.signer(&public_key),
+                manager: oracle.manager(),
+                blocker: oracle.control(public_key),
+                secret_store: store,
+                strategy: Sequential,
+                namespace: NAMESPACE,
+                sharing_mode: Mode::NonZeroCounter,
+                partition_prefix: "dkg-closed-receiver".into(),
+                participants: engine.participants_set(),
+                blocks_per_epoch: EPOCH_LENGTH,
+            },
+        );
+        let (mut handle, completion) = bootstrap.start(
+            channels.remove(0),
+            channels.remove(0),
+            channels.remove(0),
+            channels.remove(0),
+            channels.remove(0),
+            channels.remove(0),
+        );
+
+        select! {
+            result = &mut handle => result.expect("bootstrap should stop cleanly"),
+            _ = context.sleep(Duration::from_secs(1)) => {
+                panic!("bootstrap did not stop after a supplied receiver closed");
+            },
+        }
+
+        assert!(
+            completion.await.is_err(),
+            "closed receiver should not produce DKG completion"
+        );
+        context.sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            count_running_tasks(&context, "dkg"),
+            0,
+            "bootstrap child actors should be canceled"
+        );
+    });
 }

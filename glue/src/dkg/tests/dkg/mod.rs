@@ -4,7 +4,7 @@ mod properties;
 use crate::simulate::action::{Action, Crash, Schedule};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
-use harness::{DkgEngine, good_link, run_plan};
+use harness::{DkgEngine, good_link, run_closed_network_receiver, run_plan};
 use properties::ExpectedOutcome;
 use std::time::Duration;
 
@@ -42,6 +42,11 @@ fn dkg_e2e_filtered_dkg_channel_fails() {
         vec![],
         ExpectedOutcome::Failure,
     );
+}
+
+#[test]
+fn dkg_e2e_closed_network_receiver_stops_engine() {
+    run_closed_network_receiver();
 }
 
 #[test_group("slow")]
