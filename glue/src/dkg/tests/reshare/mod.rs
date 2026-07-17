@@ -1,5 +1,5 @@
 use crate::simulate::{action::Crash, exit::ProcessedHeightAtLeast, plan::PlanBuilder};
-use commonware_consensus::types::{Epoch, FixedEpocher};
+use commonware_consensus::types::{Epoch, Epocher, FixedEpocher};
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
@@ -104,9 +104,13 @@ fn state_sync_next_player_plan(
     let midpoint = FixedEpocher::new(EPOCH_LENGTH)
         .midpoint(next_player_epoch)
         .expect("test epoch should be supported");
-    let sync_floor = midpoint
-        .previous()
-        .expect("midpoint must have a sync floor");
+    let configured_floor = engine.state_sync_floor();
+    let sync_floor = configured_floor.unwrap_or_else(|| {
+        midpoint
+            .previous()
+            .expect("midpoint must have a sync floor")
+    });
+    let max_sync_floor = configured_floor.unwrap_or_else(|| final_height(next_player_epoch.get()));
     let registrations = engine.registrations.clone();
     let state_syncs = engine.state_syncs.clone();
     let schedule = engine.schedule.clone();
@@ -123,7 +127,7 @@ fn state_sync_next_player_plan(
         .property(StateSyncedAtHeight::new(
             delayed.clone(),
             sync_floor,
-            final_height(next_player_epoch.get()),
+            max_sync_floor,
             state_syncs.clone(),
         ))
         .property(StateSyncedSigner::new(
@@ -353,10 +357,13 @@ fn reshare_e2e_multiple_epochs_with_total_shutdown() {
 
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_state_sync_next_player() {
+fn reshare_e2e_state_sync_epoch_first_next_player() {
     let next_player_epoch = Epoch::new(1);
+    let state_sync_floor = FixedEpocher::new(EPOCH_LENGTH)
+        .first(next_player_epoch)
+        .expect("test epoch should be supported");
     state_sync_next_player_plan(
-        ReshareEngine::with_committee(6, 4),
+        ReshareEngine::with_committee(6, 4).with_state_sync_floor(state_sync_floor),
         3,
         5,
         next_player_epoch,
