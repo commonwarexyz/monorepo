@@ -98,7 +98,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, Handle, Quota, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Clock as _, Handle, Quota, Runner, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, ordered::Set};
@@ -157,7 +158,36 @@ mod tests {
             context: &mut deterministic::Context,
             fixture: &mocks::SchemeFixture,
             seed_first: bool,
+            first_state_sync: Option<TestStateSync>,
+        ) -> Self {
+            Self::start_with_fixture_state_sync_and_gate_epoch(
+                context,
+                fixture,
+                seed_first,
+                first_state_sync,
+                Epoch::new(1),
+            )
+            .await
+        }
+
+        async fn start_with_gate_epoch(
+            context: &mut deterministic::Context,
+            fixture: &mocks::SchemeFixture,
+            seed_first: bool,
+            gate_epoch: Epoch,
+        ) -> Self {
+            Self::start_with_fixture_state_sync_and_gate_epoch(
+                context, fixture, seed_first, None, gate_epoch,
+            )
+            .await
+        }
+
+        async fn start_with_fixture_state_sync_and_gate_epoch(
+            context: &mut deterministic::Context,
+            fixture: &mocks::SchemeFixture,
+            seed_first: bool,
             mut first_state_sync: Option<TestStateSync>,
+            gate_epoch: Epoch,
         ) -> Self {
             let participants = fixture.participants.clone();
             let boundary = make_height_one_block(participants[0].clone(), &participants);
@@ -194,13 +224,14 @@ mod tests {
                     None
                 };
                 started.push(
-                    Node::start(
+                    Node::start_with_gate_epoch(
                         context.child("node").with_attribute("index", index),
                         &oracle,
                         fixture,
                         index,
                         boundary,
                         state_sync,
+                        gate_epoch,
                     )
                     .await,
                 );
@@ -238,6 +269,7 @@ mod tests {
     struct Node {
         marshal: mocks::TestMarshalMailbox,
         application: mocks::MockApplication,
+        _fence: Fence,
         orchestrator_handle: Handle<()>,
         certificate_mux_handle: Handle<Result<(), commonware_p2p::simulated::Error>>,
         marshal_handle: Handle<()>,
@@ -251,6 +283,27 @@ mod tests {
             index: usize,
             boundary: Option<mocks::TestBlock>,
             state_sync: Option<TestStateSync>,
+        ) -> Self {
+            Self::start_with_gate_epoch(
+                context,
+                oracle,
+                fixture,
+                index,
+                boundary,
+                state_sync,
+                Epoch::new(1),
+            )
+            .await
+        }
+
+        async fn start_with_gate_epoch(
+            context: deterministic::Context,
+            oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
+            fixture: &mocks::SchemeFixture,
+            index: usize,
+            boundary: Option<mocks::TestBlock>,
+            state_sync: Option<TestStateSync>,
+            gate_epoch: Epoch,
         ) -> Self {
             let public_key = fixture.participants[index].clone();
             let control = oracle.control(public_key.clone());
@@ -322,7 +375,7 @@ mod tests {
             )
             .await;
             let application = mocks::MockApplication::default();
-            let (_fence, gate) = Fence::new(Epoch::new(1));
+            let (fence, gate) = Fence::new(gate_epoch);
             let (actor, mailbox) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -389,6 +442,7 @@ mod tests {
             Self {
                 marshal,
                 application,
+                _fence: fence,
                 orchestrator_handle,
                 certificate_mux_handle,
                 marshal_handle,
@@ -570,6 +624,26 @@ mod tests {
                     panic!("orchestrator stayed alive after active engine stopped");
                 },
             };
+        });
+    }
+
+    #[test]
+    fn shutdown_interrupts_boundary_gate_wait() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 1);
+            let cluster =
+                Cluster::start_with_gate_epoch(&mut context, &fixture, true, Epoch::zero()).await;
+            let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
+            assert_eq!(proposal.round.epoch(), Epoch::zero());
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            context
+                .child("shutdown")
+                .stop(7, Some(Duration::from_secs(1)))
+                .await
+                .expect("shutdown should interrupt the boundary gate wait");
         });
     }
 

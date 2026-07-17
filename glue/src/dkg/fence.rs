@@ -10,10 +10,15 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
 };
+
+/// Epoch producer dropped before the requested epoch became available.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("epoch fence closed")]
+pub struct Closed;
 
 pub struct Fence {
     state: Arc<State>,
@@ -39,6 +44,12 @@ impl Fence {
     }
 }
 
+impl Drop for Fence {
+    fn drop(&mut self) {
+        self.state.close();
+    }
+}
+
 pub struct Gate {
     state: Arc<State>,
 }
@@ -48,6 +59,11 @@ impl Gate {
         self.state.epoch()
     }
 
+    /// Wait for `epoch` to become available.
+    ///
+    /// Returns [`Closed`] if the producer is dropped before the gate reaches the
+    /// requested epoch. Already-reached epochs still resolve successfully after
+    /// closure.
     pub const fn wait(&mut self, epoch: Epoch) -> Waiter<'_> {
         Waiter { gate: self, epoch }
     }
@@ -59,13 +75,17 @@ pub struct Waiter<'a> {
 }
 
 impl Future for Waiter<'_> {
-    type Output = ();
+    type Output = Result<(), Closed>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.gate.state.waker.register(cx.waker());
 
         if self.epoch <= self.gate.state.epoch() {
-            return Poll::Ready(());
+            return Poll::Ready(Ok(()));
+        }
+
+        if self.gate.state.closed.load(Ordering::Acquire) {
+            return Poll::Ready(Err(Closed));
         }
 
         Poll::Pending
@@ -74,6 +94,7 @@ impl Future for Waiter<'_> {
 
 struct State {
     epoch: AtomicU64,
+    closed: AtomicBool,
     waker: AtomicWaker,
 }
 
@@ -81,6 +102,7 @@ impl State {
     const fn new(epoch: Epoch) -> Self {
         Self {
             epoch: AtomicU64::new(epoch.get()),
+            closed: AtomicBool::new(false),
             waker: AtomicWaker::new(),
         }
     }
@@ -97,11 +119,16 @@ impl State {
         }
         latest
     }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.waker.wake();
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Fence;
+    use super::{Closed, Fence};
     use commonware_consensus::types::Epoch;
     use commonware_macros::test_async;
     use futures::task::{ArcWake, waker_ref};
@@ -111,7 +138,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-        task::Context,
+        task::{Context, Poll},
     };
 
     struct WakeCounter(AtomicUsize);
@@ -135,7 +162,7 @@ mod tests {
     #[test_async]
     async fn resolves_immediately_for_ready_epoch() {
         let (_fence, mut gate) = Fence::new(Epoch::new(2));
-        gate.wait(Epoch::new(2)).await;
+        gate.wait(Epoch::new(2)).await.unwrap();
     }
 
     #[test_async]
@@ -145,7 +172,7 @@ mod tests {
         assert_eq!(fence.epoch(), Epoch::new(1));
         assert_eq!(gate.epoch(), Epoch::new(1));
 
-        gate.wait(Epoch::new(1)).await;
+        gate.wait(Epoch::new(1)).await.unwrap();
     }
 
     #[test_async]
@@ -154,11 +181,11 @@ mod tests {
 
         let first = gate.wait(Epoch::new(1));
         fence.mark(Epoch::new(1));
-        first.await;
+        first.await.unwrap();
 
         let second = gate.wait(Epoch::new(2));
         fence.mark(Epoch::new(2));
-        second.await;
+        second.await.unwrap();
     }
 
     #[test]
@@ -181,12 +208,37 @@ mod tests {
         assert!(second_wakes.count() > 0);
     }
 
+    #[test]
+    fn producer_drop_wakes_waiter_with_closed() {
+        let (fence, mut gate) = Fence::new(Epoch::zero());
+        let mut waiter = Box::pin(gate.wait(Epoch::new(1)));
+        let wakes = WakeCounter::new();
+
+        let waker = waker_ref(&wakes);
+        let mut context = Context::from_waker(&waker);
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+
+        drop(fence);
+
+        assert_eq!(wakes.count(), 1);
+        assert_eq!(waiter.as_mut().poll(&mut context), Poll::Ready(Err(Closed)));
+    }
+
+    #[test_async]
+    async fn ready_epoch_still_resolves_after_producer_drop() {
+        let (fence, mut gate) = Fence::new(Epoch::new(1));
+
+        drop(fence);
+
+        gate.wait(Epoch::new(1)).await.unwrap();
+    }
+
     #[test_async]
     async fn mark_does_not_regress_epoch() {
         let (fence, mut gate) = Fence::new(Epoch::new(2));
 
         assert_eq!(fence.mark(Epoch::new(1)), Epoch::new(2));
         assert_eq!(fence.epoch(), Epoch::new(2));
-        gate.wait(Epoch::new(2)).await;
+        gate.wait(Epoch::new(2)).await.unwrap();
     }
 }
