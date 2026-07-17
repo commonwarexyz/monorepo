@@ -7285,6 +7285,9 @@ mod tests {
             //    a. Certification of view 4 to succeed (impossible - no context)
             //    b. A nullification certificate for view 4 (impossible - only f votes)
             //    c. A finalization certificate (requires Byzantine to vote finalize)
+            // Use a fixed deadline: timeout retries re-send the nullify vote every
+            // second, which would otherwise restart a per-iteration sleep forever.
+            let deadline = context.current() + Duration::from_secs(5);
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
@@ -7303,7 +7306,7 @@ mod tests {
                             _ => {}
                         }
                     },
-                    _ = context.sleep(Duration::from_secs(5)) => {
+                    _ = context.sleep_until(deadline) => {
                         break false;
                     },
                 }
@@ -7327,6 +7330,7 @@ mod tests {
             mailbox.resolved(Certificate::Finalization(finalization_5));
 
             // Now the validator SHOULD advance (finalization aborts stuck certification)
+            let deadline = context.current() + Duration::from_secs(5);
             let rescued = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
@@ -7336,7 +7340,7 @@ mod tests {
                             break true;
                         }
                     },
-                    _ = context.sleep(Duration::from_secs(5)) => {
+                    _ = context.sleep_until(deadline) => {
                         break false;
                     },
                 }
