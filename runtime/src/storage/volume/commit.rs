@@ -17,7 +17,7 @@
 
 use super::{
     alloc::{block_align, Extent},
-    core::{chunk_of, BlobCore, ChunkCrc, Ready},
+    core::{chunk_of, BlobCore, ChunkCrc, CommittedMeta, Ready},
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
     BLOCK,
 };
@@ -25,6 +25,13 @@ use crate::{Blob as _, Error, IoBuf};
 use bytes::Bytes;
 use commonware_cryptography::Crc32;
 use std::{collections::BTreeSet, sync::Arc};
+
+/// Cap on a blob's checksum refs: an append-shaped commit that would exceed
+/// it rewrites the full array as one ref instead (compaction). Bounds the
+/// table entry's ref list and the block-alignment slack of small delta
+/// extents, while amortizing full-array rewrites to at most one per this
+/// many append-shaped commits.
+pub(super) const MAX_CHECKSUM_REFS: usize = 16;
 
 /// A planned write for the commit's WRITE phase.
 struct MetaWrite {
@@ -148,7 +155,7 @@ async fn take_snapshot<S: crate::Storage>(
         // issued bytes; released before any I/O below (the capture is a
         // value snapshot, and the freeze boundary protects it thereafter).
         let write_guard = blob.write_lock.lock().await;
-        let (entry, dirty_chunks, cksum_bytes, shadow_bytes, superseded) = {
+        let (entry, dirty_chunks, array_start, cksum_bytes, shadow_bytes, retained, superseded) = {
             let mut state = ready.state.lock();
             let mut inner = blob.inner.lock();
             if inner.removed {
@@ -188,17 +195,53 @@ async fn take_snapshot<S: crate::Storage>(
                 state.defer_free(extent, seq, None);
             }
 
-            // Dense chunk CRC array over [0, last backed chunk]; hole
-            // positions are never consulted (holes are identified from the
-            // runs, not the array).
             let last_backed = inner
                 .runs
                 .iter()
                 .next_back()
                 .map(|(&l, r)| chunk_of(l + r.len - 1));
-            let cksum_bytes: Vec<u8> = last_backed.map_or_else(Vec::new, |last| {
-                let mut bytes = Vec::with_capacity(((last + 1) * 4) as usize);
-                for c in 0..=last {
+
+            // Chunk coverage the checksum refs must provide: every backed
+            // chunk below the frontier, plus the frontier itself when it is
+            // a FULL chunk (a partial frontier is served by `tail_crc`, so
+            // coverage stops below it). Hole positions inside the covered
+            // range are never consulted (holes are identified from the
+            // runs, not the array).
+            let covered_end = last_backed.map_or(0, |last| {
+                let (_, span) = inner.chunk_span(last).expect("backed chunk");
+                if span == BLOCK {
+                    last + 1
+                } else {
+                    last
+                }
+            });
+
+            // Append-shaped dirt leaves every previously covered chunk's
+            // CRC valid: extend coverage with one NEW delta ref and keep
+            // the prior refs (and their extents) untouched, so a bulk-load
+            // sync stops rewriting the blob's whole array. Anything else —
+            // dirt below the covered frontier (overwrite, COW, shrink),
+            // coverage shrinking (rewind), or a full ref list — rewrites
+            // the array as a single ref, which also keeps refs disjoint
+            // and contiguous from chunk 0 (compaction).
+            let prev_refs = inner
+                .committed_entry
+                .as_ref()
+                .map_or(&[][..], |e| &e.checksums[..]);
+            let prev_end = prev_refs
+                .last()
+                .map_or(0, |r| r.first_chunk + r.count as u64);
+            let delta = covered_end >= prev_end
+                && prev_refs.len() < MAX_CHECKSUM_REFS
+                && dirty_chunks.first().is_none_or(|&c| c >= prev_end);
+            let (array_start, checksums) = if delta {
+                (prev_end, prev_refs.to_vec())
+            } else {
+                (0, Vec::new())
+            };
+            let cksum_bytes: Vec<u8> = {
+                let mut bytes = Vec::with_capacity(((covered_end - array_start) * 4) as usize);
+                for c in array_start..covered_end {
                     let crc = inner.crcs.get(&c).map_or(0, |s| match s.crc {
                         ChunkCrc::Ready(crc) => crc,
                         // Finalized above (every pending chunk is resident).
@@ -207,7 +250,7 @@ async fn take_snapshot<S: crate::Storage>(
                     bytes.extend_from_slice(&crc.to_be_bytes());
                 }
                 bytes
-            });
+            };
 
             // Shadow: the frontier chunk's span, when partial (post-commit
             // appends will write into its block in place; recovery restores
@@ -239,9 +282,25 @@ async fn take_snapshot<S: crate::Storage>(
                 })
                 .collect();
 
-            // Extents referenced by the PREVIOUS entry for this blob are
-            // superseded once this commit confirms.
-            let superseded = state.committed_meta.remove(&id).unwrap_or_default();
+            // Extents the new entry stops referencing, freed once this
+            // commit confirms: the previous shadow always (each commit that
+            // needs one writes a fresh block), the previous checksum
+            // extents only on a full rewrite (a delta commit keeps
+            // referencing them).
+            let mut prev_meta = state.committed_meta.remove(&id).unwrap_or_default();
+            debug_assert_eq!(
+                prev_meta.checksums.len(),
+                prev_refs.len(),
+                "committed_meta out of sync with the committed entry"
+            );
+            let mut superseded: Vec<Extent> = Vec::new();
+            superseded.extend(prev_meta.shadow.take());
+            let retained = if delta {
+                std::mem::take(&mut prev_meta.checksums)
+            } else {
+                superseded.append(&mut prev_meta.checksums);
+                Vec::new()
+            };
 
             let entry = Entry {
                 id,
@@ -250,24 +309,35 @@ async fn take_snapshot<S: crate::Storage>(
                 version: blob.version,
                 size: inner.size,
                 runs,
-                checksums: Vec::new(), // filled after allocation below
+                checksums, // retained refs (a new delta/full ref is pushed below)
                 tail_crc,
                 shadow: None, // filled after allocation below
             };
-            (entry, dirty_chunks, cksum_bytes, shadow_bytes, superseded)
+            (
+                entry,
+                dirty_chunks,
+                array_start,
+                cksum_bytes,
+                shadow_bytes,
+                retained,
+                superseded,
+            )
         };
         drop(write_guard);
 
         // Allocate + stage checksum/shadow writes.
         let mut entry = entry;
-        let mut meta_extents = Vec::new();
+        let mut meta = CommittedMeta {
+            checksums: retained,
+            shadow: None,
+        };
         if !cksum_bytes.is_empty() {
             let extent = {
                 let mut state = ready.state.lock();
                 state.alloc.allocate(block_align(cksum_bytes.len() as u64))
             };
             entry.checksums.push(ChecksumRef {
-                first_chunk: 0,
+                first_chunk: array_start,
                 count: (cksum_bytes.len() / 4) as u32,
                 offset: extent.offset,
                 crc: Crc32::checksum(&cksum_bytes),
@@ -276,7 +346,7 @@ async fn take_snapshot<S: crate::Storage>(
                 physical: extent.offset,
                 bytes: cksum_bytes,
             });
-            meta_extents.push(extent);
+            meta.checksums.push(extent);
         }
         if let Some(shadow) = shadow_bytes {
             let extent = {
@@ -288,7 +358,7 @@ async fn take_snapshot<S: crate::Storage>(
                 physical: extent.offset,
                 bytes: shadow,
             });
-            meta_extents.push(extent);
+            meta.shadow = Some(extent);
         }
         for chunk in dirty_chunks {
             manifest.push((id, chunk));
@@ -298,7 +368,7 @@ async fn take_snapshot<S: crate::Storage>(
             for extent in superseded {
                 state.defer_free(extent, seq, None);
             }
-            state.committed_meta.insert(id, meta_extents);
+            state.committed_meta.insert(id, meta);
         }
         committed.push((blob, entry));
     }

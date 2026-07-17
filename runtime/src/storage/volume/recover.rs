@@ -25,7 +25,7 @@
 
 use super::{
     alloc::{block_align, Allocator, Extent},
-    core::{chunk_of, BlobInner, ChunkCrc, ChunkState, Ready, RunMeta, State},
+    core::{chunk_of, BlobInner, ChunkCrc, ChunkState, CommittedMeta, Ready, RunMeta, State},
     layout::{Entry, Superblock, Table},
     Config, BLOCK,
 };
@@ -138,7 +138,17 @@ impl ChecksumIndex {
 }
 
 /// Verify a candidate table's delta manifest against the disk.
-async fn verify_manifest<B: crate::Blob>(file: &B, len: u64, table: &Table) -> Result<bool, Error> {
+///
+/// On success, returns the non-frontier chunks whose ON-DISK bytes this
+/// verification CRC-checked, as (blob id, chunk) pairs: hydration seeds
+/// their verified bits so first reads skip re-verification (frontier chunks
+/// are excluded — hydration re-verifies the frontier itself when it loads
+/// the tail buffer). `None` means the manifest failed to verify.
+async fn verify_manifest<B: crate::Blob>(
+    file: &B,
+    len: u64,
+    table: &Table,
+) -> Result<Option<Vec<(u64, u64)>>, Error> {
     // Load + verify the checksum extents of every manifested blob up front.
     let mut indexes: BTreeMap<u64, ChecksumIndex> = BTreeMap::new();
     for &(id, _) in &table.manifest {
@@ -149,11 +159,12 @@ async fn verify_manifest<B: crate::Blob>(file: &B, len: u64, table: &Table) -> R
             continue;
         }
         let Some(loaded) = ChecksumIndex::load(file, entry, len).await? else {
-            return Ok(false); // torn checksum extent
+            return Ok(None); // torn checksum extent
         };
         indexes.insert(id, loaded);
     }
 
+    let mut verified = Vec::new();
     for &(id, chunk) in &table.manifest {
         let Some(entry) = table.blobs.iter().find(|e| e.id == id) else {
             continue; // blob removed by this commit
@@ -162,7 +173,7 @@ async fn verify_manifest<B: crate::Blob>(file: &B, len: u64, table: &Table) -> R
             continue; // became a hole
         };
         if phys + span > len {
-            return Ok(false); // backing never landed
+            return Ok(None); // backing never landed
         }
         let frontier = entry_last_chunk(entry) == Some(chunk) && span < BLOCK;
 
@@ -173,7 +184,7 @@ async fn verify_manifest<B: crate::Blob>(file: &B, len: u64, table: &Table) -> R
         } else {
             match indexes.get(&id).expect("preloaded").get(chunk) {
                 Some(crc) => crc,
-                None => return Ok(false),
+                None => return Ok(None),
             }
         };
 
@@ -183,11 +194,11 @@ async fn verify_manifest<B: crate::Blob>(file: &B, len: u64, table: &Table) -> R
         if frontier {
             if let Some(shadow) = entry.shadow {
                 if shadow + span > len {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 let bytes = file.read_at(shadow, span as usize).await?.coalesce();
                 if Crc32::checksum(bytes.as_ref()) != expected {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 continue;
             }
@@ -195,10 +206,13 @@ async fn verify_manifest<B: crate::Blob>(file: &B, len: u64, table: &Table) -> R
 
         let bytes = file.read_at(phys, span as usize).await?.coalesce();
         if Crc32::checksum(bytes.as_ref()) != expected {
-            return Ok(false);
+            return Ok(None);
+        }
+        if !frontier {
+            verified.push((id, chunk));
         }
     }
-    Ok(true)
+    Ok(Some(verified))
 }
 
 /// Run recovery over the volume file and build the ready state.
@@ -236,14 +250,22 @@ pub(super) async fn recover<S: crate::Storage>(
 
     let mut adopted: Option<(u8, Superblock, Table)> = None;
     let mut losing_slot: Option<(u8, u64)> = None;
+    // Chunks the adopted slot's manifest verification CRC-checked on disk,
+    // seeded into hydration so first reads skip re-verification.
+    let mut recovery_verified: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for (idx, (slot, sb)) in slots.iter().enumerate() {
         let is_candidate = idx == 0 && slots.len() == 2;
         let table = match read_table(&file, len, sb).await? {
-            Some(table) if verify_manifest(&file, len, &table).await? => Some(table),
-            _ => None,
+            Some(table) => verify_manifest(&file, len, &table)
+                .await?
+                .map(|verified| (table, verified)),
+            None => None,
         };
         match table {
-            Some(table) => {
+            Some((table, verified)) => {
+                for (id, chunk) in verified {
+                    recovery_verified.entry(id).or_default().push(chunk);
+                }
                 adopted = Some((*slot, sb.clone(), table));
                 break;
             }
@@ -330,7 +352,7 @@ pub(super) async fn recover<S: crate::Storage>(
             .get_mut(partition)
             .expect("partition exists")
             .insert(entry.name.clone(), entry.id);
-        let mut meta = Vec::new();
+        let mut meta = CommittedMeta::default();
         for r in &entry.runs {
             used.push(Extent {
                 offset: r.physical,
@@ -343,7 +365,7 @@ pub(super) async fn recover<S: crate::Storage>(
                 len: block_align(c.count as u64 * 4),
             };
             used.push(extent);
-            meta.push(extent);
+            meta.checksums.push(extent);
         }
         if let Some(shadow) = entry.shadow {
             let extent = Extent {
@@ -351,7 +373,7 @@ pub(super) async fn recover<S: crate::Storage>(
                 len: BLOCK,
             };
             used.push(extent);
-            meta.push(extent);
+            meta.shadow = Some(extent);
         }
         committed_meta.insert(entry.id, meta);
         dormant.insert(entry.id, (partition.clone(), entry.clone()));
@@ -373,6 +395,7 @@ pub(super) async fn recover<S: crate::Storage>(
             len: block_align(sb.table_len as u64),
         }),
         committed_meta,
+        recovery_verified,
         next_id: table.next_id,
         dirty: Default::default(),
         meta_dirty: false,
@@ -440,6 +463,7 @@ async fn init_fresh<S: crate::Storage>(
         sacred_slot: 0,
         table_extent: Some(table_extent),
         committed_meta: BTreeMap::new(),
+        recovery_verified: BTreeMap::new(),
         next_id: 0,
         dirty: Default::default(),
         meta_dirty: false,
@@ -520,6 +544,16 @@ pub(super) async fn hydrate<S: crate::Storage>(
                     verified: false,
                 },
             );
+        }
+        // Except chunks recovery itself CRC-checked while verifying the
+        // adopted commit's delta manifest: their on-disk bytes are known to
+        // match these same CRCs (nothing can write a dormant blob between
+        // recovery and hydration), so first reads skip re-verification.
+        let seeded = ready.state.lock().recovery_verified.remove(&entry.id);
+        for chunk in seeded.into_iter().flatten() {
+            if let Some(state) = inner.crcs.get_mut(&chunk) {
+                state.verified = true;
+            }
         }
         // Load + verify the frontier span into the tail buffer.
         let (phys, span) = entry_chunk_span(entry, last).unwrap();

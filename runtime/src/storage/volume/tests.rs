@@ -2055,3 +2055,199 @@ async fn test_volume_growth_quantum_crash_recovery() {
         assert!(got.as_ref().iter().all(|&x| x == 5), "seed {seed}");
     }
 }
+
+/// The committed entry's checksum refs for `blob`: (first_chunk, count).
+fn committed_refs<S: crate::Storage>(blob: &super::Blob<S>) -> Vec<(u64, u32)> {
+    blob.core
+        .inner
+        .lock()
+        .committed_entry
+        .as_ref()
+        .map_or_else(Vec::new, |e| {
+            e.checksums
+                .iter()
+                .map(|c| (c.first_chunk, c.count))
+                .collect()
+        })
+}
+
+/// Append-shaped syncs append ONE delta checksum ref per commit and keep the
+/// prior refs (and their extents) untouched. An overwrite below the covered
+/// frontier rewrites the array as a single ref, freeing the old extents
+/// exactly once. Content round-trips through reopen (multi-ref hydration)
+/// in both shapes.
+#[tokio::test]
+async fn test_volume_delta_checksum_refs() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"log").await.unwrap();
+    let mut expected: Vec<u8> = Vec::new();
+    for i in 0..4u64 {
+        let piece = vec![i as u8 + 1; 2 * BLOCK as usize];
+        blob.write_at(expected.len() as u64, IoBuf::copy_from_slice(&piece))
+            .await
+            .unwrap();
+        expected.extend_from_slice(&piece);
+        blob.sync().await.unwrap();
+        let refs = committed_refs(&blob);
+        assert_eq!(refs.len(), i as usize + 1, "one delta ref per sync");
+        assert_eq!(refs[i as usize], (i * 2, 2), "delta covers only new chunks");
+    }
+    drop(blob);
+    drop(volume);
+
+    // Reopen: hydration resolves chunk CRCs across all four refs.
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, size) = volume.open("p", b"log").await.unwrap();
+    assert_eq!(size, expected.len() as u64);
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+
+    // Overwrite below the covered frontier: full rewrite to ONE ref.
+    blob.write_at(0, IoBuf::copy_from_slice(&[9u8; 10]))
+        .await
+        .unwrap();
+    expected[..10].copy_from_slice(&[9u8; 10]);
+    blob.sync().await.unwrap();
+    assert_eq!(committed_refs(&blob), vec![(0, 8)]);
+    drop(blob);
+    drop(volume);
+
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, _) = volume.open("p", b"log").await.unwrap();
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+}
+
+/// Syncs whose dirt stays inside the partial frontier chunk write NO
+/// checksum array at all (the frontier is served by the entry's tail CRC);
+/// coverage starts once the blob grows past it.
+#[tokio::test]
+async fn test_volume_partial_frontier_needs_no_checksum_ref() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"log").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[1u8; 100]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    assert_eq!(committed_refs(&blob), vec![]);
+    blob.write_at(100, IoBuf::copy_from_slice(&[2u8; 100]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    assert_eq!(committed_refs(&blob), vec![]);
+    drop(blob);
+    drop(volume);
+
+    // Reopen: the frontier chunk is served by the tail CRC alone.
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, size) = volume.open("p", b"log").await.unwrap();
+    assert_eq!(size, 200);
+    let got = blob.read_at(0, 200).await.unwrap().coalesce();
+    assert_eq!(&got.as_ref()[..100], &[1u8; 100][..]);
+    assert_eq!(&got.as_ref()[100..], &[2u8; 100][..]);
+
+    // Growing past the chunk creates the first ref, covering the chunks
+    // the frontier vacated.
+    blob.write_at(200, IoBuf::copy_from_slice(&vec![3u8; 2 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    assert_eq!(committed_refs(&blob), vec![(0, 2)]);
+}
+
+/// The ref list is bounded: the append-shaped commit that would exceed
+/// [`super::commit::MAX_CHECKSUM_REFS`] compacts the array back to one ref,
+/// and content still round-trips through reopen.
+#[tokio::test]
+async fn test_volume_checksum_ref_compaction() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let bound = super::commit::MAX_CHECKSUM_REFS;
+
+    let (blob, _) = volume.open("p", b"log").await.unwrap();
+    for i in 0..(bound + 4) as u64 {
+        blob.write_at(
+            i * BLOCK,
+            IoBuf::copy_from_slice(&vec![i as u8; BLOCK as usize]),
+        )
+        .await
+        .unwrap();
+        blob.sync().await.unwrap();
+        let refs = committed_refs(&blob);
+        assert!(refs.len() <= bound, "sync {i}: {} refs", refs.len());
+        let expected = if i < bound as u64 {
+            i as usize + 1
+        } else if i == bound as u64 {
+            1 // compaction: the full list would exceed the bound
+        } else {
+            (i - bound as u64) as usize + 1
+        };
+        assert_eq!(refs.len(), expected, "sync {i}");
+    }
+    drop(blob);
+    drop(volume);
+
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"log").await.unwrap();
+    assert_eq!(size, (bound + 4) as u64 * BLOCK);
+    for i in 0..(bound + 4) as u64 {
+        let got = blob.read_at(i * BLOCK, BLOCK as usize).await.unwrap();
+        assert!(
+            got.coalesce().as_ref().iter().all(|&x| x == i as u8),
+            "chunk {i}"
+        );
+    }
+}
+
+/// Recovery's delta-manifest verification seeds the verified bits of the
+/// chunks it CRC-checked, so their first read after reopen skips the
+/// widened verification read (exact-length inner read instead).
+#[tokio::test]
+async fn test_volume_recovery_seeds_verified_chunks() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+
+    let (blob, _) = volume.open("p", b"d").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![7u8; 4 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+
+    // Reopen: the adopted commit's manifest covers chunks 0-3, all of which
+    // recovery just CRC-checked on disk.
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"d").await.unwrap();
+    {
+        let inner = blob.core.inner.lock();
+        for chunk in 0..4u64 {
+            assert!(
+                inner.crcs.get(&chunk).unwrap().verified,
+                "chunk {chunk} must be seeded verified"
+            );
+        }
+    }
+
+    // Behavioral pin: a sub-chunk read of a seeded chunk is ONE exact-length
+    // inner read, not a widened whole-span verification read.
+    let reads_before = recording.reads();
+    let got = blob.read_at(BLOCK + 100, 50).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[7u8; 50][..]);
+    let log = recording.log.lock();
+    let new_reads: Vec<_> = log
+        .iter()
+        .filter(|(w, _, _)| !*w)
+        .skip(reads_before)
+        .collect();
+    assert_eq!(new_reads.len(), 1, "one inner read: {new_reads:?}");
+    assert_eq!(new_reads[0].2, 50, "seeded chunk read exactly, not widened");
+}

@@ -255,6 +255,25 @@ impl BlobInner {
     }
 }
 
+/// Metadata extents referenced by a blob's last confirmed table entry:
+/// one extent per checksum ref (parallel to the entry's `checksums`), plus
+/// the shadow block. Tracked so a commit that supersedes a piece of the
+/// entry frees exactly the extents the new entry stops referencing: the
+/// shadow is rewritten every commit, while checksum extents survive delta
+/// commits and are freed only by a full rewrite (or removal).
+#[derive(Debug, Default)]
+pub(super) struct CommittedMeta {
+    pub checksums: Vec<Extent>,
+    pub shadow: Option<Extent>,
+}
+
+impl CommittedMeta {
+    /// All extents, for wholesale release on removal.
+    pub fn into_extents(self) -> impl Iterator<Item = Extent> {
+        self.checksums.into_iter().chain(self.shadow)
+    }
+}
+
 /// A blob shared between open handles and the volume state.
 #[derive(Debug)]
 pub(super) struct BlobCore {
@@ -294,7 +313,11 @@ pub(super) struct State {
     pub table_extent: Option<Extent>,
     /// Checksum/shadow extents referenced by the last confirmed table, per
     /// blob id (freed when a newer entry supersedes them).
-    pub committed_meta: BTreeMap<u64, Vec<Extent>>,
+    pub committed_meta: BTreeMap<u64, CommittedMeta>,
+    /// Chunks recovery CRC-checked while verifying the adopted commit's
+    /// delta manifest, per blob id. Consumed at hydration to seed verified
+    /// bits so first reads skip re-verification.
+    pub recovery_verified: BTreeMap<u64, Vec<u64>>,
     /// Next blob id (persisted; never reused).
     pub next_id: u64,
     /// Blob ids with uncommitted content changes.

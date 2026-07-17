@@ -104,6 +104,14 @@ pub(super) struct Run {
 
 /// A checksum extent: CRC32Cs for `count` consecutive chunks starting at
 /// `first_chunk`, stored at `offset`, guarded by `crc` over its bytes.
+///
+/// An entry's refs are disjoint and contiguous from chunk 0, and together
+/// cover every backed chunk below the frontier plus a FULL frontier chunk
+/// (a partial frontier chunk is served by the entry's `tail_crc` instead).
+/// Hole positions inside the covered range hold arbitrary values and are
+/// never consulted. An append-shaped commit extends coverage by appending
+/// one new ref and keeps the prior refs' extents untouched. Any other dirt
+/// shape rewrites the whole array as a single ref (see the commit module).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ChecksumRef {
     pub first_chunk: u64,

@@ -12,9 +12,10 @@
 //! > covers the CAPTURED blobs: the synced blob (or the applying batch's
 //! > blobs), expanded across applied-batch groups so an applied [`Batch`]
 //! > is never split across commits. Reads are CRC32C-verified: each chunk
-//! > is checked on its first read every process lifetime (chunks written
-//! > this process are verified by construction), and a mismatch is loud
-//! > corruption, never silent truncation.
+//! > is checked once per process lifetime — on its first read, by
+//! > construction for chunks written this process, or by recovery's own
+//! > manifest verification — and a mismatch is loud corruption, never
+//! > silent truncation.
 //!
 //! Every runtime serves ALL storage through a volume over its platform
 //! backend, so this is the crash contract of every runtime context.
@@ -523,7 +524,7 @@ fn unlink(state: &mut core::State, id: u64) {
         state.dirty.remove(&id);
         // Committed metadata extents (checksums + shadow).
         if let Some(meta) = state.committed_meta.remove(&id) {
-            for extent in meta {
+            for extent in meta.into_extents() {
                 state.pending_free.push((extent, seq, gate));
             }
         }
@@ -544,11 +545,12 @@ fn unlink(state: &mut core::State, id: u64) {
             ));
         }
         if let Some(meta) = state.committed_meta.remove(&id) {
-            for extent in meta {
+            for extent in meta.into_extents() {
                 state.pending_free.push((extent, seq, None));
             }
         }
     }
+    state.recovery_verified.remove(&id);
 }
 
 impl<S: crate::Storage> crate::Blob for Blob<S> {
