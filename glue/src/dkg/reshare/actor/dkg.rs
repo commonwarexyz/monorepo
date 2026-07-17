@@ -131,6 +131,9 @@ where
         snapshot
             .validate::<V>(self.max_participants, None, 0)
             .expect("DKG participants must be valid");
+        snapshot
+            .validate_epoch_capacity::<V>(self.blocks_per_epoch, None)
+            .expect("DKG epoch must have enough dealer-log slots");
 
         let seed = store
             .seed_or_random(Epoch::zero(), self.context.as_present_mut())

@@ -131,6 +131,9 @@ where
         participants
             .validate(self.max_participants, Some(&info.output), round)
             .expect("boundary epoch participants must be valid");
+        participants
+            .validate_epoch_capacity(self.blocks_per_epoch, Some(&info.output))
+            .expect("boundary epoch must have enough dealer-log slots");
 
         let share = self.recovered_share(store, &info).await;
         let seed = store

@@ -12,7 +12,7 @@ use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
     reshare::{self, DkgConfig},
-    types::{EpochInfo, Payload, SchemeInfo},
+    types::{EpochInfo, Participants, Payload, SchemeInfo},
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -311,10 +311,13 @@ where
             !self.config.participants.is_empty(),
             "DKG requires at least one participant"
         );
-        assert!(
-            self.config.blocks_per_epoch.get() >= 4,
-            "DKG epoch must have at least four blocks"
-        );
+        Participants {
+            dealers: self.config.participants.clone(),
+            players: self.config.participants.clone(),
+            next_players: Set::default(),
+        }
+        .validate_epoch_capacity::<V>(self.config.blocks_per_epoch, None)
+        .expect("DKG epoch must have enough dealer-log slots");
         let participants = self
             .config
             .participants
