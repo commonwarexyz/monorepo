@@ -162,8 +162,9 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
     ///
     /// Writes value to glob first, then writes index entry with the value location. An
     /// append that opens a fresh section stages both journals' blob creation in one
-    /// atomic batch, so a crash can never leave one journal's section blob without the
-    /// other.
+    /// atomic creation-only batch, published without a commit: a crash can never leave
+    /// one journal's section blob without the other, and the creations become durable
+    /// (together) at the next commit instead of costing one of their own.
     ///
     /// Returns `(position, offset, size)` where:
     /// - `position`: Position in the index journal
@@ -175,10 +176,14 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
         entry: I,
         value: &V,
     ) -> Result<(u64, u64, u32), Error> {
-        // Create any missing section blob in one commit. Either journal may already hold
-        // the section (e.g. a glob section orphaned by a rewind crash), so only the
-        // missing side is created. The glob is staged before the index so a sequentially
-        // replayed batch (the test-only mock fallback) creates the value store first.
+        // Create any missing section blob in one creation-only batch, published
+        // WITHOUT a commit: both blobs' entries land together at whatever commit
+        // comes next (every commit emits every live blob's entry), or vanish
+        // together on a crash before one. Either journal may already hold the
+        // section (e.g. a glob section orphaned by a rewind crash), so only the
+        // missing side is created. The glob is staged before the index so a
+        // sequentially replayed batch (the test-only mock fallback) creates the
+        // value store first.
         let create_values = !self.values.contains(section)?;
         let create_index = !self.index.contains(section)?;
         if create_values || create_index {
@@ -189,7 +194,7 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
             if create_index {
                 self.index.create_into(section, &mut batch).await?;
             }
-            batch.apply_sync().await?;
+            batch.apply().await?;
         }
 
         // Write value first (glob). This will typically write to an in-memory
@@ -710,10 +715,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fresh_section_creation_survives_crash() {
-        // An append that opens a fresh section commits both journals' blobs in one
-        // batch, so after a crash (before any sync) the section exists in BOTH journals,
-        // empty.
+    fn test_fresh_section_creation_erased_by_crash() {
+        // An append that opens a fresh section publishes both journals' blobs in one
+        // creation-only batch WITHOUT a commit, so after a crash (before any commit)
+        // the section exists in NEITHER journal — never one without the other.
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let cfg = test_cfg(&context);
@@ -727,7 +732,7 @@ mod tests {
                 .append(1, TestEntry::new(7, 0, 0), &value)
                 .await
                 .expect("Failed to append");
-            // No sync: the appended data is lost to the crash, the creation is not.
+            // No sync: the crash erases the appended data AND both creations.
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
@@ -737,13 +742,11 @@ mod tests {
                     .await
                     .expect("Failed to reinit");
 
-            // Both journals hold the (empty) section.
-            assert_eq!(oversized.oldest_section(), Some(1));
-            assert_eq!(oversized.newest_section(), Some(1));
-            assert_eq!(oversized.size(1).unwrap(), 0);
-            assert_eq!(oversized.value_size(1).await.unwrap(), 0);
+            // Neither journal holds the section.
+            assert_eq!(oversized.oldest_section(), None);
+            assert_eq!(oversized.newest_section(), None);
 
-            // The section remains appendable.
+            // A fresh append recreates it.
             let value: TestValue = [8; 16];
             let (pos, offset, size) = oversized
                 .append(1, TestEntry::new(8, 0, 0), &value)
@@ -752,6 +755,53 @@ mod tests {
             assert_eq!(pos, 0);
             oversized.sync(1).await.expect("Failed to sync");
             assert_eq!(oversized.get_value(1, offset, size).await.unwrap(), value);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_fresh_section_creation_lands_with_next_commit() {
+        // A commit-free section creation becomes durable — empty, in BOTH journals —
+        // at the next commit, here a sync rooted at an OLDER section.
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [7; 16];
+            oversized
+                .append(1, TestEntry::new(7, 0, 0), &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+
+            // Open section 2 (commit-free creation), then commit section 1 again:
+            // section 2's creation lands with that commit, its unsynced data does not.
+            oversized
+                .append(2, TestEntry::new(9, 0, 0), &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_cfg(&context);
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("recovered"), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // Section 1 kept its synced entry. Section 2 exists empty in both
+            // journals.
+            assert_eq!(oversized.oldest_section(), Some(1));
+            assert_eq!(oversized.newest_section(), Some(2));
+            assert!(oversized.get(1, 0).await.is_ok());
+            assert_eq!(oversized.size(2).unwrap(), 0);
+            assert_eq!(oversized.value_size(2).await.unwrap(), 0);
 
             oversized.destroy().await.expect("Failed to destroy");
         });

@@ -292,10 +292,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Stage the creation of a section's blob with `batch` and track it.
     ///
-    /// The blob exists (empty, durable) once the caller applies the batch with
-    /// [WriteBatch::apply_sync]. Until then the tracked buffer must not be read
-    /// or written, so the caller must apply the batch before any other
-    /// operation touches the section.
+    /// The blob exists (empty) once the caller applies the batch: durable with
+    /// the batch's own commit under [WriteBatch::apply_sync], or — for a batch
+    /// staging only creations, published with [WriteBatch::apply] — durable at
+    /// the backend's next commit. Until the batch applies the tracked buffer
+    /// must not be read or written, so the caller must apply the batch before
+    /// any other operation touches the section.
     ///
     /// # Panics
     ///

@@ -8,7 +8,8 @@
 //! > state captured by one commit: the last confirmed commit (whose sync
 //! > returned), or a newer fully-landed one (legal roll-forward). A commit
 //! > happens on any [`crate::Blob::sync`] / [`crate::Blob::write_at_sync`],
-//! > on blob creation/removal, and on [`Batch::apply_sync`]. It atomically
+//! > on [`crate::Storage`] blob creation/removal, and on
+//! > [`Batch::apply_sync`]. It atomically
 //! > covers the CAPTURED blobs: the synced blob (or the applying batch's
 //! > blobs), expanded across applied-batch groups so an applied [`Batch`]
 //! > is never split across commits. Reads are CRC32C-verified: each chunk
@@ -53,8 +54,12 @@
 //! staged bytes; [`Batch::apply`] publishes in RAM under the commit lock,
 //! and [`Batch::apply_sync`] additionally commits. Batches also stage
 //! namespace changes — [`Batch::remove`] and [`Batch::create`] — which
-//! publish and commit with the batch (both require [`Batch::apply_sync`]).
-//! A batch dropped without apply (or lost to a crash) never happened.
+//! publish and commit with the batch. Removals (and creations staged
+//! alongside anything else) require [`Batch::apply_sync`]. A batch staging
+//! ONLY creations publishes with plain [`Batch::apply`], its creations
+//! becoming durable together at the next commit — or erased together by a
+//! crash before one. A batch dropped without apply (or lost to a crash)
+//! never happened.
 //!
 //! # Formal model
 //!

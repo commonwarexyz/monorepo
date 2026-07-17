@@ -36,15 +36,20 @@
 //! # Removals and creations
 //!
 //! [`Batch::remove`] stages namespace removals and [`Batch::create`] stages
-//! blob creations. Both land atomically with the publish and require
-//! [`Batch::apply_sync`]. A removal published without an immediate commit
+//! blob creations. Both land atomically with the publish. Removals require
+//! [`Batch::apply_sync`]: a removal published without an immediate commit
 //! could be committed by an unrelated sync while the batch's writes stay
 //! uncommitted (an entry drop is global, so the never-split group cannot
-//! defer it), and a creation is symmetric: table assembly emits an entry
-//! for every live blob, so a published-but-uncommitted creation would be
-//! persisted by any unrelated commit without the batch's other members.
+//! defer it). A creation staged alongside anything else requires
+//! [`Batch::apply_sync`] for the symmetric reason: table assembly emits an
+//! entry for every live blob, so a published-but-uncommitted creation would
+//! be persisted by any unrelated commit without the batch's other members.
 //! [`Batch::apply_sync`] publishes and commits under one hold of the commit
-//! lock, so no such commit can interleave.
+//! lock, so no such commit can interleave. A batch staging ONLY creations
+//! is exempt and publishes with plain [`Batch::apply`], commit-free: every
+//! member is an empty creation, so whatever commit comes next emits all of
+//! their entries together — and a crash before any commit erases them
+//! together (proven in the model's commit-free carve-out).
 
 use super::{
     alloc::Extent,
@@ -269,10 +274,11 @@ impl<S: crate::Storage> Batch<S> {
     }
 
     /// Stage the creation of a NEW (empty) blob, returning a handle to it.
-    /// The name is validated at [`Self::apply_sync`], where the namespace
-    /// entry publishes and commits atomically with the rest of the batch.
-    /// Until then the blob is invisible to opens, scans, and commits, and
-    /// the returned handle must not be used.
+    /// The name is validated at apply, where the namespace entry publishes
+    /// atomically with the rest of the batch (and, under
+    /// [`Self::apply_sync`], commits with it). Until then the blob is
+    /// invisible to opens, scans, and commits, and the returned handle must
+    /// not be used.
     pub fn create(&mut self, partition: &str, name: &[u8]) -> Result<Blob<S>, Error> {
         super::super::validate_partition_name(partition)?;
         self.ready.check_poisoned()?;
@@ -316,18 +322,23 @@ impl<S: crate::Storage> Batch<S> {
     /// capture all-or-nothing. A crash before the group commits discards
     /// the batch wholesale.
     ///
+    /// A batch staging ONLY creations publishes commit-free: the next
+    /// commit — whichever blob roots it — emits every created blob's
+    /// entry, so the creations become durable together, and a crash before
+    /// any commit erases them together.
+    ///
     /// # Panics
     ///
-    /// Panics if removals or creations were staged (they require
-    /// [`Self::apply_sync`]).
+    /// Panics if removals were staged, or if creations were staged
+    /// alongside any other operation (both require [`Self::apply_sync`]).
     pub async fn apply(mut self) -> Result<(), Error> {
         assert!(
             self.removals.is_empty(),
             "staged removals require apply_sync"
         );
         assert!(
-            self.creations.is_empty(),
-            "staged creations require apply_sync"
+            self.creations.is_empty() || self.staged.is_empty(),
+            "creations staged alongside writes require apply_sync"
         );
         self.apply_inner(false).await
     }

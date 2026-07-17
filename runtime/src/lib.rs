@@ -879,11 +879,15 @@ stability_scope!(BETA {
         /// it. The creation is validated when the batch is applied: a name
         /// that already exists fails the apply with [Error::BlobExists].
         ///
-        /// Staged creations require [Self::apply_sync] for the same reason
-        /// as removals: a created blob's namespace entry enters every
-        /// commit's metadata, so it must land in the batch's own commit or
-        /// an unrelated commit could persist the creation while the batch's
-        /// other members stay uncommitted.
+        /// A creation staged alongside any other operation requires
+        /// [Self::apply_sync] for the same reason as removals: a created
+        /// blob's namespace entry enters every commit's metadata, so it
+        /// must land in the batch's own commit or an unrelated commit
+        /// could persist the creation while the batch's other members stay
+        /// uncommitted. A batch staging ONLY creations may publish with
+        /// [Self::apply]: every commit emits every member's entry, so the
+        /// creations become durable together at the backend's next commit
+        /// (possibly earlier), or a crash before one erases them together.
         ///
         /// The returned handle must not be read, written, or staged against
         /// until the batch is applied.
@@ -901,8 +905,8 @@ stability_scope!(BETA {
         ///
         /// # Panics
         ///
-        /// Panics if removals or creations were staged (they require
-        /// [Self::apply_sync]).
+        /// Panics if removals were staged, or if creations were staged
+        /// alongside any other operation (both require [Self::apply_sync]).
         fn apply(self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Apply the staged operations and make every staged blob durable:

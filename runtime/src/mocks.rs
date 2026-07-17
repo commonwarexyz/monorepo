@@ -630,7 +630,8 @@ impl<E: Batchable + Send + Sync + 'static> crate::Batchable for DelayedSyncConte
             ops: Vec::new(),
             inner: self.inner.batch().await?,
             pending: self.pending.clone(),
-            namespace_ops: 0,
+            removals: 0,
+            creations: 0,
         })
     }
 }
@@ -650,7 +651,8 @@ pub struct DelayedSyncBatch<E: Batchable> {
     ops: Vec<SequentialOp<DelayedSyncBlob<E::Blob>>>,
     inner: E::Batch,
     pending: PendingSyncs,
-    namespace_ops: usize,
+    removals: usize,
+    creations: usize,
 }
 
 impl<E: Batchable + Send + Sync + 'static> crate::WriteBatch for DelayedSyncBatch<E> {
@@ -677,12 +679,12 @@ impl<E: Batchable + Send + Sync + 'static> crate::WriteBatch for DelayedSyncBatc
     }
 
     fn remove(&mut self, partition: &str, name: Option<&[u8]>) {
-        self.namespace_ops += 1;
+        self.removals += 1;
         self.inner.remove(partition, name);
     }
 
     async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
-        self.namespace_ops += 1;
+        self.creations += 1;
         let inner = self.inner.create(partition, name).await?;
         Ok(DelayedSyncBlob {
             inner,
@@ -691,9 +693,10 @@ impl<E: Batchable + Send + Sync + 'static> crate::WriteBatch for DelayedSyncBatc
     }
 
     async fn apply(mut self) -> Result<(), Error> {
+        assert!(self.removals == 0, "staged removals require apply_sync");
         assert!(
-            self.namespace_ops == 0,
-            "staged removals and creations require apply_sync"
+            self.creations == 0 || self.ops.is_empty(),
+            "creations staged alongside writes require apply_sync"
         );
         for op in &mut self.ops {
             match op {

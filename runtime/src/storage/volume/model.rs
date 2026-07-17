@@ -84,13 +84,18 @@
 //! exclusivity applied to the batch as a deferred writer).
 //!
 //! A batch can also stage a blob CREATION ([`Action::BatchCreate`]): the
-//! blob does not exist until apply publishes it, and a creation-bearing
-//! batch publishes and begins its commit in ONE step (the implementation's
-//! `apply_sync` holds the commit lock across both, and plain apply rejects
-//! staged creations). This is load-bearing: table assembly emits an entry
-//! for EVERY live blob, so a published-but-uncommitted creation would be
-//! made durable by any unrelated commit without the batch's other members
-//! (see `mutation_create_commit_detected`).
+//! blob does not exist until apply publishes it. A batch that stages
+//! creations ALONGSIDE anything else publishes and begins its commit in
+//! ONE step (the implementation's `apply_sync` holds the commit lock
+//! across both, and plain apply rejects such batches). This is
+//! load-bearing: table assembly emits an entry for EVERY live blob, so a
+//! published-but-uncommitted creation would be made durable by any
+//! unrelated commit without the batch's other members (see
+//! `mutation_create_commit_detected`). A batch staging ONLY creations is
+//! exempt and publishes WITHOUT its own commit: every member is an empty
+//! creation, so whatever commit comes next emits all of their entries
+//! together, and a crash before any commit erases them together (see
+//! `mutation_commit_free_gate_detected` for the boundary).
 //!
 //! # Invariants
 //!
@@ -427,13 +432,24 @@ struct Rules {
     /// write the blob's new entry, recycling extents the confirmed table
     /// still references.
     capture_gated_frees: bool,
-    /// Publish a creation-bearing batch and begin its commit atomically
-    /// (the implementation's apply_sync holds the commit lock across both,
-    /// and plain apply rejects staged creations). Disabling lets an unrelated
-    /// commit run between publish and the batch's commit: table assembly
-    /// emits an entry for EVERY live blob, so that commit persists the
-    /// creation while the batch's other members stay uncommitted (I6).
+    /// Publish a batch that stages creations ALONGSIDE anything else and
+    /// begin its commit atomically (the implementation's apply_sync holds
+    /// the commit lock across both, and plain apply rejects such batches).
+    /// Disabling lets an unrelated commit run between publish and the
+    /// batch's commit: table assembly emits an entry for EVERY live blob,
+    /// so that commit persists the creation while the batch's other
+    /// members stay uncommitted (I6).
     atomic_create_commit: bool,
+    /// Restrict commit-free publish to batches staging ONLY creations
+    /// (the implementation's apply asserts nothing else is staged). A
+    /// creation-only batch is safe without its own commit because every
+    /// member is an empty creation: any commit emits every live blob's
+    /// entry, so the members resolve together, and a crash before any
+    /// commit erases them together. Disabling extends the commit-free
+    /// path to every creation-bearing batch, bypassing
+    /// `atomic_create_commit` and splitting mixed batches exactly as
+    /// described there (I6).
+    commit_free_creation_gate: bool,
 }
 
 const SPEC: Rules = Rules {
@@ -447,6 +463,7 @@ const SPEC: Rules = Rules {
     stage_invisible: true,
     capture_gated_frees: true,
     atomic_create_commit: true,
+    commit_free_creation_gate: true,
 };
 
 /// Capture mask covering every blob (group-commit behavior).
@@ -476,8 +493,10 @@ enum Action {
     BatchOverwrite(u8),
     /// Stage the creation of a (removed) blob into the current batch.
     BatchCreate(u8),
-    /// Atomically publish the staged batch. A creation-bearing batch also
-    /// begins its commit in the same step (the apply_sync requirement).
+    /// Atomically publish the staged batch. A batch staging creations
+    /// alongside anything else also begins its commit in the same step
+    /// (the apply_sync requirement). A creation-ONLY batch publishes
+    /// commit-free.
     BatchApply,
     /// Drop the staged batch without applying it.
     BatchDrop,
@@ -1235,9 +1254,9 @@ fn begin_snapshot(
     // I6 (never-split): each applied batch must resolve entirely or
     // not at all. A slot is resolved if this commit captures it, an
     // earlier commit did (committed_pubseq), a removal made its part
-    // unobservable, or its part is a CREATION (table assembly emits an
-    // entry for every live blob, so any commit makes the creation
-    // durable regardless of capture).
+    // unobservable, or its part is a CREATION — always empty in this
+    // model — whose entry table assembly emits for every live blob, so
+    // any commit makes the creation durable regardless of capture.
     for pb in &s.volume.pending_batches {
         let resolved = |slot: u8, bp: &Option<(u64, bool)>| match bp {
             None => true,
@@ -1768,14 +1787,27 @@ fn step(
             if mutations_blocked || s.volume.in_flight.is_some() {
                 return Ok(None);
             }
-            // A creation-bearing batch also begins its commit (apply_sync),
-            // which the latch blocks like any other sync.
-            let has_creation = s
-                .volume
-                .batch
-                .as_ref()
-                .is_some_and(|batch| batch.values().any(|staged| staged.created));
-            if has_creation && rules.atomic_create_commit && syncs_blocked {
+            // A batch staging creations alongside anything else also begins
+            // its commit (apply_sync), which the latch blocks like any other
+            // sync. A creation-ONLY batch publishes commit-free: every
+            // member is an empty creation, so any later commit emits all of
+            // their entries together (staged content into a created slot is
+            // unreachable here: BatchAppend/BatchOverwrite require a live
+            // blob, and a staged creation's blob is not live until apply).
+            let (has_creation, creation_only) =
+                s.volume.batch.as_ref().map_or((false, false), |batch| {
+                    (
+                        batch.values().any(|staged| staged.created),
+                        batch.values().all(|staged| staged.created),
+                    )
+                });
+            let commit_free = if rules.commit_free_creation_gate {
+                creation_only
+            } else {
+                true
+            };
+            let must_commit = has_creation && !commit_free && rules.atomic_create_commit;
+            if must_commit && syncs_blocked {
                 return Ok(None);
             }
             let Some(batch) = s.volume.batch.take() else {
@@ -1835,8 +1867,9 @@ fn step(
             // The apply_sync requirement: publish and the batch's commit
             // snapshot happen under ONE hold of the commit lock, so no
             // other commit can emit the created blob's entry without
-            // capturing the whole group.
-            if has_creation && rules.atomic_create_commit {
+            // capturing the whole group. Creation-only batches are exempt
+            // (commit-free publish).
+            if must_commit {
                 let mask = members.iter().fold(0u8, |mask, &slot| mask | (1 << slot));
                 let started = begin_snapshot(&mut s, mask, rules, trace)?;
                 assert!(started, "a creation batch must begin its commit");
@@ -2025,6 +2058,26 @@ mod tests {
         Action::Crash,
     ];
 
+    /// Commit-free creation workload: a batch stages ONLY creations and
+    /// publishes without its own commit. Later commits — rooted at an
+    /// unrelated blob, or at one of the new blobs after direct writes —
+    /// must emit both creations together, and a crash before any commit
+    /// must erase them together.
+    const BATCH_CREATE_FREE: &[Action] = &[
+        Action::Append(2),
+        Action::Remove(0),
+        Action::Remove(1),
+        Action::BatchCreate(0),
+        Action::BatchCreate(1),
+        Action::BatchApply,
+        Action::Append(0),
+        Action::Snapshot(0b001),
+        Action::Snapshot(0b100),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
     /// Batch overwrite workload: staged COW of committed cells plus batch
     /// drop (staged extents returned through deferred frees).
     const BATCH_COW: &[Action] = &[
@@ -2113,6 +2166,92 @@ mod tests {
         assert_holds(BATCH_CREATE, 8, 2, 1_000);
     }
 
+    #[test]
+    fn spec_holds_batch_create_free() {
+        assert_holds(BATCH_CREATE_FREE, 8, 2, 1_000);
+    }
+
+    /// A creation-only batch publishes WITHOUT its own commit: a later
+    /// commit rooted at an unrelated blob emits both creations (durable
+    /// together), and a later sync of ONE new blob — after direct writes
+    /// through its normal handle — captures the whole group while the
+    /// other's empty entry is emitted with it.
+    #[test]
+    fn commit_free_creation_only_allowed() {
+        let unrelated: &[Action] = &[
+            Action::Append(2),
+            Action::Remove(0),
+            Action::Remove(1),
+            Action::BatchCreate(0),
+            Action::BatchCreate(1),
+            Action::BatchApply,
+            Action::Snapshot(0b100),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Crash,
+        ];
+        assert!(
+            run_trace(unrelated, &SPEC).is_ok(),
+            "spec must allow an unrelated commit to resolve the creations"
+        );
+
+        let sync_one: &[Action] = &[
+            Action::Remove(0),
+            Action::Remove(1),
+            Action::BatchCreate(0),
+            Action::BatchCreate(1),
+            Action::BatchApply,
+            Action::Append(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Crash,
+        ];
+        assert!(
+            run_trace(sync_one, &SPEC).is_ok(),
+            "spec must allow syncing one new blob to resolve both creations"
+        );
+    }
+
+    /// A crash after a commit-free creation-only publish (and before ANY
+    /// commit) must erase the creations entirely: every recovery outcome
+    /// adopts a table without the created generations. I1/I2 enforce this
+    /// in general (the adopted state must equal the baseline, in which the
+    /// creations never happened). This test additionally pins the recovered
+    /// RAM state explicitly.
+    #[test]
+    fn commit_free_creation_erased_by_crash() {
+        let trace: &[Action] = &[
+            Action::Remove(0),
+            Action::Remove(1),
+            Action::BatchCreate(0),
+            Action::BatchCreate(1),
+            Action::BatchApply,
+            Action::Crash,
+        ];
+        let mut states = vec![initial_state(trace.len() as u8, 1)];
+        for (i, &action) in trace.iter().enumerate() {
+            let mut next = Vec::new();
+            for state in &states {
+                match step(state, action, &SPEC, &trace[..=i]).expect("trace must stay legal") {
+                    Some(successors) => next.extend(successors),
+                    None => panic!("action {action:?} disabled at step {i}"),
+                }
+            }
+            states = next;
+        }
+        assert!(!states.is_empty(), "crash must produce recovered states");
+        for state in &states {
+            for slot in [0usize, 1] {
+                let b = &state.volume.blobs[slot];
+                assert!(
+                    b.gen == 0 && b.size == 0,
+                    "slot {slot}: commit-free creation survived the crash"
+                );
+            }
+        }
+    }
+
     /// A staged creation must publish and begin its commit in one step.
     /// Without that (modeling an apply that does not sync), an unrelated
     /// commit emits the created blob's entry — making the creation durable —
@@ -2158,6 +2297,50 @@ mod tests {
         assert!(
             run_trace(mutated_trace, &rules).is_err(),
             "checker missed the premature creation"
+        );
+    }
+
+    /// Commit-free publish is gated on the batch staging ONLY creations.
+    /// Disabling the gate (modeling an apply that lets a batch with staged
+    /// writes publish commit-free) must be caught: an unrelated commit
+    /// emits the created blob's entry while the sibling's staged write
+    /// stays uncommitted — a split batch (I6).
+    #[test]
+    fn mutation_commit_free_gate_detected() {
+        let spec_trace: &[Action] = &[
+            Action::Append(2),
+            Action::Remove(1),
+            Action::BatchAppend(0),
+            Action::BatchCreate(1),
+            // Under SPEC the mixed batch's apply also begins its commit.
+            // Finish it, after which the unrelated commit is harmless.
+            Action::BatchApply,
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Snapshot(0b100),
+            Action::WriteMeta,
+            Action::FsyncOk,
+        ];
+        assert!(
+            run_trace(spec_trace, &SPEC).is_ok(),
+            "spec must allow the trace"
+        );
+
+        let mutated_trace: &[Action] = &[
+            Action::Append(2),
+            Action::Remove(1),
+            Action::BatchAppend(0),
+            Action::BatchCreate(1),
+            Action::BatchApply,
+            Action::Snapshot(0b100),
+        ];
+        let rules = Rules {
+            commit_free_creation_gate: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(mutated_trace, &rules).is_err(),
+            "checker missed the widened commit-free gate"
         );
     }
 

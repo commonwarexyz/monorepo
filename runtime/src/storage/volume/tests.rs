@@ -838,6 +838,119 @@ async fn test_volume_batch_create_atomic() {
     assert_eq!(size, 9, "failed batch must publish nothing");
 }
 
+/// A creation-only batch publishes commit-free: a crash before any commit
+/// erases both creations, and a later commit rooted at an UNRELATED blob
+/// makes both durable together (every commit emits every live blob's
+/// entry).
+#[tokio::test]
+async fn test_volume_batch_create_only_commit_free() {
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+
+    // Publish two creations with plain apply: visible immediately, durable
+    // only with a later commit.
+    let mut batch = volume.batch().await.unwrap();
+    let _x = batch.create("p", b"x").unwrap();
+    let _y = batch.create("p", b"y").unwrap();
+    batch.apply().await.unwrap();
+    let names = volume.scan("p").await.unwrap();
+    assert!(names.contains(&b"x".to_vec()) && names.contains(&b"y".to_vec()));
+
+    // A crash before any commit erases both creations.
+    for seed in 0..4u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let names = recovered.scan("p").await.unwrap();
+        assert!(
+            !names.contains(&b"x".to_vec()) && !names.contains(&b"y".to_vec()),
+            "seed {seed}: commit-free creation survived the crash"
+        );
+    }
+
+    // A sync of the unrelated blob emits both (empty) entries.
+    a.write_at(0, IoBuf::copy_from_slice(b"a-data"))
+        .await
+        .unwrap();
+    a.sync().await.unwrap();
+    for seed in 0..4u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let names = recovered.scan("p").await.unwrap();
+        assert!(
+            names.contains(&b"x".to_vec()) && names.contains(&b"y".to_vec()),
+            "seed {seed}: creations must land with the unrelated commit"
+        );
+        let (_, x_size) = recovered.open("p", b"x").await.unwrap();
+        let (_, y_size) = recovered.open("p", b"y").await.unwrap();
+        assert_eq!(
+            (x_size, y_size),
+            (0, 0),
+            "seed {seed}: entries must be empty"
+        );
+    }
+}
+
+/// After a commit-free creation-only publish, direct writes through the new
+/// blobs' handles and a sync of ONE of them commit the whole creation group
+/// (never-split): the other blob's creation and accumulated writes land in
+/// the same commit.
+#[tokio::test]
+async fn test_volume_batch_create_only_sync_one() {
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+
+    let mut batch = volume.batch().await.unwrap();
+    let x = batch.create("p", b"x").unwrap();
+    let y = batch.create("p", b"y").unwrap();
+    batch.apply().await.unwrap();
+
+    x.write_at(0, IoBuf::copy_from_slice(b"x-data"))
+        .await
+        .unwrap();
+    y.write_at(0, IoBuf::copy_from_slice(b"y-data"))
+        .await
+        .unwrap();
+    x.sync().await.unwrap();
+
+    for seed in 0..4u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let (x, x_size) = recovered.open("p", b"x").await.unwrap();
+        assert_eq!(x_size, 6, "seed {seed}: synced blob durable exactly");
+        let got = x.read_at(0, 6).await.unwrap().coalesce();
+        assert_eq!(got.as_ref(), b"x-data", "seed {seed}");
+        let (y, y_size) = recovered.open("p", b"y").await.unwrap();
+        assert_eq!(y_size, 6, "seed {seed}: group member must commit with x");
+        let got = y.read_at(0, 6).await.unwrap().coalesce();
+        assert_eq!(got.as_ref(), b"y-data", "seed {seed}");
+    }
+}
+
+/// A creation staged alongside a write still requires `apply_sync`.
+#[tokio::test]
+#[should_panic(expected = "creations staged alongside writes require apply_sync")]
+async fn test_volume_batch_create_with_write_requires_apply_sync() {
+    let volume = volume_over_memory();
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let mut batch = volume.batch().await.unwrap();
+    let _n = batch.create("p", b"n").unwrap();
+    batch
+        .write_at(&a, 0, IoBuf::copy_from_slice(b"w"))
+        .await
+        .unwrap();
+    let _ = batch.apply().await;
+}
+
 /// A selective commit persists exactly the synced blob: an unrelated dirty
 /// blob's unsynced data vanishes with the crash, and a later sync of that
 /// blob commits everything it accumulated.
