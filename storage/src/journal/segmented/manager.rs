@@ -11,7 +11,8 @@ use commonware_runtime::{
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Batchable, Blob, BufferPool, Error as RError, Handle, Metrics, Storage, WriteBatch,
+    Batchable, Blob, BlobOptions, BufferPool, Error as RError, Handle, Metrics, Storage,
+    WriteBatch,
 };
 use futures::future::{join_all, try_join_all};
 use std::{
@@ -172,6 +173,11 @@ pub struct Config<F> {
 
     /// The factory for creating section buffers.
     pub factory: F,
+
+    /// Creation options for section blobs (see
+    /// [`commonware_runtime::BlobOptions`]), applied when a section blob is
+    /// first created. Existing blobs keep their creation options.
+    pub blob_options: BlobOptions,
 }
 
 /// Manages a collection of section-based blobs.
@@ -191,6 +197,7 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     context: E,
     partition: String,
     factory: F,
+    blob_options: BlobOptions,
 
     /// One blob per section.
     pub(crate) blobs: BTreeMap<u64, F::Buffer>,
@@ -231,7 +238,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         };
 
         for name in stored_blobs {
-            let (blob, size) = context.open(&cfg.partition, &name).await?;
+            let (blob, size) = context
+                .open_with(&cfg.partition, &name, cfg.blob_options)
+                .await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
                 Ok(section) => u64::from_be_bytes(section),
@@ -252,6 +261,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             context,
             partition: cfg.partition,
             factory: cfg.factory,
+            blob_options: cfg.blob_options,
             blobs,
             oldest_retained_section: 0,
             tracked,
@@ -281,7 +291,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
         if !self.blobs.contains_key(&section) {
             let name = section.to_be_bytes();
-            let (blob, size) = self.context.open(&self.partition, &name).await?;
+            let (blob, size) = self
+                .context
+                .open_with(&self.partition, &name, self.blob_options)
+                .await?;
             let buffer = self.factory.create(blob, size).await?;
             self.tracked.inc();
             self.blobs.insert(section, buffer);
@@ -314,7 +327,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         );
 
         let blob = batch
-            .create(&self.partition, &section.to_be_bytes())
+            .create(&self.partition, &section.to_be_bytes(), self.blob_options)
             .await?;
         let buffer = self.factory.create(blob, 0).await?;
         self.tracked.inc();
@@ -733,6 +746,7 @@ mod tests {
                 pending,
                 wait_for_syncs,
             },
+            blob_options: BlobOptions::default(),
         }
     }
 

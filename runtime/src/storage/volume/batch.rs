@@ -55,10 +55,10 @@ use super::{
     alloc::Extent,
     commit,
     core::{
-        chunk_of, stage_write, BlobCore, BlobInner, ChunkCrc, ChunkState, Ready, RunMeta,
+        stage_write, BlobCore, BlobInner, ChunkCrc, ChunkState, Geometry, Ready, RunMeta,
         StagedBlob, StagedRun,
     },
-    unlink, Blob, HandleTracker, Shared, BLOCK,
+    unlink, Blob, HandleTracker, Shared,
 };
 use crate::{Blob as _, Error, IoBuf, IoBufs, DEFAULT_BLOB_VERSION};
 use commonware_cryptography::Crc32;
@@ -151,6 +151,7 @@ impl<S: crate::Storage> Batch<S> {
         self.ready.check_poisoned()?;
         let ready = self.ready.clone();
         let core = blob.core.clone();
+        let geo = core.inner.lock().geo;
         let staged = self.staged_mut(blob);
         staged.touched_only = false;
         let _guard = core.write_lock.lock().await;
@@ -162,9 +163,11 @@ impl<S: crate::Storage> Batch<S> {
             let size = staged.overlay.size;
             let zero_to = {
                 let inner = core.inner.lock();
-                let boundary = chunk_of(size);
+                let boundary = geo.chunk_of(size);
                 match staged.overlay.chunk_span(&inner, boundary) {
-                    Some(_) if !size.is_multiple_of(BLOCK) => ((boundary + 1) * BLOCK).min(len),
+                    Some(_) if !size.is_multiple_of(geo.chunk_size()) => {
+                        ((boundary + 1) * geo.chunk_size()).min(len)
+                    }
                     _ => size,
                 }
             };
@@ -232,7 +235,7 @@ impl<S: crate::Storage> Batch<S> {
                 overlay.crcs.clear();
                 overlay.tail = Some((0, Vec::new()));
             } else {
-                let boundary = chunk_of(len - 1);
+                let boundary = geo.chunk_of(len - 1);
                 overlay.crcs.retain(|&c, _| c <= boundary);
             }
             overlay.relocated = true;
@@ -242,7 +245,7 @@ impl<S: crate::Storage> Batch<S> {
         // Recompute the boundary chunk's CRC/tail from its (unchanged)
         // bytes in the merged view.
         if len > 0 {
-            let boundary = chunk_of(len - 1);
+            let boundary = geo.chunk_of(len - 1);
             let span = {
                 let inner = core.inner.lock();
                 staged.overlay.chunk_span(&inner, boundary)
@@ -285,9 +288,15 @@ impl<S: crate::Storage> Batch<S> {
     /// [`Self::apply_sync`], commits with it). Until then the blob is
     /// invisible to opens, scans, and commits, and the returned handle must
     /// not be used.
-    pub fn create(&mut self, partition: &str, name: &[u8]) -> Result<Blob<S>, Error> {
+    pub fn create(
+        &mut self,
+        partition: &str,
+        name: &[u8],
+        options: crate::BlobOptions,
+    ) -> Result<Blob<S>, Error> {
         super::super::validate_partition_name(partition)?;
         self.ready.check_poisoned()?;
+        let geo = Geometry::from_options(&options);
         let (id, core) = {
             let mut state = self.ready.state.lock();
             let id = state.next_id;
@@ -302,6 +311,7 @@ impl<S: crate::Storage> Batch<S> {
                 version: DEFAULT_BLOB_VERSION,
                 write_lock: AsyncMutex::new(()),
                 inner: Mutex::new(BlobInner {
+                    geo,
                     committed_entry: None,
                     ..Default::default()
                 }),
@@ -499,7 +509,7 @@ fn publish_overlay(inner: &mut BlobInner, overlay: StagedBlob) {
             inner.crcs.clear();
             inner.dirty_chunks.clear();
         } else {
-            let boundary = chunk_of(overlay.size - 1);
+            let boundary = inner.geo.chunk_of(overlay.size - 1);
             inner.crcs.truncate(boundary);
             inner.dirty_chunks.retain(|&c| c <= boundary);
             inner.dirty_chunks.insert(boundary);

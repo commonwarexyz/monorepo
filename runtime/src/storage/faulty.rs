@@ -239,12 +239,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
+        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
         if self.ctx.should_fail(Op::Open) {
             return Err(injected_io_error().into());
         }
         self.inner
-            .open_versioned(partition, name, versions)
+            .open_versioned(partition, name, versions, options)
             .await
             .map(|(blob, len, blob_version)| {
                 (Blob::new(self.ctx.clone(), blob, len), len, blob_version)

@@ -105,7 +105,9 @@ pub(super) struct Run {
 /// A checksum extent: CRC32Cs for `count` consecutive chunks starting at
 /// `first_chunk`, stored at `offset`, guarded by `crc` over its bytes.
 ///
-/// An entry's refs are disjoint and contiguous from chunk 0, and together
+/// Chunk indexes are in the owning entry's verification-chunk units (see
+/// [`Entry::group`]). An entry's refs are disjoint and contiguous from
+/// chunk 0, and together
 /// cover every backed chunk below the frontier plus a FULL frontier chunk
 /// (a partial frontier chunk is served by the entry's `tail_crc` instead).
 /// Hole positions inside the covered range hold arbitrary values and are
@@ -129,6 +131,14 @@ pub(super) struct Entry {
     pub partition: u32,
     pub name: Vec<u8>,
     pub version: u16,
+    /// Verification-group size as log2 of blocks per chunk (0 = one
+    /// [`BLOCK`], the default): this blob's chunk — the unit of checksum
+    /// coverage, read verification, and delta manifests — spans
+    /// `BLOCK << group` bytes. Fixed at creation. Blocks stay the physical
+    /// tear, alignment, and allocation granularity. A coarse blob's runs
+    /// start chunk-aligned with chunk-multiple capacities so every chunk
+    /// is backed by (a contiguous slice of) exactly one run.
+    pub group: u8,
     /// Committed logical size in bytes.
     pub size: u64,
     pub runs: Vec<Run>,
@@ -140,8 +150,14 @@ pub(super) struct Entry {
     /// checksum refs do not cover.
     pub tail_crc: u32,
     /// Physical offset of the shadow block holding the committed bytes of
-    /// the final partial chunk. Absent when the tail chunk is unbacked (a
-    /// hole) or `size` is chunk-aligned.
+    /// the frontier chunk's final PARTIAL block — the one tear atom shared
+    /// between committed bytes and post-commit in-place appends. Absent
+    /// when the tail chunk is unbacked (a hole) or the frontier span ends
+    /// block-aligned (then no committed byte shares a block with appends).
+    /// Always at most one [`BLOCK`] on disk: the frontier chunk's earlier
+    /// blocks are fully committed and never rewritten in place, so
+    /// recovery re-derives the chunk's CRC from those blocks plus the
+    /// shadowed fragment.
     pub shadow: Option<u64>,
 }
 
@@ -176,6 +192,7 @@ impl Entry {
         out.put_u32(self.name.len() as u32);
         out.put_slice(&self.name);
         out.put_u16(self.version);
+        out.put_u8(self.group);
         out.put_u64(self.size);
         out.put_u32(self.runs.len() as u32);
         for r in &self.runs {
@@ -292,8 +309,9 @@ impl Table {
             let partition = buf.get_u32();
             let name_len = buf.get_u32() as usize;
             let name = take(&mut buf, name_len)?;
-            need(&buf, 14)?;
+            need(&buf, 15)?;
             let version = buf.get_u16();
+            let group = buf.get_u8();
             let size = buf.get_u64();
             let n_runs = buf.get_u32() as usize;
             let mut runs = Vec::with_capacity(n_runs.min(1024));
@@ -332,6 +350,7 @@ impl Table {
                 partition,
                 name,
                 version,
+                group,
                 size,
                 runs,
                 checksums,
@@ -397,6 +416,7 @@ mod tests {
                     partition: 0,
                     name: b"section-1".to_vec(),
                     version: 0,
+                    group: 4,
                     size: 12345,
                     runs: vec![
                         Run {
@@ -424,6 +444,7 @@ mod tests {
                     partition: 1,
                     name: vec![],
                     version: 3,
+                    group: 0,
                     size: 0,
                     runs: vec![],
                     checksums: vec![],

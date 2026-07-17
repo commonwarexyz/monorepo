@@ -28,8 +28,8 @@
 use super::{
     alloc::{block_align, Allocator, Extent},
     core::{
-        chunk_of, decode_crcs, merge_frozen_runs, window_value, BlobInner, ChunkCrc, ChunkState,
-        CommittedMeta, Ready, RunMeta, State,
+        decode_crcs, merge_frozen_runs, window_value, BlobInner, ChunkCrc, ChunkState,
+        CommittedMeta, Geometry, Ready, RunMeta, State,
     },
     layout::{ChecksumRef, Entry, Superblock, Table},
     Config, BLOCK,
@@ -75,21 +75,30 @@ async fn read_table<B: crate::Blob>(
     Ok(Table::decode(bytes.as_ref()))
 }
 
+/// An entry's verification-chunk geometry.
+const fn entry_geo(entry: &Entry) -> Geometry {
+    Geometry { group: entry.group }
+}
+
 /// Locate the backed span of `chunk` in a table entry.
 fn entry_chunk_span(entry: &Entry, chunk: u64) -> Option<(u64, u64)> {
-    let chunk_start = chunk * BLOCK;
+    let geo = entry_geo(entry);
+    let chunk_start = chunk * geo.chunk_size();
     let run = entry
         .runs
         .iter()
         .rev()
         .find(|r| r.logical <= chunk_start && chunk_start < r.logical + r.len)?;
-    let span = (run.logical + run.len - chunk_start).min(BLOCK);
+    let span = (run.logical + run.len - chunk_start).min(geo.chunk_size());
     Some((run.physical + (chunk_start - run.logical), span))
 }
 
 /// The last backed chunk of an entry.
 fn entry_last_chunk(entry: &Entry) -> Option<u64> {
-    entry.runs.last().map(|r| chunk_of(r.logical + r.len - 1))
+    entry
+        .runs
+        .last()
+        .map(|r| entry_geo(entry).chunk_of(r.logical + r.len - 1))
 }
 
 /// Bound on concurrently in-flight manifest-verification reads.
@@ -164,6 +173,12 @@ struct Check {
 struct VerifyRead {
     physical: u64,
     len: u64,
+    /// A second physical piece appended to the read before checking: the
+    /// shadow fragment of a partial frontier chunk whose span ends
+    /// mid-block, `(physical, len)`. The shadow is authoritative for that
+    /// final partial block (the tear atom shared with post-snapshot
+    /// appends). The span's earlier blocks are read from their backing.
+    splice: Option<(u64, u64)>,
     checks: Vec<Check>,
 }
 
@@ -227,7 +242,7 @@ async fn verify_manifest<B: crate::Blob>(
             if phys + span > len {
                 return Ok(None); // backing never landed
             }
-            let frontier = last_chunk == Some(chunk) && span < BLOCK;
+            let frontier = last_chunk == Some(chunk) && span < entry_geo(entry).chunk_size();
             if !frontier {
                 need_value.push(chunk);
             }
@@ -287,21 +302,27 @@ async fn verify_manifest<B: crate::Blob>(
             } else {
                 window_value(&loaded, chunk).expect("loaded above")
             };
-            // Frontier chunks with a shadow: the shadow is authoritative
-            // for the frozen span (the on-disk block may be torn by
-            // post-snapshot appends; recovery splices it afterwards).
-            let physical = if frontier {
-                match entry.shadow {
-                    Some(shadow) => {
-                        if shadow + span > len {
-                            return Ok(None);
-                        }
-                        shadow
+            // Frontier chunks whose span ends mid-block: the shadow is
+            // authoritative for that final partial block — the tear atom
+            // shared with post-snapshot appends — and the span's earlier
+            // blocks are read from their backing (fully committed, never
+            // rewritten in place). Recovery splices the fragment onto the
+            // disk afterwards. A block-aligned frontier span shares no
+            // block with appends and is read from its backing whole.
+            let floor = span - span % BLOCK;
+            let shadow = entry.shadow.filter(|_| frontier && floor < span);
+            let (physical, read_len, splice) = match shadow {
+                Some(shadow) => {
+                    if shadow + (span - floor) > len {
+                        return Ok(None);
                     }
-                    None => phys,
+                    if floor == 0 {
+                        (shadow, span, None)
+                    } else {
+                        (phys, floor, Some((shadow, span - floor)))
+                    }
                 }
-            } else {
-                phys
+                None => (phys, span, None),
             };
             let check = Check {
                 at: 0,
@@ -311,7 +332,9 @@ async fn verify_manifest<B: crate::Blob>(
             };
             match reads.last_mut() {
                 Some(read)
-                    if read.physical + read.len == physical
+                    if splice.is_none()
+                        && read.splice.is_none()
+                        && read.physical + read.len == physical
                         && read.len + span <= VERIFY_READ_SPAN =>
                 {
                     read.checks.push(Check {
@@ -322,7 +345,8 @@ async fn verify_manifest<B: crate::Blob>(
                 }
                 _ => reads.push(VerifyRead {
                     physical,
-                    len: span,
+                    len: read_len,
+                    splice,
                     checks: vec![check],
                 }),
             }
@@ -334,12 +358,24 @@ async fn verify_manifest<B: crate::Blob>(
     // returned chunk list is schedule-independent.
     let mut verified = Vec::new();
     let mut outcomes = stream::iter(reads.into_iter().map(|read| async move {
-        let bytes = file
+        let head = file
             .read_at(read.physical, read.len as usize)
             .await?
             .coalesce();
+        let joined;
+        let bytes: &[u8] = match read.splice {
+            None => head.as_ref(),
+            Some((physical, len)) => {
+                let frag = file.read_at(physical, len as usize).await?.coalesce();
+                let mut assembled = Vec::with_capacity(head.len() + frag.len());
+                assembled.extend_from_slice(head.as_ref());
+                assembled.extend_from_slice(frag.as_ref());
+                joined = assembled;
+                &joined
+            }
+        };
         for check in &read.checks {
-            let span = &bytes.as_ref()[check.at..check.at + check.span as usize];
+            let span = &bytes[check.at..check.at + check.span as usize];
             if Crc32::checksum(span) != check.expected {
                 return Ok(None);
             }
@@ -459,11 +495,18 @@ pub(super) async fn recover<S: crate::Storage>(
             continue;
         };
         let Some(shadow) = entry.shadow else { continue };
-        if span == BLOCK {
+        // The shadow holds the final partial BLOCK's fragment of the
+        // frontier span (the tear atom shared with post-snapshot appends);
+        // the span's earlier blocks were never rewritten in place.
+        let floor = span - span % BLOCK;
+        if floor == span {
             continue;
         }
-        let bytes = file.read_at(shadow, span as usize).await?.coalesce();
-        file.write_at(phys, bytes).await?;
+        let bytes = file
+            .read_at(shadow, (span - floor) as usize)
+            .await?
+            .coalesce();
+        file.write_at(phys + floor, bytes).await?;
         repaired = true;
         len = len.max(phys + span);
     }
@@ -495,9 +538,12 @@ pub(super) async fn recover<S: crate::Storage>(
             .insert(entry.name.clone(), entry.id);
         let mut meta = CommittedMeta::default();
         for r in &entry.runs {
+            // Reserve the run's whole chunk-aligned slice, mirroring the
+            // writer's chunk-multiple capacities: hydration hands the slack
+            // back as in-place growth room, so it must not be allocatable.
             used.push(Extent {
                 offset: r.physical,
-                len: block_align(r.len),
+                len: entry_geo(entry).chunk_align(r.len),
             });
         }
         for c in &entry.checksums {
@@ -647,7 +693,9 @@ pub(super) async fn hydrate<S: crate::Storage>(
             msg.into(),
         )
     };
+    let geo = entry_geo(entry);
     let mut inner = BlobInner {
+        geo,
         size: entry.size,
         freeze_size: entry.size,
         shadow: entry.shadow,
@@ -655,12 +703,21 @@ pub(super) async fn hydrate<S: crate::Storage>(
         ..Default::default()
     };
     for r in &entry.runs {
+        // The geometry invariant (chunk-aligned run starts) is what makes
+        // every chunk single-run: validating it here keeps a
+        // corrupt-but-CRC-bound table a loud open error.
+        if !r.logical.is_multiple_of(geo.chunk_size()) {
+            return Err(corrupt("run start not chunk-aligned"));
+        }
         inner.runs.insert(
             r.logical,
             RunMeta {
                 physical: r.physical,
                 len: r.len,
-                capacity: block_align(r.len),
+                // The run's whole chunk-aligned slice (reserved by
+                // recovery), so in-place growth keeps chunk-multiple
+                // capacities (the geometry invariant).
+                capacity: geo.chunk_align(r.len),
                 born: 0,
             },
         );
@@ -672,7 +729,7 @@ pub(super) async fn hydrate<S: crate::Storage>(
     merge_frozen_runs(&mut inner.runs);
     // Seed the dense chunk state from the merged runs: every backed chunk
     // unverified with its CRC left on disk.
-    inner.crcs.seed(&inner.runs);
+    inner.crcs.seed(&inner.runs, geo);
 
     if let Some(last) = entry_last_chunk(entry) {
         let (phys, span) = entry_chunk_span(entry, last).expect("last chunk is backed");
@@ -681,7 +738,11 @@ pub(super) async fn hydrate<S: crate::Storage>(
         // capture maintains and the committed-CRC loader relies on.
         // Validating it here keeps a corrupt-but-CRC-bound table a loud
         // open error instead of a read-path panic.
-        let covered_end = if span == BLOCK { last + 1 } else { last };
+        let covered_end = if span == geo.chunk_size() {
+            last + 1
+        } else {
+            last
+        };
         let mut next = 0;
         for r in &entry.checksums {
             if r.first_chunk != next {

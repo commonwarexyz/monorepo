@@ -19,8 +19,8 @@
 use super::{
     alloc::{block_align, Extent},
     core::{
-        chunk_of, load_committed_refs, merge_frozen_runs, window_value, BlobCore, BlobInner,
-        ChunkCrc, ChunkMap, CommittedMeta, Ready,
+        load_committed_refs, merge_frozen_runs, window_value, BlobCore, BlobInner, ChunkCrc,
+        ChunkMap, CommittedMeta, Ready,
     },
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
     BLOCK,
@@ -173,10 +173,10 @@ fn covered_end(inner: &BlobInner) -> u64 {
         .runs
         .iter()
         .next_back()
-        .map(|(&l, r)| chunk_of(l + r.len - 1));
+        .map(|(&l, r)| inner.geo.chunk_of(l + r.len - 1));
     last_backed.map_or(0, |last| {
         let (_, span) = inner.chunk_span(last).expect("backed chunk");
-        if span == BLOCK {
+        if span == inner.geo.chunk_size() {
             last + 1
         } else {
             last
@@ -335,7 +335,7 @@ async fn take_snapshot<S: crate::Storage>(
                 .runs
                 .iter()
                 .next_back()
-                .map(|(&l, r)| chunk_of(l + r.len - 1));
+                .map(|(&l, r)| inner.geo.chunk_of(l + r.len - 1));
 
             // Chunk coverage the checksum refs must provide (see
             // [`covered_end`]). Unchanged by the run merging above, which
@@ -373,15 +373,20 @@ async fn take_snapshot<S: crate::Storage>(
                 bytes
             };
 
-            // Shadow: the frontier chunk's span, when partial (post-commit
-            // appends will write into its block in place; recovery restores
-            // the frozen span from the shadow).
+            // Shadow: the final PARTIAL block's fragment of the frontier
+            // span, when the span does not end block-aligned. That block is
+            // the one tear atom shared between committed bytes and
+            // post-commit in-place appends, so recovery restores its
+            // fragment from the shadow. The span's earlier blocks are fully
+            // committed and never rewritten in place, and a block-aligned
+            // span shares no block with appends and needs no shadow.
             let shadow_bytes = last_backed.and_then(|last| {
                 let (_, span) = inner.chunk_span(last).expect("backed chunk");
-                (span < BLOCK).then(|| {
+                (!span.is_multiple_of(BLOCK)).then(|| {
                     debug_assert_eq!(inner.tail_chunk, last);
                     debug_assert_eq!(inner.tail.len() as u64, span);
-                    inner.tail.clone()
+                    let floor = span - span % BLOCK;
+                    inner.tail[floor as usize..].to_vec()
                 })
             });
 
@@ -425,6 +430,7 @@ async fn take_snapshot<S: crate::Storage>(
                 partition: 0, // resolved during table assembly
                 name: blob.name.clone(),
                 version: blob.version,
+                group: inner.geo.group,
                 size: inner.size,
                 runs,
                 checksums, // retained refs (a new delta/full ref is pushed below)
@@ -546,6 +552,7 @@ async fn take_snapshot<S: crate::Storage>(
                 partition: 0,
                 name: core.name.clone(),
                 version: core.version,
+                group: inner.geo.group,
                 size: 0,
                 runs: Vec::new(),
                 checksums: Vec::new(),

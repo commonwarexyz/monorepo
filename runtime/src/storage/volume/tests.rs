@@ -69,8 +69,12 @@ impl crate::Storage for Recording {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
+        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        let (blob, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        let (blob, len, version) = self
+            .inner
+            .open_versioned(partition, name, versions, options)
+            .await?;
         Ok((
             RecordingBlob {
                 inner: blob,
@@ -341,8 +345,12 @@ impl crate::Storage for Tearing {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
+        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        let (blob, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        let (blob, len, version) = self
+            .inner
+            .open_versioned(partition, name, versions, options)
+            .await?;
         Ok((
             TearingBlob {
                 inner: blob,
@@ -438,7 +446,18 @@ impl crate::Blob for TearingBlob {
 #[tokio::test]
 async fn test_volume_power_loss_soak() {
     for seed in 0..32u64 {
-        power_loss_round(seed).await;
+        power_loss_round(seed, [None; 3]).await;
+    }
+}
+
+/// The power-loss soak over mixed verification geometry: one default blob,
+/// one 16 KiB-group blob, one 64 KiB-group blob, driving every workload
+/// shape (appends, COW overwrites, rewinds, zero-extension, batches,
+/// selective commits) through coarse chunks and block-granular tears.
+#[tokio::test]
+async fn test_volume_power_loss_soak_grouped() {
+    for seed in 0..32u64 {
+        power_loss_round(seed, [None, Some(16 << 10), Some(64 << 10)]).await;
     }
 }
 
@@ -464,7 +483,7 @@ fn ledger_commit(
     }
 }
 
-async fn power_loss_round(seed: u64) {
+async fn power_loss_round(seed: u64, verification_groups: [Option<u64>; 3]) {
     let mut rng = TestRng::new(seed);
     let pool = test_pool();
     let mut tearing = Tearing::new(pool.clone());
@@ -477,11 +496,18 @@ async fn power_loss_round(seed: u64) {
     let mut current: BTreeMap<&'static str, Vec<u8>> = BTreeMap::new();
     let mut groups: Vec<std::collections::BTreeSet<&'static str>> = Vec::new();
     const NAMES: [&str; 3] = ["alpha", "beta", "gamma"];
+    let options = |name: &str| crate::BlobOptions {
+        verification_group: verification_groups
+            [NAMES.iter().position(|n| *n == name).expect("known name")],
+    };
 
     // Open all blobs (creation commits them empty).
     let mut blobs = BTreeMap::new();
     for name in NAMES {
-        let (blob, size) = volume.open("p", name.as_bytes()).await.unwrap();
+        let (blob, size) = volume
+            .open_with("p", name.as_bytes(), options(name))
+            .await
+            .unwrap();
         assert_eq!(size, 0, "seed {seed}: fresh blob");
         blobs.insert(name, blob);
         committed.insert(name, Vec::new());
@@ -785,7 +811,9 @@ async fn test_volume_batch_create_atomic() {
         .write_at(&a, 4, IoBuf::copy_from_slice(b"-more"))
         .await
         .unwrap();
-    let created = batch.create("p", b"n").unwrap();
+    let created = batch
+        .create("p", b"n", crate::BlobOptions::default())
+        .unwrap();
     assert!(!volume.scan("p").await.unwrap().contains(&b"n".to_vec()));
     for seed in 0..4u64 {
         let mut rng = TestRng::new(seed);
@@ -825,7 +853,9 @@ async fn test_volume_batch_create_atomic() {
 
     // A conflicting creation fails the apply loudly, applying nothing.
     let mut batch = volume.batch().await.unwrap();
-    let _dup = batch.create("p", b"n").unwrap();
+    let _dup = batch
+        .create("p", b"n", crate::BlobOptions::default())
+        .unwrap();
     batch
         .write_at(&a, 9, IoBuf::copy_from_slice(b"!"))
         .await
@@ -853,8 +883,12 @@ async fn test_volume_batch_create_only_commit_free() {
     // Publish two creations with plain apply: visible immediately, durable
     // only with a later commit.
     let mut batch = volume.batch().await.unwrap();
-    let _x = batch.create("p", b"x").unwrap();
-    let _y = batch.create("p", b"y").unwrap();
+    let _x = batch
+        .create("p", b"x", crate::BlobOptions::default())
+        .unwrap();
+    let _y = batch
+        .create("p", b"y", crate::BlobOptions::default())
+        .unwrap();
     batch.apply().await.unwrap();
     let names = volume.scan("p").await.unwrap();
     assert!(names.contains(&b"x".to_vec()) && names.contains(&b"y".to_vec()));
@@ -908,8 +942,12 @@ async fn test_volume_batch_create_only_sync_one() {
     let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
 
     let mut batch = volume.batch().await.unwrap();
-    let x = batch.create("p", b"x").unwrap();
-    let y = batch.create("p", b"y").unwrap();
+    let x = batch
+        .create("p", b"x", crate::BlobOptions::default())
+        .unwrap();
+    let y = batch
+        .create("p", b"y", crate::BlobOptions::default())
+        .unwrap();
     batch.apply().await.unwrap();
 
     x.write_at(0, IoBuf::copy_from_slice(b"x-data"))
@@ -943,7 +981,9 @@ async fn test_volume_batch_create_with_write_requires_apply_sync() {
     let volume = volume_over_memory();
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let mut batch = volume.batch().await.unwrap();
-    let _n = batch.create("p", b"n").unwrap();
+    let _n = batch
+        .create("p", b"n", crate::BlobOptions::default())
+        .unwrap();
     batch
         .write_at(&a, 0, IoBuf::copy_from_slice(b"w"))
         .await
@@ -1093,8 +1133,12 @@ impl crate::Storage for Capturing {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
+        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        let (blob, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        let (blob, len, version) = self
+            .inner
+            .open_versioned(partition, name, versions, options)
+            .await?;
         *self.handle.lock() = Some((blob.clone(), len));
         Ok((blob, len, version))
     }
@@ -1620,8 +1664,12 @@ impl<S: crate::Storage> crate::Storage for Gated<S> {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
+        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        let (blob, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        let (blob, len, version) = self
+            .inner
+            .open_versioned(partition, name, versions, options)
+            .await?;
         Ok((
             GatedBlob {
                 inner: blob,
@@ -3318,4 +3366,279 @@ async fn test_volume_staged_batch_gates_merge_until_reopen() {
     assert_eq!(blob.core.inner.lock().runs.len(), 1, "hydration merges");
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
+}
+
+/// A 64 KiB verification group is fixed at creation: the committed
+/// checksum refs cover 16x fewer chunks than the default geometry, the
+/// geometry survives reopen whatever options the reopen passes, and
+/// content round-trips through recovery.
+#[tokio::test]
+async fn test_volume_group_geometry_round_trip() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let coarse = crate::BlobOptions {
+        verification_group: Some(64 << 10),
+    };
+
+    let (blob, _) = volume.open_with("p", b"g", coarse).await.unwrap();
+    assert_eq!(blob.core.inner.lock().geo.group, 4);
+    let mut rng = TestRng::new(7);
+    let mut expected = vec![0u8; 4 * (64 << 10) + 100];
+    rng.fill_bytes(&mut expected);
+    blob.write_at(0, IoBuf::copy_from_slice(&expected))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+
+    // Four full 64 KiB chunks covered by refs, where the default geometry
+    // would need 64 (the partial frontier chunk is served by the tail CRC).
+    assert_eq!(committed_refs(&blob), vec![(0, 4)]);
+    assert_eq!(
+        blob.core
+            .inner
+            .lock()
+            .committed_entry
+            .as_ref()
+            .unwrap()
+            .group,
+        4
+    );
+    drop(blob);
+    drop(volume);
+
+    // Reopen with DEFAULT options: the stored geometry wins.
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"g").await.unwrap();
+    assert_eq!(size, expected.len() as u64);
+    assert_eq!(blob.core.inner.lock().geo.group, 4);
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+}
+
+/// The accepted trade-off, pinned: the first read of any byte of an
+/// unverified coarse chunk widens to the WHOLE chunk span (one inner read
+/// per group, once per process lifetime). Later reads in the same chunk
+/// are exact. A default-geometry sibling widens only to its 4 KiB block.
+#[tokio::test]
+async fn test_volume_group_first_touch_amplification() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let coarse = crate::BlobOptions {
+        verification_group: Some(64 << 10),
+    };
+
+    let (a, _) = volume.open_with("p", b"coarse", coarse).await.unwrap();
+    let (b, _) = volume.open("p", b"default").await.unwrap();
+    let data = vec![3u8; 128 << 10];
+    a.write_at(0, IoBuf::copy_from_slice(&data)).await.unwrap();
+    a.sync().await.unwrap();
+    b.write_at(0, IoBuf::copy_from_slice(&data)).await.unwrap();
+    b.sync().await.unwrap();
+    drop((a, b));
+    drop(volume);
+
+    // Reopen, then advance the NEWEST commit past both blobs with an
+    // unrelated sync: recovery's manifest verification would otherwise
+    // seed the just-written chunks as verified, hiding the first-touch
+    // path this test pins.
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let (c, _) = volume.open("p", b"other").await.unwrap();
+    c.write_at_sync(0, IoBuf::copy_from_slice(&[1u8; 64]))
+        .await
+        .unwrap();
+    drop(c);
+    drop(volume);
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let (a, _) = volume.open("p", b"coarse").await.unwrap();
+    let (b, _) = volume.open("p", b"default").await.unwrap();
+
+    // First touch of a coarse chunk: ONE data read of the whole 64 KiB
+    // span serves a 100-byte request (the honest amplification). The other
+    // new read is the lazy committed-CRC extent load (a few bytes).
+    let before = recording.reads();
+    let got = a.read_at(10, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &vec![3u8; 100][..]);
+    let log = recording.log.lock().clone();
+    let new: Vec<_> = log
+        .iter()
+        .filter(|(w, _, _)| !*w)
+        .skip(before)
+        .copied()
+        .collect();
+    let data: Vec<_> = new
+        .iter()
+        .filter(|(_, _, len)| *len >= BLOCK as usize)
+        .collect();
+    assert_eq!(data.len(), 1, "one widened data read: {new:?}");
+    assert_eq!(data[0].2, 64 << 10, "widened to the whole group");
+
+    // The group is now verified: a second read elsewhere in it is exact.
+    let before = recording.reads();
+    let got = a.read_at(40_000, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &vec![3u8; 100][..]);
+    let log = recording.log.lock().clone();
+    let new: Vec<_> = log
+        .iter()
+        .filter(|(w, _, _)| !*w)
+        .skip(before)
+        .copied()
+        .collect();
+    assert_eq!(new.len(), 1, "one exact read: {new:?}");
+    assert_eq!(new[0].2, 100, "verified chunks read exactly");
+
+    // The default-geometry sibling widens only to its block.
+    let before = recording.reads();
+    let got = b.read_at(10, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &vec![3u8; 100][..]);
+    let log = recording.log.lock().clone();
+    let new: Vec<_> = log
+        .iter()
+        .filter(|(w, _, _)| !*w)
+        .skip(before)
+        .copied()
+        .collect();
+    let data: Vec<_> = new
+        .iter()
+        .filter(|(_, _, len)| *len >= BLOCK as usize)
+        .collect();
+    assert_eq!(data.len(), 1, "one widened data read: {new:?}");
+    assert_eq!(data[0].2, BLOCK as usize, "default widens to one block");
+}
+
+/// The frontier shadow under groups covers exactly the span's final
+/// PARTIAL block: tearing that block under post-commit appends recovers
+/// through the shadow splice, while tearing a fully-committed block of the
+/// same manifested chunk fails the group CRC and rolls back the commit.
+#[tokio::test]
+async fn test_volume_group_frontier_shadow_fragment() {
+    let coarse = crate::BlobOptions {
+        verification_group: Some(64 << 10),
+    };
+    let group = 64usize << 10;
+    // Frontier chunk span = one full block + a 904-byte fragment.
+    let committed_len = group + BLOCK as usize + 904;
+
+    for tear_fragment in [true, false] {
+        let pool = test_pool();
+        let tearing = Tearing::new(pool.clone());
+        let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+        let (blob, _) = volume.open_with("p", b"g", coarse).await.unwrap();
+        let mut rng = TestRng::new(11);
+        let mut expected = vec![0u8; committed_len];
+        rng.fill_bytes(&mut expected);
+        blob.write_at(0, IoBuf::copy_from_slice(&expected))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        // The shadow covers the 904-byte fragment, not the whole span.
+        assert!(blob
+            .core
+            .inner
+            .lock()
+            .committed_entry
+            .as_ref()
+            .unwrap()
+            .shadow
+            .is_some());
+
+        // Unsynced post-commit append (writes the fragment's block in
+        // place), then a crash that tears one specific block of the
+        // frontier chunk.
+        blob.write_at(committed_len as u64, IoBuf::copy_from_slice(&[7u8; 3000]))
+            .await
+            .unwrap();
+        let mut image = tearing.durable.lock().clone();
+        // Locate the frontier chunk's physical base: its committed content
+        // is unique in the image (search for the span's first block).
+        let span_start = group;
+        let phys = image
+            .windows(BLOCK as usize)
+            .position(|w| w == &expected[span_start..span_start + BLOCK as usize])
+            .expect("frontier span on disk");
+        assert!(phys % BLOCK as usize == 0, "block-aligned backing");
+        let torn = if tear_fragment {
+            // The shared tear atom (committed fragment + appended bytes).
+            phys + BLOCK as usize
+        } else {
+            // A fully-committed block of the same manifested chunk.
+            phys
+        };
+        for b in &mut image[torn..torn + BLOCK as usize] {
+            *b = !*b ^ 0x5a;
+        }
+
+        drop(blob);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let (blob, size) = recovered.open("p", b"g").await.unwrap();
+        if tear_fragment {
+            // Shadow splice restores the fragment: the commit stands.
+            assert_eq!(size, committed_len as u64);
+            let got = blob.read_at(0, committed_len).await.unwrap().coalesce();
+            assert_eq!(got.as_ref(), &expected[..], "shadow splice restores");
+        } else {
+            // A tear beyond the shadow's reach fails the group CRC: the
+            // commit rolls back to the previous one (the empty creation).
+            assert_eq!(size, 0, "torn committed block rolls the commit back");
+        }
+    }
+}
+
+/// A group-partial but BLOCK-ALIGNED frontier span needs no shadow (no
+/// committed byte shares a tear atom with appends), and the tail CRC still
+/// verifies the span at recovery and hydration.
+#[tokio::test]
+async fn test_volume_group_block_aligned_frontier_needs_no_shadow() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let coarse = crate::BlobOptions {
+        verification_group: Some(64 << 10),
+    };
+
+    let (blob, _) = volume.open_with("p", b"g", coarse).await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![5u8; 2 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    assert!(
+        blob.core
+            .inner
+            .lock()
+            .committed_entry
+            .as_ref()
+            .unwrap()
+            .shadow
+            .is_none(),
+        "block-aligned span shares no tear atom with appends"
+    );
+
+    // A mid-block frontier gets one.
+    blob.write_at(2 * BLOCK, IoBuf::copy_from_slice(&[6u8; 100]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    assert!(blob
+        .core
+        .inner
+        .lock()
+        .committed_entry
+        .as_ref()
+        .unwrap()
+        .shadow
+        .is_some());
+    drop(blob);
+    drop(volume);
+
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"g").await.unwrap();
+    assert_eq!(size, 2 * BLOCK + 100);
+    let got = blob.read_at(0, size as usize).await.unwrap().coalesce();
+    assert_eq!(
+        &got.as_ref()[..2 * BLOCK as usize],
+        &vec![5u8; 2 * BLOCK as usize][..]
+    );
+    assert_eq!(&got.as_ref()[2 * BLOCK as usize..], &[6u8; 100][..]);
 }

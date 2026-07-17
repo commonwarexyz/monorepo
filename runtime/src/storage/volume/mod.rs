@@ -135,19 +135,22 @@ mod recover;
 mod tests;
 
 use crate::{BufferPool, Error, Handle, IoBufs, IoBufsMut};
-use alloc::{block_align, Extent};
+use alloc::Extent;
 pub use batch::Batch;
 use commonware_formatting::hex;
 use commonware_utils::sync::AsyncMutex;
-use core::{BlobCore, Ready};
+use core::{BlobCore, Geometry, Ready};
 use std::{
     ops::RangeInclusive,
     sync::{Arc, OnceLock},
 };
 
-/// Alignment unit and checksum granularity: writes tear at (at most) this
-/// granularity, and reads are verified per this granularity (once per chunk
-/// per process lifetime).
+/// Alignment, allocation, and tearing unit — and the DEFAULT verification
+/// granularity: writes tear at (at most) this granularity, and reads are
+/// verified per chunk (once per chunk per process lifetime), where a chunk
+/// is one block unless the blob was created with a coarser verification
+/// group (see [`crate::BlobOptions::verification_group`] and
+/// [`core::Geometry`]).
 pub(crate) const BLOCK: u64 = 4096;
 
 /// Location and growth policy of the volume file within the inner storage.
@@ -338,8 +341,13 @@ impl<S: crate::Storage> crate::WriteBatch for Batch<S> {
         Self::remove(self, partition, name);
     }
 
-    async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Blob<S>, Error> {
-        Self::create(self, partition, name)
+    async fn create(
+        &mut self,
+        partition: &str,
+        name: &[u8],
+        options: crate::BlobOptions,
+    ) -> Result<Blob<S>, Error> {
+        Self::create(self, partition, name, options)
     }
 
     async fn apply(self) -> Result<(), Error> {
@@ -359,6 +367,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         partition: &str,
         name: &[u8],
         versions: RangeInclusive<u16>,
+        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
         super::validate_partition_name(partition)?;
         let ready = self.ensure().await?;
@@ -436,8 +445,11 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             ));
         }
 
-        // Create: new id, empty blob, durable via group commit.
+        // Create: new id, empty blob, durable via group commit. Creation
+        // options apply here and only here: an existing blob (the branch
+        // above) keeps the geometry it was created with.
         let version = *versions.end();
+        let geo = Geometry::from_options(&options);
         let (id, core) = {
             let mut state = ready.state.lock();
             let id = state.next_id;
@@ -449,6 +461,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
                 version,
                 write_lock: AsyncMutex::new(()),
                 inner: commonware_utils::sync::Mutex::new(core::BlobInner {
+                    geo,
                     committed_entry: None,
                     ..Default::default()
                 }),
@@ -592,10 +605,11 @@ fn unlink(state: &mut core::State, id: u64) {
         }
     } else if let Some((_, entry)) = state.dormant.remove(&id) {
         for r in &entry.runs {
+            // The run's whole chunk-aligned slice, as recovery reserved it.
             state.pending_free.push((
                 Extent {
                     offset: r.physical,
-                    len: block_align(r.len),
+                    len: Geometry { group: entry.group }.chunk_align(r.len),
                 },
                 seq,
                 None,

@@ -585,6 +585,34 @@ stability_scope!(BETA {
         fn peek(&self, max_len: usize) -> &[u8];
     }
 
+    /// Creation-time hints for a new blob, applied only when an open or a
+    /// staged creation actually CREATES the blob. A blob that already exists
+    /// keeps the options it was created with, whatever a later open passes.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct BlobOptions {
+        /// Verification-group size hint in bytes: backends that checksum
+        /// reads (the storage volume serving every runtime context) verify
+        /// this blob's content in groups of this many bytes, one checksum
+        /// per group. `None` requests the backend default (4096, matching
+        /// the volume's tear granularity). Backends without read
+        /// verification ignore the hint.
+        ///
+        /// Coarse groups fit blobs written contiguously and never read at
+        /// sub-group granularity (bulk values read whole, replay-dominant
+        /// journals): a 64 KiB group carries 16x less checksum metadata and
+        /// 16x smaller commit manifests than the default. The trade-off is
+        /// read amplification on first touch: the first read of any byte of
+        /// an unverified group reads the WHOLE group to verify it (once per
+        /// group per process lifetime), so random small reads against a
+        /// coarse blob pay up to a group-sized read each until the touched
+        /// groups are verified. Keep the default for blobs served by
+        /// page-granular caches or read in small random probes.
+        ///
+        /// When set, the value must be a power-of-two multiple of 4096, at
+        /// most 1 MiB.
+        pub verification_group: Option<u64>,
+    }
+
     /// Interface to interact with storage.
     ///
     /// To support storage implementations that enable concurrent reads and
@@ -637,15 +665,31 @@ stability_scope!(BETA {
         type Blob: Blob;
 
         /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
-        /// in the versions range. The blob version is omitted from the return value.
+        /// in the versions range and default [`BlobOptions`]. The blob version is
+        /// omitted from the return value.
         fn open(
             &self,
             partition: &str,
             name: &[u8],
         ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
+            self.open_with(partition, name, BlobOptions::default())
+        }
+
+        /// [`Storage::open`] with explicit creation [`BlobOptions`].
+        fn open_with(
+            &self,
+            partition: &str,
+            name: &[u8],
+            options: BlobOptions,
+        ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
             async move {
                 let (blob, size, _) = self
-                    .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
+                    .open_versioned(
+                        partition,
+                        name,
+                        DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
+                        options,
+                    )
                     .await?;
                 Ok((blob, size))
             }
@@ -664,6 +708,12 @@ stability_scope!(BETA {
         /// Blobs are versioned. If the blob's version is not in `versions`, returns
         /// [Error::BlobVersionMismatch].
         ///
+        /// # Options
+        ///
+        /// `options` are creation-time hints, applied only when this call creates
+        /// the blob: a blob that already exists keeps the options it was created
+        /// with (see [BlobOptions]).
+        ///
         /// # Returns
         ///
         /// A tuple of (blob, logical_size, blob_version).
@@ -672,6 +722,7 @@ stability_scope!(BETA {
             partition: &str,
             name: &[u8],
             versions: std::ops::RangeInclusive<u16>,
+            options: BlobOptions,
         ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
 
         /// Remove a blob from a given partition.
@@ -891,10 +942,14 @@ stability_scope!(BETA {
         ///
         /// The returned handle must not be read, written, or staged against
         /// until the batch is applied.
+        ///
+        /// `options` are creation-time hints, exactly as for
+        /// [Storage::open_versioned].
         fn create(
             &mut self,
             partition: &str,
             name: &[u8],
+            options: BlobOptions,
         ) -> impl Future<Output = Result<Self::Blob, Error>> + Send;
 
         /// Apply the staged operations atomically WITHOUT making them

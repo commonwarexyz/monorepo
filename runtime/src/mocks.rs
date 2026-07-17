@@ -559,7 +559,12 @@ impl<S: Storage + Clone> crate::WriteBatch for SequentialBatch<S> {
     /// [`Storage::open`] contract) instead of staging it: exactly the
     /// pre-batch behavior. The create-exclusive contract is still enforced,
     /// eagerly instead of at apply.
-    async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+    async fn create(
+        &mut self,
+        partition: &str,
+        name: &[u8],
+        options: crate::BlobOptions,
+    ) -> Result<Self::Blob, Error> {
         match self.storage.scan(partition).await {
             Ok(names) if names.iter().any(|existing| existing == name) => {
                 return Err(Error::BlobExists(
@@ -570,7 +575,7 @@ impl<S: Storage + Clone> crate::WriteBatch for SequentialBatch<S> {
             Ok(_) | Err(Error::PartitionMissing(_)) => {}
             Err(err) => return Err(err),
         }
-        let (blob, _) = self.storage.open(partition, name).await?;
+        let (blob, _) = self.storage.open_with(partition, name, options).await?;
         Ok(blob)
     }
 
@@ -683,9 +688,14 @@ impl<E: Batchable + Send + Sync + 'static> crate::WriteBatch for DelayedSyncBatc
         self.inner.remove(partition, name);
     }
 
-    async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+    async fn create(
+        &mut self,
+        partition: &str,
+        name: &[u8],
+        options: crate::BlobOptions,
+    ) -> Result<Self::Blob, Error> {
         self.creations += 1;
-        let inner = self.inner.create(partition, name).await?;
+        let inner = self.inner.create(partition, name, options).await?;
         Ok(DelayedSyncBlob {
             inner,
             pending: self.pending.clone(),
@@ -745,8 +755,12 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
+        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        let (inner, len, version) = self
+            .inner
+            .open_versioned(partition, name, versions, options)
+            .await?;
         Ok((
             DelayedSyncBlob {
                 inner,
@@ -981,8 +995,12 @@ impl<E: Storage> Storage for SyncFaultContext<E> {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
+        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        let (inner, len, version) = self
+            .inner
+            .open_versioned(partition, name, versions, options)
+            .await?;
         Ok((
             SyncFaultBlob {
                 inner,

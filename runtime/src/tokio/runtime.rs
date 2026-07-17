@@ -833,8 +833,11 @@ impl crate::Storage for Context {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
+        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.storage.open_versioned(partition, name, versions).await
+        self.storage
+            .open_versioned(partition, name, versions, options)
+            .await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {

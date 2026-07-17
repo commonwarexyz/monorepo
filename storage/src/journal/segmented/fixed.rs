@@ -25,7 +25,7 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, Handle, Metrics, Storage,
+    Blob, BlobOptions, Buf, Handle, Metrics, Storage,
 };
 use commonware_utils::NZUsize;
 use futures::{
@@ -85,6 +85,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 write_buffer: cfg.write_buffer,
                 page_cache_ref: cfg.page_cache,
             },
+            // Reads miss through the page cache in page-sized probes, so
+            // the default verification group avoids group-sized
+            // amplification on first touch.
+            blob_options: BlobOptions::default(),
         };
         let manager = Manager::init(context, manager_cfg).await?;
 
