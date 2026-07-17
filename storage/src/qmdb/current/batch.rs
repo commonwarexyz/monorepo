@@ -109,56 +109,35 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 }
 
-/// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Skips locations where the
-/// bitmap bit is unset, avoiding I/O reads for inactive operations.
+/// Bitmap-accelerated floor scan for a layered `BitmapBatch` chain. Fills `out` with up to
+/// `limit` floor-raise candidates in `[floor, tip)`, returning the next `floor`. Skips
+/// locations where the committed bitmap bit is unset, avoiding I/O reads for inactive
+/// operations.
 ///
 /// Mirrors the contract on `any::batch::fill_candidates`: may return only locations that are
 /// *possibly* active in `[floor, tip)`, may skip locations only when known inactive. The
 /// floor-raise loop revalidates each candidate, so false positives are tolerated; false
 /// negatives are forbidden.
 ///
-/// False positives can arise two ways:
-/// - In the committed prefix, an uncommitted ancestor batch in the chain may have superseded
-///   the location -- the committed bitmap doesn't reflect uncommitted shadows.
-/// - Beyond the committed bitmap, locations are returned as sequential candidates (one per
-///   index) without per-location filtering, so any inactive uncommitted op shows up here.
-pub(crate) fn next_candidate<F: Graftable, B: bitmap::Readable<N>, const N: usize>(
-    bitmap: &B,
-    floor: Location<F>,
-    tip: u64,
-) -> Option<Location<F>> {
-    let floor = *floor;
-    let bitmap_len = bitmap.len();
-    let committed_end = bitmap_len.min(tip);
-    if floor < committed_end
-        && let Some(idx) = bitmap.ones_iter_from(floor).next()
-        && idx < committed_end
-    {
-        return Some(Location::<F>::new(idx));
-    }
-    let candidate = floor.max(bitmap_len);
-    (candidate < tip).then(|| Location::<F>::new(candidate))
-}
-
-/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` over the layered
-/// `BitmapBatch` chain, returning the next `floor`. Produces the same sequence as repeatedly
-/// calling [`next_candidate`].
-pub(crate) fn fill_candidates<F: Graftable, B: bitmap::Readable<N>, const N: usize>(
-    bitmap: &B,
+/// Overlay `Layer`s are deliberately ignored: scanning them bit-by-bit costs a fresh chain
+/// walk and base-lock acquisition per candidate, while the terminal [`Shared`] serves the
+/// whole batch under one read guard. This can only widen the candidate set:
+/// - In the committed prefix, layers only clear bits (supersessions -- appends never land
+///   below the committed boundary), so a stale set bit read from the base is a false
+///   positive.
+/// - At or beyond the committed boundary, every location is emitted as a sequential
+///   candidate, which covers all layer appends.
+pub(crate) fn fill_candidates<F: Graftable, const N: usize>(
+    bitmap: &BitmapBatch<N>,
     floor: Location<F>,
     tip: u64,
     limit: usize,
     out: &mut Vec<Location<F>>,
 ) -> Location<F> {
-    let mut scan = floor;
-    while out.len() < limit {
-        let Some(candidate) = next_candidate(bitmap, scan, tip) else {
-            break;
-        };
-        out.push(candidate);
-        scan = Location::<F>::new(*candidate + 1);
-    }
-    scan
+    let mut raw: Vec<u64> = Vec::with_capacity(limit);
+    let next = bitmap.shared().fill_candidates(*floor, tip, limit, &mut raw);
+    out.extend(raw.into_iter().map(Location::new));
+    Location::new(next)
 }
 
 /// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
@@ -1481,6 +1460,27 @@ mod tests {
 
     // ---- next_candidate tests ----
 
+    /// Single-step oracle for [`fill_candidates`]: return the next floor-raise candidate in
+    /// `[floor, tip)` over a flat committed bitmap. `fill_candidates_matches_oracle` proves
+    /// the production scan produces exactly this sequence.
+    fn next_candidate<B: bitmap::Readable<N2>, const N2: usize>(
+        bitmap: &B,
+        floor: Location,
+        tip: u64,
+    ) -> Option<Location> {
+        let floor = *floor;
+        let bitmap_len = bitmap.len();
+        let committed_end = bitmap_len.min(tip);
+        if floor < committed_end
+            && let Some(idx) = bitmap.ones_iter_from(floor).next()
+            && idx < committed_end
+        {
+            return Some(Location::new(idx));
+        }
+        let candidate = floor.max(bitmap_len);
+        (candidate < tip).then(|| Location::new(candidate))
+    }
+
     #[test]
     fn bitmap_scan_all_active() {
         let bm = make_bitmap(&[true; 8]);
@@ -1558,6 +1558,57 @@ mod tests {
         );
         // Empty bitmap, tip = 0: no candidates.
         assert_eq!(next_candidate(&bm, Location::new(0), 0), None);
+    }
+
+    #[test]
+    fn fill_candidates_matches_oracle() {
+        let bits = [true, false, true, true, false, false, true, false];
+        let shared = Arc::new(Shared::new(make_bitmap(&bits)));
+        let chain = BitmapBatch::Base(Arc::clone(&shared));
+        let oracle_bm = make_bitmap(&bits);
+        let tip = 12; // extends past the committed bitmap
+        for floor in 0..=tip {
+            let mut want = Vec::new();
+            let mut scan = Location::new(floor);
+            while let Some(c) = next_candidate(&oracle_bm, scan, tip) {
+                want.push(c);
+                scan = Location::new(*c + 1);
+            }
+            // Any split point yields the same overall sequence: the continuation returned by
+            // the first call seamlessly resumes the second.
+            for split in 0..=want.len() {
+                let mut got = Vec::new();
+                let next = fill_candidates(&chain, Location::new(floor), tip, split, &mut got);
+                fill_candidates(&chain, next, tip, want.len() + 1, &mut got);
+                assert_eq!(got, want, "floor={floor} split={split}");
+            }
+        }
+    }
+
+    #[test]
+    fn fill_candidates_ignores_layers() {
+        let bits = [true, false, true, true, false, false, true, false];
+        let base = make_bitmap(&bits);
+        let shared = Arc::new(Shared::new(make_bitmap(&bits)));
+        // Layer clears committed bit 3 and appends bits 8..12 (only 9 set).
+        let mut overlay = ChunkOverlay::new(12, 2);
+        overlay.clear_bit(&base, 0, 3);
+        overlay.set_bit(&base, 9);
+        let chain = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+            parent: BitmapBatch::Base(Arc::clone(&shared)),
+            overlay: Arc::new(overlay),
+            shared,
+        }));
+        let mut got = Vec::new();
+        fill_candidates(&chain, Location::new(0), 12, 16, &mut got);
+        // Committed set bits (0, 2, 3, 6) are all emitted -- including 3, which the layer
+        // cleared (a permitted false positive) -- then 8..12 sequentially, covering the
+        // layer's appends without per-location filtering.
+        let want: Vec<Location> = [0, 2, 3, 6, 8, 9, 10, 11]
+            .into_iter()
+            .map(Location::new)
+            .collect();
+        assert_eq!(got, want);
     }
 
     // ---- trim_committed tests ----
