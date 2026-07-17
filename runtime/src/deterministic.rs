@@ -1195,6 +1195,29 @@ impl crate::Spawner for Context {
     }
 }
 
+// Rayon permits one permanent registry registration per OS thread. Cache the pool that
+// registered the executor thread so later requests and runners reuse it.
+commonware_utils::thread_local_cache!(static THREAD_POOL: commonware_parallel::ThreadPool);
+
+/// Returns the single-threaded pool the executor thread registered with, created on first use.
+///
+/// All pool work executes inline on the executor thread, so a larger pool would only
+/// add permanently unstarted workers.
+fn shared_thread_pool() -> Result<commonware_parallel::ThreadPool, rayon::ThreadPoolBuildError> {
+    let pool = commonware_utils::Cached::take(
+        &THREAD_POOL,
+        || {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .use_current_thread()
+                .build()
+                .map(Arc::new)
+        },
+        |_| Ok(()),
+    )?;
+    Ok(Arc::clone(&pool))
+}
+
 /// Spawning threads would be nondeterministic, so the pool has no background workers. The
 /// executor thread registers itself as its sole member and all work executes inline.
 ///
@@ -1207,8 +1230,7 @@ impl crate::Spawner for Context {
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         Rayon::with_pool(
-            crate::utils::rayon::shared_thread_pool()
-                .expect("failed to create deterministic Rayon thread pool"),
+            shared_thread_pool().expect("failed to create deterministic Rayon thread pool"),
         )
         .with_parallelism(parallelism)
     }
