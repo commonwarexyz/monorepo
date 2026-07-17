@@ -91,6 +91,7 @@ mod tests {
         certificate::Verifier as _,
         sha256::Sha256,
     };
+    use commonware_macros::select;
     use commonware_p2p::{
         simulated::{Config as NetworkConfig, Link, Network, Oracle},
         utils::mux::{Builder, Muxer},
@@ -238,6 +239,7 @@ mod tests {
         marshal: mocks::TestMarshalMailbox,
         application: mocks::MockApplication,
         orchestrator_handle: Handle<()>,
+        certificate_mux_handle: Handle<Result<(), commonware_p2p::simulated::Error>>,
         marshal_handle: Handle<()>,
     }
 
@@ -377,7 +379,7 @@ mod tests {
                 16,
             )
             .build();
-            certificate_mux.start();
+            let certificate_mux_handle = certificate_mux.start();
             let simplex_resolver = control
                 .register(RESOLVER_CHANNEL, TEST_QUOTA)
                 .await
@@ -388,12 +390,14 @@ mod tests {
                 marshal,
                 application,
                 orchestrator_handle,
+                certificate_mux_handle,
                 marshal_handle,
             }
         }
 
         fn abort(&mut self) {
             self.orchestrator_handle.abort();
+            self.certificate_mux_handle.abort();
             self.marshal_handle.abort();
         }
     }
@@ -545,6 +549,27 @@ mod tests {
             let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
 
             assert_eq!(proposal.round.epoch(), Epoch::zero());
+        });
+    }
+
+    #[test]
+    fn active_engine_channel_close_stops_orchestrator() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let mut cluster = Cluster::start_with_seeded_first(&mut context, 1, false).await;
+            let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
+            assert_eq!(proposal.round.epoch(), Epoch::zero());
+
+            let node = &mut cluster.nodes[0];
+            node.certificate_mux_handle.abort();
+            select! {
+                result = &mut node.orchestrator_handle => {
+                    result.expect("orchestrator should stop cleanly");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("orchestrator stayed alive after active engine stopped");
+                },
+            };
         });
     }
 
