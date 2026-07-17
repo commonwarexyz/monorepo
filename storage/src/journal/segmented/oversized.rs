@@ -31,10 +31,9 @@
 //! (each section's last entry must have its value range within the durable glob) and any
 //! violation is [Error::Corruption], a state no crash can produce.
 //!
-//! Two states remain reachable across a crash, both unreferenced storage and both benign:
-//! - A crash during `rewind` (which removes trailing sections index-first, then glob) can
-//!   leave glob sections with no index section. They are left in place: appends reuse
-//!   them (values write after the existing bytes) and `prune` reclaims them.
+//! Two residual states are tolerated, both unreferenced storage and both benign:
+//! - Glob sections with no index section are left in place: appends reuse them
+//!   (values write after the existing bytes) and `prune` reclaims them.
 //! - Glob bytes past the last indexed value (e.g. within such a reused section) are
 //!   likewise left in place: subsequent appends write after them and the space is
 //!   reclaimed when the section is pruned.
@@ -180,10 +179,10 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
         // WITHOUT a commit: both blobs' entries land together at whatever commit
         // comes next (every commit emits every live blob's entry), or vanish
         // together on a crash before one. Either journal may already hold the
-        // section (e.g. a glob section orphaned by a rewind crash), so only the
-        // missing side is created. The glob is staged before the index so a
-        // sequentially replayed batch (the test-only mock fallback) creates the
-        // value store first.
+        // section (e.g. an index-less glob section, tolerated as unreferenced
+        // storage), so only the missing side is created. The glob is staged
+        // before the index so a sequentially replayed batch (the test-only mock
+        // fallback) creates the value store first.
         let create_values = !self.values.contains(section)?;
         let create_index = !self.index.contains(section)?;
         if create_values || create_index {
@@ -311,39 +310,9 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
         Ok(true)
     }
 
-    /// Rewind both journals to a specific section and index size.
+    /// Rewind only the given section to a specific index size. Other sections
+    /// are unaffected.
     ///
-    /// This rewinds the section to the given index size and removes all sections
-    /// after the given section. The value size is derived from the last entry.
-    ///
-    /// The index is rewound before the glob, so a crash mid-rewind can only leave glob
-    /// sections whose index section is already gone: unreferenced bytes that later
-    /// appends reuse and `prune` reclaims (see the module docs). The target section's
-    /// truncations are not durable until the next sync, which commits both atomically.
-    pub async fn rewind(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
-        // Rewind index first (this also removes sections after `section`)
-        self.index.rewind(section, index_size).await?;
-
-        // Derive value size from last entry (section may not exist if empty)
-        let value_size = match self.index.last(section).await {
-            Ok(Some(entry)) => {
-                let (offset, size) = entry.value_location();
-                offset
-                    .checked_add(u64::from(size))
-                    .ok_or(Error::OffsetOverflow)?
-            }
-            Ok(None) => 0,
-            Err(Error::SectionOutOfRange(_)) if index_size == 0 => 0,
-            Err(e) => return Err(e),
-        };
-
-        // Rewind values (this also removes sections after `section`)
-        self.values.rewind(section, value_size).await
-    }
-
-    /// Rewind only the given section to a specific index size.
-    ///
-    /// Unlike `rewind`, this does not affect other sections.
     /// The value size is derived from the last entry after rewinding the index.
     pub async fn rewind_section(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
         // Rewind index first
@@ -1905,9 +1874,9 @@ mod tests {
 
     #[test_traced]
     fn test_recovery_glob_trailing_bytes_retained() {
-        // Glob bytes past the last indexed value are unreferenced and tolerated (e.g. a
-        // glob section orphaned by a rewind crash and reused by later appends).
-        // Initialization leaves them in place and subsequent appends write after them.
+        // Glob bytes past the last indexed value are unreferenced and tolerated (e.g.
+        // an index-less glob section reused by later appends). Initialization leaves
+        // them in place and subsequent appends write after them.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -2212,76 +2181,6 @@ mod tests {
             let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
                 Oversized::init(context.child("third"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    #[test_traced]
-    fn test_rewind_to_zero_index_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
-
-            let value: TestValue = [1; 16];
-            let entry = TestEntry::new(1, 0, 0);
-            oversized
-                .append(0, entry, &value)
-                .await
-                .expect("Failed to append");
-            oversized.sync(0).await.expect("Failed to sync");
-
-            oversized
-                .rewind(0, 0)
-                .await
-                .expect("rewind to zero index_size must not fail");
-
-            assert_eq!(oversized.last(0).await.unwrap(), None);
-            assert_eq!(oversized.size(0).unwrap(), 0);
-            assert_eq!(oversized.value_size(0).await.unwrap(), 0);
-
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_rewind_to_zero_on_missing_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
-
-            oversized
-                .rewind(0, 0)
-                .await
-                .expect("rewind on missing section must not fail");
-
-            assert!(matches!(
-                oversized.last(0).await,
-                Err(Error::SectionOutOfRange(0))
-            ));
-            assert_eq!(oversized.value_size(0).await.unwrap(), 0);
-
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_rewind_nonzero_on_missing_section_errors() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
-
-            let result = oversized.rewind(0, 1).await;
-            assert!(
-                matches!(result, Err(Error::SectionOutOfRange(0))),
-                "nonzero index_size on missing section must fail, got: {result:?}"
-            );
-
-            oversized.destroy().await.expect("Failed to destroy");
         });
     }
 

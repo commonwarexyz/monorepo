@@ -113,11 +113,17 @@ impl<S: crate::Storage> Batch<S> {
     /// The staged entry for `blob`, created (at the blob's published size)
     /// on first touch.
     fn staged_mut(&mut self, blob: &Blob<S>) -> &mut Staged {
-        self.staged.entry(blob.core.id).or_insert_with(|| Staged {
-            core: blob.core.clone(),
-            overlay: StagedBlob::new(blob.core.inner.lock().size),
-            discarded: Vec::new(),
-            touched_only: true,
+        self.staged.entry(blob.core.id).or_insert_with(|| {
+            let mut inner = blob.core.inner.lock();
+            // Gates capture-time run merging until apply or drop: the
+            // overlay references base runs by key.
+            inner.staged_batches += 1;
+            Staged {
+                core: blob.core.clone(),
+                overlay: StagedBlob::new(inner.size),
+                discarded: Vec::new(),
+                touched_only: true,
+            }
         })
     }
 
@@ -433,8 +439,9 @@ impl<S: crate::Storage> Batch<S> {
             for extent in st.discarded {
                 state.defer_free(extent, seq, None);
             }
+            let mut inner = st.core.inner.lock();
+            inner.staged_batches -= 1;
             if !st.touched_only {
-                let mut inner = st.core.inner.lock();
                 publish_overlay(&mut inner, st.overlay);
                 state.dirty.insert(id);
             }
@@ -539,6 +546,7 @@ impl<S: crate::Storage> Drop for Batch<S> {
         let mut state = self.ready.state.lock();
         let seq = state.seq;
         for st in self.staged.values_mut() {
+            st.core.inner.lock().staged_batches -= 1;
             for extent in st.overlay.fresh.drain(..) {
                 state.defer_free(extent, seq, None);
             }

@@ -301,6 +301,10 @@ pub(super) struct BlobInner {
     /// next commit would recycle extents that commit's table (serving this
     /// blob's cached committed entry) still references.
     pub pending_frees: Vec<Extent>,
+    /// Batches currently holding staged state for this blob. While nonzero,
+    /// snapshot capture must not merge this blob's runs: staged overlays
+    /// (see [`StagedBlob`]) reference base runs by key.
+    pub staged_batches: usize,
     /// Unlinked from the namespace (handles may still read).
     pub removed: bool,
 }
@@ -1639,6 +1643,60 @@ fn cow_remap(inner: &mut BlobInner, chunk_start: u64, fresh: RunMeta) {
         );
     }
     inner.runs.insert(chunk_start, fresh);
+}
+
+/// Merge adjacent runs that are logically AND physically contiguous with no
+/// padding gap (the earlier run's written length fills its extent exactly,
+/// so the later run's extent begins where the earlier run's data ends).
+///
+/// A merged run references the same physical bytes as its components — no
+/// extent is freed or allocated — and keeps the final component's spare
+/// capacity as its growth room. `born` becomes the minimum (oldest) of the
+/// components, which never widens the freeze-rule exemption. Callers must
+/// still guarantee every run is frozen (born <= the current snapshot seq),
+/// since a young component would silently lose its exemption otherwise.
+/// Holes are never crossed: they break logical contiguity by definition.
+pub(super) fn merge_frozen_runs(runs: &mut BTreeMap<u64, RunMeta>) {
+    /// Whether `run` at `logical` extends `head` (at `head_logical`) with
+    /// logical and physical contiguity and no padding gap in `head`.
+    const fn extends(head_logical: u64, head: &RunMeta, logical: u64, run: &RunMeta) -> bool {
+        head_logical + head.len == logical
+            && head.physical + head.len == run.physical
+            && head.capacity == head.len
+    }
+
+    // Common case: nothing to merge (coalesced by a previous pass). One
+    // borrowed scan proves it without rebuilding the map.
+    if !runs
+        .iter()
+        .zip(runs.iter().skip(1))
+        .any(|((&l0, r0), (&l1, r1))| extends(l0, r0, l1, r1))
+    {
+        return;
+    }
+
+    let mut head: Option<(u64, RunMeta)> = None;
+    for (logical, run) in std::mem::take(runs) {
+        match &mut head {
+            Some((head_logical, merged)) if extends(*head_logical, merged, logical, &run) => {
+                merged.len += run.len;
+                merged.capacity += run.capacity;
+                merged.born = merged.born.min(run.born);
+                debug_assert!(
+                    merged.capacity >= block_align(merged.len),
+                    "merged capacity below block-aligned length"
+                );
+            }
+            _ => {
+                if let Some((l, r)) = head.replace((logical, run)) {
+                    runs.insert(l, r);
+                }
+            }
+        }
+    }
+    if let Some((l, r)) = head {
+        runs.insert(l, r);
+    }
 }
 
 /// Cap on one coalesced inner read issued by [`read_verified`].

@@ -25,7 +25,10 @@
 
 use super::{
     alloc::{block_align, Allocator, Extent},
-    core::{chunk_of, BlobInner, ChunkCrc, ChunkState, CommittedMeta, Ready, RunMeta, State},
+    core::{
+        chunk_of, merge_frozen_runs, BlobInner, ChunkCrc, ChunkState, CommittedMeta, Ready,
+        RunMeta, State,
+    },
     layout::{Entry, Superblock, Table},
     Config, BLOCK,
 };
@@ -511,6 +514,11 @@ pub(super) async fn hydrate<S: crate::Storage>(
             },
         );
     }
+    // Recovered runs are all frozen (born 0): coalesce contiguous
+    // neighbors. A no-op for entries captured after a merging pass, but an
+    // entry captured while a batch held staged state for its blob (which
+    // gates capture-time merging) can still carry mergeable runs.
+    merge_frozen_runs(&mut inner.runs);
     // Load + verify chunk CRCs (committed extents: no length bound).
     let index = ChecksumIndex::load(&ready.file, entry, u64::MAX)
         .await?

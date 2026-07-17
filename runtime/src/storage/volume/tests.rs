@@ -2721,3 +2721,197 @@ async fn test_volume_chunk_counts_stay_exact() {
     let _ = blob.read_at(0, BLOCK as usize).await.unwrap();
     audit(&blob);
 }
+
+/// Contiguous appends land as separate runs, a capture merges them into
+/// one (all frozen at that point), and the merged entry round-trips across
+/// reopen.
+#[tokio::test]
+async fn test_volume_capture_merges_frozen_runs() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+        .await
+        .unwrap();
+    let (blob, _) = volume.open("p", b"m").await.unwrap();
+
+    // Two-block appends: fresh extents skip the single-block holes freed by
+    // the creation commit and land contiguously at the end of the file.
+    let mut expected = Vec::new();
+    for i in 0..4u8 {
+        let piece = vec![i + 1; 2 * BLOCK as usize];
+        blob.write_at(i as u64 * 2 * BLOCK, IoBuf::copy_from_slice(&piece))
+            .await
+            .unwrap();
+        expected.extend_from_slice(&piece);
+    }
+    assert_eq!(blob.core.inner.lock().runs.len(), 4);
+
+    blob.sync().await.unwrap();
+    {
+        let inner = blob.core.inner.lock();
+        assert_eq!(inner.runs.len(), 1, "capture merges contiguous runs");
+        let run = inner.runs.values().next().unwrap();
+        assert_eq!(run.len, 8 * BLOCK);
+        assert_eq!(run.capacity, 8 * BLOCK);
+        let entry = inner.committed_entry.as_ref().unwrap();
+        assert_eq!(entry.runs.len(), 1, "the entry encodes the merged run");
+    }
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+    drop(blob);
+    drop(volume);
+
+    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let (blob, size) = volume.open("p", b"m").await.unwrap();
+    assert_eq!(size, 8 * BLOCK);
+    assert_eq!(blob.core.inner.lock().runs.len(), 1);
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+}
+
+/// A hole breaks logical contiguity: runs on either side never merge.
+#[tokio::test]
+async fn test_volume_merge_never_crosses_holes() {
+    let volume = volume_over_memory();
+    let (blob, _) = volume.open("p", b"h").await.unwrap();
+
+    blob.write_at(0, IoBuf::copy_from_slice(&[1u8; BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.write_at(2 * BLOCK, IoBuf::copy_from_slice(&[2u8; BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    assert_eq!(blob.core.inner.lock().runs.len(), 2, "hole stays a hole");
+
+    let mut expected = vec![1u8; BLOCK as usize];
+    expected.extend_from_slice(&[0u8; BLOCK as usize]);
+    expected.extend_from_slice(&[2u8; BLOCK as usize]);
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+}
+
+/// A COW relocation leaves physically non-adjacent neighbors: the split
+/// runs stay separate across captures, and reads splice them correctly.
+#[tokio::test]
+async fn test_volume_merge_requires_physical_adjacency() {
+    let volume = volume_over_memory();
+    let (blob, _) = volume.open("p", b"c").await.unwrap();
+
+    let mut expected = vec![5u8; 3 * BLOCK as usize];
+    blob.write_at(0, IoBuf::copy_from_slice(&expected))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    assert_eq!(blob.core.inner.lock().runs.len(), 1);
+
+    // Overwrite the frozen middle chunk: relocated by copy-on-write.
+    blob.write_at(BLOCK, IoBuf::copy_from_slice(&[6u8; BLOCK as usize]))
+        .await
+        .unwrap();
+    expected[BLOCK as usize..2 * BLOCK as usize].fill(6);
+    assert_eq!(blob.core.inner.lock().runs.len(), 3);
+
+    blob.sync().await.unwrap();
+    assert_eq!(
+        blob.core.inner.lock().runs.len(),
+        3,
+        "relocated chunk is not physically adjacent to its neighbors"
+    );
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+}
+
+/// Runs merge only at capture: appends racing no snapshot stay separate
+/// until the next sync freezes and coalesces them.
+#[tokio::test]
+async fn test_volume_young_runs_merge_only_at_capture() {
+    let volume = volume_over_memory();
+    let (blob, _) = volume.open("p", b"y").await.unwrap();
+
+    let mut expected = vec![1u8; BLOCK as usize];
+    blob.write_at(0, IoBuf::copy_from_slice(&expected))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    assert_eq!(blob.core.inner.lock().runs.len(), 1);
+
+    // Two contiguous young appends on mutually adjacent fresh extents (the
+    // commit's metadata extents separate them from the first run).
+    for i in 0..2u8 {
+        let piece = vec![i + 2; 2 * BLOCK as usize];
+        blob.write_at((1 + 2 * i as u64) * BLOCK, IoBuf::copy_from_slice(&piece))
+            .await
+            .unwrap();
+        expected.extend_from_slice(&piece);
+    }
+    assert_eq!(
+        blob.core.inner.lock().runs.len(),
+        3,
+        "young runs stay unmerged until a capture"
+    );
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+
+    blob.sync().await.unwrap();
+    assert_eq!(
+        blob.core.inner.lock().runs.len(),
+        2,
+        "the capture merges the adjacent young pair"
+    );
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+}
+
+/// A batch holding staged state gates capture-time merging, since staged
+/// overlays reference base runs by key. Hydration merges the unmerged
+/// committed entry on reopen.
+#[tokio::test]
+async fn test_volume_staged_batch_gates_merge_until_reopen() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+        .await
+        .unwrap();
+    let (blob, _) = volume.open("p", b"g").await.unwrap();
+
+    // Two-block appends: physically adjacent (see the capture-merge test).
+    let mut expected = Vec::new();
+    for i in 0..2u8 {
+        let piece = vec![i + 1; 2 * BLOCK as usize];
+        blob.write_at(i as u64 * 2 * BLOCK, IoBuf::copy_from_slice(&piece))
+            .await
+            .unwrap();
+        expected.extend_from_slice(&piece);
+    }
+
+    // Stage batch content for the blob, then sync it: the capture must not
+    // merge while the overlay's base-run keys are live.
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&blob, 4 * BLOCK, IoBuf::copy_from_slice(&[9u8; 100]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    {
+        let inner = blob.core.inner.lock();
+        assert_eq!(inner.staged_batches, 1);
+        assert_eq!(inner.runs.len(), 2, "merge is gated by the staged batch");
+        let entry = inner.committed_entry.as_ref().unwrap();
+        assert_eq!(entry.runs.len(), 2, "the entry carries the unmerged runs");
+    }
+    drop(batch);
+    assert_eq!(blob.core.inner.lock().staged_batches, 0);
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+    drop(blob);
+    drop(volume);
+
+    // Hydration coalesces the unmerged committed entry.
+    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let (blob, size) = volume.open("p", b"g").await.unwrap();
+    assert_eq!(size, 4 * BLOCK);
+    assert_eq!(blob.core.inner.lock().runs.len(), 1, "hydration merges");
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+}

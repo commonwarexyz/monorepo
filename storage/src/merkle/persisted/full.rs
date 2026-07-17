@@ -533,19 +533,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         futures::future::try_join_all(futs).await
     }
 
-    /// Flush all nodes cached in the in-memory structure to the journal without forcing them to
-    /// disk. Flushed nodes are pruned from the in-memory structure and remain readable through the
-    /// journal, but they are not guaranteed to survive a crash until [Self::sync] is called.
-    pub async fn flush(&mut self) -> Result<(), Error<F>> {
-        self.flush_internal().await
-    }
-
     /// Flush all nodes cached in the in-memory structure to the journal and make them durable.
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
         self.flush_internal().await?;
 
-        // Sync the journal to ensure durability before returning. This covers nodes appended by
-        // the flush above as well as nodes left non-durable by earlier [Self::flush] calls.
+        // Sync the journal to ensure durability before returning, covering every flushed node
+        // not yet known durable.
         if self.journal_dirty {
             self.journal.sync().await?;
             self.journal_dirty = false;
@@ -1344,7 +1337,7 @@ mod tests {
         let root = mmr.root(&hasher, 0).unwrap();
 
         // Flush writes all cached nodes to the journal and prunes them from the mem.
-        mmr.flush().await.unwrap();
+        mmr.flush_internal().await.unwrap();
         assert_eq!(Position::<F>::new(mmr.journal.size()), expected_size);
         assert_eq!(mmr.size(), expected_size);
         assert_eq!(
@@ -1353,7 +1346,7 @@ mod tests {
         );
 
         // Flushing again is a no-op.
-        mmr.flush().await.unwrap();
+        mmr.flush_internal().await.unwrap();
         assert_eq!(Position::<F>::new(mmr.journal.size()), expected_size);
 
         // Flushed nodes remain readable and provable, and the root is unchanged.
@@ -1418,7 +1411,7 @@ mod tests {
                 }
                 let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
                 mmr.apply_batch(&batch).unwrap();
-                mmr.flush().await.unwrap();
+                mmr.flush_internal().await.unwrap();
                 assert_eq!(Position::<F>::new(mmr.journal.size()), mmr.size());
 
                 (synced_size, mmr.size())
@@ -1473,7 +1466,7 @@ mod tests {
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
             mmr.apply_batch(&batch).unwrap();
-            mmr.flush().await.unwrap();
+            mmr.flush_internal().await.unwrap();
             mmr.sync().await.unwrap();
 
             mmr.size()

@@ -18,7 +18,7 @@
 
 use super::{
     alloc::{block_align, Extent},
-    core::{chunk_of, BlobCore, ChunkCrc, CommittedMeta, Ready},
+    core::{chunk_of, merge_frozen_runs, BlobCore, ChunkCrc, CommittedMeta, Ready},
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
     BLOCK,
 };
@@ -220,6 +220,15 @@ async fn take_snapshot<S: crate::Storage>(
             // exempt: they are genuinely absent from this commit's table.
             for run in inner.runs.values_mut() {
                 run.born = run.born.min(seq);
+            }
+
+            // With every run frozen as of this capture, coalesce contiguous
+            // neighbors: the entry encodes fewer runs and every later
+            // runs-map descent walks a shallower map. Skipped while a batch
+            // holds staged state for this blob, whose overlay references
+            // base runs by key (merging would move keys under it).
+            if inner.staged_batches == 0 {
+                merge_frozen_runs(&mut inner.runs);
             }
             let dirty_chunks: Vec<u64> = std::mem::take(&mut inner.dirty_chunks)
                 .into_iter()
