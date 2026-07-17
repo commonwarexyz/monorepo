@@ -80,6 +80,7 @@ where
                         let _ = response.send_lossy(None);
                     });
                 }
+                MailboxMessage::ReleaseLog { .. } => {}
                 MailboxMessage::EpochInfo { span, response, .. } => {
                     let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
                     process.in_scope(|| {

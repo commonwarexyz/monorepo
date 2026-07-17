@@ -112,6 +112,7 @@ where
                 Message::NextLog {
                     span,
                     height,
+                    release,
                     response,
                 } => {
                     let process = info_span!(
@@ -130,10 +131,23 @@ where
                             })
                             .flatten();
                         let has_payload = payload.is_some();
-                        if response.send_lossy(payload) && has_payload {
+                        let reservation = payload
+                            .map(|payload| crate::dkg::reshare::mailbox::LogReservation::new(
+                                height, payload, release,
+                            ));
+                        if response.send_lossy(reservation) && has_payload {
                             served_at = Some(height);
                         }
                     });
+                }
+                Message::ReleaseLog { height } => {
+                    if served_at == Some(height)
+                        && dealer
+                            .as_ref()
+                            .is_some_and(|dealer| dealer.finalized().is_some())
+                    {
+                        served_at = None;
+                    }
                 }
                 Message::EpochInfo {
                     span,

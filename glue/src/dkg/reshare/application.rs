@@ -148,9 +148,9 @@ where
         span.record("height", height.traced());
         span.record("phase", field::debug(phase));
 
-        let payload = if self.final_block(height) {
+        let (payload, log_reservation) = if self.final_block(height) {
             match self.reshare.epoch_info(ancestry.clone()).await {
-                EpochInfoResponse::Available(payload) => payload,
+                EpochInfoResponse::Available(payload) => (payload, None),
                 EpochInfoResponse::Pending => {
                     debug!("proposal skipped: final block epoch info is not ready");
                     return None;
@@ -161,12 +161,17 @@ where
                 }
             }
         } else if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late)) {
-            self.reshare.next_log(height).await
+            let reservation = self.reshare.next_log(height).await;
+            let payload = reservation
+                .as_ref()
+                .map(|reservation| reservation.payload().clone());
+            (payload, reservation)
         } else {
-            None
+            (None, None)
         };
         span.record("has_payload", payload.is_some());
-        self.inner
+        let proposed = self
+            .inner
             .propose(
                 context,
                 ancestry,
@@ -175,7 +180,13 @@ where
                     payload,
                 },
             )
-            .await
+            .await;
+        if proposed.is_some()
+            && let Some(reservation) = log_reservation
+        {
+            reservation.included();
+        }
+        proposed
     }
 
     #[tracing::instrument(
@@ -236,7 +247,7 @@ where
 mod tests {
     use super::*;
     use crate::dkg::{
-        reshare::Message,
+        reshare::{LogReservation, Message},
         tests::mocks::{self, TestBlock, TestBlsVariant, TestContext, TestScheme},
         types::{EpochInfo, EpochOutcome},
     };
@@ -244,7 +255,7 @@ mod tests {
     use commonware_consensus::{
         CertifiableBlock, Heightable,
         marshal::ancestry,
-        types::{Epoch, Round, View},
+        types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
         Digestible, Signer,
@@ -256,9 +267,13 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
-    use commonware_utils::{N3f1, NZU32, NZU64, NZUsize, TestRng, ordered::Set, sync::Mutex};
+    use commonware_utils::{
+        Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
+        sync::Mutex,
+    };
     use futures::{
         future::{Either, select},
+        FutureExt,
         pin_mut,
     };
     use rand_core::Rng;
@@ -276,9 +291,18 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ProposalBehavior {
+        Accept,
+        Reject,
+        Pending,
+    }
+
     #[derive(Clone)]
     struct RecordingApp {
         proposed: Arc<Mutex<Vec<Option<TestPayload>>>>,
+        proposal_behavior: ProposalBehavior,
+        proposal_entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         verify_count: Arc<Mutex<usize>>,
         verify_result: bool,
     }
@@ -287,8 +311,25 @@ mod tests {
         fn accepting() -> Self {
             Self {
                 proposed: Arc::new(Mutex::new(Vec::new())),
+                proposal_behavior: ProposalBehavior::Accept,
+                proposal_entered: Arc::new(Mutex::new(None)),
                 verify_count: Arc::new(Mutex::new(0)),
                 verify_result: true,
+            }
+        }
+
+        fn rejecting() -> Self {
+            Self {
+                proposal_behavior: ProposalBehavior::Reject,
+                ..Self::accepting()
+            }
+        }
+
+        fn pending(proposal_entered: oneshot::Sender<()>) -> Self {
+            Self {
+                proposal_behavior: ProposalBehavior::Pending,
+                proposal_entered: Arc::new(Mutex::new(Some(proposal_entered))),
+                ..Self::accepting()
             }
         }
 
@@ -318,6 +359,17 @@ mod tests {
         ) -> Option<Self::Block> {
             let parent = ancestry.peek()?.clone();
             self.proposed.lock().push(input.payload.clone());
+            if let Some(entered) = self.proposal_entered.lock().take() {
+                let _ = entered.send(());
+            }
+
+            if self.proposal_behavior == ProposalBehavior::Reject {
+                return None;
+            }
+
+            if self.proposal_behavior == ProposalBehavior::Pending {
+                future::pending().await
+            }
 
             let block =
                 TestBlock::new::<Sha256>(context, parent.digest(), parent.height().next(), 0);
@@ -336,6 +388,14 @@ mod tests {
     }
 
     fn wrapper(context: &deterministic::Context, response: TestResponse) -> TestWrapper {
+        wrapper_with_inner(context, response, RecordingApp::accepting())
+    }
+
+    fn wrapper_with_inner(
+        context: &deterministic::Context,
+        response: TestResponse,
+        inner: RecordingApp,
+    ) -> TestWrapper {
         let (sender, mut receiver) = mailbox::new::<Message<TestBlock, TestBlsVariant, PrivateKey>>(
             context.child("mailbox"),
             NZUsize!(1),
@@ -350,7 +410,58 @@ mod tests {
             let _ = reply.send(response);
         });
 
-        Application::new(RecordingApp::accepting(), Mailbox::new(sender), NZU64!(2))
+        Application::new(inner, Mailbox::new(sender), NZU64!(2))
+    }
+
+    fn log_wrapper(
+        context: &deterministic::Context,
+        payload: TestPayload,
+        inner: RecordingApp,
+    ) -> (TestWrapper, oneshot::Receiver<Height>) {
+        let (sender, mut receiver) = mailbox::new::<Message<TestBlock, TestBlsVariant, PrivateKey>>(
+            context.child("mailbox"),
+            NZUsize!(4),
+        );
+        let (release_tx, release_rx) = oneshot::channel();
+        context.child("fake_actor").spawn(|_| async move {
+            let mut served_at = None;
+            let mut release_tx = Some(release_tx);
+            while let Some(message) = receiver.recv().await {
+                match message {
+                    Message::NextLog {
+                        height,
+                        release,
+                        response,
+                        ..
+                    } => {
+                        let reservation = served_at.is_none().then(|| {
+                            served_at = Some(height);
+                            LogReservation::new(height, payload.clone(), release)
+                        });
+                        let _ = response.send(reservation);
+                    }
+                    Message::ReleaseLog { height } => {
+                        if served_at == Some(height) {
+                            served_at = None;
+                        }
+                        if let Some(release_tx) = release_tx.take() {
+                            let _ = release_tx.send(height);
+                        }
+                    }
+                    Message::EpochInfo { response, .. } => {
+                        let _ = response.send(EpochInfoResponse::Unavailable);
+                    }
+                    Message::Finalized { response, .. } => {
+                        response.acknowledge();
+                    }
+                }
+            }
+        });
+
+        (
+            Application::new(inner, Mailbox::new(sender), NZU64!(4)),
+            release_rx,
+        )
     }
 
     fn leader() -> PrivateKey {
@@ -400,6 +511,146 @@ mod tests {
             None => block,
         };
         Arc::new(block)
+    }
+
+    fn midpoint_parent() -> TestBlock {
+        let genesis = mocks::genesis_block(leader().public_key());
+        TestBlock::new::<Sha256>(
+            block_context(&genesis, 1),
+            genesis.digest(),
+            genesis.height().next(),
+            0,
+        )
+    }
+
+    #[test]
+    fn proposal_none_releases_dealer_log_reservation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = midpoint_parent();
+            let payload = epoch_payload(10);
+            let inner = RecordingApp::rejecting();
+            let (mut app, release_rx) = log_wrapper(&context, payload.clone(), inner.clone());
+
+            let proposed = app
+                .propose(
+                    (context.child("app"), block_context(&parent, 2)),
+                    ancestry::from_iter([Arc::new(parent.clone())]),
+                    (),
+                )
+                .await;
+            assert!(proposed.is_none());
+            assert_eq!(
+                release_rx.await.expect("reservation should be released"),
+                Height::new(2)
+            );
+
+            let proposed = app
+                .propose(
+                    (context.child("app_retry"), block_context(&parent, 3)),
+                    ancestry::from_iter([Arc::new(parent)]),
+                    (),
+                )
+                .await;
+            assert!(proposed.is_none());
+            let proposed_payloads = inner.proposed();
+            assert_eq!(proposed_payloads.len(), 2);
+            assert!(proposed_payloads[0] == Some(payload.clone()));
+            assert!(proposed_payloads[1] == Some(payload));
+        });
+    }
+
+    #[test]
+    fn dropped_proposal_future_releases_dealer_log_reservation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = midpoint_parent();
+            let payload = epoch_payload(11);
+            let (entered_tx, entered_rx) = oneshot::channel();
+            let mut entered_rx = entered_rx;
+            let inner = RecordingApp::pending(entered_tx);
+            let (sender, mut receiver) =
+                mailbox::new::<Message<TestBlock, TestBlsVariant, PrivateKey>>(
+                    context.child("mailbox"),
+                    NZUsize!(4),
+                );
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(4));
+
+            let mut propose = Box::pin(app.propose(
+                (context.child("app"), block_context(&parent, 2)),
+                ancestry::from_iter([Arc::new(parent)]),
+                (),
+            ));
+            assert!(propose.as_mut().now_or_never().is_none());
+
+            let Some(Message::NextLog {
+                height,
+                release,
+                response,
+                ..
+            }) = receiver.recv().await
+            else {
+                panic!("proposal should request a dealer log");
+            };
+            assert_eq!(height, Height::new(2));
+            let reservation = LogReservation::new(height, payload.clone(), release);
+            assert!(
+                response.send(Some(reservation)).is_ok(),
+                "proposal should still be waiting for log"
+            );
+
+            assert!(propose.as_mut().now_or_never().is_none());
+            entered_rx
+                .try_recv()
+                .expect("proposal should enter inner application");
+            drop(propose);
+
+            let Some(Message::ReleaseLog { height }) = receiver.recv().await else {
+                panic!("dropped proposal should release reservation");
+            };
+            assert_eq!(height, Height::new(2));
+
+            if let Ok(Message::ReleaseLog { height }) = receiver.try_recv() {
+                panic!("reservation released more than once at {height:?}");
+            }
+            let proposed_payloads = inner.proposed();
+            assert_eq!(proposed_payloads.len(), 1);
+            assert!(proposed_payloads[0] == Some(payload));
+        });
+    }
+
+    #[test]
+    fn successful_proposal_keeps_dealer_log_reserved() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = midpoint_parent();
+            let payload = epoch_payload(12);
+            let inner = RecordingApp::accepting();
+            let (mut app, release_rx) = log_wrapper(&context, payload.clone(), inner.clone());
+
+            let proposed = app
+                .propose(
+                    (context.child("app"), block_context(&parent, 2)),
+                    ancestry::from_iter([Arc::new(parent)]),
+                    (),
+                )
+                .await
+                .expect("proposal should be built");
+            assert!(proposed.payload() == Some(payload.clone()));
+            let proposed_payloads = inner.proposed();
+            assert_eq!(proposed_payloads.len(), 1);
+            assert!(proposed_payloads[0] == Some(payload));
+
+            let timeout = context.sleep(Duration::from_millis(1));
+            pin_mut!(release_rx);
+            pin_mut!(timeout);
+            match select(release_rx, timeout).await {
+                Either::Left((released, _)) => {
+                    panic!("successful proposal released reservation: {released:?}");
+                }
+                Either::Right(((), _)) => {}
+            }
+        });
     }
 
     #[test]

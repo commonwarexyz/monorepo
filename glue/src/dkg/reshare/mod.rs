@@ -79,8 +79,9 @@
 //! carry at most one [`Payload`](crate::dkg::types::Payload). The application is
 //! responsible for wiring proposal and verification to [`Mailbox`]:
 //!
-//! - Before the final block of an epoch, proposers call [`Mailbox::next_log`]
-//!   and include the returned dealer log, if any.
+//! - Before the final block of an epoch, proposers call [`Mailbox::next_log`],
+//!   include the reserved dealer log if one is returned, and keep the
+//!   reservation only after a block is built.
 //! - Before the final block of an epoch, verifiers treat dealer logs as ordinary
 //!   optional payloads and rely on finalized delivery to update the reshare
 //!   actor.
@@ -179,7 +180,7 @@ pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v1();
 pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
 
 mod mailbox;
-pub use mailbox::{EpochInfoResponse, Mailbox, Message};
+pub use mailbox::{EpochInfoResponse, LogReservation, Mailbox, Message};
 
 mod actor;
 pub(crate) use actor::DkgConfig;
