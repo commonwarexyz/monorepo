@@ -18,6 +18,25 @@ use tracing::{Span, error, info_span};
 /// Type-erased block ancestry stream sent through the actor mailbox.
 pub(crate) type ErasedAncestry<B> = Pin<Box<dyn Stream<Item = Arc<B>> + Send>>;
 
+/// Response to a final-block epoch artifact request.
+#[derive(Clone, PartialEq, Eq)]
+pub enum EpochInfoResponse<V, C>
+where
+    V: Variant,
+    C: Signer,
+{
+    /// The actor derived a stable response.
+    ///
+    /// `None` is a legitimate response only for a failed one-shot DKG final
+    /// block, which intentionally carries no epoch artifact.
+    Available(Option<Payload<V, C>>),
+    /// The actor cannot answer yet, but may be able to after local epoch
+    /// progress catches up.
+    Pending,
+    /// The actor cannot derive the artifact in its current local mode.
+    Unavailable,
+}
+
 /// A message that can be sent to the [`Actor`].
 ///
 /// [`Actor`]: super::Actor
@@ -45,7 +64,7 @@ where
     EpochInfo {
         span: Span,
         ancestry: ErasedAncestry<B>,
-        response: oneshot::Sender<Option<Payload<V, C>>>,
+        response: oneshot::Sender<EpochInfoResponse<V, C>>,
     },
 
     /// A new block has been finalized.
@@ -65,9 +84,8 @@ where
 {
     fn response_closed(&self) -> bool {
         match self {
-            Self::NextLog { response, .. } | Self::EpochInfo { response, .. } => {
-                response.is_closed()
-            }
+            Self::NextLog { response, .. } => response.is_closed(),
+            Self::EpochInfo { response, .. } => response.is_closed(),
             Self::Finalized { .. } => false,
         }
     }
@@ -148,7 +166,7 @@ where
     pub async fn epoch_info(
         &mut self,
         ancestry: impl Stream<Item = Arc<B>> + Send + 'static,
-    ) -> Option<Payload<V, C>> {
+    ) -> EpochInfoResponse<V, C> {
         let (response_tx, response_rx) = oneshot::channel();
         let span = info_span!("dkg.reshare.mailbox.epoch_info");
         if !self
@@ -161,14 +179,14 @@ where
             .accepted()
         {
             error!("failed to send request for epoch info");
-            return None;
+            return EpochInfoResponse::Unavailable;
         }
 
         match response_rx.await {
             Ok(outcome) => outcome,
             Err(err) => {
                 error!(?err, "failed to receive epoch info response");
-                None
+                EpochInfoResponse::Unavailable
             }
         }
     }

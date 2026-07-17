@@ -1,4 +1,8 @@
-use crate::dkg::{ReshareBlock, reshare::Mailbox, types::Payload};
+use crate::dkg::{
+    ReshareBlock,
+    reshare::{EpochInfoResponse, Mailbox},
+    types::Payload,
+};
 use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock,
     marshal::ancestry::Ancestry,
@@ -7,7 +11,7 @@ use commonware_consensus::{
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use rand_core::Rng;
-use std::num::NonZeroU64;
+use std::{future, num::NonZeroU64};
 use tracing::{debug, field};
 
 /// Per-proposal input handed to an application wrapped by [`Application`].
@@ -145,7 +149,17 @@ where
         span.record("phase", field::debug(phase));
 
         let payload = if self.final_block(height) {
-            self.reshare.epoch_info(ancestry.clone()).await
+            match self.reshare.epoch_info(ancestry.clone()).await {
+                EpochInfoResponse::Available(payload) => payload,
+                EpochInfoResponse::Pending => {
+                    debug!("proposal skipped: final block epoch info is not ready");
+                    return None;
+                }
+                EpochInfoResponse::Unavailable => {
+                    debug!("proposal skipped: final block epoch info is unavailable");
+                    return None;
+                }
+            }
         } else if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late)) {
             self.reshare.next_log(height).await
         } else {
@@ -191,11 +205,22 @@ where
         span.record("has_payload", tip_payload.is_some());
 
         if self.final_block(height) {
-            if let Some(derived) = self.reshare.epoch_info(ancestry.clone()).await
-                && Some(derived) != tip_payload
-            {
-                debug!("verification rejected: final block payload mismatch");
-                return false;
+            match self.reshare.epoch_info(ancestry.clone()).await {
+                EpochInfoResponse::Available(derived) => {
+                    if derived != tip_payload {
+                        debug!("verification rejected: final block payload mismatch");
+                        return false;
+                    }
+                }
+                EpochInfoResponse::Pending => {
+                    debug!("verification pending: final block epoch info is not ready");
+                    future::pending::<()>().await;
+                    unreachable!("pending future must not resolve");
+                }
+                EpochInfoResponse::Unavailable => {
+                    debug!("verification rejected: final block epoch info is unavailable");
+                    return false;
+                }
             }
         } else if matches!(phase, Some(EpochPhase::Early)) && tip_payload.is_some() {
             // Dealer logs are only posted from the midpoint onward, so an early
@@ -204,5 +229,362 @@ where
             return false;
         }
         self.inner.verify(context, ancestry).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dkg::{
+        reshare::Message,
+        tests::mocks::{self, TestBlock, TestBlsVariant, TestContext, TestScheme},
+        types::{EpochInfo, EpochOutcome},
+    };
+    use commonware_actor::mailbox;
+    use commonware_consensus::{
+        CertifiableBlock, Heightable,
+        marshal::ancestry,
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::{
+        Digestible, Signer,
+        bls12381::{
+            dkg::feldman_desmedt::deal,
+            primitives::{sharing::Mode, variant::MinPk},
+        },
+        ed25519::{PrivateKey, PublicKey},
+        sha256::Sha256,
+    };
+    use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
+    use commonware_utils::{N3f1, NZU32, NZU64, NZUsize, TestRng, ordered::Set, sync::Mutex};
+    use futures::{
+        future::{Either, select},
+        pin_mut,
+    };
+    use rand_core::Rng;
+    use std::{sync::Arc, time::Duration};
+
+    type TestPayload = Payload<TestBlsVariant, PrivateKey>;
+    type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
+    type TestWrapper = Application<RecordingApp, TestBlock, TestBlsVariant, PrivateKey>;
+
+    impl CertifiableBlock for TestBlock {
+        type Context = TestContext;
+
+        fn context(&self) -> Self::Context {
+            self.context().clone()
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingApp {
+        proposed: Arc<Mutex<Vec<Option<TestPayload>>>>,
+        verify_count: Arc<Mutex<usize>>,
+        verify_result: bool,
+    }
+
+    impl RecordingApp {
+        fn accepting() -> Self {
+            Self {
+                proposed: Arc::new(Mutex::new(Vec::new())),
+                verify_count: Arc::new(Mutex::new(0)),
+                verify_result: true,
+            }
+        }
+
+        fn proposed(&self) -> Vec<Option<TestPayload>> {
+            self.proposed.lock().clone()
+        }
+
+        fn verify_count(&self) -> usize {
+            *self.verify_count.lock()
+        }
+    }
+
+    impl<E> ConsensusApplication<E> for RecordingApp
+    where
+        E: Rng + Spawner + Metrics + Clock,
+    {
+        type SigningScheme = TestScheme;
+        type Context = TestContext;
+        type Block = TestBlock;
+        type Input = Input<(), TestBlsVariant, PrivateKey>;
+
+        async fn propose(
+            &mut self,
+            (_, context): (E, Self::Context),
+            ancestry: impl Ancestry<Self::Block>,
+            input: Self::Input,
+        ) -> Option<Self::Block> {
+            let parent = ancestry.peek()?.clone();
+            self.proposed.lock().push(input.payload.clone());
+
+            let block =
+                TestBlock::new::<Sha256>(context, parent.digest(), parent.height().next(), 0);
+            Some(match input.payload {
+                Some(payload) => {
+                    block.with_payload::<Sha256, TestBlsVariant, PrivateKey>(NZU32!(16), payload)
+                }
+                None => block,
+            })
+        }
+
+        async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
+            *self.verify_count.lock() += 1;
+            self.verify_result
+        }
+    }
+
+    fn wrapper(context: &deterministic::Context, response: TestResponse) -> TestWrapper {
+        let (sender, mut receiver) = mailbox::new::<Message<TestBlock, TestBlsVariant, PrivateKey>>(
+            context.child("mailbox"),
+            NZUsize!(1),
+        );
+        context.child("fake_actor").spawn(|_| async move {
+            let Some(Message::EpochInfo {
+                response: reply, ..
+            }) = receiver.recv().await
+            else {
+                return;
+            };
+            let _ = reply.send(response);
+        });
+
+        Application::new(RecordingApp::accepting(), Mailbox::new(sender), NZU64!(2))
+    }
+
+    fn leader() -> PrivateKey {
+        PrivateKey::from_seed(99)
+    }
+
+    fn block_context(parent: &TestBlock, view: u64) -> TestContext {
+        TestContext {
+            round: Round::new(Epoch::zero(), View::new(view)),
+            leader: leader().public_key(),
+            parent: (View::zero(), parent.digest()),
+        }
+    }
+
+    fn signers() -> Vec<PrivateKey> {
+        (0..4).map(PrivateKey::from_seed).collect()
+    }
+
+    fn players() -> Set<PublicKey> {
+        Set::from_iter_dedup(signers().iter().map(Signer::public_key))
+    }
+
+    fn epoch_payload(seed: u64) -> TestPayload {
+        let (output, _) =
+            deal::<MinPk, _, N3f1>(TestRng::new(seed), Mode::NonZeroCounter, players())
+                .expect("trusted deal");
+        Payload::EpochInfo(EpochInfo {
+            outcome: EpochOutcome::Success,
+            epoch: Epoch::new(1),
+            output,
+            players: Set::default(),
+            next_players: Set::default(),
+        })
+    }
+
+    fn final_block(parent: &TestBlock, payload: Option<TestPayload>) -> Arc<TestBlock> {
+        let block = TestBlock::new::<Sha256>(
+            block_context(parent, 1),
+            parent.digest(),
+            parent.height().next(),
+            0,
+        );
+        let block = match payload {
+            Some(payload) => {
+                block.with_payload::<Sha256, TestBlsVariant, PrivateKey>(NZU32!(16), payload)
+            }
+            None => block,
+        };
+        Arc::new(block)
+    }
+
+    #[test]
+    fn proposal_skips_unavailable_final_epoch_info() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = mocks::genesis_block(leader().public_key());
+            let mut app = wrapper(&context, EpochInfoResponse::Unavailable);
+            let inner = app.inner.clone();
+
+            let proposed = app
+                .propose(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([Arc::new(parent)]),
+                    (),
+                )
+                .await;
+
+            assert!(proposed.is_none());
+            assert!(inner.proposed().is_empty());
+        });
+    }
+
+    #[test]
+    fn proposal_preserves_legitimate_no_artifact_final_block() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = mocks::genesis_block(leader().public_key());
+            let mut app = wrapper(&context, EpochInfoResponse::Available(None));
+            let inner = app.inner.clone();
+
+            let proposed = app
+                .propose(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([Arc::new(parent)]),
+                    (),
+                )
+                .await
+                .expect("proposal should be built");
+
+            assert!(proposed.payload().is_none());
+            let proposed_payloads = inner.proposed();
+            assert_eq!(proposed_payloads.len(), 1);
+            assert!(proposed_payloads[0].is_none());
+        });
+    }
+
+    #[test]
+    fn proposal_includes_available_final_epoch_info() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = mocks::genesis_block(leader().public_key());
+            let payload = epoch_payload(7);
+            let mut app = wrapper(
+                &context,
+                EpochInfoResponse::Available(Some(payload.clone())),
+            );
+            let inner = app.inner.clone();
+
+            let proposed = app
+                .propose(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([Arc::new(parent)]),
+                    (),
+                )
+                .await
+                .expect("proposal should be built");
+
+            assert!(proposed.payload() == Some(payload.clone()));
+            let proposed_payloads = inner.proposed();
+            assert_eq!(proposed_payloads.len(), 1);
+            assert!(proposed_payloads[0] == Some(payload));
+        });
+    }
+
+    #[test]
+    fn verification_rejects_unavailable_final_epoch_info() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let tip = final_block(&parent, Some(epoch_payload(1)));
+            let mut app = wrapper(&context, EpochInfoResponse::Unavailable);
+            let inner = app.inner.clone();
+
+            let verified = app
+                .verify(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([tip, parent]),
+                )
+                .await;
+
+            assert!(!verified);
+            assert_eq!(inner.verify_count(), 0);
+        });
+    }
+
+    #[test]
+    fn verification_stays_pending_when_final_epoch_info_not_ready() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let tip = final_block(&parent, Some(epoch_payload(1)));
+            let mut app = wrapper(&context, EpochInfoResponse::Pending);
+            let inner = app.inner.clone();
+
+            let verify = app.verify(
+                (context.child("app"), block_context(&parent, 1)),
+                ancestry::from_iter([tip, parent]),
+            );
+            let timeout = context.sleep(Duration::from_millis(1));
+            pin_mut!(verify);
+            pin_mut!(timeout);
+
+            match select(verify, timeout).await {
+                Either::Left((verified, _)) => {
+                    panic!("verification resolved before epoch info was ready: {verified}");
+                }
+                Either::Right(((), _)) => {}
+            }
+            assert_eq!(inner.verify_count(), 0);
+        });
+    }
+
+    #[test]
+    fn verification_accepts_legitimate_no_artifact_final_block() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let tip = final_block(&parent, None);
+            let mut app = wrapper(&context, EpochInfoResponse::Available(None));
+            let inner = app.inner.clone();
+
+            let verified = app
+                .verify(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([tip, parent]),
+                )
+                .await;
+
+            assert!(verified);
+            assert_eq!(inner.verify_count(), 1);
+        });
+    }
+
+    #[test]
+    fn verification_accepts_equal_final_epoch_info() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let payload = epoch_payload(2);
+            let tip = final_block(&parent, Some(payload.clone()));
+            let mut app = wrapper(&context, EpochInfoResponse::Available(Some(payload)));
+            let inner = app.inner.clone();
+
+            let verified = app
+                .verify(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([tip, parent]),
+                )
+                .await;
+
+            assert!(verified);
+            assert_eq!(inner.verify_count(), 1);
+        });
+    }
+
+    #[test]
+    fn verification_rejects_mismatched_final_epoch_info() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let tip = final_block(&parent, Some(epoch_payload(3)));
+            let response = EpochInfoResponse::Available(Some(epoch_payload(4)));
+            let mut app = wrapper(&context, response);
+            let inner = app.inner.clone();
+
+            let verified = app
+                .verify(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([tip, parent]),
+                )
+                .await;
+
+            assert!(!verified);
+            assert_eq!(inner.verify_count(), 0);
+        });
     }
 }
