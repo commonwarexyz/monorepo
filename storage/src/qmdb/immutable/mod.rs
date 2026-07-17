@@ -1248,8 +1248,7 @@ pub(super) mod test {
         }
         let merkleized = batch.merkleize(&db, None, Location::new(0)).await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
-        drop(db); // Drop before syncing
+        db.commit().await.unwrap(); // Drop before syncing
 
         // Recovery should replay the log to regenerate the merkle structure.
         // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
@@ -1689,9 +1688,6 @@ pub(super) mod test {
             matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
             "unexpected rewind error: {err:?}"
         );
-
-        let db = open_small_sections_db(context.child("db")).await;
-        db.destroy().await.unwrap();
     }
 
     /// batch.get() reads pending mutations and falls through to base DB.

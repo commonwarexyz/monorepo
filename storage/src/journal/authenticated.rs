@@ -380,12 +380,10 @@ where
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
         // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
         // limit memory bloat.
-        let (journal, merkle) = try_join!(
+        (self.journal, self.merkle) = try_join!(
             self.journal.commit().map_err(Error::Journal),
             self.merkle.flush().map_err(Error::Merkle)
         )?;
-        self.journal = journal;
-        self.merkle = merkle;
 
         Ok(self)
     }
@@ -480,8 +478,8 @@ where
         let encoded_item = item.encode();
 
         // Append item to the journal, then update the Merkle structure state.
-        let (journal, loc) = self.journal.append(item).await?;
-        self.journal = journal;
+        let loc;
+        (self.journal, loc) = self.journal.append(item).await?;
         let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
         let batch = self
             .merkle
@@ -588,15 +586,13 @@ where
         // replay the items between the structure's last element and the journal's first element.
         // Commit the journal alongside: the prune target may be justified by a buffered append
         // (e.g. a commit operation), and pruning does not guarantee buffered appends are durable.
-        let (journal, merkle) = try_join!(
+        (self.journal, self.merkle) = try_join!(
             self.journal.commit().map_err(Error::Journal),
             self.merkle.sync().map_err(Error::Merkle)
         )?;
-        self.journal = journal;
-        self.merkle = merkle;
 
-        let (journal, journal_pruned) = self.journal.prune(*prune_loc).await?;
-        self.journal = journal;
+        let journal_pruned;
+        (self.journal, journal_pruned) = self.journal.prune(*prune_loc).await?;
         let bounds = self.journal.bounds();
         let boundary = Location::new(bounds.start);
         let merkle_boundary = self.merkle.bounds().start;
@@ -715,12 +711,10 @@ where
 
     /// Durably persist the journal, ensuring no recovery is required on startup.
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
-        let (journal, merkle) = try_join!(
+        (self.journal, self.merkle) = try_join!(
             self.journal.sync().map_err(Error::Journal),
             self.merkle.sync().map_err(Error::Merkle)
         )?;
-        self.journal = journal;
-        self.merkle = merkle;
 
         Ok(self)
     }

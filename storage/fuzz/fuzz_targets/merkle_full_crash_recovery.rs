@@ -129,7 +129,6 @@ async fn run_operations<F: MerkleFamily>(
 
     // A failed operation breaks out of the loop.
     for op in operations.iter() {
-        // Each arm takes the merkle and evaluates to its successor.
         merkle = match op {
             MerkleOperation::Add { data } => {
                 let batch = merkle.new_batch().add(hasher, data);

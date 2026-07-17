@@ -406,7 +406,6 @@ fn fuzz(data: FuzzInput) {
         .await;
 
         for op in &data.operations {
-            // Each arm takes the dbs and evaluates to their successors.
             (db, reference_db) = match op {
                 CurrentOperation::Update { key, value } => {
                     if issued_writes >= MAX_ACTUAL_WRITES {

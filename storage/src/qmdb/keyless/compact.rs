@@ -1139,15 +1139,14 @@ mod tests {
             db.sync().await.unwrap();
 
             // Corrupt the persisted proof so it no longer verifies against the stored root.
-            let mut journal = open_witness_journal(context.child("tamper"), partition).await;
+            let journal = open_witness_journal(context.child("tamper"), partition).await;
             let (op_bytes, mut proof, pinned_nodes) = witness::tests::tip(&journal).await;
             if let Some(digest) = proof.digests.first_mut() {
                 *digest = Sha256::fill(0xff);
             } else {
                 proof.leaves = Location::new(*proof.leaves + 1);
             }
-            journal = witness::tests::overwrite_tip(journal, op_bytes, proof, pinned_nodes).await;
-            drop(journal);
+            witness::tests::overwrite_tip(journal, op_bytes, proof, pinned_nodes).await;
 
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
             let reopened = TestDb::<mmr::Family>::init_from_merkle(
@@ -1273,7 +1272,7 @@ mod tests {
             let oversized_floor = Location::new(10);
 
             // Overwrite the persisted commit op with a floor beyond its own commit location.
-            let mut journal = open_witness_journal(context.child("tamper"), partition).await;
+            let journal = open_witness_journal(context.child("tamper"), partition).await;
             let (_, proof, pinned_nodes) = witness::tests::tip(&journal).await;
             let bad_op = Operation::<mmr::Family, FixedEncoding<U64>>::Commit(
                 Some(U64::new(11)),
@@ -1281,8 +1280,7 @@ mod tests {
             )
             .encode()
             .to_vec();
-            journal = witness::tests::overwrite_tip(journal, bad_op, proof, pinned_nodes).await;
-            drop(journal);
+            witness::tests::overwrite_tip(journal, bad_op, proof, pinned_nodes).await;
 
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
             let reopened = TestDb::<mmr::Family>::init_from_merkle(
@@ -1314,11 +1312,10 @@ mod tests {
 
             // Corrupt one pinned frontier node: the root recomputed from the rebuilt Merkle no
             // longer matches the proof stored in the same entry.
-            let mut journal = open_witness_journal(context.child("tamper"), partition).await;
+            let journal = open_witness_journal(context.child("tamper"), partition).await;
             let (op_bytes, proof, mut pinned_nodes) = witness::tests::tip(&journal).await;
             pinned_nodes[0] = Sha256::fill(0xff);
-            journal = witness::tests::overwrite_tip(journal, op_bytes, proof, pinned_nodes).await;
-            drop(journal);
+            witness::tests::overwrite_tip(journal, op_bytes, proof, pinned_nodes).await;
 
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
             let reopened = TestDb::<mmr::Family>::init_from_merkle(
@@ -1397,10 +1394,6 @@ mod tests {
                 db.rewind(beyond_tip).await,
                 Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
             ));
-
-            let db =
-                open_db::<mmr::Family>(context.child("destroy"), "keyless-rewind-beyond").await;
-            db.destroy().await.unwrap();
         });
     }
 
@@ -1478,11 +1471,10 @@ mod tests {
 
             // Simulate the crash window: append an entry ahead of the tip without syncing it,
             // then drop the journal. The unsynced tail must not survive reopen.
-            let mut journal = open_witness_journal(context.child("crash"), partition).await;
+            let journal = open_witness_journal(context.child("crash"), partition).await;
             let (op_bytes, mut proof, pinned_nodes) = witness::tests::tip(&journal).await;
             proof.leaves = Location::new(*proof.leaves + 2);
-            journal = witness::tests::append_unsynced(journal, op_bytes, proof, pinned_nodes).await;
-            drop(journal);
+            witness::tests::append_unsynced(journal, op_bytes, proof, pinned_nodes).await;
 
             // Reopen must drop the unsynced entry and recover state A.
             let reopened = open_db::<mmr::Family>(context.child("reopen"), partition).await;

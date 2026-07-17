@@ -179,7 +179,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
         }
 
         for op in &operations {
-            // Each arm takes the db and evaluates to its successor.
             db = match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);

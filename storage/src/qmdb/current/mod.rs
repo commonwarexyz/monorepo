@@ -2237,14 +2237,6 @@ pub mod tests {
                 matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
                 "unexpected rewind error for unsettled delayed-merge window: {err:?}"
             );
-
-            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                context.child("reopen"),
-                variable_config::<OneCap>(partition, &context),
-            )
-            .await
-            .unwrap();
-            reopened.destroy().await.unwrap();
         });
     }
 
@@ -2896,14 +2888,6 @@ pub mod tests {
                 ),
                 "unexpected rewind error: {err:?}"
             );
-
-            let db: UnorderedVariableDb = UnorderedVariableDb::init(
-                ctx.child("reopen2"),
-                variable_config::<OneCap>(partition, &ctx),
-            )
-            .await
-            .unwrap();
-            db.destroy().await.unwrap();
         });
     }
 
@@ -2969,14 +2953,6 @@ pub mod tests {
                 matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
                 "unexpected rewind error: {err:?}"
             );
-
-            let db: UnorderedVariableDb = UnorderedVariableDb::init(
-                ctx.child("reopen"),
-                variable_config::<OneCap>(partition, &ctx),
-            )
-            .await
-            .unwrap();
-            db.destroy().await.unwrap();
         });
     }
 

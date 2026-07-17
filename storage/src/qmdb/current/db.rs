@@ -861,8 +861,8 @@ where
     ) -> Result<(Self, Range<Location<F>>), Error<F>> {
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
-        let (any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
-        self.any = any;
+        let range;
+        (self.any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
         self.update_metrics();

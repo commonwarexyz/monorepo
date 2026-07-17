@@ -148,10 +148,8 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
         .await;
         let boundary = db.sync_boundary();
         let db = db.prune(boundary).await.unwrap();
-        let db = db.sync().await.unwrap();
-        let elapsed = start.elapsed();
-        drop(db);
-        elapsed
+        let _db = db.sync().await.unwrap();
+        start.elapsed()
     });
     println!("generated {num_updates} updates over keyspace {keyspace} at {folder} in {elapsed:?}");
 }

@@ -266,8 +266,7 @@ where
         let expected_op_count = bounds.end;
         let expected_oldest_retained_loc = bounds.start;
 
-        let synced_db = H::db_sync(synced_db).await;
-        drop(synced_db);
+        H::db_sync(synced_db).await;
         let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
 
         assert_eq!(H::db_root(&reopened_db), expected_root);
@@ -441,8 +440,7 @@ where
             H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
 
         let target_db = H::apply_ops(target_db, original_ops.clone(), None).await;
-        let sync_db = H::apply_ops(sync_db, original_ops, None).await;
-        drop(sync_db);
+        H::apply_ops(sync_db, original_ops, None).await;
 
         let last_op = H::create_ops_seeded(1, 1);
         let target_db = H::apply_ops(target_db, last_op, None).await;
@@ -496,8 +494,7 @@ where
             H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
 
         let target_db = H::apply_ops(target_db, target_ops.clone(), None).await;
-        let sync_db = H::apply_ops(sync_db, target_ops, None).await;
-        drop(sync_db);
+        H::apply_ops(sync_db, target_ops, None).await;
 
         let root = H::db_root(&target_db);
         let bounds = H::bounds(&target_db);

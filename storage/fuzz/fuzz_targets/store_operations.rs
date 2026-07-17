@@ -123,7 +123,6 @@ fn fuzz(input: FuzzInput) {
         let mut pending: BTreeMap<Digest, Option<Vec<u8>>> = BTreeMap::new();
 
         for op in &input.ops {
-            // Each arm takes the db and evaluates to its successor.
             db = match op {
                 Operation::Update { key, value_bytes } => {
                     pending.insert(Digest(*key), Some(value_bytes.clone()));

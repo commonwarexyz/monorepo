@@ -681,9 +681,6 @@ pub(crate) mod test {
             };
             assert!(matches!(err, Error::PruneBeyondMinRequired(loc, floor)
                     if loc == beyond_floor && floor == inactivity_floor));
-
-            let db = open_db(context.child("reopen")).await;
-            db.destroy().await.unwrap();
         });
     }
 
@@ -770,9 +767,6 @@ pub(crate) mod test {
                 panic!("expected StaleBatch for asymmetric sibling");
             };
             assert!(matches!(err, Error::StaleBatch { .. }));
-
-            let db = open_db(context.child("reopen")).await;
-            db.destroy().await.unwrap();
         });
     }
 
@@ -870,9 +864,6 @@ pub(crate) mod test {
                 panic!("expected StaleBatch error for sibling");
             };
             assert!(matches!(err, Error::StaleBatch { .. }));
-
-            let db = open_db(context.child("reopen")).await;
-            db.destroy().await.unwrap();
         });
     }
 
@@ -942,9 +933,6 @@ pub(crate) mod test {
                 panic!("expected StaleBatch for parent after child applied");
             };
             assert!(matches!(err, Error::StaleBatch { .. }));
-
-            let db = open_db(context.child("reopen")).await;
-            db.destroy().await.unwrap();
         });
     }
 

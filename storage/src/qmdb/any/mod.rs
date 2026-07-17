@@ -2281,14 +2281,6 @@ pub(crate) mod test {
                 ),
                 "unexpected rewind error: {err:?}"
             );
-
-            let db: UnorderedVariable = UnorderedVariableDb::init(
-                ctx.child("reopen2"),
-                variable_db_config::<OneCap>("rp", &ctx),
-            )
-            .await
-            .unwrap();
-            db.destroy().await.unwrap();
         });
     }
 
@@ -2426,14 +2418,6 @@ pub(crate) mod test {
                 ),
                 "unexpected rewind error: {err:?}"
             );
-
-            let db: UnorderedVariable = UnorderedVariableDb::init(
-                ctx.child("reopen"),
-                variable_db_config::<OneCap>("rf", &ctx),
-            )
-            .await
-            .unwrap();
-            db.destroy().await.unwrap();
         });
     }
 

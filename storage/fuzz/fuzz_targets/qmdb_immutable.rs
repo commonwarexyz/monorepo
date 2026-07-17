@@ -160,7 +160,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let mut pending_sets: Vec<(Digest, Vec<u8>)> = Vec::new();
 
             for op in operations {
-                // Each arm takes the db and evaluates to its successor.
                 db = match op {
                     ImmutableOperation::Set {
                         key_seed,

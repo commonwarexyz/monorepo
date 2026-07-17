@@ -126,7 +126,6 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
             for op in &operations {
-                // Each arm takes the db and evaluates to its successor.
                 db = match op {
                     QmdbOperation::Update { key, value } => {
                         let k = Key::new(*key);

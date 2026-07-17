@@ -2254,9 +2254,6 @@ pub(crate) mod tests {
             matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
             "unexpected rewind error: {err:?}"
         );
-
-        let db = reopen(context.child("reopen_destroy")).await;
-        db.destroy().await.unwrap();
     }
 
     #[boxed]

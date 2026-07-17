@@ -177,7 +177,6 @@ fn fuzz(input: FuzzInput) {
         let mut reference = ReferenceQueue::new();
 
         for op in input.operations.iter() {
-            // Each arm takes the queue and evaluates to its successor.
             queue = match op {
                 QueueOperation::Enqueue { value } => {
                     let (queue, pos) = queue.enqueue(vec![*value]).await.unwrap();

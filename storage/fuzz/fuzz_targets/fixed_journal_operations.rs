@@ -165,7 +165,6 @@ fn fuzz(input: FuzzInput) {
         let mut restarts = 0usize;
 
         for op in input.ops.iter() {
-            // Each arm takes the journal and evaluates to its successor.
             journal = match op {
                 JournalOperation::Append { value } => {
                     let digest = Sha256::hash(&value.to_be_bytes());

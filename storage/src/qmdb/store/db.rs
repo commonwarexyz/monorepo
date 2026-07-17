@@ -349,8 +349,8 @@ where
 
         // Prune the log. The log will prune at section boundaries, so the actual oldest retained
         // location may be less than requested.
-        let (log, pruned) = self.log.prune(*prune_loc).await?;
-        self.log = log;
+        let pruned;
+        (self.log, pruned) = self.log.prune(*prune_loc).await?;
         if !pruned {
             return Ok(self);
         }
@@ -471,11 +471,10 @@ where
                 } else {
                     self.active_keys += 1;
                 }
-                let (log, _) = self
+                (self.log, _) = self
                     .log
                     .append(&Operation::Update(Update(key, value)))
                     .await?;
-                self.log = log;
             } else {
                 let deleted = delete_key::<crate::mmr::Family, _, _>(
                     &mut self.snapshot,
@@ -514,11 +513,11 @@ where
         }
 
         // Append the commit operation with the new inactivity floor.
-        let (log, commit_loc) = self
+        let commit_loc;
+        (self.log, commit_loc) = self
             .log
             .append(&Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await?;
-        self.log = log;
         self.last_commit_loc = Location::new(commit_loc);
 
         self.steps = 0;

@@ -439,8 +439,8 @@ where
             ));
         }
 
-        let (log, boundary) = self.log.prune(prune_loc).await?;
-        self.log = log;
+        let boundary;
+        (self.log, boundary) = self.log.prune(prune_loc).await?;
         Ok((self, boundary))
     }
 

@@ -618,8 +618,7 @@ async fn run_ops<J: FuzzJournal>(
     params: Params,
 ) {
     for op in ops {
-        // A mutation error ends the cycle. Each arm takes the journal and evaluates to
-        // its successor.
+        // A mutation error ends the cycle.
         journal = match op {
             JournalOperation::Append { value } => {
                 let item = Item::from(*value);

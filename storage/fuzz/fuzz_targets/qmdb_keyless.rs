@@ -253,7 +253,6 @@ fn fuzz_family<F: Family, S: Strategy>(
         let mut pending_appends: Vec<Vec<u8>> = Vec::new();
 
         for op in &input.ops {
-            // Each arm takes the db and evaluates to its successor.
             db = match op {
                 Operation::Append { value_bytes } => {
                     pending_appends.push(value_bytes.clone());

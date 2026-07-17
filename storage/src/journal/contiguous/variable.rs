@@ -1034,7 +1034,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         );
     }
 
-    /// Initialize the journal state, running recovery.
+    /// See [Journal::init].
     #[boxed]
     pub(crate) async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_section.get();
@@ -5775,10 +5775,9 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            let journal = Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
+            Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
                 .await
                 .unwrap();
-            drop(journal);
 
             let mut journal = Journal::<_, u64>::init(context.child("after_reset"), cfg.clone())
                 .await

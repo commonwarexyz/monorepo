@@ -126,7 +126,6 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             let mut all_keys: HashSet<RawKey> = HashSet::new();
 
             for op in operations.iter().take(MAX_OPS) {
-                // Each arm takes the db and evaluates to its successor.
                 db = match op {
                     QmdbOperation::Update { key, value } => {
                         let k = Key::new(*key);

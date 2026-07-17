@@ -383,7 +383,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         }
     }
 
-    /// Initialize the journal state, running recovery.
+    /// See [Journal::init].
     pub(crate) async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         Self::init_with_checkpoint(context, cfg, checkpoint).await
@@ -4463,11 +4463,6 @@ mod tests {
             // Rewind to before pruning_boundary should fail.
             let result = journal.rewind(9).await;
             assert!(matches!(result, Err(Error::ItemPruned(9))));
-
-            let journal = Journal::<_, Digest>::init(context.child("reopen"), cfg.clone())
-                .await
-                .unwrap();
-            journal.destroy().await.unwrap();
         });
     }
 

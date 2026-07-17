@@ -208,8 +208,7 @@ fn make_item(value: u8) -> Vec<u8> {
     vec![value; ITEM_SIZE]
 }
 
-/// Run operations on the queue, tracking state for recovery verification. A mutation
-/// error ends the run (the crash).
+/// Run operations on the queue, tracking state for recovery verification.
 async fn run_operations(
     mut queue: Queue<deterministic::Context, Vec<u8>>,
     operations: &[QueueOperation],
@@ -217,7 +216,6 @@ async fn run_operations(
     let mut state = RecoveryState::new();
 
     for op in operations {
-        // Each arm takes the queue and evaluates to its successor.
         queue = match op {
             QueueOperation::Enqueue { value } => {
                 let item = make_item(*value);

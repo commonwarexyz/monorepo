@@ -241,7 +241,6 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
             for op in &operations {
-                // Each arm takes the db and evaluates to its successor.
                 db = match op {
                     CurrentOperation::Update { key, value } => {
                         pending_writes.push((Key::new(*key), Some(Value::new(*value))));

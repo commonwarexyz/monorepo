@@ -178,7 +178,6 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
         for op in &input.ops {
-            // Each arm takes the db and evaluates to its successor.
             db = match op {
                 Operation::Update { key, value } => {
                     pending_writes.push((Key::new(*key), Some(Value::new(*value))));

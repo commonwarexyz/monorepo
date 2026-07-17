@@ -131,7 +131,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let mut restarts = 0usize;
 
             for op in operations {
-                // Each arm takes the merkle and evaluates to its successor.
                 merkle = match op {
                     Operation::Add { data } => {
                         let limited_data = if data.len() > MAX_DATA_SIZE {
