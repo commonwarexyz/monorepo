@@ -543,14 +543,14 @@ where
             };
 
             // Remove the batch of operations that contains the next operation to apply.
-            let mut operations = self.fetched_operations.remove(&range_start_loc).unwrap();
+            let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
             assert!(!operations.is_empty());
             // Skip operations that are before the next location. The containment check when
             // selecting the range (`next_loc <= range_end`) guarantees at least one operation
             // at or after it, so the batch is never empty.
-            let operations = operations.split_off((next_loc - *range_start_loc) as usize);
+            let operations = &operations[(next_loc - *range_start_loc) as usize..];
             next_loc += operations.len() as u64;
-            self.journal = self.journal.append(&operations).await?;
+            self.journal = self.journal.append(operations).await?;
         }
 
         Ok(self)

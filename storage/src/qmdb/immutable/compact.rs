@@ -847,6 +847,8 @@ mod tests {
             let advance_floor = db.new_batch().set(Sha256::hash(&[1]), Sha256::fill(1u8));
             let advance_floor = advance_floor.merkleize(&db, None, Location::new(1)).await;
             let (db, _) = db.apply_batch(advance_floor).unwrap();
+            let db = db.sync().await.unwrap();
+            let target = db.target();
 
             let regressed = db
                 .new_batch()
@@ -859,6 +861,11 @@ mod tests {
                 Err(Error::FloorRegressed(new, current))
                     if new == Location::new(0) && current == Location::new(1)
             ));
+
+            // Reopen and verify the rejected batch persisted nothing.
+            let db =
+                open_db::<mmr::Family>(context.child("reopen"), "immutable-floor-regressed").await;
+            assert_eq!(db.target(), target);
         });
     }
 
@@ -883,11 +890,20 @@ mod tests {
                 .merkleize(&db, None, Location::new(0))
                 .await;
 
+            let target = db.target();
             assert!(matches!(
                 db.apply_batch(child),
                 Err(Error::FloorRegressed(new, prev))
                     if new == Location::new(0) && prev == Location::new(1)
             ));
+
+            // Reopen and verify the rejected chain persisted nothing.
+            let db = open_db::<mmr::Family>(
+                context.child("reopen"),
+                "immutable-regressed-ancestor-floor",
+            )
+            .await;
+            assert_eq!(db.target(), target);
         });
     }
 

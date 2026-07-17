@@ -114,7 +114,9 @@ pub mod p2p;
 /// Owned mutations (finalize, prune, rewind) take the database out of the cell under the
 /// write lock ([Self::write]) and put it back on success ([WriteSlot::put]); a failure,
 /// panic, or cancellation mid-operation leaves the cell empty permanently, and every
-/// later access panics: a lost database is fatal here by design; restart to recover.
+/// later [Self::read] or [Self::write] panics: a lost database is fatal here by design;
+/// restart to recover. Resolver access instead reports the source as missing, so serving
+/// degrades without crashing remote sync.
 pub struct Shared<DB>(Inner<DB>);
 
 /// The lock wrapped by [`Shared`]. Storage implements its sync resolver traits on
