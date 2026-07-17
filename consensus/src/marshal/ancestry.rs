@@ -240,6 +240,7 @@ pub struct AncestorStream<M: BlockProvider, C: Clock> {
     marshal: M,
     fetch_duration: Timed,
     clock: Arc<C>,
+    pending_child: Option<Arc<M::Block>>,
     #[pin]
     pending: OptionFuture<PendingFetch<M::Block>>,
 }
@@ -278,6 +279,7 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
             buffered,
             fetch_duration,
             clock,
+            pending_child: None,
             pending: None.into(),
         }
     }
@@ -295,12 +297,22 @@ where
     C: Clock,
 {
     fn clone(&self) -> Self {
+        let pending_child = self.pending_child.clone();
+        let marshal = self.marshal.clone();
+        let fetch_duration = self.fetch_duration.clone();
+        let clock = self.clock.clone();
+        let pending = pending_child
+            .as_ref()
+            .map(|child| timed_parent_fetch(&clock, &marshal, child, &fetch_duration))
+            .into();
+
         Self {
             buffered: self.buffered.clone(),
-            marshal: self.marshal.clone(),
-            fetch_duration: self.fetch_duration.clone(),
-            clock: self.clock.clone(),
-            pending: None.into(),
+            marshal,
+            fetch_duration,
+            clock,
+            pending_child,
+            pending,
         }
     }
 }
@@ -335,6 +347,7 @@ where
             if should_walk_parent && end_of_buffered {
                 let future =
                     timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
+                *this.pending_child = Some(block.clone());
                 *this.pending.as_mut() = Some(future).into();
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -343,15 +356,21 @@ where
                     Poll::Ready(Some(Some((expected, parent)))) => {
                         expected.assert_matches(parent.as_ref());
                         this.buffered.push(parent);
+                        *this.pending_child = None;
                     }
                     Poll::Ready(Some(None)) => {
                         *this.pending.as_mut() = None.into();
+                        *this.pending_child = None;
                     }
-                    Poll::Ready(None) | Poll::Pending => {}
+                    Poll::Ready(None) => {
+                        *this.pending_child = None;
+                    }
+                    Poll::Pending => {}
                 }
             } else if !should_walk_parent {
                 // No more parents to fetch; Finish the stream.
                 *this.pending.as_mut() = None.into();
+                *this.pending_child = None;
             }
 
             return Poll::Ready(Some(block));
@@ -361,6 +380,7 @@ where
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) | Poll::Ready(Some(None)) => {
                 *this.pending.as_mut() = None.into();
+                *this.pending_child = None;
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Some((expected, block)))) => {
@@ -370,6 +390,7 @@ where
                 if should_walk_parent {
                     let future =
                         timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
+                    *this.pending_child = Some(block.clone());
                     *this.pending.as_mut() = Some(future).into();
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -378,15 +399,21 @@ where
                         Poll::Ready(Some(Some((expected, parent)))) => {
                             expected.assert_matches(parent.as_ref());
                             this.buffered.push(parent);
+                            *this.pending_child = None;
                         }
                         Poll::Ready(Some(None)) => {
                             *this.pending.as_mut() = None.into();
+                            *this.pending_child = None;
                         }
-                        Poll::Ready(None) | Poll::Pending => {}
+                        Poll::Ready(None) => {
+                            *this.pending_child = None;
+                        }
+                        Poll::Pending => {}
                     }
                 } else {
                     // No more parents to fetch; Finish the stream.
                     *this.pending.as_mut() = None.into();
+                    *this.pending_child = None;
                 }
 
                 Poll::Ready(Some(block))
@@ -407,6 +434,7 @@ mod test {
             histogram::{Buckets, Timed},
         },
     };
+    use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::StreamExt;
 
     #[derive(Default, Clone)]
@@ -426,6 +454,40 @@ mod test {
                     .cloned()
                     .map(Arc::new),
             )
+        }
+    }
+
+    type TestBlock = Block<Sha256Digest, ()>;
+    type ParentSubscription = oneshot::Sender<Arc<TestBlock>>;
+
+    #[derive(Default, Clone)]
+    struct PendingProvider {
+        subscriptions: Arc<Mutex<Vec<ParentSubscription>>>,
+    }
+
+    impl PendingProvider {
+        fn subscription_count(&self) -> usize {
+            self.subscriptions.lock().len()
+        }
+
+        fn complete_all(&self, parent: Arc<Block<Sha256Digest, ()>>) {
+            let subscriptions = std::mem::take(&mut *self.subscriptions.lock());
+            for subscription in subscriptions {
+                assert!(subscription.send(parent.clone()).is_ok());
+            }
+        }
+    }
+
+    impl BlockProvider for PendingProvider {
+        type Block = Block<Sha256Digest, ()>;
+
+        fn subscribe_parent(
+            &self,
+            _block: &Self::Block,
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
+            let (subscription, parent) = oneshot::channel();
+            self.subscriptions.lock().push(subscription);
+            parent.map(Result::ok)
         }
     }
 
@@ -581,6 +643,33 @@ mod test {
 
             let results = stream.collect::<Vec<_>>().await;
             assert_eq!(results, vec![Arc::new(child), Arc::new(genesis)]);
+        });
+    }
+
+    #[test]
+    fn test_clone_preserves_pending_parent_fetch() {
+        deterministic::Runner::default().start(|context| async move {
+            let parent = Arc::new(Block::new::<Sha256>(
+                (),
+                Sha256Digest::EMPTY,
+                Height::zero(),
+                0,
+            ));
+            let child = Block::new::<Sha256>((), parent.digest(), Height::new(1), 1);
+            let provider = PendingProvider::default();
+            let mut stream = stream(&context, provider.clone(), [child.clone()]);
+
+            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(provider.subscription_count(), 1);
+
+            let mut cloned = stream.clone();
+            assert_eq!(provider.subscription_count(), 2);
+            provider.complete_all(parent.clone());
+
+            assert_eq!(stream.next().await, Some(parent.clone()));
+            assert_eq!(cloned.next().await, Some(parent.clone()));
+            assert_eq!(stream.next().await, None);
+            assert_eq!(cloned.next().await, None);
         });
     }
 
