@@ -189,8 +189,8 @@ where
     if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
         let commit_floor = Operation::CommitFloor(None, Location::new(0));
-        let (appended, _) = log.append(&commit_floor).await?;
-        log = appended.sync().await?;
+        (log, _) = log.append(&commit_floor).await?;
+        log = log.sync().await?;
     }
 
     let index = I::new(context.child("index"), cfg.translator);

@@ -527,8 +527,8 @@ where
             let old_loc = inactivity_floor_loc;
             inactivity_floor_loc += 1;
             let op = self.log.read(*old_loc).await?;
-            let (helper, moved) = self.move_op_if_active(op, old_loc).await?;
-            self = helper;
+            let moved;
+            (self, moved) = self.move_op_if_active(op, old_loc).await?;
             if moved {
                 return Ok((self, inactivity_floor_loc));
             }

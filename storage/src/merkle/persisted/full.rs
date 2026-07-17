@@ -1583,7 +1583,8 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
+        drop(mmr);
 
         // Simulate a crash that wrote a leaf but not its parent nodes by appending one
         // extra digest to the journal. This creates an invalid structure size.
@@ -1834,7 +1835,8 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
+        drop(mmr);
 
         // Prune the structure in increments of 50, simulating a partial write after each prune.
         for i in 0usize..200 {
@@ -2291,7 +2293,8 @@ mod tests {
             pinned_nodes: None,
         };
 
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
+        drop(mmr);
 
         let sync_mmr =
             Merkle::<F, _, Digest, Sequential>::init_sync(context.child("sync"), sync_cfg)
@@ -2372,7 +2375,8 @@ mod tests {
             pinned_nodes: None,
         };
 
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
+        drop(mmr);
 
         let sync_mmr =
             Merkle::<F, _, Digest, Sequential>::init_sync(context.child("sync"), sync_cfg)
@@ -3179,7 +3183,8 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
         let valid_size = mmr.size();
         let valid_root = mmr.root(&hasher, 0).unwrap();
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
+        drop(mmr);
 
         // Append one extra digest to the journal, simulating a crash that wrote a
         // leaf (for the 4th element) but not its parent nodes. This makes the

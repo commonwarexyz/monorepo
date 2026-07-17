@@ -2917,7 +2917,8 @@ mod tests {
             for i in 0..20u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             let cfg = Config {
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -2968,7 +2969,8 @@ mod tests {
             for item in &items {
                 (journal, _) = journal.append(item).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Reopen with a fresh page cache so sealed-blob full pages are cold.
             let cfg = Config {
@@ -3070,7 +3072,8 @@ mod tests {
             assert_eq!(bounds.start, 20);
             assert_eq!(bounds.end, 40);
 
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // === Phase 2: Simulate complete offsets partition loss ===
             // Remove both the offsets data partition and its metadata partition
@@ -3119,7 +3122,8 @@ mod tests {
                 (variable, _) = variable.append(&(i * 100)).await.unwrap();
             }
 
-            variable.sync().await.unwrap();
+            let variable = variable.sync().await.unwrap();
+            drop(variable);
 
             // === Simulate data loss: Delete data partition but keep offsets ===
             context
@@ -3695,7 +3699,8 @@ mod tests {
             variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
             variable.test_prune_data(1).await.unwrap(); // Only prune data blobs to blob 1 (position 10)
 
-            variable.sync().await.unwrap();
+            let variable = variable.sync().await.unwrap();
+            drop(variable);
 
             // === Verify corruption detected ===
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
@@ -4210,7 +4215,8 @@ mod tests {
             for i in 0..20u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Empty the oldest data blob in place, leaving blob 1's items orphaned past the
             // gap, then drop the offsets journal so recovery rebuilds from the data alone.
@@ -4284,7 +4290,8 @@ mod tests {
             for i in 0..128u8 {
                 (journal, _) = journal.append(&FixedBytes::new([i; 31])).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             let physical_page_size = LARGE_PAGE_SIZE.get() as u64 + 12;
             let items_in_page = LARGE_PAGE_SIZE.get() as u64 / 32;
@@ -4875,7 +4882,8 @@ mod tests {
                     .unwrap();
                 (journal, _) = journal.append(&10).await.unwrap();
                 (journal, _) = journal.append(&20).await.unwrap();
-                journal.sync().await.unwrap();
+                let journal = journal.sync().await.unwrap();
+                drop(journal);
 
                 let (blob, raw_size) = context
                     .open(&offsets_blob_partition, &0u64.to_be_bytes())
@@ -4940,7 +4948,8 @@ mod tests {
                     .unwrap();
                 (journal, _) = journal.append(&10).await.unwrap();
                 (journal, _) = journal.append(&20).await.unwrap();
-                journal.sync().await.unwrap();
+                let journal = journal.sync().await.unwrap();
+                drop(journal);
 
                 let (blob, raw_size) = context
                     .open(&data_partition, &0u64.to_be_bytes())
@@ -5452,7 +5461,8 @@ mod tests {
                 for i in 0..12u64 {
                     (journal, _) = journal.append(&(100 + i)).await.unwrap();
                 }
-                journal.sync().await.unwrap();
+                let journal = journal.sync().await.unwrap();
+                drop(journal);
 
                 *context.storage_fault_config().write() = deterministic::FaultConfig {
                     sync_rate: Some(1.0),
@@ -5636,7 +5646,8 @@ mod tests {
                 for i in 0..12u64 {
                     (journal, _) = journal.append(&(100 + i)).await.unwrap();
                 }
-                journal.sync().await.unwrap();
+                let journal = journal.sync().await.unwrap();
+                drop(journal);
 
                 let offsets_cfg = fixed::Config {
                     partition: cfg.offsets_partition(),
@@ -5710,7 +5721,8 @@ mod tests {
             for i in 0..12u64 {
                 (journal, _) = journal.append(&(100 + i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Simulate a prior `clear_to_size(5)` that crashed after staging its intent: the offsets
             // checkpoint carries a clear target of 5 while the data blobs still holds all 12 items.
@@ -5773,7 +5785,8 @@ mod tests {
                 (journal, appended) = journal.append(&(500 + i)).await.unwrap();
                 assert_eq!(appended, 5 + i);
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
                 .await
@@ -6248,7 +6261,8 @@ mod tests {
             for i in 0..20u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries that overlap with existing data
             // lower_bound: 8 (blob 1), upper_bound: 31 (last location 30, blob 6)
@@ -6342,7 +6356,8 @@ mod tests {
             for i in 0..20u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries that exactly match existing data
             let lower_bound = 5; // blob 1
@@ -6411,7 +6426,8 @@ mod tests {
             for i in 0..30u64 {
                 (journal, _) = journal.append(&(i * 1000)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries that are exceeded by existing data
             let lower_bound = 8; // blob 1
@@ -6498,7 +6514,8 @@ mod tests {
             )
             .await
             .expect("Failed to create stale empty journal");
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Simulate clear_to_size(7) crashing after clearing data, but before offsets were
             // re-cleared. Recovery will initially see the old empty offsets boundary at 9.
@@ -6551,7 +6568,8 @@ mod tests {
             for i in 0..10u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries beyond all existing data
             let lower_bound = 15; // blob 3
@@ -6603,7 +6621,8 @@ mod tests {
             for i in 0..25u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Test sync boundaries exactly at blob boundaries
             let lower_bound = 15; // Exactly at blob boundary (15/5 = 3)
@@ -6671,7 +6690,8 @@ mod tests {
             for i in 0..15u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Test sync boundaries within the same blob
             let lower_bound = 10; // operation 10 (blob 2: 10/5 = 2)
@@ -7308,7 +7328,8 @@ mod tests {
             for i in 0..10u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Remove the empty tail blob, leaving only the full blob 0 (the layout written
             // before eager tail creation).
@@ -7395,7 +7416,8 @@ mod tests {
             for i in 0..25u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Remove blob 1, leaving a gap in the retained data blobs.
             context

@@ -160,10 +160,10 @@ where
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
-            let (appended, _) = journal
+            (journal, _) = journal
                 .append(&Operation::Commit(None, Location::new(0)))
                 .await?;
-            journal = appended.sync().await?;
+            journal = journal.sync().await?;
         }
 
         let (last_commit_loc, inactivity_floor_loc) = {

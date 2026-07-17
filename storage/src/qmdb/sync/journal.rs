@@ -194,7 +194,8 @@ mod tests {
             let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
                 .await
                 .unwrap();
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Simulate clear_to_size(7) crash: blobs cleared, section 1 recreated
             // empty, but metadata still says pruning_boundary=9.
@@ -233,7 +234,8 @@ mod tests {
             let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 30)
                 .await
                 .unwrap();
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Open via Journal::new with a range whose end < 30. Without the fix this would
             // return ItemOutOfRange because size(30) > range.end(20).

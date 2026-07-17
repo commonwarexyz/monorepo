@@ -306,7 +306,8 @@ mod tests {
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
             let mmr = mmr.apply_batch(&batch).unwrap();
-            mmr.sync().await.unwrap();
+            let mmr = mmr.sync().await.unwrap();
+            drop(mmr);
 
             // Build a reference MMR to 100 leaves to get valid pinned nodes for the
             // sync boundary.

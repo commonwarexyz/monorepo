@@ -1136,7 +1136,8 @@ mod tests {
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
                 .await;
             let (db, _) = db.apply_batch(batch).unwrap();
-            db.sync().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
 
             // Corrupt the persisted proof so it no longer verifies against the stored root.
             let journal = open_witness_journal(context.child("tamper"), partition).await;
@@ -1235,7 +1236,8 @@ mod tests {
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
                 .await;
             let (db, _) = db.apply_batch(batch).unwrap();
-            db.sync().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
 
             // Simulate a crash between an import's journal clear and its entry append: the
             // journal is empty but its size is nonzero.
@@ -1268,7 +1270,8 @@ mod tests {
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
                 .await;
             let (db, _) = db.apply_batch(batch).unwrap();
-            db.sync().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
             let oversized_floor = Location::new(10);
 
             // Overwrite the persisted commit op with a floor beyond its own commit location.
@@ -1308,7 +1311,8 @@ mod tests {
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
                 .await;
             let (db, _) = db.apply_batch(batch).unwrap();
-            db.sync().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
 
             // Corrupt one pinned frontier node: the root recomputed from the rebuilt Merkle no
             // longer matches the proof stored in the same entry.

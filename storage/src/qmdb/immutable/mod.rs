@@ -229,10 +229,10 @@ where
     ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
-            let (appended, _) = journal
+            (journal, _) = journal
                 .append(&Operation::Commit(None, Location::new(0)))
                 .await?;
-            journal = appended.sync().await?;
+            journal = journal.sync().await?;
         }
 
         let mut snapshot = Index::new(context.child("snapshot"), translator);

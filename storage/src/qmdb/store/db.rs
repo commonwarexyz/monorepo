@@ -504,9 +504,7 @@ where
             };
             let mut inactivity_floor_loc = self.inactivity_floor_loc;
             for _ in 0..steps_to_take {
-                let (h, floor) = helper.raise_floor(inactivity_floor_loc).await?;
-                helper = h;
-                inactivity_floor_loc = floor;
+                (helper, inactivity_floor_loc) = helper.raise_floor(inactivity_floor_loc).await?;
             }
             self.log = helper.log;
             self.inactivity_floor_loc = inactivity_floor_loc;

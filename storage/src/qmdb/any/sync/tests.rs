@@ -479,7 +479,8 @@ where
         let boundary = sync_db.sync_boundary();
         let sync_db = sync_db.prune(boundary).await.unwrap();
 
-        sync_db.sync().await.unwrap();
+        let sync_db = sync_db.sync().await.unwrap();
+        drop(sync_db);
 
         // Capture target state
         let sync_root = H::sync_target_root(&target_db);
@@ -1615,7 +1616,8 @@ where
         // commit already done in apply_ops
         let boundary = sync_db.sync_boundary();
         let sync_db = sync_db.prune(boundary).await.unwrap();
-        sync_db.sync().await.unwrap();
+        let sync_db = sync_db.sync().await.unwrap();
+        drop(sync_db);
 
         // Add more operations to the target db
         // (use different seed to avoid key collisions)

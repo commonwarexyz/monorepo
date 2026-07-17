@@ -1933,7 +1933,8 @@ pub mod tests {
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
             assert_eq!(db.get(&key(2)).await.unwrap(), None);
 
-            db.commit().await.unwrap();
+            let db = db.commit().await.unwrap();
+            drop(db);
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen"),
@@ -1960,7 +1961,8 @@ pub mod tests {
             assert_eq!(reopened.get(&key(1)).await.unwrap(), None);
             assert_eq!(reopened.get(&key(2)).await.unwrap(), None);
 
-            reopened.commit().await.unwrap();
+            let reopened = reopened.commit().await.unwrap();
+            drop(reopened);
 
             let reopened_initial: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_initial"),
@@ -2043,7 +2045,8 @@ pub mod tests {
             assert_eq!(db.bounds().end, target_size);
             assert_eq!(db.get(&key0).await.unwrap(), Some(target_value));
 
-            db.commit().await.unwrap();
+            let db = db.commit().await.unwrap();
+            drop(db);
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_pruned_recovery"),
@@ -2805,7 +2808,8 @@ pub mod tests {
             assert_eq!(db.get(&key0).await.unwrap(), Some(target_key0));
             assert_eq!(db.get(&key1).await.unwrap(), target_key1);
 
-            db.commit().await.unwrap();
+            let db = db.commit().await.unwrap();
+            drop(db);
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_small_delta"),

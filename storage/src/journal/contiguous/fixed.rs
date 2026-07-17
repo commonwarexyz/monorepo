@@ -1823,7 +1823,8 @@ mod tests {
                 .await
                 .expect("failed to initialize journal");
             (journal, _) = journal.append(&test_digest(1)).await.unwrap();
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             let legacy_blobs = scan_partition(&context, &legacy_partition).await;
             let new_blobs = scan_partition(&context, &blobs_partition).await;
@@ -1844,7 +1845,8 @@ mod tests {
                 .await
                 .expect("failed to initialize journal");
             (journal, _) = journal.append(&test_digest(1)).await.unwrap();
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             let legacy_blobs = scan_partition(&context, &legacy_partition).await;
             let new_blobs = scan_partition(&context, &blobs_partition).await;
@@ -1875,7 +1877,8 @@ mod tests {
             assert_eq!(pos, 0);
 
             // Drop the journal and re-initialize it to simulate a restart
-            journal.sync().await.expect("Failed to sync journal");
+            let journal = journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             let cfg = test_cfg(&context, NZU64!(2));
             let mut journal = Journal::init(context.child("second"), cfg.clone())
@@ -2097,7 +2100,8 @@ mod tests {
                 }
             }
 
-            journal.sync().await.expect("Failed to sync journal");
+            let journal = journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Corrupt one of the bytes and make sure it's detected.
             let (blob, _) = context
@@ -2163,7 +2167,8 @@ mod tests {
             for i in 0u64..30 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             let (blob, _) = context
                 .open(&blob_partition(&cfg), &1u64.to_be_bytes())
@@ -2207,7 +2212,8 @@ mod tests {
             for i in 0u64..5 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Delete a middle blob (external corruption). The watermark (5) now exceeds the
             // recoverable contiguous prefix, which is corruption.
@@ -2300,7 +2306,8 @@ mod tests {
             for i in 0..5 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Truncate the tail blob by 1 byte (external corruption). The watermark (5) now
             // exceeds the recoverable size, which is corruption.
@@ -2459,7 +2466,8 @@ mod tests {
                 .await
                 .unwrap();
             (journal, _) = journal.append(&test_digest(0)).await.unwrap();
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Add a far-future blob directly. Recovery should inspect actual blob ids and
             // repair at the first missing boundary instead of walking the entire numeric range.
@@ -2716,7 +2724,8 @@ mod tests {
             for i in 0..3u64 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Remove all blobs but leave the checkpoint (with a boundary hint of 7) intact.
             for name in scan_partition(&context, &blob_partition(&cfg)).await {
@@ -2903,7 +2912,8 @@ mod tests {
                     .await
                     .expect("failed to append data");
             }
-            journal.sync().await.expect("failed to sync journal");
+            let journal = journal.sync().await.expect("failed to sync journal");
+            drop(journal);
 
             // Inject an extra item into blob 0 at the blob level so its length exceeds
             // items_per_blob -- this is what `recover_bounds` validates and rejects as Corruption.
@@ -2945,7 +2955,8 @@ mod tests {
                 .await
                 .expect("failed to append data");
             assert_eq!(journal.size(), 1);
-            journal.sync().await.expect("Failed to sync journal");
+            let journal = journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Manually extend the blob to simulate a failure where the file was extended, but no
             // bytes were written due to failure.
@@ -3038,7 +3049,8 @@ mod tests {
             const ITEMS_REMAINING: u64 = 10 * (100 - 49);
             assert_eq!(journal.size(), ITEMS_REMAINING);
 
-            journal.sync().await.expect("Failed to sync journal");
+            let journal = journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Repeat with a different blob size (3 items per blob)
             let mut cfg = test_cfg(&context, NZU64!(3));
@@ -3531,7 +3543,8 @@ mod tests {
             for i in 0..20u64 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Empty the oldest blob (external corruption). The watermark (20) now exceeds the
             // recoverable size (0), which is corruption.
@@ -4475,7 +4488,8 @@ mod tests {
             for i in 0..5u64 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Crash Scenario 1: after clear intent is synced and blobs are removed, but before
             // the new tail blob is created.
@@ -4542,7 +4556,8 @@ mod tests {
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 12)
                     .await
                     .unwrap();
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Crash Scenario: clear_to_size(2) after the intent is synced and blob 0 is created,
             // but before final metadata replaces the clear intent.
@@ -4688,7 +4703,8 @@ mod tests {
             for i in 0..10u64 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Remove all blobs and create a single empty blob 1, leaving
             // recovery_watermark=10 in metadata.
@@ -4715,7 +4731,8 @@ mod tests {
             for i in 0..10u64 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Remove all blobs and create a single empty blob 0, leaving
             // recovery_watermark=10 in metadata.
@@ -5322,7 +5339,8 @@ mod tests {
             for i in 0..40u64 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             // Reopen with a fresh page cache so every full page is cold. The positions avoid
             // each blob's trailing bytes, which sealed blobs keep in memory and always serve
