@@ -339,21 +339,8 @@ impl Property<ed25519::PublicKey, ValidatorState> for BoundaryOutputMode {
         states: &'a [&'a ValidatorState],
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            let Some(reference) = states.first() else {
-                return Err("no active validator states".to_string());
-            };
-
             let height = final_height(self.epoch.get());
-            let Some(block) = reference.marshal.get_block(height).await else {
-                return Err(format!(
-                    "missing finalized boundary block at height {height}"
-                ));
-            };
-            let Some(Payload::EpochInfo(info)) = block.payload() else {
-                return Err(format!(
-                    "boundary at height {height} did not carry epoch info"
-                ));
-            };
+            let info = boundary_info(states, height).await?;
 
             let encoded = info.output.encode();
             let Some(mode) = encoded.get(<Summary as FixedSize>::SIZE).copied() else {
@@ -393,40 +380,40 @@ impl Property<ed25519::PublicKey, ValidatorState> for FailedCeremonyCarryOver {
         states: &'a [&'a ValidatorState],
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            let Some(reference) = states
-                .iter()
-                .find(|state| state.state_sync_height().is_some())
-                .or_else(|| states.first())
-            else {
-                return Err("no active validator states".to_string());
-            };
-
+            // The previous boundary may predate a node's state-sync floor and
+            // be absent from its marshal, so read it from whichever node
+            // retains it.
             let previous_height = self
                 .epoch
                 .previous()
                 .map(|epoch| final_height(epoch.get()))
                 .unwrap_or(Height::zero());
-            let Some(previous_block) = reference.marshal.get_block(previous_height).await else {
-                return Err(format!(
-                    "missing previous boundary block at height {previous_height}"
-                ));
-            };
-            let Some(Payload::EpochInfo(previous)) = previous_block.payload() else {
-                return Err(format!(
-                    "previous boundary at height {previous_height} did not carry epoch info"
-                ));
-            };
+            let previous = boundary_info(states, previous_height).await?;
 
+            // The carry-over boundary itself must be visible to a state-synced
+            // node whose floor covers it: demand that node's view of the
+            // boundary rather than falling back to a peer that retains it.
             let height = final_height(self.epoch.get());
-            let Some(block) = reference.marshal.get_block(height).await else {
-                return Err(format!(
-                    "missing finalized boundary block at height {height}"
-                ));
-            };
-            let Some(Payload::EpochInfo(info)) = block.payload() else {
-                return Err(format!(
-                    "boundary at height {height} did not carry epoch info"
-                ));
+            let synced = states.iter().find(|state| {
+                state
+                    .state_sync_height()
+                    .is_some_and(|floor| floor <= height.get())
+            });
+            let info = match synced {
+                Some(synced) => {
+                    let Some(block) = synced.marshal.get_block(height).await else {
+                        return Err(format!(
+                            "state-synced node missing boundary block at height {height}"
+                        ));
+                    };
+                    let Some(Payload::EpochInfo(info)) = block.payload() else {
+                        return Err(format!(
+                            "boundary at height {height} did not carry epoch info"
+                        ));
+                    };
+                    info
+                }
+                None => boundary_info(states, height).await?,
             };
 
             let expected_epoch = self.epoch.next();
