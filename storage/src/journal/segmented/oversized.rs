@@ -25,18 +25,14 @@
 //! ([commonware_runtime::WriteBatch]): `sync`, `start_sync`, and `sync_all` stage both
 //! journals' dirty blobs in one commit, `prune` stages both journals' section removals in
 //! one commit, `destroy` stages every blob's removal in one commit, and an append that
-//! opens a fresh section stages both blobs' creation in one commit. After a crash, a
-//! section's index and glob therefore read back from the same commit: durable index
-//! entries always reference values the durable glob holds. Initialization verifies this
-//! (each section's last entry must have its value range within the durable glob) and any
+//! opens a fresh section stages both blobs' creation in one commit. Both journals are
+//! private to this structure, so no path commits one side alone, and unsynced writes to
+//! one journal's blob never become readable through another blob's commit (a commit
+//! captures only its own blobs, see [commonware_runtime::Storage]). After a crash, a
+//! section's index and glob therefore read back from the same commit: the two journals
+//! hold exactly the same sections, and each section's glob ends exactly where its last
+//! durable index entry's value ends. Initialization verifies both properties and any
 //! violation is [Error::Corruption], a state no crash can produce.
-//!
-//! Two residual states are tolerated, both unreferenced storage and both benign:
-//! - Glob sections with no index section are left in place: appends reuse them
-//!   (values write after the existing bytes) and `prune` reclaims them.
-//! - Glob bytes past the last indexed value (e.g. within such a reused section) are
-//!   likewise left in place: subsequent appends write after them and the space is
-//!   reclaimed when the section is pruned.
 
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -102,9 +98,10 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
 {
     /// Initialize with cross-journal verification.
     ///
-    /// Every mutation commits both journals as one atomic batch, so an index entry
-    /// referencing bytes beyond the durable glob is [Error::Corruption], not a crash
-    /// state to repair.
+    /// Every mutation commits both journals as one atomic batch, so any skew between
+    /// them (mismatched section sets, or a section's glob not ending exactly at its
+    /// last index entry's value end) is [Error::Corruption], not a crash state to
+    /// repair.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize both journals
         let index_cfg = FixedConfig {
@@ -132,24 +129,34 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
         Ok(oversized)
     }
 
-    /// Verify that every index entry's value range is within the durable glob.
+    /// Verify that the two journals hold exactly the same sections and that each
+    /// section's glob ends exactly at its last index entry's value end.
     ///
     /// Value offsets are appended in monotone order within a section, so checking the
-    /// last entry covers all earlier ones. When could this fail? Only through corruption
+    /// last entry bounds all earlier ones. When could this fail? Only through corruption
     /// or external tampering: every commit that captures one of a section's blobs
-    /// captures both (creation, sync, prune, and destroy are single atomic batches), so
-    /// no crash leaves durable index entries whose values never landed.
+    /// captures both (creation, sync, prune, and destroy are single atomic batches), and
+    /// no other path commits either journal's blobs, so no crash can leave the journals
+    /// listing different sections or a glob whose durable size differs from what its
+    /// durable index entries reference.
     async fn verify_alignment(&self) -> Result<(), Error> {
-        for section in self.index.sections() {
-            let Some(last) = self.index.last(section).await? else {
-                continue;
-            };
-            let (offset, size) = last.value_location();
-            let entry_end = offset.saturating_add(u64::from(size));
+        let index_sections: Vec<u64> = self.index.sections().collect();
+        let glob_sections: Vec<u64> = self.values.sections().collect();
+        if index_sections != glob_sections {
+            return Err(Error::Corruption(format!(
+                "index sections {index_sections:?} and glob sections {glob_sections:?} differ"
+            )));
+        }
+
+        for section in index_sections {
+            let entry_end = self.index.last(section).await?.map_or(0, |last| {
+                let (offset, size) = last.value_location();
+                offset.saturating_add(u64::from(size))
+            });
             let glob_size = self.values.size(section)?;
-            if entry_end > glob_size {
+            if entry_end != glob_size {
                 return Err(Error::Corruption(format!(
-                    "section {section} index references {entry_end} glob bytes but only {glob_size} are durable"
+                    "section {section} index references {entry_end} glob bytes but {glob_size} are durable"
                 )));
             }
         }
@@ -175,24 +182,18 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
         entry: I,
         value: &V,
     ) -> Result<(u64, u64, u32), Error> {
-        // Create any missing section blob in one creation-only batch, published
+        // Create a missing section's blobs in one creation-only batch, published
         // WITHOUT a commit: both blobs' entries land together at whatever commit
         // comes next (every commit emits every live blob's entry), or vanish
-        // together on a crash before one. Either journal may already hold the
-        // section (e.g. an index-less glob section, tolerated as unreferenced
-        // storage), so only the missing side is created. The glob is staged
-        // before the index so a sequentially replayed batch (the test-only mock
-        // fallback) creates the value store first.
-        let create_values = !self.values.contains(section)?;
-        let create_index = !self.index.contains(section)?;
-        if create_values || create_index {
+        // together on a crash before one. The two journals hold exactly the same
+        // sections (verified at initialization, preserved by every mutation), so
+        // one containment check covers both. The glob is staged before the index
+        // so a sequentially replayed batch (the test-only mock fallback) creates
+        // the value store first.
+        if !self.index.contains(section)? {
             let mut batch = self.context.batch().await?;
-            if create_values {
-                self.values.create_into(section, &mut batch).await?;
-            }
-            if create_index {
-                self.index.create_into(section, &mut batch).await?;
-            }
+            self.values.create_into(section, &mut batch).await?;
+            self.index.create_into(section, &mut batch).await?;
             batch.apply().await?;
         }
 
@@ -205,6 +206,11 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
         let position = self.index.append(section, &entry_with_location).await?;
 
         Ok((position, offset, size))
+    }
+
+    /// Returns the runtime context backing this journal's storage.
+    pub(crate) const fn context(&self) -> &E {
+        &self.context
     }
 
     /// Get entry at position (index entry only, not value).
@@ -297,17 +303,27 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
     /// together, so a crash can never leave one journal's sections without the other's.
     /// Returns true if any sections were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        // The index is staged before the glob so a sequentially replayed batch (the
-        // test-only mock fallback) never removes a value store still referenced by a
-        // durable index section.
         let mut batch = self.context.batch().await?;
-        let index_pruned = self.index.prune_into(min, &mut batch).await?;
-        let value_pruned = self.values.prune_into(min, &mut batch).await?;
-        if !(index_pruned || value_pruned) {
+        if !self.prune_into(min, &mut batch).await? {
             return Ok(false);
         }
         batch.apply_sync().await?;
         Ok(true)
+    }
+
+    /// [Self::prune], staged with `batch` (see [super::manager::Manager::prune_into]
+    /// for the caller contract).
+    pub(crate) async fn prune_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        min: u64,
+        batch: &mut T,
+    ) -> Result<bool, Error> {
+        // The index is staged before the glob so a sequentially replayed batch (the
+        // test-only mock fallback) never removes a value store still referenced by a
+        // durable index section.
+        let index_pruned = self.index.prune_into(min, batch).await?;
+        let value_pruned = self.values.prune_into(min, batch).await?;
+        Ok(index_pruned || value_pruned)
     }
 
     /// Get the index size for a section.
@@ -1096,7 +1112,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_recovery_index_partition_deleted() {
+    fn test_index_blob_missing_is_corruption() {
+        // Creation, prune, and destroy capture a section's index and glob in one
+        // commit, so a glob section without its index section cannot arise from a
+        // crash.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1124,26 +1143,16 @@ mod tests {
                 .await
                 .expect("Failed to remove index");
 
-            // Reinitialize - should handle gracefully. Section 2 is gone from the index;
-            // its glob section is retained as unreferenced storage.
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to reinit");
-
-            // Section 1 and 3 should still be valid
-            assert!(oversized.get(1, 0).await.is_ok());
-            assert!(oversized.get(3, 0).await.is_ok());
-
-            // Section 2 should be gone (index file deleted)
-            assert!(oversized.get(2, 0).await.is_err());
-
-            oversized.destroy().await.expect("Failed to destroy");
+            let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
+                Oversized::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
     #[test_traced]
-    fn test_recovery_glob_synced_but_index_not() {
+    fn test_index_truncated_behind_glob_is_corruption() {
+        // Both journals sync in one commit, so a durable index ending before the
+        // durable glob cannot arise from a crash.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Use page size = entry size so each entry is exactly one page.
@@ -1170,125 +1179,32 @@ mod tests {
                     .expect("Failed to init");
 
             // Append entries and sync
-            let mut locations = Vec::new();
             for i in 0..3u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push(loc);
             }
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Truncate the INDEX but leave the GLOB intact: the glob ends with
-            // unreferenced trailing bytes, which the journal tolerates by design (see the
-            // module docs).
+            // Truncate the INDEX to the first 2 entries but leave the GLOB intact:
+            // the glob now ends past the last index entry's value.
             let (blob, _size) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-
-            // Keep only the first 2 index entries
             blob.resize(2 * TestEntry::SIZE as u64)
                 .await
                 .expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - glob has orphan data from entry 3
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to reinit");
-
-            // First 2 entries should be valid
-            for i in 0..2u8 {
-                let (position, offset, size) = locations[i as usize];
-                let entry = oversized.get(1, position).await.expect("Failed to get");
-                assert_eq!(entry.id, i as u64);
-
-                let value = oversized
-                    .get_value(1, offset, size)
-                    .await
-                    .expect("Failed to get value");
-                assert_eq!(value, [i; 16]);
-            }
-
-            // Entry at position 2 should fail (index was truncated)
-            assert!(oversized.get(1, 2).await.is_err());
-
-            // Append new entries - should work despite orphan data in glob
-            let mut new_locations = Vec::new();
-            for i in 10..13u8 {
-                let value: TestValue = [i; 16];
-                let entry = TestEntry::new(i as u64, 0, 0);
-                let (position, offset, size) = oversized
-                    .append(1, entry, &value)
-                    .await
-                    .expect("Failed to append after recovery");
-
-                // New entries start at position 2 (after the 2 valid entries)
-                assert_eq!(position, (i - 10 + 2) as u64);
-                new_locations.push((position, offset, size, i));
-
-                // Verify we can read the new entry
-                let retrieved = oversized.get(1, position).await.expect("Failed to get");
-                assert_eq!(retrieved.id, i as u64);
-
-                let retrieved_value = oversized
-                    .get_value(1, offset, size)
-                    .await
-                    .expect("Failed to get value");
-                assert_eq!(retrieved_value, value);
-            }
-
-            // Sync and restart again to verify persistence with orphan data
-            oversized.sync(1).await.expect("Failed to sync");
-            drop(oversized);
-
-            // Reinitialize after adding data on top of orphan glob data
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), cfg)
-                    .await
-                    .expect("Failed to reinit after append");
-
-            // Read all valid entries in the index
-            // First 2 entries from original data
-            for i in 0..2u8 {
-                let (position, offset, size) = locations[i as usize];
-                let entry = oversized.get(1, position).await.expect("Failed to get");
-                assert_eq!(entry.id, i as u64);
-
-                let value = oversized
-                    .get_value(1, offset, size)
-                    .await
-                    .expect("Failed to get value");
-                assert_eq!(value, [i; 16]);
-            }
-
-            // New entries added after recovery
-            for (position, offset, size, expected_id) in &new_locations {
-                let entry = oversized
-                    .get(1, *position)
-                    .await
-                    .expect("Failed to get new entry after restart");
-                assert_eq!(entry.id, *expected_id as u64);
-
-                let value = oversized
-                    .get_value(1, *offset, *size)
-                    .await
-                    .expect("Failed to get new value after restart");
-                assert_eq!(value, [*expected_id; 16]);
-            }
-
-            // Verify total entry count: 2 original + 3 new = 5
-            assert!(oversized.get(1, 4).await.is_ok());
-            assert!(oversized.get(1, 5).await.is_err());
-
-            oversized.destroy().await.expect("Failed to destroy");
+            let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
+                Oversized::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
@@ -1432,7 +1348,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_recovery_values_has_orphan_section() {
+    fn test_orphan_glob_section_is_corruption() {
+        // Creation, prune, and destroy capture a section's index and glob in one
+        // commit, so a glob section without its index section cannot arise from a
+        // crash.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1471,82 +1390,14 @@ mod tests {
             glob.sync(3).await.expect("Failed to sync glob");
             drop(glob);
 
-            // Reinitialize - the orphan section is retained as unreferenced storage
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to reinit");
-
-            // Sections 1 and 2 should still be valid
-            assert!(oversized.get(1, 0).await.is_ok());
-            assert!(oversized.get(2, 0).await.is_ok());
-
-            // Newest section is index-derived, so the orphan does not surface
-            assert_eq!(oversized.newest_section(), Some(2));
-
-            oversized.destroy().await.expect("Failed to destroy");
+            let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
+                Oversized::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
     #[test_traced]
-    fn test_recovery_values_has_multiple_orphan_sections() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-
-            // Create and populate with only section 1
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
-                    .await
-                    .expect("Failed to init");
-
-            let value: TestValue = [1; 16];
-            let entry = TestEntry::new(1, 0, 0);
-            oversized
-                .append(1, entry, &value)
-                .await
-                .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
-            drop(oversized);
-
-            // Manually create multiple orphan value sections (2, 3, 4)
-            let glob_cfg = GlobConfig {
-                partition: cfg.value_partition.clone(),
-                compression: cfg.compression,
-                codec_config: (),
-                write_buffer: cfg.value_write_buffer,
-            };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
-
-            for section in 2u64..=4 {
-                let orphan_value: TestValue = [section as u8; 16];
-                glob.append(section, &orphan_value)
-                    .await
-                    .expect("Failed to append orphan");
-                glob.sync(section).await.expect("Failed to sync glob");
-            }
-            drop(glob);
-
-            // Reinitialize - orphan sections are retained as unreferenced storage
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to reinit");
-
-            // Section 1 should still be valid
-            assert!(oversized.get(1, 0).await.is_ok());
-
-            // Newest section is index-derived, so the orphans do not surface
-            assert_eq!(oversized.newest_section(), Some(1));
-
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_recovery_index_empty_but_values_exist() {
+    fn test_glob_sections_without_index_partition_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1571,120 +1422,19 @@ mod tests {
             }
             drop(glob);
 
-            // Initialize oversized - the orphan value sections are retained but do not
-            // surface (sections are index-derived)
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
-                    .await
-                    .expect("Failed to init");
-
-            // No sections should exist
-            assert_eq!(oversized.newest_section(), None);
-            assert_eq!(oversized.oldest_section(), None);
-
-            oversized.destroy().await.expect("Failed to destroy");
+            let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
+                Oversized::init(context.child("first"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
     #[test_traced]
-    fn test_recovery_orphan_section_append_after() {
+    fn test_recovery_consistent_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
 
-            // Create and populate with section 1
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
-                    .await
-                    .expect("Failed to init");
-
-            let value: TestValue = [1; 16];
-            let entry = TestEntry::new(1, 0, 0);
-            let (_, offset1, size1) = oversized
-                .append(1, entry, &value)
-                .await
-                .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
-            drop(oversized);
-
-            // Manually create orphan value sections (2, 3)
-            let glob_cfg = GlobConfig {
-                partition: cfg.value_partition.clone(),
-                compression: cfg.compression,
-                codec_config: (),
-                write_buffer: cfg.value_write_buffer,
-            };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
-
-            for section in 2u64..=3 {
-                let orphan_value: TestValue = [section as u8; 16];
-                glob.append(section, &orphan_value)
-                    .await
-                    .expect("Failed to append orphan");
-                glob.sync(section).await.expect("Failed to sync glob");
-            }
-            drop(glob);
-
-            // Reinitialize - orphan sections are retained as unreferenced storage
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to reinit");
-
-            // Section 1 should still be valid
-            let entry = oversized.get(1, 0).await.expect("Failed to get");
-            assert_eq!(entry.id, 1);
-            let value = oversized
-                .get_value(1, offset1, size1)
-                .await
-                .expect("Failed to get value");
-            assert_eq!(value, [1; 16]);
-
-            // Should be able to append to section 2 after recovery
-            let new_value: TestValue = [42; 16];
-            let new_entry = TestEntry::new(42, 0, 0);
-            let (pos, offset, size) = oversized
-                .append(2, new_entry, &new_value)
-                .await
-                .expect("Failed to append after recovery");
-            assert_eq!(pos, 0);
-
-            // Verify the new entry
-            let retrieved = oversized.get(2, 0).await.expect("Failed to get");
-            assert_eq!(retrieved.id, 42);
-            let retrieved_value = oversized
-                .get_value(2, offset, size)
-                .await
-                .expect("Failed to get value");
-            assert_eq!(retrieved_value, new_value);
-
-            // Sync and restart to verify persistence
-            oversized.sync(2).await.expect("Failed to sync");
-            drop(oversized);
-
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), cfg)
-                    .await
-                    .expect("Failed to reinit after append");
-
-            // Both sections should be valid
-            assert!(oversized.get(1, 0).await.is_ok());
-            assert!(oversized.get(2, 0).await.is_ok());
-            assert_eq!(oversized.newest_section(), Some(2));
-
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_recovery_no_orphan_sections() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-
-            // Create and populate with sections 1, 2, 3 (no orphans)
+            // Create and populate with sections 1, 2, 3
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("first"), cfg.clone())
                     .await
@@ -1719,7 +1469,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_recovery_orphan_with_empty_index_section() {
+    fn test_empty_index_section_with_glob_bytes_is_corruption() {
+        // Both journals sync in one commit, so a durable empty index section whose
+        // glob holds bytes cannot arise from a crash.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1739,24 +1491,7 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Manually create orphan value section 2
-            let glob_cfg = GlobConfig {
-                partition: cfg.value_partition.clone(),
-                compression: cfg.compression,
-                codec_config: (),
-                write_buffer: cfg.value_write_buffer,
-            };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
-            let orphan_value: TestValue = [2; 16];
-            glob.append(2, &orphan_value)
-                .await
-                .expect("Failed to append orphan");
-            glob.sync(2).await.expect("Failed to sync glob");
-            drop(glob);
-
-            // Now truncate index section 1 to 0 (making it empty but still tracked)
+            // Truncate index section 1 to 0 (making it empty but still tracked)
             let (blob, _) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
@@ -1765,93 +1500,17 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - the empty index section and the orphan value section are
-            // both tolerated
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
-                    .await
-                    .expect("Failed to reinit");
-
-            // Section 1 should exist but have no entries (empty after truncation)
-            assert!(oversized.get(1, 0).await.is_err());
-
-            // Orphan section 2 does not surface (sections are index-derived)
-            assert_eq!(oversized.newest_section(), Some(1));
-
-            oversized.destroy().await.expect("Failed to destroy");
+            let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
+                Oversized::init(context.child("second"), cfg).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
     #[test_traced]
-    fn test_recovery_orphan_sections_with_gaps() {
-        // Test non-contiguous sections: index has [1, 3, 5], values has [1, 2, 3, 4, 5, 6]
-        // Orphan sections 2, 4, 6 are retained but do not surface
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-
-            // Create index with sections 1, 3, 5 (gaps)
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
-                    .await
-                    .expect("Failed to init");
-
-            for section in [1u64, 3, 5] {
-                let value: TestValue = [section as u8; 16];
-                let entry = TestEntry::new(section, 0, 0);
-                oversized
-                    .append(section, entry, &value)
-                    .await
-                    .expect("Failed to append");
-                oversized.sync(section).await.expect("Failed to sync");
-            }
-            drop(oversized);
-
-            // Manually create orphan value sections 2, 4, 6 (filling gaps and beyond)
-            let glob_cfg = GlobConfig {
-                partition: cfg.value_partition.clone(),
-                compression: cfg.compression,
-                codec_config: (),
-                write_buffer: cfg.value_write_buffer,
-            };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
-
-            for section in [2u64, 4, 6] {
-                let orphan_value: TestValue = [section as u8; 16];
-                glob.append(section, &orphan_value)
-                    .await
-                    .expect("Failed to append orphan");
-                glob.sync(section).await.expect("Failed to sync glob");
-            }
-            drop(glob);
-
-            // Reinitialize - orphan sections 2, 4, 6 are retained as unreferenced storage
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
-                    .await
-                    .expect("Failed to reinit");
-
-            // Sections 1, 3, 5 should still be valid
-            for section in [1u64, 3, 5] {
-                let entry = oversized.get(section, 0).await.expect("Failed to get");
-                assert_eq!(entry.id, section);
-            }
-
-            // Verify only sections 1, 3, 5 surface (sections are index-derived)
-            assert_eq!(oversized.oldest_section(), Some(1));
-            assert_eq!(oversized.newest_section(), Some(5));
-
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_recovery_glob_trailing_bytes_retained() {
-        // Glob bytes past the last indexed value are unreferenced and tolerated (e.g.
-        // an index-less glob section reused by later appends). Initialization leaves
-        // them in place and subsequent appends write after them.
+    fn test_glob_trailing_bytes_is_corruption() {
+        // Both journals sync in one commit and unsynced glob writes are never made
+        // readable by another blob's commit, so a durable glob ending past the last
+        // index entry's value cannot arise from a crash.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1875,68 +1534,25 @@ mod tests {
             }
             oversized.sync(1).await.expect("Failed to sync");
 
-            // Record where next entry SHOULD start (end of entry 1)
-            let expected_next_offset = byte_end(locations[1].1, locations[1].2);
+            // Record where the glob ends (end of entry 1)
+            let glob_end = byte_end(locations[1].1, locations[1].2);
             drop(oversized);
 
-            // Simulate crash: write garbage to glob (simulating partial value write)
+            // Append 100 bytes of garbage past the last indexed value
             let (blob, size) = context
                 .open(&cfg.value_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(size, expected_next_offset);
-
-            // Write 100 bytes of garbage (simulating partial/failed value write)
+            assert_eq!(size, glob_end);
             let garbage = vec![0xDE; 100];
             blob.write_at_sync(size, garbage)
                 .await
                 .expect("Failed to write garbage");
             drop(blob);
 
-            // Verify glob now has trailing garbage
-            let (blob, new_size) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            assert_eq!(new_size, expected_next_offset + 100);
-            drop(blob);
-
-            // Reinitialize - the trailing bytes are unreferenced and retained
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to reinit");
-
-            // First 2 entries should still be valid
-            for i in 0..2u8 {
-                let entry = oversized.get(1, i as u64).await.expect("Failed to get");
-                assert_eq!(entry.id, i as u64);
-            }
-
-            // Append new entry - starts after the retained trailing bytes
-            let new_value: TestValue = [99; 16];
-            let new_entry = TestEntry::new(99, 0, 0);
-            let (pos, offset, size) = oversized
-                .append(1, new_entry, &new_value)
-                .await
-                .expect("Failed to append after recovery");
-
-            // Verify position is 2 (after the 2 existing entries)
-            assert_eq!(pos, 2);
-
-            // Verify offset is past the trailing bytes
-            assert_eq!(offset, expected_next_offset + 100);
-
-            // Verify we can read the new entry and its value
-            let retrieved = oversized.get(1, 2).await.expect("Failed to get new entry");
-            assert_eq!(retrieved.id, 99);
-            let retrieved_value = oversized
-                .get_value(1, offset, size)
-                .await
-                .expect("Failed to get new value");
-            assert_eq!(retrieved_value, new_value);
-
-            oversized.destroy().await.expect("Failed to destroy");
+            let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
+                Oversized::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
@@ -2002,8 +1618,9 @@ mod tests {
 
     #[test_traced]
     fn test_empty_section_persistence() {
-        // Tests that sections that become empty (all entries removed/rewound)
-        // are handled correctly across restart cycles.
+        // A section whose index and glob are both empty is a legitimate crash state
+        // (a creation-only batch captured before the section's first appends land).
+        // Recovery keeps it and appends resume from the start of the section.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -2034,14 +1651,17 @@ mod tests {
             oversized.sync(2).await.expect("Failed to sync section 2");
             drop(oversized);
 
-            // Truncate section 1's index to 0 (making it empty)
-            let (blob, _) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            blob.resize(0).await.expect("Failed to truncate");
-            blob.sync().await.expect("Failed to sync");
-            drop(blob);
+            // Truncate BOTH of section 1's blobs to 0, the state a crash leaves when
+            // the section's creation landed but its appends did not.
+            for partition in [&cfg.index_partition, &cfg.value_partition] {
+                let (blob, _) = context
+                    .open(partition, &1u64.to_be_bytes())
+                    .await
+                    .expect("Failed to open blob");
+                blob.resize(0).await.expect("Failed to truncate");
+                blob.sync().await.expect("Failed to sync");
+                drop(blob);
+            }
 
             // First restart - recovery should handle empty section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2059,11 +1679,7 @@ mod tests {
             // Section 1 should still be tracked (blob exists but is empty)
             assert_eq!(oversized.oldest_section(), Some(1));
 
-            // Append to empty section 1
-            // Note: When index is truncated to 0 but the index blob still exists,
-            // the glob is NOT truncated (the section isn't considered an orphan).
-            // The glob still has orphan DATA from the old entries, but this doesn't
-            // affect correctness - new entries simply append after the orphan data.
+            // Append to empty section 1: both journals resume from the section start.
             let new_value: TestValue = [99; 16];
             let new_entry = TestEntry::new(99, 0, 0);
             let (pos, offset, size) = oversized
@@ -2071,11 +1687,10 @@ mod tests {
                 .await
                 .expect("Failed to append to empty section");
             assert_eq!(pos, 0);
-            // Glob offset is non-zero because orphan data wasn't truncated
-            assert!(offset > 0);
+            assert_eq!(offset, 0);
             oversized.sync(1).await.expect("Failed to sync");
 
-            // Verify the new entry is readable despite orphan data before it
+            // Verify the new entry is readable
             let entry = oversized.get(1, 0).await.expect("Failed to get");
             assert_eq!(entry.id, 99);
             let value = oversized

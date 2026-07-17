@@ -690,13 +690,6 @@ where
 
         Ok(())
     }
-
-    /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&mut self) -> Result<(), Error<F>> {
-        self.rebuild_metadata()?;
-        self.metadata.sync().await?;
-        Ok(())
-    }
 }
 
 /// Compute the safe sync boundary from the chunk-aligned inactivity floor and the current

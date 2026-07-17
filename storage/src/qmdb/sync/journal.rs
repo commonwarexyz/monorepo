@@ -40,9 +40,6 @@ pub trait Journal<F: Family>: Sized + Send {
         start: Location<F>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Persist the journal.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
     /// Get the number of operations in the journal
     fn size(&self) -> u64;
 
@@ -75,10 +72,6 @@ where
         } else {
             self.prune(*start).await.map(|_| ())
         }
-    }
-
-    async fn sync(&mut self) -> Result<(), Self::Error> {
-        Self::sync(self).await
     }
 
     fn size(&self) -> u64 {
@@ -142,10 +135,6 @@ where
         } else {
             self.prune(*start).await.map(|_| ())
         }
-    }
-
-    async fn sync(&mut self) -> Result<(), Self::Error> {
-        Self::sync(self).await
     }
 
     fn size(&self) -> u64 {

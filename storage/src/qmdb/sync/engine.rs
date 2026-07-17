@@ -764,9 +764,9 @@ where
                 return self.handle_event(event).await;
             }
 
-            self.journal.sync().await?;
-
-            // Build the database from the completed sync
+            // Build the database from the completed sync. The implementation
+            // makes the journal and every derived component durable in its own
+            // finalizing commit.
             let database = DB::from_sync_result(
                 self.context,
                 self.config,
@@ -868,10 +868,6 @@ mod tests {
 
         async fn resize(&mut self, start: Location<MmrFamily>) -> Result<(), Self::Error> {
             self.size = *start;
-            Ok(())
-        }
-
-        async fn sync(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 

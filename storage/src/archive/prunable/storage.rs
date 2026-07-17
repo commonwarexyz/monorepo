@@ -11,7 +11,7 @@ use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Batchable, Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
+    Batchable, Buf, BufMut, BufferPooler, Handle, Metrics, Storage, WriteBatch,
 };
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
@@ -407,6 +407,34 @@ impl<T: Translator, E: BufferPooler + Batchable + Metrics, K: Array, V: CodecSha
     /// If this is called with a min lower than the last pruned, nothing
     /// will happen.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+        let mut batch = self
+            .oversized
+            .context()
+            .batch()
+            .await
+            .map_err(crate::journal::Error::Runtime)?;
+        if self.prune_into(min, &mut batch).await? {
+            batch
+                .apply_sync()
+                .await
+                .map_err(crate::journal::Error::Runtime)?;
+        }
+        Ok(())
+    }
+
+    /// [Self::prune], staged with `batch`: every pruned section's removal (the
+    /// index journal's and the value journal's) lands when the caller applies the
+    /// batch with [WriteBatch::apply_sync], atomically with everything else it
+    /// stages. Returns whether any removals were staged.
+    ///
+    /// The archive stops tracking pruned sections immediately, so when this
+    /// returns true the caller must apply the batch: a batch dropped without
+    /// apply leaves the blobs on disk untracked until the next initialization.
+    pub async fn prune_into<B: WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        min: u64,
+        batch: &mut B,
+    ) -> Result<bool, Error> {
         // Update `min` to reflect section mask
         let min = self.section(min);
 
@@ -415,13 +443,13 @@ impl<T: Translator, E: BufferPooler + Batchable + Metrics, K: Array, V: CodecSha
             if min <= oldest_allowed {
                 // We don't return an error in this case because the caller
                 // shouldn't be burdened with converting `min` to some section.
-                return Ok(());
+                return Ok(false);
             }
         }
         debug!(min, "pruning archive");
 
-        // Prune oversized journal (handles both index and values)
-        self.oversized.prune(min).await?;
+        // Stage the oversized journal's section removals (both index and values)
+        let pruned = self.oversized.prune_into(min, batch).await?;
 
         // Remove pending and requested sync work (no need to call `sync` as we are pruning)
         self.pending = self.pending.split_off(&min);
@@ -446,7 +474,21 @@ impl<T: Translator, E: BufferPooler + Batchable + Metrics, K: Array, V: CodecSha
         // Update last pruned (to prevent reads from pruned sections)
         self.oldest_allowed = Some(min);
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
+        Ok(pruned)
+    }
+
+    /// [Archive::destroy](crate::archive::Archive::destroy), staged with `batch`:
+    /// every blob's removal and both partitions' land when the caller applies the
+    /// batch with [WriteBatch::apply_sync], atomically with everything else it
+    /// stages.
+    ///
+    /// The caller must apply the batch: a batch dropped without apply leaves the
+    /// blobs on disk untracked.
+    pub async fn destroy_into<B: WriteBatch<Blob = E::Blob>>(
+        self,
+        batch: &mut B,
+    ) -> Result<(), Error> {
+        Ok(self.oversized.destroy_into(batch).await?)
     }
 }
 

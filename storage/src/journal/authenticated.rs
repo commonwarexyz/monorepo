@@ -460,6 +460,10 @@ where
 {
     /// Create a new [Journal] from the given components after aligning the Merkle structure with
     /// the journal.
+    ///
+    /// Nothing is persisted here: alignment work (and any unsynced journal state) survives a
+    /// restart only after the caller's next [Self::sync] (or staged equivalent), which commits
+    /// both sides together.
     pub async fn from_components(
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: C,
@@ -467,10 +471,6 @@ where
         apply_batch_size: u64,
     ) -> Result<Self, Error<F>> {
         Self::align(&mut merkle, &journal, &hasher, apply_batch_size).await?;
-
-        // Sync the Merkle structure to disk to avoid having to repeat any recovery that may have
-        // been performed on next startup.
-        merkle.sync().await?;
 
         Ok(Self {
             merkle,

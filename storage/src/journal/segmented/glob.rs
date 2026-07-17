@@ -126,15 +126,6 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(value)
     }
 
-    /// Returns whether the given section exists.
-    ///
-    /// # Errors
-    ///
-    /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
-    pub(crate) fn contains(&self, section: u64) -> Result<bool, Error> {
-        Ok(self.manager.get(section)?.is_some())
-    }
-
     /// Stage the creation of a fresh section's blob with `batch` (see
     /// [super::manager::Manager::create_into] for the caller contract).
     pub(crate) async fn create_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(

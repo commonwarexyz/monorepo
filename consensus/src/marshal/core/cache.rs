@@ -8,6 +8,7 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::boxed;
 use commonware_runtime::{
     buffer::paged::CacheRef, Batchable, BufferPooler, Clock, Handle, Metrics, Spawner,
+    WriteBatch as _,
 };
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier, MultiArchive as _},
@@ -74,17 +75,31 @@ where
     V: Variant,
     S: Scheme,
 {
-    /// Prune view-indexed archives to the given view.
-    async fn prune_by_view(&mut self, min_view: View) {
-        match futures::try_join!(
-            self.verified_blocks.prune(min_view.get()),
-            self.notarized_blocks.prune(min_view.get()),
-            self.notarizations.prune(min_view.get()),
-            self.finalizations.prune(min_view.get()),
-        ) {
-            Ok(_) => debug!(min_view = %min_view, "pruned archives"),
-            Err(e) => panic!("failed to prune archives: {e}"),
-        }
+    /// Stage prunes of the view-indexed archives with `batch`. Returns whether
+    /// any removals were staged.
+    async fn prune_by_view_into(&mut self, min_view: View, batch: &mut R::Batch) -> bool {
+        let mut staged = false;
+        staged |= self
+            .verified_blocks
+            .prune_into(min_view.get(), batch)
+            .await
+            .expect("failed to prune verified blocks");
+        staged |= self
+            .notarized_blocks
+            .prune_into(min_view.get(), batch)
+            .await
+            .expect("failed to prune notarized blocks");
+        staged |= self
+            .notarizations
+            .prune_into(min_view.get(), batch)
+            .await
+            .expect("failed to prune notarizations");
+        staged |= self
+            .finalizations
+            .prune_into(min_view.get(), batch)
+            .await
+            .expect("failed to prune finalizations");
+        staged
     }
 
     /// Prune height-indexed archives to the given height.
@@ -200,7 +215,14 @@ where
             return None;
         }
 
-        // Update the metadata (metadata-first is safe; init is idempotent)
+        // The ceiling record must be durable before any of the epoch's archives
+        // accepts a write, or a crash could leave epoch data invisible to
+        // load_persisted_epochs. There is no commit to fold the record into:
+        // archive initialization creates nothing durable (sections are created
+        // commit-free on first append), and the epoch's data writes land in
+        // later calls with their own commits. A crash between this record and
+        // the first data write leaves only an empty epoch, re-initialized
+        // idempotently on restart.
         if epoch > ceiling {
             self.set_metadata(floor, epoch).await;
         }
@@ -598,8 +620,17 @@ where
     }
 
     /// Prune the view-indexed caches below the given round.
+    ///
+    /// ONE batch stages everything this prune removes: the destroyed epochs'
+    /// archives, the floor record that marks them pruned, and the round's
+    /// epoch's view prunes. No crash can leave the floor record claiming
+    /// destroyed epochs still hold data, or archives destroyed before the
+    /// record covers them.
     pub(crate) async fn prune_by_view(&mut self, round: Round) {
-        // Remove and close prunable archives from older epochs
+        let mut batch = self.context.batch().await.expect("failed to create batch");
+        let mut staged = false;
+
+        // Remove prunable archives from older epochs and stage their destruction
         let new_floor = round.epoch();
         let old_epochs: Vec<Epoch> = self
             .caches
@@ -615,25 +646,51 @@ where
                 notarizations: nv,
                 finalizations: fv,
             } = self.caches.remove(epoch).unwrap();
-            vb.destroy().await.expect("failed to destroy vb");
-            nb.destroy().await.expect("failed to destroy nb");
-            cb.destroy().await.expect("failed to destroy cb");
-            nv.destroy().await.expect("failed to destroy nv");
-            fv.destroy().await.expect("failed to destroy fv");
+            vb.destroy_into(&mut batch)
+                .await
+                .expect("failed to destroy vb");
+            nb.destroy_into(&mut batch)
+                .await
+                .expect("failed to destroy nb");
+            cb.destroy_into(&mut batch)
+                .await
+                .expect("failed to destroy cb");
+            nv.destroy_into(&mut batch)
+                .await
+                .expect("failed to destroy nv");
+            fv.destroy_into(&mut batch)
+                .await
+                .expect("failed to destroy fv");
+            staged = true;
         }
 
-        // Update metadata if necessary
+        // Stage the floor record rewrite if necessary
         let (floor, ceiling) = self.get_metadata();
         if new_floor > floor {
             let new_ceiling = max(ceiling, new_floor);
-            self.set_metadata(new_floor, new_ceiling).await;
+            self.metadata
+                .put(CACHED_EPOCHS_KEY, (new_floor, new_ceiling));
+            self.metadata
+                .sync_into(&mut batch)
+                .await
+                .expect("failed to stage metadata");
+            staged = true;
         }
 
-        // Prune archives for the given epoch
+        // Stage prunes of the round's epoch's archives
         let min_view = round.view();
         if let Some(prunable) = self.caches.get_mut(&round.epoch()) {
-            prunable.prune_by_view(min_view).await;
+            staged |= prunable.prune_by_view_into(min_view, &mut batch).await;
         }
+
+        if !staged {
+            return;
+        }
+        batch
+            .apply_sync()
+            .await
+            .expect("failed to apply prune batch");
+        debug!(min_view = %min_view, "pruned archives");
     }
 
     /// Prune height-indexed certified blocks below the given height.

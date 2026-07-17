@@ -541,6 +541,22 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         self.manager.prune(min).await
     }
 
+    /// [Self::prune], staged with `batch`: every pruned section's removal lands when
+    /// the caller applies the batch with
+    /// [WriteBatch](commonware_runtime::WriteBatch)`::apply_sync`, atomically with
+    /// everything else it stages. Returns true if any removals were staged.
+    ///
+    /// The journal stops tracking pruned sections immediately, so the caller must
+    /// apply the batch: a batch dropped without apply leaves the blobs on disk
+    /// untracked until the next initialization.
+    pub async fn prune_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+        &mut self,
+        min: u64,
+        batch: &mut T,
+    ) -> Result<bool, Error> {
+        self.manager.prune_into(min, batch).await
+    }
+
     /// Returns the number of the oldest section in the journal.
     pub fn oldest_section(&self) -> Option<u64> {
         self.manager.oldest_section()

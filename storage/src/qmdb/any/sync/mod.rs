@@ -97,7 +97,11 @@ where
     )
     .await?;
     let metrics = Metrics::new(context);
-    let db = Db::init_from_log(index, log, None, cache_size, metrics).await?;
+    let mut db = Db::init_from_log(index, log, None, cache_size, metrics).await?;
+
+    // ONE commit finalizes state sync: the ops journal's appends and the Merkle
+    // structure's alignment work become durable together.
+    db.sync().await?;
 
     Ok(db)
 }

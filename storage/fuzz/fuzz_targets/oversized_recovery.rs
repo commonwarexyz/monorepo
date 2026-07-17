@@ -4,9 +4,8 @@
 //!
 //! This test creates valid data, randomly corrupts storage, and verifies that initialization
 //! is verification, not repair: every mutation commits both journals as one atomic batch, so
-//! damage a crash cannot produce (a partial index entry, or index entries referencing bytes
-//! beyond the durable glob) surfaces as loud corruption. States it tolerates (orphan glob
-//! sections, unreferenced trailing glob bytes) leave the journal readable and appendable. It
+//! damage a crash cannot produce (a partial index entry, mismatched section sets, or a glob
+//! not ending exactly at the last index entry's value end) surfaces as loud corruption. It
 //! never panics.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
@@ -295,8 +294,8 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Phase 3: Recovery - this should never panic. Damage that a crash cannot produce
-        // (a partial trailing index entry, or index entries referencing bytes beyond the
-        // durable glob) surfaces as loud corruption.
+        // (a partial trailing index entry, mismatched section sets, or a glob not ending
+        // exactly at the last index entry's value end) surfaces as loud corruption.
         let mut recovered: Oversized<_, TestEntry, TestValue> =
             match Oversized::init(context.child("recovered"), cfg.clone()).await {
                 Ok(recovered) => recovered,

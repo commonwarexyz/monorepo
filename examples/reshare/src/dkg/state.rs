@@ -27,7 +27,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Batchable, Buf, BufMut, BufferPooler, Clock, Metrics,
+    buffer::paged::CacheRef, Batchable, Buf, BufMut, BufferPooler, Clock, Metrics, WriteBatch as _,
 };
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
@@ -183,6 +183,7 @@ where
     V: Variant,
     P: PublicKey,
 {
+    context: E,
     states: Metadata<E, u64, Epoch<V, P>>,
     msgs: SVJournal<E, Event<V, P>>,
 
@@ -264,6 +265,7 @@ where
         }
 
         Self {
+            context,
             states,
             msgs,
             current,
@@ -436,21 +438,31 @@ where
     }
 
     /// Removes all data from epochs older than `min`.
+    ///
+    /// ONE batch stages the msgs journal's prune and the states rewrite that drops
+    /// the pruned epochs, so a crash cannot leave stale epoch states behind pruned
+    /// messages.
     pub async fn prune(&mut self, min: EpochNum) {
         let min_epoch = min.get();
 
-        // Prune msgs journal
+        let mut batch = self
+            .context
+            .batch()
+            .await
+            .expect("should be able to create batch");
         self.msgs
-            .prune(min_epoch)
+            .prune_into(min_epoch, &mut batch)
             .await
             .expect("should be able to prune msgs");
-
-        // Prune states metadata - remove all epochs < min
         self.states.retain(|&epoch_key, _| epoch_key >= min_epoch);
         self.states
-            .sync()
+            .sync_into(&mut batch)
             .await
-            .expect("should be able to sync states after prune");
+            .expect("should be able to stage states");
+        batch
+            .apply_sync()
+            .await
+            .expect("should be able to apply prune");
 
         // Remove old epoch caches
         self.epochs.retain(|&epoch, _| epoch >= min);

@@ -223,10 +223,11 @@ where
         root,
         metrics,
     };
-    current_db.update_metrics();
 
-    // Persist metadata so the db can be reopened with init_fixed/init_variable.
-    current_db.sync_metadata().await?;
+    // ONE commit finalizes state sync: the ops journal's appends, the Merkle
+    // structure's alignment work, and the pruning metadata needed to reopen with
+    // init_fixed/init_variable become durable together.
+    current_db.sync().await?;
 
     Ok(current_db)
 }

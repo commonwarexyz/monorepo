@@ -50,6 +50,11 @@ pub trait Database: Sized + Send {
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
+    ///
+    /// The journal may hold appends that are not yet durable. The implementation must
+    /// make the journal and every component it derives from it durable before returning,
+    /// staging them into ONE finalizing commit so no bare follow-up write is needed to
+    /// reopen the database through its regular initialization path.
     fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
