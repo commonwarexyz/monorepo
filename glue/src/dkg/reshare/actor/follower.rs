@@ -63,6 +63,7 @@ where
                         let _ = response.send_lossy(None);
                     });
                 }
+                Message::ReleaseLog { .. } => {}
                 Message::EpochInfo { span, response, .. } => {
                     let process =
                         info_span!(parent: &span, "dkg.reshare.actor.follower.epoch_info");

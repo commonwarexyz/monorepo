@@ -170,6 +170,7 @@ where
                         let _ = response.send(None);
                     });
                 }
+                Message::ReleaseLog { .. } => {}
                 Message::EpochInfo { span, response, .. } => {
                     let process = info_span!(
                         parent: &span,

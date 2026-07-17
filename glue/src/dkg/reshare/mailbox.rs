@@ -5,7 +5,7 @@
 use crate::dkg::{ReshareBlock, types::Payload};
 use commonware_actor::{
     Feedback,
-    mailbox::{Policy, Sender},
+    mailbox::{Policy, Sender as ActorSender},
 };
 use commonware_consensus::{Reporter, marshal::Update, types::Height};
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
@@ -37,6 +37,72 @@ where
     Unavailable,
 }
 
+/// A dealer log reserved for one proposal attempt.
+///
+/// Dropping the reservation releases the log back to the reshare actor. Call
+/// [`included`](Self::included) only after the wrapped application returns a
+/// block for the proposal attempt that received this payload.
+#[must_use = "dropping a log reservation releases it for another proposal"]
+pub struct LogReservation<B, V, C, A = Exact>
+where
+    B: ReshareBlock,
+    V: Variant,
+    C: Signer,
+    A: Acknowledgement,
+{
+    height: Height,
+    payload: Payload<V, C>,
+    release: Option<ActorSender<Message<B, V, C, A>>>,
+}
+
+impl<B, V, C, A> LogReservation<B, V, C, A>
+where
+    B: ReshareBlock,
+    V: Variant,
+    C: Signer,
+    A: Acknowledgement,
+{
+    pub(crate) const fn new(
+        height: Height,
+        payload: Payload<V, C>,
+        release: ActorSender<Message<B, V, C, A>>,
+    ) -> Self {
+        Self {
+            height,
+            payload,
+            release: Some(release),
+        }
+    }
+
+    /// Returns the reserved dealer log payload.
+    pub const fn payload(&self) -> &Payload<V, C> {
+        &self.payload
+    }
+
+    /// Keeps the log reserved for this height until finalization confirms
+    /// whether the proposal landed on-chain.
+    pub fn included(mut self) {
+        self.release = None;
+    }
+}
+
+impl<B, V, C, A> Drop for LogReservation<B, V, C, A>
+where
+    B: ReshareBlock,
+    V: Variant,
+    C: Signer,
+    A: Acknowledgement,
+{
+    fn drop(&mut self) {
+        let Some(release) = self.release.take() else {
+            return;
+        };
+        let _ = release.enqueue(Message::ReleaseLog {
+            height: self.height,
+        });
+    }
+}
+
 /// A message that can be sent to the [`Actor`].
 ///
 /// [`Actor`]: super::Actor
@@ -57,8 +123,13 @@ where
     NextLog {
         span: Span,
         height: Height,
-        response: oneshot::Sender<Option<Payload<V, C>>>,
+        release: ActorSender<Self>,
+        response: oneshot::Sender<Option<LogReservation<B, V, C, A>>>,
     },
+
+    /// A proposal attempt was canceled or returned no block after receiving a
+    /// dealer log.
+    ReleaseLog { height: Height },
 
     /// A request for the final block's speculative [`EpochInfo`](crate::dkg::types::EpochInfo).
     EpochInfo {
@@ -85,6 +156,7 @@ where
     fn response_closed(&self) -> bool {
         match self {
             Self::NextLog { response, .. } => response.is_closed(),
+            Self::ReleaseLog { .. } => false,
             Self::EpochInfo { response, .. } => response.is_closed(),
             Self::Finalized { .. } => false,
         }
@@ -119,7 +191,7 @@ where
     C: Signer,
     A: Acknowledgement,
 {
-    sender: Sender<Message<B, V, C, A>>,
+    sender: ActorSender<Message<B, V, C, A>>,
 }
 
 impl<B, V, C, A> Mailbox<B, V, C, A>
@@ -130,14 +202,14 @@ where
     A: Acknowledgement,
 {
     /// Create a new mailbox.
-    pub const fn new(sender: Sender<Message<B, V, C, A>>) -> Self {
+    pub const fn new(sender: ActorSender<Message<B, V, C, A>>) -> Self {
         Self { sender }
     }
 
     /// Request a dealer log for inclusion before the final block of the epoch.
     ///
     /// `height` is the height of the block being proposed.
-    pub async fn next_log(&mut self, height: Height) -> Option<Payload<V, C>> {
+    pub async fn next_log(&mut self, height: Height) -> Option<LogReservation<B, V, C, A>> {
         let (response_tx, response_rx) = oneshot::channel();
         let span = info_span!("dkg.reshare.mailbox.next_log", height = height.traced());
         if !self
@@ -145,6 +217,7 @@ where
             .enqueue(Message::NextLog {
                 span,
                 height,
+                release: self.sender.clone(),
                 response: response_tx,
             })
             .accepted()
