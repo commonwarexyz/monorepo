@@ -30,14 +30,13 @@ pub struct Input<Parent, V: Variant, C: Signer> {
 /// An [`Application`](commonware_consensus::Application) wrapper that enforces the
 /// reshare block-validity contract and drives the reshare payload for proposals.
 ///
-/// The reshare protocol requires the application to reject any final block whose
-/// payload is not the [`EpochInfo`](crate::dkg::types::EpochInfo) the reshare
-/// actor independently reconstructs, and to reject stray payloads carried by
-/// non-final blocks in the early dealing window. Wiring these checks by hand is
-/// error prone: a verifier that skips them can vote for a malformed final block,
-/// which later panics the reshare actor on every honest node once the block
-/// finalizes. This wrapper performs those checks in
-/// [`verify`](ConsensusApplication::verify).
+/// When the reshare actor tracks an epoch's ceremony, the wrapper rejects a
+/// final block whose payload differs from the independently reconstructed
+/// [`EpochInfo`](crate::dkg::types::EpochInfo). An actor that starts following
+/// mid-epoch lacks the protocol history required for that comparison, so the
+/// wrapper delegates verification to the inner application rather than treating
+/// missing local state as an invalid proposal. The wrapper always rejects stray
+/// payloads carried by non-final blocks in the early dealing window.
 ///
 /// For proposals, the wrapper selects and fetches the payload for the block being
 /// built (a dealer log from the midpoint onward, the epoch info on the final
@@ -155,6 +154,10 @@ where
                     debug!("proposal skipped: final block epoch info is not ready");
                     return None;
                 }
+                EpochInfoResponse::Following => {
+                    debug!("proposal skipped: follower has no final block epoch info");
+                    return None;
+                }
                 EpochInfoResponse::Unavailable => {
                     debug!("proposal skipped: final block epoch info is unavailable");
                     return None;
@@ -227,6 +230,9 @@ where
                     debug!("verification pending: final block epoch info is not ready");
                     future::pending::<()>().await;
                     unreachable!("pending future must not resolve");
+                }
+                EpochInfoResponse::Following => {
+                    debug!("verification delegated: follower has no final block epoch info");
                 }
                 EpochInfoResponse::Unavailable => {
                     debug!("verification rejected: final block epoch info is unavailable");
@@ -744,6 +750,30 @@ mod tests {
 
             assert!(!verified);
             assert_eq!(inner.verify_count(), 0);
+        });
+    }
+
+    #[test]
+    fn verification_delegates_when_following_without_epoch_info() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for expected in [true, false] {
+                let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+                let tip = final_block(&parent, Some(epoch_payload(1)));
+                let mut app = wrapper(&context, EpochInfoResponse::Following);
+                app.inner.verify_result = expected;
+                let inner = app.inner.clone();
+
+                let verified = app
+                    .verify(
+                        (context.child("app"), block_context(&parent, 1)),
+                        ancestry::from_iter([tip, parent]),
+                    )
+                    .await;
+
+                assert_eq!(verified, expected);
+                assert_eq!(inner.verify_count(), 1);
+            }
         });
     }
 
