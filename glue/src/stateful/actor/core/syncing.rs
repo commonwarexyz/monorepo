@@ -331,7 +331,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
-        db::{Anchor, AttachableResolver},
+        db::{Anchor, AttachableResolver, Shared},
         tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant, anchor, test_databases},
     };
     use commonware_actor::mailbox as actor_mailbox;
@@ -348,10 +348,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, NZU16, NZU64, NZUsize,
-        acknowledgement::Exact,
-        channel::oneshot,
-        sync::{AsyncMutex, TracedAsyncRwLock},
+        Acknowledgement, NZU16, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
+        sync::AsyncMutex,
     };
     use futures::{FutureExt, pin_mut, poll};
     use std::sync::Arc;
@@ -360,7 +358,7 @@ mod tests {
     struct NoopResolver;
 
     impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<DB>>) {}
+        async fn attach_database(&self, _db: Shared<DB>) {}
     }
 
     struct TestHarness {

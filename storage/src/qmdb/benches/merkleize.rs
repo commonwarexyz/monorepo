@@ -378,22 +378,22 @@ fn cur_var_cfg_with_cache(
 /// the workload optimized by bitmap-backed floor raising.
 #[boxed]
 async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
-    mut db: C,
+    db: C,
     num_keys: u64,
     churn_batches: u64,
     iters: u64,
 ) -> Duration {
-    seed_db(&mut db, num_keys).await;
+    let mut db = seed_db(db, num_keys).await;
     let num_updates = num_keys / 10;
     let mut rng = TestRng::new(99);
 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        (db, _) = db.apply_batch(merkleized).await.unwrap();
     }
-    db.commit().await.unwrap();
-    db.sync().await.unwrap();
+    let db = db.commit().await.unwrap();
+    let db = db.sync().await.unwrap();
 
     let mut total = Duration::ZERO;
     for _ in 0..iters {
@@ -478,13 +478,14 @@ where
     type Output = Digest;
 
     async fn setup(&mut self) {
-        let Some(db) = self.db.as_mut() else {
+        let Some(db) = self.db.take() else {
             panic!("database must be present during setup");
         };
-        seed_db(db, self.options.num_keys).await;
+        let mut db = seed_db(db, self.options.num_keys).await;
         if self.options.seed_sync {
-            db.sync().await.unwrap();
+            db = db.sync().await.unwrap();
         }
+        self.db = Some(db);
         if self.options.clear_cache {
             self.page_cache.clear();
         }

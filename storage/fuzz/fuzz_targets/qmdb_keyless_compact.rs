@@ -259,16 +259,17 @@ fn fuzz_family<F: Family, S: Strategy>(
                     match expect_err {
                         None => {
                             let expected_root = merkleized.root();
-                            db.apply_batch(merkleized).expect("Commit should not fail");
+                            (db, _) = db.apply_batch(merkleized).expect("Commit should not fail");
                             assert_eq!(db.root(), expected_root);
                         }
                         Some(kind) => {
-                            // Snapshot state; the reject must not mutate.
+                            // Snapshot state; the reject must not mutate. `apply_batch` consumes
+                            // the handle on failure, so check with `validate_batch` instead.
                             let before_size = db.size();
                             let before_floor = db.inactivity_floor_loc();
                             let before_root = db.root();
                             let err = db
-                                .apply_batch(merkleized)
+                                .validate_batch(&merkleized)
                                 .expect_err("bad floor must be rejected");
                             assert_bad_floor_error(&err, kind);
                             assert_eq!(db.size(), before_size);
@@ -291,7 +292,8 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .merkleize(&db, None, floor)
                         .await;
                     let expected_root = child.root();
-                    db.apply_batch(child)
+                    (db, _) = db
+                        .apply_batch(child)
                         .expect("Chained commit should not fail");
                     assert_eq!(db.root(), expected_root);
                 }
@@ -308,15 +310,15 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .append(vec![3u8; 1])
                         .merkleize(&db, None, floor)
                         .await;
-                    db.apply_batch(batch_a).expect("Commit should not fail");
+                    (db, _) = db.apply_batch(batch_a).expect("Commit should not fail");
                     assert!(
-                        matches!(db.apply_batch(batch_b), Err(Error::StaleBatch { .. })),
+                        matches!(db.validate_batch(&batch_b), Err(Error::StaleBatch { .. })),
                         "second batch from the same state must be stale"
                     );
                 }
 
                 Operation::Sync => {
-                    db.sync().await.expect("Sync should not fail");
+                    db = db.sync().await.expect("Sync should not fail");
                     let size = db.size().as_u64();
                     if synced.last().map(|c| c.size) != Some(size) {
                         synced.push(SyncedCommit {
@@ -330,7 +332,8 @@ fn fuzz_family<F: Family, S: Strategy>(
                 Operation::Rewind { idx } => {
                     let entry = &synced[*idx as usize % synced.len()];
                     let target = entry.size;
-                    db.rewind(Location::new(target))
+                    db = db
+                        .rewind(Location::new(target))
                         .await
                         .expect("Rewind to a synced commit should not fail");
                     synced.retain(|c| c.size <= target);
@@ -342,7 +345,7 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                 Operation::RewindUnsynced => {
                     // One past the latest synced commit was never persisted, so the rewind
-                    // must fail. The handle is fatal after any rewind error: reopen it.
+                    // must fail. A failed rewind consumes the handle: reopen it.
                     let target = synced.last().unwrap().size + 1;
                     let err = db
                         .rewind(Location::new(target))
@@ -352,7 +355,6 @@ fn fuzz_family<F: Family, S: Strategy>(
                         matches!(err, Error::Merkle(MerkleError::RewindBeyondHistory)),
                         "unexpected rewind error: {err:?}"
                     );
-                    drop(db);
                     pending_appends.clear();
                     db = Db::init(
                         context
@@ -371,7 +373,8 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                 Operation::Prune { idx } => {
                     let boundary = synced[*idx as usize % synced.len()].size;
-                    db.prune(Location::new(boundary))
+                    db = db
+                        .prune(Location::new(boundary))
                         .await
                         .expect("Prune should not fail");
                     // Witnesses below the boundary may be gone; stop rewinding to them.
@@ -413,7 +416,7 @@ fn fuzz_family<F: Family, S: Strategy>(
 
         // Compact-sync round-trip: rebuild a fresh db from the source's persisted compact witness,
         // exercising compact_state, init_from_validated_state, and Store::from_import.
-        db.sync().await.expect("Sync should not fail");
+        let db = db.sync().await.expect("Sync should not fail");
         let target = db.target();
         let source = Arc::new(db);
         let client_cfg = test_config(&format!("{suffix}-client"), &context, strategy.clone());

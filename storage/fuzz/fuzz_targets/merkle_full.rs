@@ -137,7 +137,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let mut restarts = 0usize;
 
             for op in operations {
-                match op {
+                merkle = match op {
                     Operation::Add { data } => {
                         let limited_data = if data.len() > MAX_DATA_SIZE {
                             &data[0..MAX_DATA_SIZE]
@@ -155,11 +155,12 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let batch = merkle.with_mem(|mem| {
                             batch.add(&hasher, limited_data).merkleize(mem, &hasher)
                         });
-                        merkle.apply_batch(&batch).unwrap();
+                        let merkle = merkle.apply_batch(&batch).unwrap();
                         leaves.push(limited_data.to_vec());
                         historical_sizes.push(merkle.leaves());
                         assert!(merkle.size() > size_before);
                         assert_eq!(merkle.leaves() - 1, loc);
+                        merkle
                     }
 
                     Operation::AddBatched { items } => {
@@ -192,7 +193,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 merkle.with_mem(|mem| batch.merkleize(mem, &hasher)),
                             )
                         };
-                        merkle.apply_batch(&batch).unwrap();
+                        let merkle = merkle.apply_batch(&batch).unwrap();
                         assert!(merkle.size() > size_before);
 
                         for (item, loc) in items.iter().zip(&locations) {
@@ -201,10 +202,12 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             historical_sizes.push(*loc + 1);
                         }
                         assert_eq!(merkle.leaves() - 1, *locations.last().unwrap());
+                        merkle
                     }
 
                     Operation::GetNode { pos } => {
                         let _ = merkle.get_node(Position::<F>::new(pos)).await;
+                        merkle
                     }
 
                     Operation::Proof { location } => {
@@ -223,6 +226,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 }
                             }
                         }
+                        merkle
                     }
 
                     Operation::RangeProof { start_loc, end_loc } => {
@@ -247,6 +251,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 ));
                             }
                         }
+                        merkle
                     }
 
                     Operation::HistoricalRangeProof { start_loc, end_loc } => {
@@ -288,40 +293,44 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 panic!("unexpected historical_range_proof error: {err:?}")
                             }
                         }
+                        merkle
                     }
 
-                    Operation::Sync => {
-                        merkle.sync().await.unwrap();
-                    }
+                    Operation::Sync => merkle.sync().await.unwrap(),
 
-                    Operation::PruneAll => {
-                        merkle.prune_all().await.unwrap();
-                    }
+                    Operation::PruneAll => merkle.prune_all().await.unwrap(),
 
                     Operation::PruneToPos { pos } => {
                         if merkle.size() > 0 {
                             let safe_loc = Location::<F>::new(pos % (*merkle.leaves() + 1));
-                            merkle.prune(safe_loc).await.unwrap();
+                            let merkle = merkle.prune(safe_loc).await.unwrap();
                             assert!(merkle.bounds().start <= merkle.leaves());
+                            merkle
+                        } else {
+                            merkle
                         }
                     }
 
                     Operation::GetRoot => {
                         let _ = merkle.root(&hasher, 0);
+                        merkle
                     }
 
                     Operation::GetSize => {
                         let _ = merkle.size();
+                        merkle
                     }
 
                     Operation::GetLeaves => {
                         let (leaf_count, size) = (merkle.leaves().as_u64(), merkle.size().as_u64());
                         assert!(leaf_count <= size);
+                        merkle
                     }
 
                     Operation::GetPrunedToPos => {
                         let pruned_loc = merkle.bounds().start;
                         assert!(pruned_loc <= merkle.leaves());
+                        merkle
                     }
 
                     Operation::GetOldestRetainedPos => {
@@ -329,12 +338,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         if !bounds.is_empty() {
                             assert!(bounds.start < merkle.leaves());
                         }
+                        merkle
                     }
 
                     Operation::Reinit => {
                         // Init a new merkle structure.
                         drop(merkle);
-                        merkle = Merkle::<F, _, _>::init(
+                        let merkle = Merkle::<F, _, _>::init(
                             context.child("merkle").with_attribute("instance", restarts),
                             &hasher,
                             test_config(suffix, &context),
@@ -347,6 +357,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let recovered_leaves = merkle.leaves().as_u64() as usize;
                         leaves.truncate(recovered_leaves);
                         historical_sizes.truncate(recovered_leaves);
+                        merkle
                     }
 
                     Operation::InitSync {
@@ -381,8 +392,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             sync_merkle.destroy().await.unwrap();
                         }
                         restarts += 1;
+                        merkle
                     }
-                }
+                };
             }
         }
     });

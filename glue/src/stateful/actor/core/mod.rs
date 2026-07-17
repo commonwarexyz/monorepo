@@ -294,7 +294,7 @@ mod tests {
     use super::{Config, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
+        db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
     };
     use commonware_consensus::{
@@ -316,14 +316,14 @@ mod tests {
         Clock as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc, sync::TracedAsyncRwLock};
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc};
+    use std::{convert::Infallible, time::Duration};
 
     #[derive(Clone)]
     struct NoopResolver;
 
     impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<TestDb>>) {}
+        async fn attach_database(&self, _db: Shared<TestDb>) {}
     }
 
     impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {

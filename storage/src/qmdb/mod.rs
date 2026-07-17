@@ -29,6 +29,14 @@
 //! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`,
 //! and `destroy()`.
 //!
+//! # Ownership
+//!
+//! Mutating methods take the database by value and return it on success. If a mutating
+//! method returns an error, or its future is dropped before it finishes, the database is
+//! gone: state that was not yet durable is discarded, but everything already on disk stays
+//! recoverable. This applies to validation errors too (e.g. rejecting a stale batch);
+//! use each database's `validate_batch` to pre-check a batch without risking the handle.
+//!
 //! # Traits
 //!
 //! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny`.
@@ -452,7 +460,7 @@ pub(crate) struct FloorHelper<
     C: Mutable<Item: Operation<F>>,
 > {
     pub snapshot: &'a mut I,
-    pub log: &'a mut C,
+    pub log: C,
 }
 
 impl<F, I, C> FloorHelper<'_, F, I, C>
@@ -462,49 +470,54 @@ where
     C: Mutable<Item: Operation<F>>,
 {
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
-    /// inactive. If the operation was not active, then this is a no-op. Returns whether the
-    /// operation was moved.
+    /// inactive. If the operation was not active, then this is a no-op. Returns the helper and
+    /// whether the operation was moved.
     async fn move_op_if_active(
-        &mut self,
+        mut self,
         op: C::Item,
         old_loc: Location<F>,
-    ) -> Result<bool, Error<F>> {
+    ) -> Result<(Self, bool), Error<F>> {
         let Some(key) = op.key() else {
-            return Ok(false); // operations without keys cannot be active
+            return Ok((self, false)); // operations without keys cannot be active
         };
 
         // If we find a snapshot entry corresponding to the operation, we know it's active.
-        {
+        let active = {
             let Some(mut cursor) = self.snapshot.get_mut(key) else {
-                return Ok(false);
+                return Ok((self, false));
             };
-            if !cursor.find(|&loc| loc == old_loc) {
-                return Ok(false);
+            if cursor.find(|&loc| loc == old_loc) {
+                // Update the operation's snapshot location to point to tip.
+                cursor.update(Location::<F>::new(self.log.bounds().end));
+                true
+            } else {
+                false
             }
-
-            // Update the operation's snapshot location to point to tip.
-            cursor.update(Location::<F>::new(self.log.bounds().end));
+        };
+        if !active {
+            return Ok((self, false));
         }
 
         // Apply the operation at tip.
-        self.log.append(&op).await?;
+        (self.log, _) = self.log.append(&op).await?;
 
-        Ok(true)
+        Ok((self, true))
     }
 
     /// Raise the inactivity floor by taking one _step_, which involves searching for the first
     /// active operation above the inactivity floor, moving it to tip, and then setting the
     /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one. Returns the new inactivity floor location.
+    /// guaranteed to raise the floor by at least one. Returns the helper and the new inactivity
+    /// floor location.
     ///
     /// # Panics
     ///
     /// Expects there is at least one active operation above the inactivity floor, and panics
     /// otherwise.
     async fn raise_floor(
-        &mut self,
+        mut self,
         mut inactivity_floor_loc: Location<F>,
-    ) -> Result<Location<F>, Error<F>> {
+    ) -> Result<(Self, Location<F>), Error<F>> {
         let tip_loc: Location<F> = Location::new(self.log.bounds().end);
         loop {
             assert!(
@@ -514,8 +527,10 @@ where
             let old_loc = inactivity_floor_loc;
             inactivity_floor_loc += 1;
             let op = self.log.read(*old_loc).await?;
-            if self.move_op_if_active(op, old_loc).await? {
-                return Ok(inactivity_floor_loc);
+            let moved;
+            (self, moved) = self.move_op_if_active(op, old_loc).await?;
+            if moved {
+                return Ok((self, inactivity_floor_loc));
             }
         }
     }

@@ -2776,6 +2776,20 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    /// Check that `batch` can be applied to the database in its current state, without
+    /// applying it.
+    ///
+    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
+    /// fails; callers that want to reject a bad batch and keep the handle can check first.
+    pub fn validate_batch(
+        &self,
+        batch: &MerkleizedBatch<F, H::Digest, U, S>,
+    ) -> Result<(), crate::qmdb::Error<F>> {
+        batch
+            .bounds
+            .validate_apply_to(*self.last_commit_loc + 1, self.inactivity_floor_loc)
+    }
+
     /// Apply a batch to the database, returning the range of written operations.
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
@@ -2798,19 +2812,17 @@ where
         ),
     )]
     pub async fn apply_batch(
-        &mut self,
+        mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
+    ) -> Result<(Self, Range<Location<F>>), crate::qmdb::Error<F>> {
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
+        self.validate_batch(&batch)?;
         let db_size = *self.last_commit_loc + 1;
-        batch
-            .bounds
-            .validate_apply_to(db_size, self.inactivity_floor_loc)?;
         let start_loc = Location::new(db_size);
 
         // Apply journal (handles its own partial ancestor skipping).
-        self.log.apply_batch(&batch.journal_batch).await?;
+        self.log = self.log.apply_batch(&batch.journal_batch).await?;
 
         // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
         {
@@ -2873,7 +2885,7 @@ where
         self.metrics
             .operations_applied
             .inc_by(*range.end - *range.start);
-        Ok(range)
+        Ok((self, range))
     }
 }
 
@@ -2933,7 +2945,7 @@ fn extract_update_value<F: Family, U: update::Update>(op: &Operation<F, U>) -> U
 mod trait_impls {
     use super::*;
     use crate::qmdb::any::traits::{
-        BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
+        ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
         UnmerkleizedBatch as UnmerkleizedBatchTrait,
     };
     use std::future::Future;
@@ -3040,9 +3052,9 @@ mod trait_impls {
         }
 
         fn apply_batch(
-            &mut self,
+            self,
             batch: Self::Merkleized,
-        ) -> impl Future<Output = Result<Range<Location<F>>, crate::qmdb::Error<F>>> {
+        ) -> impl Future<Output = ApplyBatchResult<Self>> {
             self.apply_batch(batch)
         }
     }
@@ -3071,9 +3083,9 @@ mod trait_impls {
         }
 
         fn apply_batch(
-            &mut self,
+            self,
             batch: Self::Merkleized,
-        ) -> impl Future<Output = Result<Range<Location<F>>, crate::qmdb::Error<F>>> {
+        ) -> impl Future<Output = ApplyBatchResult<Self>> {
             self.apply_batch(batch)
         }
     }
@@ -3633,7 +3645,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
 
             let key_update = Sha256::hash(b"update-through-all-layers");
             let key_recreate_then_delete = Sha256::hash(b"recreate-then-delete");
@@ -3654,7 +3666,7 @@ mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(seed).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
 
             let applied = db
                 .new_batch()
@@ -3696,8 +3708,8 @@ mod tests {
 
             // Apply only the first ancestor. Applying the child must combine applied
             // fixups from that ancestor with the still-pending parent diff.
-            db.apply_batch(applied).await.unwrap();
-            db.apply_batch(child).await.unwrap();
+            let (db, _) = db.apply_batch(applied).await.unwrap();
+            let (db, _) = db.apply_batch(child).await.unwrap();
 
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&key_update).await.unwrap(), Some(final_update));
@@ -3736,7 +3748,7 @@ mod tests {
                     >;
 
                     let config = fixed_db_config::<OneCap>($partition, &context);
-                    let mut db = TestDb::init(context, config).await.unwrap();
+                    let db = TestDb::init(context, config).await.unwrap();
 
                     let k0 = colliding_digest(0x40 + $shift, 0);
                     let k1 = colliding_digest(0x40 + $shift, 1);
@@ -3767,8 +3779,8 @@ mod tests {
                         .merkleize(&db, None)
                         .await
                         .unwrap();
-                    db.apply_batch(seed).await.unwrap();
-                    db.commit().await.unwrap();
+                    let (db, _) = db.apply_batch(seed).await.unwrap();
+                    let db = db.commit().await.unwrap();
 
                     // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
                     let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
@@ -3844,7 +3856,7 @@ mod tests {
                     assert_eq!(explicit.root(), staged_merkleized.root());
                     assert_eq!(explicit.root(), expanded.root());
 
-                    db.apply_batch(expanded).await.unwrap();
+                    let (db, _) = db.apply_batch(expanded).await.unwrap();
                     assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
                     assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
                     assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);
@@ -4075,7 +4087,7 @@ mod tests {
             type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
             let config = fixed_db_config::<OneCap>("unordered-staged-prior-mutation", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
 
             let key = colliding_digest(0x95, 0);
             let old = colliding_digest(0x95, 1);
@@ -4091,8 +4103,8 @@ mod tests {
             let old_loc = lookup_sorted(seed.diff.as_slice(), &key)
                 .and_then(DiffEntry::loc)
                 .unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let explicit = db
                 .new_batch()
@@ -4259,15 +4271,15 @@ mod tests {
                         };
                         let context = context.child(label);
                         let config = fixed_db_config::<OneCap>(label, &context);
-                        let mut db = TestDb::init(context, config).await.unwrap();
+                        let db = TestDb::init(context, config).await.unwrap();
 
                         let mut seed = db.new_batch();
                         for i in 0..100u64 {
                             seed = seed.write(key(i), Some(val(i)));
                         }
                         let seed = seed.merkleize(&db, None).await.unwrap();
-                        db.apply_batch(seed).await.unwrap();
-                        db.commit().await.unwrap();
+                        let (db, _) = db.apply_batch(seed).await.unwrap();
+                        let mut db = db.commit().await.unwrap();
 
                         let mut grandparent = db.new_batch();
                         for i in 0..10u64 {
@@ -4293,8 +4305,8 @@ mod tests {
                             let (mut values, staged) =
                                 child.stage(&keys[..split], &db).await.unwrap();
 
-                            db.apply_batch(grandparent).await.unwrap();
-                            db.commit().await.unwrap();
+                            (db, _) = db.apply_batch(grandparent).await.unwrap();
+                            db = db.commit().await.unwrap();
 
                             let (range, suffix_values, staged) =
                                 staged.expand(&keys[split..], &db).await.unwrap();
@@ -4314,17 +4326,17 @@ mod tests {
                                 .unwrap()
                         } else {
                             let mut child = parent.new_batch::<Sha256>();
-                            db.apply_batch(grandparent).await.unwrap();
-                            db.commit().await.unwrap();
+                            (db, _) = db.apply_batch(grandparent).await.unwrap();
+                            db = db.commit().await.unwrap();
                             for suffix in &suffixes {
                                 child = child.write(key(*suffix), Some(val(suffix + 3_000)));
                             }
                             child.merkleize(&db, None).await.unwrap()
                         };
 
-                        db.apply_batch(parent).await.unwrap();
-                        db.apply_batch(child).await.unwrap();
-                        db.commit().await.unwrap();
+                        let (db, _) = db.apply_batch(parent).await.unwrap();
+                        let (db, _) = db.apply_batch(child).await.unwrap();
+                        let db = db.commit().await.unwrap();
 
                         for suffix in &suffixes {
                             assert_eq!(
@@ -4375,7 +4387,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
 
             let key_db = colliding_digest(0x30, 0);
             let value_db = colliding_digest(0x30, 1);
@@ -4391,8 +4403,8 @@ mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
 
@@ -4460,7 +4472,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4473,8 +4485,8 @@ mod tests {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
             let initial = initial.merkleize(&db, None).await.unwrap();
-            db.apply_batch(initial).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
             // parent.diff and must still be resolved through the committed
@@ -4505,8 +4517,8 @@ mod tests {
 
             let pending_root = pending_child.root();
 
-            db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -4520,7 +4532,7 @@ mod tests {
 
             // Apply pending child. The resulting root should match a
             // child built directly from the committed DB.
-            db.apply_batch(pending_child).await.unwrap();
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
 
             db.destroy().await.unwrap();
@@ -4542,7 +4554,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4553,8 +4565,8 @@ mod tests {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
             let initial = initial.merkleize(&db, None).await.unwrap();
-            db.apply_batch(initial).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
             // parent.diff and must still be resolved through the committed
@@ -4582,8 +4594,8 @@ mod tests {
 
             let pending_root = pending_child.root();
 
-            db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -4597,7 +4609,7 @@ mod tests {
 
             // Apply pending child. The resulting root should match a
             // child built directly from the committed DB.
-            db.apply_batch(pending_child).await.unwrap();
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
 
             db.destroy().await.unwrap();
@@ -4621,7 +4633,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-basic", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
 
             // Seed an initial key.
             let seed = db
@@ -4630,8 +4642,8 @@ mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Build batch A.
             let key_a = colliding_digest(0x02, 0);
@@ -4653,8 +4665,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            db.apply_batch(batch_a).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Build the same logical B from committed DB for comparison.
             let committed_b = db
@@ -4666,7 +4678,7 @@ mod tests {
             assert_eq!(batch_b.root(), committed_b.root());
 
             // Apply B.
-            db.apply_batch(batch_b).await.unwrap();
+            let (db, _) = db.apply_batch(batch_b).await.unwrap();
             assert_eq!(db.root(), committed_b.root());
 
             db.destroy().await.unwrap();
@@ -4690,7 +4702,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-base-old-loc", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
 
             // Seed an initial key so we have an existing entry.
             let key = colliding_digest(0x10, 0);
@@ -4700,8 +4712,8 @@ mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Build batch A that updates the key.
             let val_a = colliding_digest(0x10, 2);
@@ -4728,8 +4740,8 @@ mod tests {
 
             // Commit A. The base_old_loc fixup is deferred to apply_batch,
             // which reads A's diff by reference.
-            db.apply_batch(batch_a).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Verify B produces the same root as a fresh build.
             let committed_b = db
@@ -4740,7 +4752,7 @@ mod tests {
                 .unwrap();
             assert_eq!(batch_b.root(), committed_b.root());
 
-            db.apply_batch(batch_b).await.unwrap();
+            let (db, _) = db.apply_batch(batch_b).await.unwrap();
             assert_eq!(db.root(), committed_b.root());
 
             db.destroy().await.unwrap();
@@ -4764,7 +4776,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("fork-after-commit", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
 
             // Seed.
             let seed = db
@@ -4773,8 +4785,8 @@ mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Build batch A.
             let key_a = colliding_digest(0x21, 0);
@@ -4804,8 +4816,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            db.apply_batch(batch_a).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Verify both produce correct roots.
             let committed_b = db
@@ -4845,7 +4857,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ff-cross", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
 
             // Grandparent: 2 keys.
             let grandparent = db
@@ -4873,15 +4885,15 @@ mod tests {
                 .unwrap();
 
             // Commit grandparent.
-            db.apply_batch(grandparent).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(grandparent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Commit parent.
-            db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Commit child.
-            db.apply_batch(child).await.unwrap();
+            let (db, _) = db.apply_batch(child).await.unwrap();
 
             // All 4 keys should be present.
             for i in 1..=4 {
@@ -4914,7 +4926,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("recreate-deleted-collision", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
 
             // Two colliding keys: K0 (suffix 0) and K6 (suffix 6).
             let k0 = colliding_digest(0xAA, 0);
@@ -4928,8 +4940,8 @@ mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(initial).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Parent: delete K0. K6 remains untouched.
             let parent = db
@@ -4950,8 +4962,8 @@ mod tests {
                 .unwrap();
 
             // Commit the parent, then rebuild the same child.
-            db.apply_batch(parent).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -4987,7 +4999,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("get-many-basic", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config).await.unwrap();
 
             let key_db = colliding_digest(0x40, 0);
             let val_db = colliding_digest(0x40, 1);
@@ -5004,8 +5016,8 @@ mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // DB-level get_many.
             let results = db.get_many(&[&key_db, &key_missing]).await.unwrap();

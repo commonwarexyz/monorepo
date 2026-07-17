@@ -44,6 +44,13 @@ pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 const PAGE_SIZE: NonZeroU16 = NZU16!(77);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
+/// Wraps [`SyncTestHarness::prune`] with a heap-allocated state machine (the future embeds
+/// the database twice and exceeds the size lint in the deepest test).
+#[boxed]
+async fn prune_boxed<H: SyncTestHarness>(db: H::Db, loc: Location<H::Family>) -> H::Db {
+    H::prune(db, loc).await
+}
+
 /// Harness that abstracts per-family details so the generic tests below can operate on
 /// any immutable database.
 pub(crate) trait SyncTestHarness: Sized + 'static {
@@ -70,7 +77,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         config: ConfigOf<Self>,
     ) -> impl Future<Output = Self::Db> + Send;
     fn destroy(db: Self::Db) -> impl Future<Output = ()> + Send;
-    fn db_sync(db: &mut Self::Db) -> impl Future<Output = ()> + Send;
+    fn db_sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
 
     fn apply_ops(
         db: Self::Db,
@@ -83,9 +90,9 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         metadata: Option<Self::Metadata>,
         floor: Location<Self::Family>,
     ) -> impl Future<Output = Self::Db> + Send;
-    fn commit(db: &mut Self::Db) -> impl Future<Output = ()> + Send;
+    fn commit(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
     fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family>;
-    fn prune(db: &mut Self::Db, loc: Location<Self::Family>) -> impl Future<Output = ()> + Send;
+    fn prune(db: Self::Db, loc: Location<Self::Family>) -> impl Future<Output = Self::Db> + Send;
 
     fn bounds(db: &Self::Db) -> std::ops::Range<Location<Self::Family>>;
     fn db_root(db: &Self::Db) -> sha256::Digest;
@@ -251,7 +258,7 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        let mut synced_db: DbOf<H> = sync::sync(config).await.unwrap();
+        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::db_root(&synced_db), target_root);
         let expected_root = H::db_root(&synced_db);
@@ -259,8 +266,7 @@ where
         let expected_op_count = bounds.end;
         let expected_oldest_retained_loc = bounds.start;
 
-        H::db_sync(&mut synced_db).await;
-        drop(synced_db);
+        H::db_sync(synced_db).await;
         let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
 
         assert_eq!(H::db_root(&reopened_db), expected_root);
@@ -434,8 +440,7 @@ where
             H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
 
         let target_db = H::apply_ops(target_db, original_ops.clone(), None).await;
-        let sync_db = H::apply_ops(sync_db, original_ops, None).await;
-        drop(sync_db);
+        H::apply_ops(sync_db, original_ops, None).await;
 
         let last_op = H::create_ops_seeded(1, 1);
         let target_db = H::apply_ops(target_db, last_op, None).await;
@@ -489,8 +494,7 @@ where
             H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
 
         let target_db = H::apply_ops(target_db, target_ops.clone(), None).await;
-        let sync_db = H::apply_ops(sync_db, target_ops, None).await;
-        drop(sync_db);
+        H::apply_ops(sync_db, target_ops, None).await;
 
         let root = H::db_root(&target_db);
         let bounds = H::bounds(&target_db);
@@ -535,9 +539,9 @@ where
     executor.start(|mut context| async move {
         let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(100);
-        let mut target_db = H::apply_ops(target_db, target_ops, None).await;
+        let target_db = H::apply_ops(target_db, target_ops, None).await;
 
-        H::prune(&mut target_db, Location::new(10)).await;
+        let target_db = H::prune(target_db, Location::new(10)).await;
 
         let bounds = H::bounds(&target_db);
         let initial_lower_bound = bounds.start;
@@ -664,9 +668,9 @@ where
         let initial_root = H::db_root(&target_db);
 
         let more_ops = H::create_ops_seeded(5, 1);
-        let mut target_db = H::apply_ops(target_db, more_ops, None).await;
+        let target_db = H::apply_ops(target_db, more_ops, None).await;
 
-        H::prune(&mut target_db, Location::new(10)).await;
+        let target_db = H::prune(target_db, Location::new(10)).await;
         let target_db = H::apply_ops(target_db, vec![], None).await;
 
         let bounds = H::bounds(&target_db);
@@ -729,20 +733,20 @@ where
 
         // First batch with floor=0.
         let early_ops = H::create_ops(50);
-        let mut target_db = H::apply_ops(target_db, early_ops.clone(), None).await;
-        H::commit(&mut target_db).await;
+        let target_db = H::apply_ops(target_db, early_ops.clone(), None).await;
+        let target_db = H::commit(target_db).await;
         let first_commit_end = H::bounds(&target_db).end;
 
         // Second batch with floor = first_commit_end, declaring the first batch inactive.
         let late_ops = H::create_ops_seeded(50, 1);
-        let mut target_db = H::apply_ops_with_floor(
+        let target_db = H::apply_ops_with_floor(
             target_db,
             late_ops.clone(),
             Some(H::sample_metadata()),
             first_commit_end,
         )
         .await;
-        H::commit(&mut target_db).await;
+        let target_db = H::commit(target_db).await;
 
         assert_eq!(H::inactivity_floor_loc(&target_db), first_commit_end);
 
@@ -925,7 +929,7 @@ pub(crate) mod harnesses {
     }
 
     async fn variable_apply_ops_with_floor<F: Family>(
-        mut db: VariableDb<F>,
+        db: VariableDb<F>,
         ops: Vec<Operation<F, sha256::Digest, sha256::Digest>>,
         metadata: Option<sha256::Digest>,
         floor: Location<F>,
@@ -945,7 +949,7 @@ pub(crate) mod harnesses {
             }
         }
         let merkleized = batch.merkleize(&db, metadata, floor).await;
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db
     }
 
@@ -991,8 +995,8 @@ pub(crate) mod harnesses {
             db.destroy().await.unwrap();
         }
 
-        async fn db_sync(db: &mut Self::Db) {
-            db.sync().await.unwrap();
+        async fn db_sync(db: Self::Db) -> Self::Db {
+            db.sync().await.unwrap()
         }
 
         async fn apply_ops(
@@ -1012,21 +1016,21 @@ pub(crate) mod harnesses {
             variable_apply_ops_with_floor::<F>(db, ops, metadata, floor).await
         }
 
-        async fn commit(db: &mut Self::Db) {
-            db.commit().await.unwrap();
+        async fn commit(db: Self::Db) -> Self::Db {
+            db.commit().await.unwrap()
         }
 
         fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
             db.inactivity_floor_loc()
         }
 
-        async fn prune(db: &mut Self::Db, loc: Location<Self::Family>) {
+        async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
             // Advance the inactivity floor to `loc` via a commit before pruning,
             // since prune requires the floor to be at or beyond the prune target.
-            let merkleized = db.new_batch().merkleize(db, None, loc).await;
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db.prune(loc).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None, loc).await;
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            db.prune(loc).await.unwrap()
         }
 
         fn bounds(db: &Self::Db) -> std::ops::Range<Location<Self::Family>> {
@@ -1157,8 +1161,8 @@ fn test_immutable_local_boundary_nodes_rejects_target_before_local_lower_bound()
         for seed in 0..3u64 {
             db = H::apply_ops(db, H::create_ops_seeded(100, seed), None).await;
         }
-        H::prune(&mut db, Location::new(100)).await;
-        H::db_sync(&mut db).await;
+        let db = prune_boxed::<H>(db, Location::new(100)).await;
+        let db = H::db_sync(db).await;
 
         let bounds = H::bounds(&db);
         let local_start = bounds.start;
@@ -1323,10 +1327,9 @@ mod compact_variable_mmr {
     fn test_compact_sync_roundtrip() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let metadata = vec![8, 8, 8];
             let floor = Location::new(1);
             let key_a = sha256::Digest::from([1; 32]);
@@ -1337,8 +1340,8 @@ mod compact_variable_mmr {
                 .set(key_b, vec![4, 5, 6])
                 .merkleize(&source, Some(metadata.clone()), floor)
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -1381,17 +1384,16 @@ mod compact_variable_mmr {
     fn test_compact_sync_recovers_after_invalid_proof() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-proof-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -1434,17 +1436,16 @@ mod compact_variable_mmr {
     fn test_compact_sync_recovers_after_tampered_commit_floor() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-floor-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -1503,10 +1504,9 @@ mod compact_variable_mmr {
     fn test_compact_sync_recovers_after_tampered_pinned_nodes() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-pins-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let key_a = sha256::Digest::from([1; 32]);
             let key_b = sha256::Digest::from([2; 32]);
             let batch = source
@@ -1515,8 +1515,8 @@ mod compact_variable_mmr {
                 .set(key_b, vec![4, 5, 6])
                 .merkleize(&source, Some(vec![7]), Location::new(2))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -1568,17 +1568,16 @@ mod compact_variable_mmr {
     fn test_compact_sync_recovers_after_leaf_count_mismatch() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-leaf-count-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -1621,17 +1620,16 @@ mod compact_variable_mmr {
     fn test_compact_full_source_rejects_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-stale-full-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let batch1 = source
                 .new_batch()
                 .set(sha256::Digest::from([1; 32]), vec![1, 2, 3])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
                 .await;
-            source.apply_batch(batch1).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch1).await.unwrap();
+            let source = source.commit().await.unwrap();
             let stale_target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: source.bounds().end,
@@ -1642,8 +1640,8 @@ mod compact_variable_mmr {
                 .set(sha256::Digest::from([2; 32]), vec![4, 5, 6])
                 .merkleize(&source, Some(vec![2]), Location::new(2))
                 .await;
-            source.apply_batch(batch2).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch2).await.unwrap();
+            let source = source.commit().await.unwrap();
             let current_target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: source.bounds().end,
@@ -1669,7 +1667,7 @@ mod compact_variable_mmr {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-unj-source-{}", context.next_u64());
             let source_cfg = client_config(&format!("{suffix}-source"), &context);
-            let mut source = ClientDb::init(context.child("source_init"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_init"), source_cfg.clone())
                 .await
                 .unwrap();
 
@@ -1680,8 +1678,8 @@ mod compact_variable_mmr {
                 .set(sha256::Digest::from([10; 32]), vec![10, 11])
                 .merkleize(&source, Some(metadata1.clone()), floor1)
                 .await;
-            source.apply_batch(batch1).unwrap();
-            source.sync().await.unwrap();
+            let (source, _) = source.apply_batch(batch1).unwrap();
+            let source = source.sync().await.unwrap();
             let target1 = source.target();
             drop(source);
 
@@ -1706,7 +1704,7 @@ mod compact_variable_mmr {
             assert_eq!(served1.inactivity_floor_loc(), floor1);
             served1.destroy().await.unwrap();
 
-            let mut source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
                 .await
                 .unwrap();
             let metadata2 = vec![2, 2, 2];
@@ -1716,12 +1714,12 @@ mod compact_variable_mmr {
                 .set(sha256::Digest::from([20; 32]), vec![20, 21])
                 .merkleize(&source, Some(metadata2.clone()), floor2)
                 .await;
-            source.apply_batch(batch2).unwrap();
-            source.sync().await.unwrap();
+            let (source, _) = source.apply_batch(batch2).unwrap();
+            let source = source.sync().await.unwrap();
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            source.rewind(target1.leaf_count).await.unwrap();
+            let source = source.rewind(target1.leaf_count).await.unwrap();
             assert_eq!(source.target(), target1);
 
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
@@ -1740,7 +1738,7 @@ mod compact_variable_mmr {
             assert_eq!(served2.inactivity_floor_loc(), floor1);
             served2.destroy().await.unwrap();
 
-            let mut source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -1751,8 +1749,8 @@ mod compact_variable_mmr {
                 .set(sha256::Digest::from([30; 32]), vec![30, 31, 32])
                 .merkleize(&source, Some(metadata3.clone()), floor3)
                 .await;
-            source.apply_batch(batch3).unwrap();
-            source.sync().await.unwrap();
+            let (source, _) = source.apply_batch(batch3).unwrap();
+            let source = source.sync().await.unwrap();
             let target3 = source.target();
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
@@ -1822,11 +1820,12 @@ mod compact_variable_mmr {
                     .set(sha256::Digest::from([i; 32]), vec![i])
                     .merkleize(&seeded, Some(vec![i]), floor)
                     .await;
-                seeded.apply_batch(batch).unwrap();
-                seeded.sync().await.unwrap();
+                (seeded, _) = seeded.apply_batch(batch).unwrap();
+                seeded = seeded.sync().await.unwrap();
                 first_size.get_or_insert(seeded.size());
             }
-            seeded.prune(seeded.size()).await.unwrap();
+            let boundary = seeded.size();
+            let seeded = seeded.prune(boundary).await.unwrap();
             // The prune moved the journal's pruning boundary: the first commit is unreachable.
             assert!(matches!(
                 seeded.rewind(first_size.unwrap()).await,
@@ -1834,21 +1833,19 @@ mod compact_variable_mmr {
                     crate::merkle::Error::RewindBeyondHistory
                 ))
             ));
-            drop(seeded);
 
             // Sync different state into the same partition.
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let metadata = vec![9, 9, 9];
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([9; 32]), vec![9])
                 .merkleize(&source, Some(metadata.clone()), Location::new(0))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
             let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
@@ -1886,7 +1883,7 @@ mod compact_variable_mmr {
 
             // Seed the client partition with committed state A.
             let client_cfg = client_config(&suffix, &context);
-            let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
+            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
                 .await
                 .unwrap();
             let batch = seeded
@@ -1894,24 +1891,23 @@ mod compact_variable_mmr {
                 .set(sha256::Digest::from([1; 32]), vec![1])
                 .merkleize(&seeded, Some(vec![1]), Location::new(0))
                 .await;
-            seeded.apply_batch(batch).unwrap();
-            seeded.sync().await.unwrap();
+            let (seeded, _) = seeded.apply_batch(batch).unwrap();
+            let seeded = seeded.sync().await.unwrap();
             let target_a = seeded.target();
             drop(seeded);
 
             // Reconstruct state B into the same partition, then drop it before the first
             // persist (as a cancelled sync would).
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([9; 32]), vec![9])
                 .merkleize(&source, Some(vec![9]), Location::new(0))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
             let bounds = source.bounds();
             let target_b = sync::compact::Target {
                 root: source.root(),
@@ -1926,7 +1922,7 @@ mod compact_variable_mmr {
                 state: fetched.state,
                 root: target_b.root,
             };
-            let mut imported = <ClientDb as sync::compact::Database>::from_validated_state(
+            let imported = <ClientDb as sync::compact::Database>::from_validated_state(
                 context.child("import"),
                 client_cfg.clone(),
                 validated,
@@ -1939,11 +1935,24 @@ mod compact_variable_mmr {
             // count itself: the fast path must not report unpersisted state as durable.
             assert!(imported.rewind(target_b.leaf_count).await.is_err());
 
-            // Prune is likewise rejected while the import is pending.
+            // Prune is likewise rejected while the import is pending; rebuild the import.
+            let fetched = sync::compact::Resolver::get_compact_state(&source, target_b.clone())
+                .await
+                .unwrap();
+            let validated = sync::compact::ValidatedState {
+                state: fetched.state,
+                root: target_b.root,
+            };
+            let imported = <ClientDb as sync::compact::Database>::from_validated_state(
+                context.child("import").with_attribute("index", 2),
+                client_cfg.clone(),
+                validated,
+            )
+            .await
+            .unwrap();
             assert!(imported.prune(target_b.leaf_count).await.is_err());
-            drop(imported);
 
-            // The dropped import never touched the journal: state A is still there.
+            // The dropped imports never touched the journal: state A is still there.
             let reopened = ClientDb::init(context.child("reopen"), client_cfg)
                 .await
                 .unwrap();
@@ -2074,10 +2083,9 @@ mod compact_variable_mmb {
     fn test_compact_sync_roundtrip() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let metadata = vec![4, 4, 4];
             let floor = Location::new(1);
             let key_a = sha256::Digest::from([1; 32]);
@@ -2088,8 +2096,8 @@ mod compact_variable_mmb {
                 .set(key_b, vec![4, 5, 6])
                 .merkleize(&source, Some(metadata.clone()), floor)
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -2132,17 +2140,16 @@ mod compact_variable_mmb {
     fn test_compact_sync_recovers_after_invalid_proof() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-bad-proof-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -2185,17 +2192,16 @@ mod compact_variable_mmb {
     fn test_compact_sync_recovers_after_tampered_commit_floor() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-bad-floor-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -2254,10 +2260,9 @@ mod compact_variable_mmb {
     fn test_compact_sync_recovers_after_tampered_pinned_nodes() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-bad-pins-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let key_a = sha256::Digest::from([1; 32]);
             let key_b = sha256::Digest::from([2; 32]);
             let batch = source
@@ -2266,8 +2271,8 @@ mod compact_variable_mmb {
                 .set(key_b, vec![4, 5, 6])
                 .merkleize(&source, Some(vec![7]), Location::new(2))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -2322,17 +2327,16 @@ mod compact_variable_mmb {
                 "compact-immutable-mmb-bad-leaf-count-{}",
                 context.next_u64()
             );
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
                 .await;
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
             let target = sync::compact::Target {
@@ -2375,17 +2379,16 @@ mod compact_variable_mmb {
     fn test_compact_full_source_rejects_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-stale-full-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
             let batch1 = source
                 .new_batch()
                 .set(sha256::Digest::from([1; 32]), vec![1, 2, 3])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
                 .await;
-            source.apply_batch(batch1).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch1).await.unwrap();
+            let source = source.commit().await.unwrap();
             let stale_target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: source.bounds().end,
@@ -2396,8 +2399,8 @@ mod compact_variable_mmb {
                 .set(sha256::Digest::from([2; 32]), vec![4, 5, 6])
                 .merkleize(&source, Some(vec![2]), Location::new(2))
                 .await;
-            source.apply_batch(batch2).await.unwrap();
-            source.commit().await.unwrap();
+            let (source, _) = source.apply_batch(batch2).await.unwrap();
+            let source = source.commit().await.unwrap();
             let current_target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: source.bounds().end,
@@ -2423,7 +2426,7 @@ mod compact_variable_mmb {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-unj-source-{}", context.next_u64());
             let source_cfg = client_config(&format!("{suffix}-source"), &context);
-            let mut source = ClientDb::init(context.child("source_init"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_init"), source_cfg.clone())
                 .await
                 .unwrap();
 
@@ -2434,8 +2437,8 @@ mod compact_variable_mmb {
                 .set(sha256::Digest::from([10; 32]), vec![10, 11])
                 .merkleize(&source, Some(metadata1.clone()), floor1)
                 .await;
-            source.apply_batch(batch1).unwrap();
-            source.sync().await.unwrap();
+            let (source, _) = source.apply_batch(batch1).unwrap();
+            let source = source.sync().await.unwrap();
             let target1 = source.target();
             drop(source);
 
@@ -2460,7 +2463,7 @@ mod compact_variable_mmb {
             assert_eq!(served1.inactivity_floor_loc(), floor1);
             served1.destroy().await.unwrap();
 
-            let mut source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
                 .await
                 .unwrap();
             let metadata2 = vec![2, 2, 2];
@@ -2470,12 +2473,12 @@ mod compact_variable_mmb {
                 .set(sha256::Digest::from([20; 32]), vec![20, 21])
                 .merkleize(&source, Some(metadata2.clone()), floor2)
                 .await;
-            source.apply_batch(batch2).unwrap();
-            source.sync().await.unwrap();
+            let (source, _) = source.apply_batch(batch2).unwrap();
+            let source = source.sync().await.unwrap();
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            source.rewind(target1.leaf_count).await.unwrap();
+            let source = source.rewind(target1.leaf_count).await.unwrap();
             assert_eq!(source.target(), target1);
 
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
@@ -2494,7 +2497,7 @@ mod compact_variable_mmb {
             assert_eq!(served2.inactivity_floor_loc(), floor1);
             served2.destroy().await.unwrap();
 
-            let mut source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -2505,8 +2508,8 @@ mod compact_variable_mmb {
                 .set(sha256::Digest::from([30; 32]), vec![30, 31, 32])
                 .merkleize(&source, Some(metadata3.clone()), floor3)
                 .await;
-            source.apply_batch(batch3).unwrap();
-            source.sync().await.unwrap();
+            let (source, _) = source.apply_batch(batch3).unwrap();
+            let source = source.sync().await.unwrap();
             let target3 = source.target();
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);

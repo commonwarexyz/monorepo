@@ -168,11 +168,12 @@ pub mod test {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                db.apply_batch(merkleized).await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Prune the database
-            db.prune(db.sync_boundary()).await.unwrap();
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
 
             assert!(
                 db.any.bitmap.pruned_chunks() > 0,

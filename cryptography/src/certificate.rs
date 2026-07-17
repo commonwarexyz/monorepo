@@ -16,32 +16,32 @@
 //! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly, no trusted
 //!   setup required, and widely supported by hardware security modules. Unlike ed25519, does not
 //!   benefit from batch verification. Certificates contain individual signatures from each signer.
-//!
-//! - [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
-//!   can be aggregated into a single multi-signature for compact certificates while preserving
-//!   attribution (signer indices are stored alongside the aggregated signature).
-//!
-//! - [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
-//!   certificates that are constant-size regardless of committee size. Requires a trusted
-//!   setup (distributed key generation) and cannot attribute signatures to individual signers.
-//!
+#![cfg_attr(
+    feature = "bls12381",
+    doc = "
+- [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
+  can be aggregated into a single multi-signature for compact certificates while preserving
+  attribution (signer indices are stored alongside the aggregated signature).
+
+- [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
+  certificates that are constant-size regardless of committee size. Requires a trusted
+  setup (distributed key generation) and cannot attribute signatures to individual signers.
+"
+)]
 //! # Attributable Schemes and Fault Evidence
 //!
 //! Signing schemes differ in whether per-participant activities can be used as evidence of
 //! either liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`secp256r1`], [`bls12381_multisig`]): Individual
-//!   signatures can be presented to some third party as evidence of either liveness or of
-//!   committing a fault.  Certificates contain signer indices alongside individual signatures,
-//!   enabling secure per-participant activity tracking and conflict detection.
+//! - **Attributable Schemes**: Individual signatures can be presented to some third party as
+//!   evidence of either liveness or of committing a fault. Certificates contain signer indices
+//!   alongside individual signatures, enabling secure per-participant activity tracking and
+//!   conflict detection.
 //!
-//! - **Non-Attributable Schemes** ([`bls12381_threshold`]): Individual signatures cannot be
-//!   presented to some third party as evidence of either liveness or of committing a fault
-//!   because they can be forged by other players (often after some quorum of partial signatures
-//!   are collected). With [`bls12381_threshold`], possession of any `t` valid partial signatures
-//!   can be used to forge a partial signature for any other player. Because peer connections are
-//!   authenticated, evidence can be used locally (as it must be sent by said participant) but
-//!   cannot be used by an external observer.
+//! - **Non-Attributable Schemes**: Individual signatures cannot be presented to some third party
+//!   as evidence because they can be forged after collecting a quorum of partial signatures.
+//!   Authenticated peer connections allow this evidence to be used locally, but not by an external
+//!   observer.
 //!
 //! The [`Scheme::is_attributable()`] associated function signals whether evidence can be safely
 //! exposed to third parties.
@@ -52,18 +52,21 @@
 //! is used for assigning a unique order to the participant set and authenticating connections
 //! whereas the signing key is used for producing and verifying signatures/certificates.
 //!
-//! This flexibility is supported because some cryptographic schemes are only performant when
-//! used in batch verification (like [bls12381_multisig]) and/or are refreshed frequently
-//! (like [bls12381_threshold]). Refer to [ed25519] for an example of a scheme that uses the
-//! same key for both purposes.
+#![cfg_attr(
+    feature = "bls12381",
+    doc = "Some cryptographic schemes are only performant when used in batch verification (like
+[`bls12381_multisig`]) and/or are refreshed frequently (like [`bls12381_threshold`])."
+)]
+//! Refer to [ed25519] for an example of a scheme that uses the same key for both purposes.
 
+#[cfg(feature = "bls12381")]
+pub use crate::bls12381::certificate::{
+    multisig as bls12381_multisig, threshold as bls12381_threshold,
+};
+pub use crate::ed25519::certificate as ed25519;
 #[commonware_macros::stability(ALPHA)]
 pub use crate::secp256r1::certificate as secp256r1;
 use crate::{Digest, PublicKey};
-pub use crate::{
-    bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
-    ed25519::certificate as ed25519,
-};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
@@ -295,9 +298,8 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
 
     /// Returns whether this scheme benefits from batch verification.
     ///
-    /// Schemes that benefit from batch verification (like [`ed25519`], [`bls12381_multisig`]
-    /// and [`bls12381_threshold`]) should return `true`, allowing callers to optimize by
-    /// deferring verification until multiple signatures are available.
+    /// Schemes that benefit from batch verification should return `true`, allowing callers to
+    /// optimize by deferring verification until multiple signatures are available.
     ///
     /// Schemes that don't benefit from batch verification (like [`secp256r1`]) should
     /// return `false`, indicating that eager per-signature verification is preferred.

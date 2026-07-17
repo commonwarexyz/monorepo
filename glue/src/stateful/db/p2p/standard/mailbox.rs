@@ -1,7 +1,7 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
 use super::handler;
-use crate::stateful::db::AttachableResolver;
+use crate::stateful::db::{AttachableResolver, Shared};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -10,9 +10,9 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
 };
-use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock};
+use commonware_utils::channel::oneshot;
 use futures::FutureExt as _;
-use std::{collections::VecDeque, future::Future, num::NonZeroU64, sync::Arc};
+use std::{collections::VecDeque, future::Future, num::NonZeroU64};
 
 /// The resolver actor dropped the response before completion.
 #[derive(Debug, thiserror::Error)]
@@ -22,7 +22,7 @@ pub struct ResponseDropped;
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     /// Provide a database handle so the actor can serve incoming requests.
-    AttachDatabase(Arc<TracedAsyncRwLock<DB>>),
+    AttachDatabase(Shared<DB>),
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
         request: handler::Request<F>,
@@ -42,7 +42,7 @@ impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
 }
 
 pub(super) struct Pending<DB, F: Family, Op, D: Digest> {
-    database: Option<Arc<TracedAsyncRwLock<DB>>>,
+    database: Option<Shared<DB>>,
     messages: VecDeque<Message<DB, F, Op, D>>,
 }
 
@@ -121,7 +121,7 @@ impl<DB, F: Family, Op, D: Digest> Mailbox<DB, F, Op, D> {
 }
 
 impl<DB: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<DB, F, Op, D> {
-    pub fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) {
+    pub fn attach_database(&self, db: Shared<DB>) {
         let _ = self.sender.enqueue(Message::AttachDatabase(db));
     }
 }
@@ -181,7 +181,7 @@ where
     D: Digest,
     DB: Send + Sync + 'static,
 {
-    fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) -> impl Future<Output = ()> + Send {
+    fn attach_database(&self, db: Shared<DB>) -> impl Future<Output = ()> + Send {
         Self::attach_database(self, db);
         std::future::ready(())
     }
