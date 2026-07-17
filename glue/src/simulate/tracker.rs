@@ -74,10 +74,10 @@ impl<P: PublicKey> ProgressTracker<P> {
 
     /// Check if at least `total` validators have finalized past the required view.
     pub fn all_reached(&self, total: usize, required: u64) -> bool {
-        let required_round = Round::new(Epoch::zero(), View::new(required));
+        let required_view = View::new(required);
         self.status
             .values()
-            .filter(|round| **round >= required_round)
+            .filter(|round| round.view() >= required_view)
             .count()
             >= total
     }
@@ -113,6 +113,21 @@ impl<P: PublicKey> ProgressTracker<P> {
 mod tests {
     use super::*;
     use commonware_cryptography::{Signer as _, ed25519};
+
+    fn observe_view(
+        tracker: &mut ProgressTracker<ed25519::PublicKey>,
+        seed: u64,
+        epoch: u64,
+        view: u64,
+    ) {
+        tracker
+            .observe(FinalizationUpdate {
+                pk: ed25519::PrivateKey::from_seed(seed).public_key(),
+                round: Round::new(Epoch::new(epoch), View::new(view)),
+                block_digest: view.to_le_bytes().to_vec(),
+            })
+            .expect("finalization should be accepted");
+    }
 
     #[test]
     fn conflicting_same_round_from_same_validator_is_rejected() {
@@ -191,5 +206,28 @@ mod tests {
                 block_digest: vec![2, 2, 2],
             })
             .expect("same view in another epoch should not trigger a fork");
+    }
+
+    #[test]
+    fn later_epoch_low_view_does_not_satisfy_required_view() {
+        let mut tracker = ProgressTracker::default();
+
+        observe_view(&mut tracker, 1, 1, 1);
+        observe_view(&mut tracker, 2, 1, 2);
+
+        assert!(!tracker.all_reached(1, 10));
+        assert!(!tracker.all_reached(2, 10));
+    }
+
+    #[test]
+    fn exact_required_view_satisfies_progress_threshold() {
+        let mut tracker = ProgressTracker::default();
+
+        observe_view(&mut tracker, 1, 0, 10);
+        observe_view(&mut tracker, 2, 1, 10);
+
+        assert!(tracker.all_reached(1, 10));
+        assert!(tracker.all_reached(2, 10));
+        assert!(!tracker.all_reached(1, 11));
     }
 }
