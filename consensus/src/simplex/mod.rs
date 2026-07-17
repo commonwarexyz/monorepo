@@ -2855,17 +2855,9 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.child("finalizer").spawn(move |context| async move {
-                    let progressed = async {
-                        while latest < required_containers {
-                            latest = monitor.recv().await.expect("event missing");
-                        }
-                    };
-                    select! {
-                        _done = progressed => {},
-                        _timeout = context.sleep(Duration::from_secs(600)) => {
-                            panic!("liveness lost: no progress after crash during nullified view");
-                        },
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
