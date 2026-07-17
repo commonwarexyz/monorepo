@@ -30,6 +30,10 @@ pub enum Error {
     #[error("database operation failed")]
     Database(#[from] commonware_storage::qmdb::Error<commonware_storage::mmr::Family>),
 
+    /// Database slot is empty after a failed or interrupted update
+    #[error("database is not available: a previous update failed or was interrupted")]
+    DatabaseUnavailable,
+
     /// Request channel to I/O task closed unexpectedly
     #[error("request channel closed - I/O task may have terminated")]
     RequestChannelClosed,

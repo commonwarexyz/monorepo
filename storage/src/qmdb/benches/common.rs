@@ -580,7 +580,7 @@ pub(crate) use define_vec_variants;
 /// unseeded keys and insert them organically -- a growing keyspace rather than a fixed population.
 #[allow(clippy::too_many_arguments)]
 pub async fn gen_random_kv<F, M>(
-    db: &mut M,
+    mut db: M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
@@ -589,7 +589,8 @@ pub async fn gen_random_kv<F, M>(
     key_zipf_exponent: Option<f64>,
     keyspace: Option<u64>,
     make_value: impl Fn(&mut TestRng) -> M::Value,
-) where
+) -> M
+where
     F: Family,
     M: DbAny<F, Key = Digest>,
 {
@@ -612,22 +613,22 @@ pub async fn gen_random_kv<F, M>(
             batch = batch.write(key, Some(make_value(&mut rng)));
             pending += 1;
             if seed_batch.is_some_and(|n| pending >= n) {
-                let merkleized = batch.merkleize(db, None).await.unwrap();
-                db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 commits += 1;
                 if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
                     let boundary = db.sync_boundary();
-                    db.prune(boundary).await.unwrap();
+                    db = db.prune(boundary).await.unwrap();
                 }
                 batch = db.new_batch();
                 pending = 0;
             }
         }
         if pending > 0 {
-            let merkleized = batch.merkleize(db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
         }
     }
 
@@ -654,21 +655,23 @@ pub async fn gen_random_kv<F, M>(
             if let Some(freq) = commit_frequency
                 && rng.next_u32().is_multiple_of(freq)
             {
-                let merkleized = batch.merkleize(db, None).await.unwrap();
-                db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 commits += 1;
                 if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
                     let boundary = db.sync_boundary();
-                    db.prune(boundary).await.unwrap();
+                    db = db.prune(boundary).await.unwrap();
                 }
                 batch = db.new_batch();
             }
         }
-        let merkleized = batch.merkleize(db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db = db.commit().await.unwrap();
     }
+
+    db
 }
 
 /// Generate a fixed-size digest value.
@@ -678,18 +681,18 @@ pub fn make_fixed_value(rng: &mut TestRng) -> Digest {
 
 /// Pre-populate the database with `num_keys` unique keys, then commit.
 pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
-    db: &mut C,
+    db: C,
     num_keys: u64,
-) {
+) -> C {
     let mut rng = TestRng::new(42);
     let mut batch = db.new_batch();
     for i in 0u64..num_keys {
         let k = Sha256::hash(&i.to_be_bytes());
         batch = batch.write(k, Some(make_fixed_value(&mut rng)));
     }
-    let merkleized = batch.merkleize(db, None).await.unwrap();
-    db.apply_batch(merkleized).await.unwrap();
-    db.commit().await.unwrap();
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let (db, _) = db.apply_batch(merkleized).await.unwrap();
+    db.commit().await.unwrap()
 }
 
 /// Write `num_updates` random key updates into a batch.

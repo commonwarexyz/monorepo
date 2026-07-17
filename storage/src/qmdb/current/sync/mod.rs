@@ -63,7 +63,9 @@ use crate::{
         },
         metrics::Metrics as AnyMetrics,
         operation::{Committable, Key, Operation as _},
-        sync::{Database, DatabaseConfig as Config, resolver::fetch_operations},
+        sync::{
+            Database, DatabaseConfig as Config, compact::ServeError, resolver::fetch_operations,
+        },
     },
     translator::Translator,
 };
@@ -469,7 +471,7 @@ macro_rules! impl_current_resolver {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
+            type Error = ServeError<F, H::Digest>;
 
             async fn get_operations(
                 &self,
@@ -478,10 +480,10 @@ macro_rules! impl_current_resolver {
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
+            ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::<F>::KeyNotFound)?;
-                fetch_operations(
+                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
+                Ok(fetch_operations(
                     op_count,
                     start_loc,
                     max_ops,
@@ -491,7 +493,7 @@ macro_rules! impl_current_resolver {
                     },
                     |start_loc| db.any.pinned_nodes_at(start_loc),
                 )
-                .await
+                .await?)
             }
         }
     };

@@ -112,7 +112,7 @@ mod tests {
     {
         let hasher = Standard::new(ForwardFold);
         let cfg = storage_config(&format!("{prefix}-{seed}"), &context);
-        let mut merkle = full::Merkle::<F, _, sha256::Digest, Sequential>::init(
+        let merkle = full::Merkle::<F, _, sha256::Digest, Sequential>::init(
             context.child("merkle"),
             &hasher,
             cfg,
@@ -126,11 +126,11 @@ mod tests {
             batch = batch.add(&hasher, &element);
         }
         let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
-        merkle.apply_batch(&batch)?;
-        merkle.sync().await?;
+        let merkle = merkle.apply_batch(&batch)?;
+        let merkle = merkle.sync().await?;
 
         if items > 32 {
-            merkle
+            let merkle = merkle
                 .prune(crate::merkle::Location::new(items as u64 / 3))
                 .await?;
             merkle.sync().await?;

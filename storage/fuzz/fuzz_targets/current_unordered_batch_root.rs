@@ -117,7 +117,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
     let test_name = test_name.to_string();
     runner.start(|context| async move {
         let cfg = test_config(&test_name, &context);
-        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
+        let db: Db<F> = Db::init(context.child("storage"), cfg)
             .await
             .expect("init current unordered db");
 
@@ -131,8 +131,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             );
         }
         let initial = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(initial).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(initial).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Build the child while the parent is still pending.
         let mut batch = db.new_batch();
@@ -158,8 +158,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
 
         // Commit the parent, then rebuild the same logical child from the
         // committed wrapper state. Both canonical and ops roots must match.
-        db.apply_batch(parent).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         let mut batch = db.new_batch();
         for mutation in &input.child {
@@ -184,7 +184,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         );
 
         // Apply the pending child and verify the DB state matches.
-        db.apply_batch(pending_child).await.unwrap();
+        let (db, _) = db.apply_batch(pending_child).await.unwrap();
         assert_eq!(
             db.root(),
             committed_child.root(),

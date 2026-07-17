@@ -217,7 +217,7 @@ pub mod tests {
         assert_eq!(db.oldest_retained(), 0);
         let root0 = db.root();
         drop(db);
-        let mut db: C = open_db(context.child("second"), partition.clone()).await;
+        let db: C = open_db(context.child("second"), partition.clone()).await;
         assert!(db.get_metadata().await.unwrap().is_none());
         assert_eq!(db.root(), root0);
 
@@ -231,15 +231,15 @@ pub mod tests {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert!(db.get_metadata().await.unwrap().is_none());
         let root1 = db.root();
         assert_ne!(root1, root0);
 
         drop(db);
-        let mut db: C = open_db(context.child("third"), partition.clone()).await;
+        let db: C = open_db(context.child("third"), partition.clone()).await;
         assert_eq!(db.root(), root1);
 
         // Create of same key should fail (key already exists).
@@ -254,21 +254,21 @@ pub mod tests {
             .merkleize(&db, Some(metadata.clone()))
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
         let root2 = db.root();
 
         drop(db);
-        let mut db: C = open_db(context.child("fourth"), partition.clone()).await;
+        let db: C = open_db(context.child("fourth"), partition.clone()).await;
         assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
         assert_eq!(db.root(), root2);
 
         // Repeated delete of same key should fail (key already deleted).
         assert!(db.get(&k1).await.unwrap().is_none());
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         let root3 = db.root();
         assert_ne!(root3, root2);
 
@@ -286,7 +286,7 @@ pub mod tests {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_ne!(db.root(), root3);
 
         db.destroy().await.unwrap();
@@ -310,7 +310,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "build-small".to_string();
-            let mut db = open_db(context.child("db"), partition.clone()).await;
+            let db = open_db(context.child("db"), partition.clone()).await;
 
             // Add one key.
             let k = Sha256::fill(0x01);
@@ -321,7 +321,7 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(k).await.unwrap();
@@ -354,7 +354,7 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -485,11 +485,11 @@ pub mod tests {
                 &root,
             ));
 
-            let mut db = apply_random_ops::<F, TestDb<F, C, V>>(200, true, context.next_u64(), db)
+            let db = apply_random_ops::<F, TestDb<F, C, V>>(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -539,11 +539,11 @@ pub mod tests {
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
             let db = open_db(context.child("db"), partition.clone()).await;
-            let mut db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
+            let db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -632,7 +632,7 @@ pub mod tests {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                db.apply_batch(merkleized).await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
                 let root = db.root();
 
@@ -672,7 +672,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "exclusion-proofs".to_string();
-            let mut db = open_db(context.child("db"), partition.clone()).await;
+            let db = open_db(context.child("db"), partition.clone()).await;
 
             let key_exists_1 = Sha256::fill(0x10);
 
@@ -693,7 +693,7 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
@@ -737,7 +737,7 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Use a lesser/greater key that has a translated-key conflict based
@@ -816,8 +816,8 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.sync().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.

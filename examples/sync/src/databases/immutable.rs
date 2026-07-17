@@ -101,13 +101,13 @@ where
     }
 
     async fn add_operations(
-        &mut self,
+        mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::qmdb::Error<mmr::Family>> {
+    ) -> Result<Self, commonware_storage::qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
-            return Ok(());
+            return Ok(self);
         }
 
         let mut batch = self.new_batch();
@@ -117,14 +117,14 @@ where
                     batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata, floor) => {
-                    let merkleized = batch.merkleize(self, metadata, floor).await;
-                    self.apply_batch(merkleized).await?;
-                    self.commit().await?;
+                    let merkleized = batch.merkleize(&self, metadata, floor).await;
+                    (self, _) = self.apply_batch(merkleized).await?;
+                    self = self.commit().await?;
                     batch = self.new_batch();
                 }
             }
         }
-        Ok(())
+        Ok(self)
     }
 
     fn current_floor(&self) -> u64 {

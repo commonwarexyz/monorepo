@@ -182,23 +182,18 @@ mod tests {
 
     #[allow(dead_code)]
     fn assert_db_futures_are_send(
-        db: &mut Db<
-            mmr::Family,
-            deterministic::Context,
-            Digest,
-            Digest,
-            Sha256,
-            TwoCap,
-            Sequential,
-        >,
+        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
         key: Digest,
         loc: crate::merkle::mmr::Location,
+        which: u8,
     ) {
         is_send(db.get(&key));
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
-        is_send(db.sync());
-        is_send(db.rewind(loc));
+        match which {
+            0 => is_send(db.sync()),
+            _ => is_send(db.rewind(loc)),
+        }
     }
 
     fn small_sections_config(
@@ -328,8 +323,8 @@ mod tests {
 
     #[boxed]
     async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
-        let mut db = open_db::<F>(ctx.child("db")).await;
-        let mut compact = open_compact::<F>(ctx.child("compact")).await;
+        let db = open_db::<F>(ctx.child("db")).await;
+        let compact = open_compact::<F>(ctx.child("compact")).await;
         assert_eq!(db.root(), compact.root());
 
         let k1 = Sha256::fill(1u8);
@@ -354,10 +349,10 @@ mod tests {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        db.apply_batch(retained).await.unwrap();
-        compact.apply_batch(compact_batch).unwrap();
-        db.commit().await.unwrap();
-        compact.sync().await.unwrap();
+        let (db, _) = db.apply_batch(retained).await.unwrap();
+        let (compact, _) = compact.apply_batch(compact_batch).unwrap();
+        let db = db.commit().await.unwrap();
+        let compact = compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata));

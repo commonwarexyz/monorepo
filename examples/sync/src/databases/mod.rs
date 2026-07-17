@@ -150,9 +150,9 @@ pub trait ExampleDatabase: Sized {
     /// Add operations to the database, ignoring any input that doesn't end with a commit
     /// operation.
     fn add_operations(
-        &mut self,
+        self,
         operations: Vec<Self::Operation>,
-    ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
+    ) -> impl Future<Output = Result<Self, qmdb::Error<Self::Family>>> + Send;
 
     /// Return the floor anchor a caller should pass as `starting_loc` when generating a stream
     /// to append to this db's current state.
@@ -221,7 +221,18 @@ mod tests {
         DatabaseType, ExampleDatabase, SyncMode, immutable, immutable_compact, keyless,
         keyless_compact,
     };
+    use commonware_macros::boxed;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+
+    /// [`ExampleDatabase::add_operations`] with a heap-allocated state machine (the future
+    /// embeds the database and the operation stream, exceeding the size lint).
+    #[boxed]
+    async fn add_operations_boxed<D: ExampleDatabase>(
+        db: D,
+        ops: Vec<D::Operation>,
+    ) -> Result<D, commonware_storage::qmdb::Error<D::Family>> {
+        db.add_operations(ops).await
+    }
 
     #[test]
     fn test_supported_client_mode_matrix() {
@@ -269,8 +280,8 @@ mod tests {
 
                 let ops = immutable::create_test_operations(count, seed, starting_loc);
 
-                full.add_operations(ops.clone()).await.unwrap();
-                compact.add_operations(ops).await.unwrap();
+                full = add_operations_boxed(full, ops.clone()).await.unwrap();
+                compact = compact.add_operations(ops).await.unwrap();
 
                 assert_eq!(full.root(), compact.root());
                 assert_eq!(full.current_floor(), compact.current_floor());
@@ -303,8 +314,8 @@ mod tests {
 
                 let ops = keyless::create_test_operations(count, seed, starting_loc);
 
-                full.add_operations(ops.clone()).await.unwrap();
-                compact.add_operations(ops).await.unwrap();
+                full = add_operations_boxed(full, ops.clone()).await.unwrap();
+                compact = compact.add_operations(ops).await.unwrap();
 
                 assert_eq!(full.root(), compact.root());
                 assert_eq!(full.current_floor(), compact.current_floor());

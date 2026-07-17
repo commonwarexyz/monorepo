@@ -20,6 +20,7 @@ use crate::{
     translator::{OneCap, TwoCap},
 };
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
+use commonware_macros::boxed;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -286,15 +287,16 @@ fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
 
 /// Apply a batch of keyed writes (creates, updates, or deletes) to the database.
 async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
-    db: &mut D,
+    db: D,
     writes: Vec<(Digest, Option<Digest>)>,
-) {
+) -> D {
     let mut batch = db.new_batch();
     for (k, v) in writes {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(db, None).await.unwrap();
-    db.apply_batch(merkleized).await.unwrap();
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let (db, _) = db.apply_batch(merkleized).await.unwrap();
+    db
 }
 
 #[cfg(feature = "arbitrary")]
@@ -390,7 +392,7 @@ mod tests {
                 batch = batch.set(k, v);
             }
             let merkleized = batch.merkleize(&$db, None, floor).await;
-            $db.apply_batch(merkleized).await.unwrap();
+            ($db, _) = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
 
@@ -404,7 +406,7 @@ mod tests {
                 batch = batch.set(k, v);
             }
             let merkleized = batch.merkleize(&$db, None, floor).await;
-            $db.apply_batch(merkleized).unwrap();
+            ($db, _) = $db.apply_batch(merkleized).unwrap();
         }};
     }
 
@@ -418,7 +420,7 @@ mod tests {
                 batch = batch.append(v);
             }
             let merkleized = batch.merkleize(&$db, None, floor).await;
-            $db.apply_batch(merkleized).unwrap();
+            ($db, _) = $db.apply_batch(merkleized).unwrap();
         }};
     }
 
@@ -431,7 +433,7 @@ mod tests {
                 batch = batch.append(v);
             }
             let merkleized = batch.merkleize(&$db, None, floor).await;
-            $db.apply_batch(merkleized).await.unwrap();
+            ($db, _) = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
 
@@ -442,9 +444,9 @@ mod tests {
     /// 3. Recreate the deleted keys alongside new keys that collide under the translator.
     /// 4. Update original keys; delete odd-indexed colliding keys, update even-indexed ones.
     async fn keyed_root<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
-        db: &mut D,
+        db: D,
         seed: u64,
-    ) -> Vec<u8> {
+    ) -> (D, Vec<u8>) {
         let n = seed % 50 + 5;
 
         // Choose a translator bucket for colliding keys (varies per seed).
@@ -452,7 +454,7 @@ mod tests {
 
         // 1. Create n keys.
         let writes: Vec<_> = (0..n).map(|i| (to_digest(i), Some(to_val(i, 1)))).collect();
-        apply_writes(db, writes).await;
+        let db = apply_writes(db, writes).await;
 
         // 2. Delete ~20% of keys, update the rest with new values.
         let writes: Vec<_> = (0..n)
@@ -465,7 +467,7 @@ mod tests {
                 }
             })
             .collect();
-        apply_writes(db, writes).await;
+        let db = apply_writes(db, writes).await;
 
         // 3. Recreate every deleted key, and introduce new keys that share a translator
         //    bucket (offset by 10000 to avoid overlapping with the original key range).
@@ -478,7 +480,7 @@ mod tests {
         for i in 0..n / 2 {
             writes.push((colliding_digest(prefix, 10000 + i), Some(to_val(i, 4))));
         }
-        apply_writes(db, writes).await;
+        let db = apply_writes(db, writes).await;
 
         // 4. Update original keys; delete odd-indexed colliding keys, update even-indexed.
         let mut writes = Vec::new();
@@ -493,9 +495,10 @@ mod tests {
                 writes.push((key, Some(to_val(i, 6))));
             }
         }
-        apply_writes(db, writes).await;
+        let db = apply_writes(db, writes).await;
 
-        db.root().to_vec()
+        let root = db.root().to_vec();
+        (db, root)
     }
 
     /// 3-batch immutable workload. Each batch inserts a disjoint set of keys (immutable
@@ -634,8 +637,11 @@ mod tests {
 
     macro_rules! keyed_conformance {
         ($name:ident, $db:ty, $cfg_fn:expr) => {
-            db_conformance!($name, $db, $cfg_fn, |db, seed| keyed_root(&mut db, seed)
-                .await);
+            db_conformance!($name, $db, $cfg_fn, |db, seed| {
+                let (d, root) = keyed_root(db, seed).await;
+                db = d;
+                root
+            });
         };
     }
 
@@ -665,7 +671,8 @@ mod tests {
                     let mut $d =
                         <$db>::init(context.child("db"), ($cfg_fn)(&suffix, &context)).await?;
                     let _root = $body;
-                    $d.sync().await
+                    $d.sync().await?;
+                    Ok(())
                 }
             }
         };
@@ -674,7 +681,9 @@ mod tests {
     macro_rules! keyed_storage_audit {
         ($name:ident, $family:ty, $db:ty, $cfg_fn:expr) => {
             storage_audit_conformance!($name, $family, $db, $cfg_fn, |db, seed| {
-                keyed_root(&mut db, seed).await
+                let (d, root) = keyed_root(db, seed).await;
+                db = d;
+                root
             });
         };
     }
@@ -1144,29 +1153,32 @@ mod tests {
 // operations in forward and reverse order, then asserts the roots are equal.
 
 async fn apply_both_orders<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
-    fwd: &mut D,
-    rev: &mut D,
+    fwd: D,
+    rev: D,
     ops: Vec<(Digest, Option<Digest>)>,
     msg: &str,
-) {
-    apply_writes(fwd, ops.clone()).await;
+) -> (D, D) {
+    let fwd = apply_writes(fwd, ops.clone()).await;
     let mut reversed = ops;
     reversed.reverse();
-    apply_writes(rev, reversed).await;
+    let rev = apply_writes(rev, reversed).await;
     assert_eq!(fwd.root().to_vec(), rev.root().to_vec(), "{msg}");
+    (fwd, rev)
 }
 
+#[boxed]
 async fn assert_keyed_order_independent<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
-    fwd: &mut D,
-    rev: &mut D,
-) {
+    fwd: D,
+    rev: D,
+) -> (D, D) {
     let mut creates: Vec<_> = (0..20)
         .map(|i| (to_digest(i), Some(to_val(i, 0))))
         .collect();
     for i in 0..8u64 {
         creates.push((colliding_digest(0xAB, i), Some(to_val(i, 100))));
     }
-    apply_both_orders(fwd, rev, creates, "create order must not affect root").await;
+    let (fwd, rev) =
+        apply_both_orders(fwd, rev, creates, "create order must not affect root").await;
 
     let mut mixed: Vec<_> = (0..20)
         .map(|i| {
@@ -1180,7 +1192,8 @@ async fn assert_keyed_order_independent<F: Family, D: DbAny<F, Key = Digest, Val
     for i in 0..8u64 {
         mixed.push((colliding_digest(0xAB, i), Some(to_val(i, 300))));
     }
-    apply_both_orders(fwd, rev, mixed, "delete+update order must not affect root").await;
+    let (fwd, rev) =
+        apply_both_orders(fwd, rev, mixed, "delete+update order must not affect root").await;
 
     let mut recreates: Vec<_> = (0..20)
         .filter(|i| i % 2 == 1)
@@ -1189,13 +1202,14 @@ async fn assert_keyed_order_independent<F: Family, D: DbAny<F, Key = Digest, Val
     for i in 8..16u64 {
         recreates.push((colliding_digest(0xAB, i), Some(to_val(i, 500))));
     }
-    apply_both_orders(
+    let (fwd, rev) = apply_both_orders(
         fwd,
         rev,
         recreates,
         "recreate-after-delete order must not affect root",
     )
     .await;
+    (fwd, rev)
 }
 
 // Macro rather than a generic function because compact immutable apply_batch is sync.
@@ -1212,7 +1226,7 @@ macro_rules! assert_immutable_order_independent_compact {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&$fwd, None, fwd_floor).await;
-        $fwd.apply_batch(merkleized).unwrap();
+        ($fwd, _) = $fwd.apply_batch(merkleized).unwrap();
 
         let rev_floor = $rev.inactivity_floor_loc();
         let mut batch = $rev.new_batch();
@@ -1220,7 +1234,7 @@ macro_rules! assert_immutable_order_independent_compact {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&$rev, None, rev_floor).await;
-        $rev.apply_batch(merkleized).unwrap();
+        ($rev, _) = $rev.apply_batch(merkleized).unwrap();
 
         assert_eq!(
             $fwd.root().to_vec(),
@@ -1244,7 +1258,7 @@ macro_rules! assert_immutable_order_independent {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&$fwd, None, fwd_floor).await;
-        $fwd.apply_batch(merkleized).await.unwrap();
+        ($fwd, _) = $fwd.apply_batch(merkleized).await.unwrap();
 
         let rev_floor = $rev.inactivity_floor_loc();
         let mut batch = $rev.new_batch();
@@ -1252,7 +1266,7 @@ macro_rules! assert_immutable_order_independent {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&$rev, None, rev_floor).await;
-        $rev.apply_batch(merkleized).await.unwrap();
+        ($rev, _) = $rev.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(
             $fwd.root().to_vec(),
@@ -1285,97 +1299,129 @@ order_test!(
     test_order_any_mmr_unordered_fixed,
     AnyMmrUnorderedFixed,
     any_fixed_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_any_mmr_unordered_variable,
     AnyMmrUnorderedVariable,
     any_variable_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_any_mmr_ordered_fixed,
     AnyMmrOrderedFixed,
     any_fixed_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_any_mmr_ordered_variable,
     AnyMmrOrderedVariable,
     any_variable_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_any_mmb_unordered_fixed,
     AnyMmbUnorderedFixed,
     any_fixed_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_any_mmb_unordered_variable,
     AnyMmbUnorderedVariable,
     any_variable_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_any_mmb_ordered_fixed,
     AnyMmbOrderedFixed,
     any_fixed_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_any_mmb_ordered_variable,
     AnyMmbOrderedVariable,
     any_variable_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_cur_mmr_unordered_fixed,
     CurrentMmrUnorderedFixed,
     current_fixed_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_cur_mmr_unordered_variable,
     CurrentMmrUnorderedVariable,
     current_variable_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_cur_mmr_ordered_fixed,
     CurrentMmrOrderedFixed,
     current_fixed_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_cur_mmr_ordered_variable,
     CurrentMmrOrderedVariable,
     current_variable_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_cur_mmb_unordered_fixed,
     CurrentMmbUnorderedFixed,
     current_fixed_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_cur_mmb_unordered_variable,
     CurrentMmbUnorderedVariable,
     current_variable_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_cur_mmb_ordered_fixed,
     CurrentMmbOrderedFixed,
     current_fixed_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_cur_mmb_ordered_variable,
     CurrentMmbOrderedVariable,
     current_variable_config,
-    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+    |fwd, rev| {
+        (fwd, rev) = assert_keyed_order_independent(fwd, rev).await;
+    }
 );
 order_test!(
     test_order_immutable_mmr_fixed,
