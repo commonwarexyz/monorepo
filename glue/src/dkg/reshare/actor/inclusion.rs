@@ -20,11 +20,11 @@ use commonware_cryptography::{
     },
     certificate::Scheme,
 };
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Manager};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage,
+    BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage, signal,
     telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{
@@ -51,6 +51,79 @@ struct CachedArtifact<V: BlsVariant, C: Signer> {
     // protocol state.
     logs: PendingLogs<V, C::PublicKey>,
     artifact: Option<Artifact<V, C>>,
+}
+
+struct PendingLogScan<'a, V: BlsVariant, P> {
+    epoch: Epoch,
+    info: &'a Info<V, P>,
+    epocher: FixedEpocher,
+    finalized_tip: Option<Height>,
+    final_height: Height,
+}
+
+/// The final block is special because proposal and verification may run ahead
+/// of this actor's finalized-block reporter stream. In that case, the block
+/// ancestry given to the application can contain pending dealer logs that are
+/// not yet present in [`Store`].
+///
+/// Those pending logs must influence the final [`EpochInfo`] calculation so
+/// proposal and verification agree with the block being evaluated. They must
+/// not be persisted here: only the finalized reporter path below is durable.
+/// This module therefore builds final artifacts from a temporary overlay of
+/// finalized logs plus valid pending ancestry logs.
+async fn pending_logs<B, V, C>(
+    scan: PendingLogScan<'_, V, C::PublicKey>,
+    mut ancestry: crate::dkg::reshare::mailbox::ErasedAncestry<B>,
+    mut shutdown: signal::Signal,
+    response: &mut oneshot::Sender<EpochInfoResponse<V, C>>,
+) -> Option<PendingLogs<V, C::PublicKey>>
+where
+    B: ReshareBlock<Variant = V, Signer = C>,
+    V: BlsVariant,
+    C: Signer,
+{
+    let mut blocks = Vec::new();
+    loop {
+        let block = select! {
+            _ = &mut shutdown => return None,
+            _ = response.closed() => return None,
+            block = ancestry.next() => block,
+        };
+        let Some(block) = block else {
+            break;
+        };
+        let height = block.height();
+        if scan.finalized_tip.is_some_and(|tip| height <= tip) {
+            break;
+        }
+        if height >= scan.final_height {
+            continue;
+        }
+        let Some(bounds) = scan.epocher.containing(height) else {
+            continue;
+        };
+        if bounds.epoch() != scan.epoch {
+            continue;
+        }
+        if !matches!(bounds.phase(), EpochPhase::Midpoint | EpochPhase::Late) {
+            continue;
+        }
+        blocks.push(block);
+    }
+
+    let mut logs = BTreeMap::new();
+    for block in blocks.into_iter().rev() {
+        let height = block.height();
+        let Some(Payload::DealerLog(log)) = block.payload() else {
+            continue;
+        };
+        let Some((dealer, log)) = log.check(scan.info) else {
+            warn!(epoch = ?scan.epoch, ?height, "ignoring invalid pending dealer log");
+            continue;
+        };
+        logs.entry(dealer).or_insert(log);
+    }
+    Some(logs)
 }
 
 impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
@@ -152,7 +225,7 @@ where
                 Message::EpochInfo {
                     span,
                     ancestry,
-                    response,
+                    mut response,
                 } => {
                     if response.is_closed() {
                         continue;
@@ -166,14 +239,18 @@ where
                             .epocher
                             .last(epoch)
                             .expect("epocher must know final epoch height");
-                        let Some(pending_logs) = Self::pending_logs(
+                        let scan = PendingLogScan {
                             epoch,
                             info,
-                            self.epocher.clone(),
+                            epocher: self.epocher.clone(),
                             finalized_tip,
                             final_height,
+                        };
+                        let Some(pending_logs) = pending_logs(
+                            scan,
                             ancestry,
-                            &response,
+                            self.context.stopped(),
+                            &mut response,
                         )
                         .await
                         else {
@@ -343,64 +420,6 @@ where
         if ours && let Some(dealer) = dealer {
             dealer.clear_finalized();
         }
-    }
-
-    /// The final block is special because proposal and verification may run ahead
-    /// of this actor's finalized-block reporter stream. In that case, the block
-    /// ancestry given to the application can contain pending dealer logs that are
-    /// not yet present in [`Store`].
-    ///
-    /// Those pending logs must influence the final [`EpochInfo`] calculation so
-    /// proposal and verification agree with the block being evaluated. They must
-    /// not be persisted here: only the finalized reporter path below is durable.
-    /// This module therefore builds final artifacts from a temporary overlay of
-    /// finalized logs plus valid pending ancestry logs.
-    async fn pending_logs(
-        epoch: Epoch,
-        info: &Info<V, C::PublicKey>,
-        epocher: FixedEpocher,
-        finalized_tip: Option<Height>,
-        final_height: Height,
-        mut ancestry: crate::dkg::reshare::mailbox::ErasedAncestry<B>,
-        response: &oneshot::Sender<EpochInfoResponse<V, C>>,
-    ) -> Option<PendingLogs<V, C::PublicKey>> {
-        let mut blocks = Vec::new();
-        while let Some(block) = ancestry.next().await {
-            if response.is_closed() {
-                return None;
-            }
-            let height = block.height();
-            if finalized_tip.is_some_and(|tip| height <= tip) {
-                break;
-            }
-            if height >= final_height {
-                continue;
-            }
-            let Some(bounds) = epocher.containing(height) else {
-                continue;
-            };
-            if bounds.epoch() != epoch {
-                continue;
-            }
-            if !matches!(bounds.phase(), EpochPhase::Midpoint | EpochPhase::Late) {
-                continue;
-            }
-            blocks.push(block);
-        }
-
-        let mut logs = BTreeMap::new();
-        for block in blocks.into_iter().rev() {
-            let height = block.height();
-            let Some(Payload::DealerLog(log)) = block.payload() else {
-                continue;
-            };
-            let Some((dealer, log)) = log.check(info) else {
-                warn!(?epoch, ?height, "ignoring invalid pending dealer log");
-                continue;
-            };
-            logs.entry(dealer).or_insert(log);
-        }
-        Some(logs)
     }
 
     /// Build the final epoch artifact from finalized state plus pending logs.
@@ -638,5 +657,104 @@ where
         if !dkg {
             self.register_epoch(&info, share).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dkg::tests::mocks::{TestBlock, TestBlsVariant};
+    use commonware_cryptography::{
+        Signer,
+        bls12381::primitives::sharing::Mode as SharingMode,
+        ed25519::{PrivateKey, PublicKey},
+    };
+    use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+    use commonware_utils::{N3f1, NZU64, channel::oneshot, ordered::Set};
+    use futures::{FutureExt, stream};
+    use std::sync::Arc;
+
+    type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
+
+    fn signers() -> Vec<PrivateKey> {
+        (0..4).map(PrivateKey::from_seed).collect()
+    }
+
+    fn players() -> Set<PublicKey> {
+        Set::from_iter_dedup(signers().iter().map(Signer::public_key))
+    }
+
+    fn info() -> Info<TestBlsVariant, PublicKey> {
+        Info::new::<N3f1>(
+            b"_COMMONWARE_GLUE_DKG_RESHARE_INCLUSION_TEST",
+            0,
+            None,
+            SharingMode::NonZeroCounter,
+            players(),
+            players(),
+        )
+        .expect("valid info")
+    }
+
+    fn stalled_ancestry() -> crate::dkg::reshare::mailbox::ErasedAncestry<TestBlock> {
+        Box::pin(stream::pending::<Arc<TestBlock>>())
+    }
+
+    fn scan(
+        info: &Info<TestBlsVariant, PublicKey>,
+    ) -> PendingLogScan<'_, TestBlsVariant, PublicKey> {
+        PendingLogScan {
+            epoch: Epoch::zero(),
+            info,
+            epocher: FixedEpocher::new(NZU64!(4)),
+            finalized_tip: None,
+            final_height: Height::new(3),
+        }
+    }
+
+    #[test]
+    fn pending_logs_cancels_stalled_ancestry_when_response_closes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let info = info();
+            let (mut response_tx, response_rx) = oneshot::channel::<TestResponse>();
+            let pending = pending_logs(
+                scan(&info),
+                stalled_ancestry(),
+                context.stopped(),
+                &mut response_tx,
+            );
+            futures::pin_mut!(pending);
+            assert!(pending.as_mut().now_or_never().is_none());
+
+            drop(response_rx);
+
+            assert!(pending.await.is_none());
+        });
+    }
+
+    #[test]
+    fn pending_logs_cancels_stalled_ancestry_when_runtime_stops() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let info = info();
+            let (mut response_tx, _response_rx) = oneshot::channel::<TestResponse>();
+            let pending = pending_logs(
+                scan(&info),
+                stalled_ancestry(),
+                context.stopped(),
+                &mut response_tx,
+            );
+            futures::pin_mut!(pending);
+            assert!(pending.as_mut().now_or_never().is_none());
+
+            let stopper = context.child("stopper");
+            let stop = context.child("stop").spawn(|_| async move {
+                stopper.stop(0, None).await.expect("runtime should stop");
+            });
+
+            assert!(pending.await.is_none());
+            stop.await.expect("stop task should finish");
+        });
     }
 }
