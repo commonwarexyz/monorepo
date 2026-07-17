@@ -1234,7 +1234,6 @@ mod tests {
     fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
@@ -1252,6 +1251,7 @@ mod tests {
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         }
     }
 
@@ -1261,7 +1261,6 @@ mod tests {
     ) -> VariableConfig<TwoCap, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
@@ -1281,6 +1280,7 @@ mod tests {
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         }
     }
 

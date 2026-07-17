@@ -325,11 +325,11 @@ pub(crate) fn any_fix_cfg_with_cache(
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
     commonware_storage::qmdb::any::FixedConfig {
-        init_workers: None,
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -338,11 +338,11 @@ fn any_var_cfg_with_cache(
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
     commonware_storage::qmdb::any::VariableConfig {
-        init_workers: None,
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -351,12 +351,12 @@ pub(crate) fn cur_fix_cfg_with_cache(
     pc: CacheRef,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     commonware_storage::qmdb::current::FixedConfig {
-        init_workers: None,
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -365,12 +365,12 @@ fn cur_var_cfg_with_cache(
     pc: CacheRef,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
     commonware_storage::qmdb::current::VariableConfig {
-        init_workers: None,
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_concurrency: NZUsize!(1),
     }
 }
 

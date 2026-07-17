@@ -133,12 +133,13 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
-    /// Number of worker tasks the init-time snapshot build may split across; `None` builds on the
-    /// init task. Only certain index types (such as the ordered-partitioned index) build in
-    /// parallel. Counts past a few waste tasks without speeding up the build, and each task is
-    /// spawned as blocking-friendly shared work, so on runtimes with a bounded blocking pool keep
-    /// counts well below that pool's size.
-    pub init_workers: Option<NonZeroUsize>,
+    /// Number of tasks that build the init-time snapshot, including the init task itself
+    /// (which replays and routes the log); `1` builds entirely on the init task. Only certain
+    /// index types (such as the ordered-partitioned index) build in parallel. Counts past a few
+    /// waste tasks without speeding up the build, and each additional task is spawned as
+    /// blocking-friendly shared work, so on runtimes with a bounded blocking pool keep counts
+    /// well below that pool's size.
+    pub init_concurrency: NonZeroUsize,
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
@@ -210,7 +211,7 @@ where
         log,
         bitmap,
         cfg.init_cache_size,
-        cfg.init_workers,
+        cfg.init_concurrency,
         metrics,
     )
     .await
@@ -265,7 +266,6 @@ pub(crate) mod test {
     ) -> FixedConfig<T, S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
@@ -282,6 +282,7 @@ pub(crate) mod test {
             },
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         }
     }
 
@@ -291,7 +292,6 @@ pub(crate) mod test {
     ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
@@ -310,6 +310,7 @@ pub(crate) mod test {
             },
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         }
     }
 

@@ -101,7 +101,7 @@ pub mod partitioned {
     {
         /// Initializes a [Db] from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization, and
-        /// `config.init_workers` bounds how many tasks the snapshot build splits across during
+        /// `config.init_concurrency` bounds how many tasks the snapshot build splits across during
         /// init.
         pub async fn init(
             context: E,

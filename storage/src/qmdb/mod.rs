@@ -512,9 +512,10 @@ pub trait SnapshotBuild<F: Family>:
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
     ///
-    /// `workers` bounds how many tasks an index type that builds in parallel splits the work
-    /// across (`None` builds on the calling task). Index types that build serially ignore it.
-    /// `cache_size` bounds each build's `(location -> key)` cache (`None` disables it).
+    /// `init_concurrency` bounds how many tasks an index type that builds in parallel uses,
+    /// including the calling task (`1` builds entirely on the calling task). Index types that
+    /// build serially ignore it. `cache_size` bounds each build's `(location -> key)` cache
+    /// (`None` disables it).
     // In-crate callers await this future at concrete index types, so the flexibility an explicit
     // `Send` bound on the returned future would add is unused.
     #[allow(async_fn_in_trait)]
@@ -523,19 +524,19 @@ pub trait SnapshotBuild<F: Family>:
         _context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        workers: Option<NonZeroUsize>,
+        init_concurrency: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        // This index type builds serially, so `workers` has no effect. Warn on an explicit
-        // worker count rather than silently ignore it.
-        if workers.is_some() {
+        // This index type builds serially, so `init_concurrency` has no effect. Warn on an
+        // explicit concurrency rather than silently ignore it.
+        if init_concurrency.get() > 1 {
             tracing::warn!(
-                ?workers,
-                "init_workers configured but this index builds serially; ignoring"
+                init_concurrency,
+                "init_concurrency configured but this index builds serially; ignoring"
             );
         }
         build_snapshot_serial(inactivity_floor_loc, &**log, self, cache_size).await
@@ -573,7 +574,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        workers: Option<NonZeroUsize>,
+        init_concurrency: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
@@ -581,7 +582,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         C: Contiguous<Item: Operation<F>> + 'static,
     {
         let count = self.partition_count();
-        let workers = workers.map_or(0, |n| n.get().min(count));
+        let workers = (init_concurrency.get() - 1).min(count);
 
         // No workers: build on this task.
         if workers == 0 {

@@ -816,7 +816,7 @@ mod tests {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
-            init_workers: None,
+            init_concurrency: NZUsize!(1),
         }
     }
 

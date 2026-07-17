@@ -717,7 +717,8 @@ where
 {
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
-    /// from grafted metadata). `workers` bounds how many tasks the snapshot build splits across.
+    /// from grafted metadata). `init_concurrency` bounds how many tasks the snapshot build
+    /// uses, including this one.
     ///
     /// # Panics
     ///
@@ -729,7 +730,7 @@ where
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
         cache_size: Option<NonZeroUsize>,
-        workers: Option<NonZeroUsize>,
+        init_concurrency: NonZeroUsize,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
@@ -757,7 +758,13 @@ where
 
             // Build the snapshot, collecting each replayed location's activity status.
             let (active_keys, activity) = index
-                .build_snapshot(context, inactivity_floor_loc, &log, workers, cache_size)
+                .build_snapshot(
+                    context,
+                    inactivity_floor_loc,
+                    &log,
+                    init_concurrency,
+                    cache_size,
+                )
                 .await?;
 
             // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in

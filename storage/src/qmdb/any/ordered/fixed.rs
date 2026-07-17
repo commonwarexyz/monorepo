@@ -156,7 +156,7 @@ pub(crate) mod test {
         translator::{OneCap, TwoCap},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -502,15 +502,17 @@ pub(crate) mod test {
         });
     }
 
-    /// Build a `P`-partitioned ordered db with churny ops, then assert that reopening it with a range
-    /// of worker counts (`0` for the serial path, `1` for the single-worker de-interleave, counts
-    /// that round down to fewer workers with wider ranges, and counts above the partition count
-    /// that clamp) all reconstruct the identical root and key-value state: the parallel build
-    /// replays the same immutable log, just split across workers owning disjoint partition ranges.
+    /// Build a `P`-partitioned ordered db with churny ops, then assert that reopening it with a
+    /// range of `init_concurrency` values (`1` for the serial path, `2` for the single-worker
+    /// de-interleave, counts that round down to fewer workers with wider ranges, and counts
+    /// above the partition count that clamp) all reconstruct the identical root and key-value
+    /// state: the parallel build replays the same immutable log, just split across workers
+    /// owning disjoint partition ranges.
+    #[boxed]
     async fn check_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
         partition: &'static str,
-        worker_counts: &[usize],
+        concurrency_sweep: &[usize],
     ) {
         type PartDb<const P: usize, S> =
             partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, P, S>;
@@ -547,7 +549,7 @@ pub(crate) mod test {
         }
 
         let cfg = fixed_db_config::<OneCap>(partition, &context);
-        let mut db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
             .await
             .unwrap();
 
@@ -559,8 +561,8 @@ pub(crate) mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
         let mut batch = db.new_batch();
@@ -574,8 +576,8 @@ pub(crate) mod test {
             batch = batch.write(k, None);
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Commit 3: reinsert a third of the deleted keys, so the replayed log contains
         // delete-then-reinsert sequences for the parallel build to resolve.
@@ -586,20 +588,26 @@ pub(crate) mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        db.sync().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let db = db.sync().await.unwrap();
         let root = db.root();
         drop(db);
 
-        // Reopen with a range of worker counts. All rebuild from the same log and must match the
-        // original root and serve the expected value for every key.
-        for &workers in worker_counts {
+        // Reopen with a range of concurrency values. All rebuild from the same log and must
+        // match the original root and serve the expected value for every key.
+        for &concurrency in concurrency_sweep {
             let mut cfg = fixed_db_config::<OneCap>(partition, &context);
-            cfg.init_workers = core::num::NonZeroUsize::new(workers);
-            let ctx = context.child("reopen").with_attribute("workers", workers);
+            cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
+            let ctx = context
+                .child("reopen")
+                .with_attribute("concurrency", concurrency);
             let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
-            assert_eq!(db.root(), root, "root mismatch at P={P} workers={workers}");
+            assert_eq!(
+                db.root(),
+                root,
+                "root mismatch at P={P} concurrency={concurrency}"
+            );
             assert_expected_values(&db).await;
             drop(db);
         }
@@ -621,7 +629,7 @@ pub(crate) mod test {
             drop(db);
 
             let mut cfg = fixed_db_config::<OneCap>("parallel_fresh", &context);
-            cfg.init_workers = core::num::NonZeroUsize::new(3);
+            cfg.init_concurrency = NZUsize!(4);
             let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
                 .await
                 .unwrap();
@@ -643,7 +651,7 @@ pub(crate) mod test {
 
             // Populate a db so the log has committed operations to replay.
             let cfg = fixed_db_config::<OneCap>("parallel_replay_fail", &context);
-            let mut db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -653,9 +661,9 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
             drop(db);
 
             // Reopen the op log directly (init's reads run before faults are enabled) and build
@@ -681,7 +689,7 @@ pub(crate) mod test {
             // workers never read the log themselves.
             context.storage_fault_config().write().read_rate = Some(1.0);
             let result = index
-                .build_snapshot(context.child("build"), floor, &log, Some(NZUsize!(3)), None)
+                .build_snapshot(context.child("build"), floor, &log, NZUsize!(4), None)
                 .await;
             assert!(result.is_err(), "replay must fail under read faults");
 
@@ -695,13 +703,13 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_ordered_partitioned_p1_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            // 200 rounds down to 128 equal two-partition ranges for P=1 (count=256) and 300
-            // exceeds the partition count and clamps. Both must reconstruct the same root
-            // without panicking.
+            // Concurrency 201 (200 workers) rounds down to 128 equal two-partition ranges for
+            // P=1 (count=256) and 301 exceeds the partition count and clamps. Both must
+            // reconstruct the same root without panicking.
             check_parallel_init_equivalence::<1>(
                 context,
                 "parallel_equiv_p1",
-                &[0, 1, 2, 4, 8, 200, 300],
+                &[1, 2, 3, 5, 9, 201, 301],
             )
             .await;
         });
@@ -713,7 +721,7 @@ pub(crate) mod test {
             check_parallel_init_equivalence::<2>(
                 context,
                 "parallel_equiv_p2",
-                &[0, 1, 2, 4, 8, 200],
+                &[1, 2, 3, 5, 9, 201],
             )
             .await;
         });
@@ -727,7 +735,7 @@ pub(crate) mod test {
     #[ignore]
     fn test_ordered_partitioned_p3_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            check_parallel_init_equivalence::<3>(context, "parallel_equiv_p3", &[0, 1, 2]).await;
+            check_parallel_init_equivalence::<3>(context, "parallel_equiv_p3", &[1, 2, 3]).await;
         });
     }
 

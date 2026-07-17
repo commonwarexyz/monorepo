@@ -184,7 +184,6 @@ pub(crate) mod test {
         let page_cache =
             CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
-            init_workers: None,
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
                 metadata_partition: format!("mmr-metadata-{seed}"),
@@ -203,6 +202,7 @@ pub(crate) mod test {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         }
     }
 
@@ -243,7 +243,7 @@ pub(crate) mod test {
 
             // Commit 1: insert every key.
             let cfg = create_test_config(77, &context);
-            let mut db = PartDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = PartDb::<Sequential>::init(context.child("populate"), cfg)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -253,8 +253,8 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Commit 2: update a third and delete a seventh so the replay carries churn.
             let mut batch = db.new_batch();
@@ -267,18 +267,24 @@ pub(crate) mod test {
                 batch = batch.write(k, None);
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
             let root = db.root();
             drop(db);
 
-            for workers in [0usize, 3] {
+            for concurrency in [1usize, 4] {
                 let mut cfg = create_test_config(77, &context);
-                cfg.init_workers = core::num::NonZeroUsize::new(workers);
-                let ctx = context.child("reopen").with_attribute("workers", workers);
+                cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
+                let ctx = context
+                    .child("reopen")
+                    .with_attribute("concurrency", concurrency);
                 let db = PartDb::<Sequential>::init(ctx, cfg).await.unwrap();
-                assert_eq!(db.root(), root, "root mismatch at workers={workers}");
+                assert_eq!(
+                    db.root(),
+                    root,
+                    "root mismatch at concurrency={concurrency}"
+                );
                 for i in 0u64..500 {
                     let k = Sha256::hash(&i.to_be_bytes());
                     assert_eq!(

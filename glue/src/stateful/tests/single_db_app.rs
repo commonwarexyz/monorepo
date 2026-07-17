@@ -345,7 +345,6 @@ impl EngineDefinition for SingleDbEngine {
 
         // QMDB database config (created by Stateful::start)
         let db_config = FixedConfig {
-            init_workers: None,
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
@@ -362,6 +361,7 @@ impl EngineDefinition for SingleDbEngine {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         };
 
         // Destructure the 7 channels.

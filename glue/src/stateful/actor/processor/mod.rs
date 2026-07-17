@@ -1558,7 +1558,6 @@ mod tests {
     ) -> any::FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
-            init_workers: None,
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
                 metadata_partition: format!("{prefix}_mmr_metadata"),
@@ -1575,6 +1574,7 @@ mod tests {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         }
     }
 

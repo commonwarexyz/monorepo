@@ -358,12 +358,12 @@ fn main() {
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
-                    init_workers: None,
                     merkle_config,
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_concurrency: NZUsize!(1),
                 };
                 let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(
@@ -375,12 +375,12 @@ fn main() {
             }
             "current::ordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
-                    init_workers: None,
                     merkle_config,
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_concurrency: NZUsize!(1),
                 };
                 let db = CurrentOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(
@@ -392,18 +392,17 @@ fn main() {
             }
             "any::ordered::fixed::mmb" => {
                 let cfg = FixedConfig {
-                    init_workers: None,
                     merkle_config,
                     journal_config,
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_concurrency: NZUsize!(1),
                 };
                 let db = AnyOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
             }
             "any::unordered::variable::mmb" => {
                 let cfg = commonware_storage::qmdb::any::VariableConfig {
-                    init_workers: None,
                     merkle_config,
                     journal_config: VConfig {
                         partition: "constantinople-var-log".into(),
@@ -415,17 +414,18 @@ fn main() {
                     },
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_concurrency: NZUsize!(1),
                 };
                 let db = AnyVarDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
             }
             _ => {
                 let cfg = FixedConfig {
-                    init_workers: None,
                     merkle_config,
                     journal_config,
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_concurrency: NZUsize!(1),
                 };
                 let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)

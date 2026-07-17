@@ -165,7 +165,6 @@ pub(crate) mod test {
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_workers: None,
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("journal-{seed}"),
                 metadata_partition: format!("metadata-{seed}"),
@@ -184,6 +183,7 @@ pub(crate) mod test {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         }
     }
 

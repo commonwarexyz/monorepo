@@ -94,7 +94,7 @@ pub mod partitioned {
     {
         /// Initializes a [Db] authenticated database from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization, and
-        /// `config.init_workers` bounds how many tasks the snapshot build splits across during
+        /// `config.init_concurrency` bounds how many tasks the snapshot build splits across during
         /// init.
         pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
@@ -114,7 +114,7 @@ pub mod test {
         translator::OneCap,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
@@ -214,10 +214,11 @@ pub mod test {
     /// state. Unlike the `any` equivalence tests, the current root commits to the activity bitmap,
     /// so this exercises the parallel build's bitmap reconstruction (`for_each_value` +
     /// last-commit) over a pruned prefix, not just the snapshot index and MMR.
+    #[boxed]
     async fn check_current_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
         partition: &'static str,
-        worker_counts: &[usize],
+        concurrency_sweep: &[usize],
     ) {
         type PartDb<const P: usize, S> = partitioned::Db<
             mmr::Family,
@@ -243,7 +244,7 @@ pub mod test {
         }
 
         let cfg = fixed_config::<OneCap>(partition, &context);
-        let mut db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
             .await
             .unwrap();
 
@@ -255,8 +256,8 @@ pub mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
         let mut batch = db.new_batch();
@@ -270,26 +271,29 @@ pub mod test {
             batch = batch.write(k, None);
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Prune so the reopens rebuild the grafted root over a bitmap with a pruned prefix.
-        db.prune(db.sync_boundary()).await.unwrap();
-        db.sync().await.unwrap();
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
+        let db = db.sync().await.unwrap();
         let root = db.root();
         drop(db);
 
-        // Reopen at each worker count. All rebuild (snapshot + bitmap) from the same log and must
+        // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
         // match the original root and serve the expected value for every key.
-        for &workers in worker_counts {
+        for &concurrency in concurrency_sweep {
             let mut cfg = fixed_config::<OneCap>(partition, &context);
-            cfg.init_workers = core::num::NonZeroUsize::new(workers);
-            let ctx = context.child("reopen").with_attribute("workers", workers);
+            cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
+            let ctx = context
+                .child("reopen")
+                .with_attribute("concurrency", concurrency);
             let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
             assert_eq!(
                 db.root(),
                 root,
-                "current root mismatch at P={P} workers={workers}"
+                "current root mismatch at P={P} concurrency={concurrency}"
             );
             for i in 0u64..2000 {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -309,7 +313,7 @@ pub mod test {
             check_current_parallel_init_equivalence::<1>(
                 context,
                 "current_parallel_equiv_p1",
-                &[0, 1, 2, 4],
+                &[1, 2, 3, 5],
             )
             .await;
         });
@@ -321,7 +325,7 @@ pub mod test {
             check_current_parallel_init_equivalence::<2>(
                 context,
                 "current_parallel_equiv_p2",
-                &[0, 1, 2, 4],
+                &[1, 2, 3, 5],
             )
             .await;
         });
@@ -337,7 +341,7 @@ pub mod test {
             check_current_parallel_init_equivalence::<3>(
                 context,
                 "current_parallel_equiv_p3",
-                &[0, 2],
+                &[1, 3],
             )
             .await;
         });

@@ -331,7 +331,7 @@ use crate::{
         authenticated,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig},
+    merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
         any::{
             self, Config as AnyConfig,
@@ -381,12 +381,13 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
-    /// Number of worker tasks the init-time snapshot build may split across; `None` builds on the
-    /// init task. Only certain index types (such as the ordered-partitioned index) build in
-    /// parallel. Counts past a few waste tasks without speeding up the build, and each task is
-    /// spawned as blocking-friendly shared work, so on runtimes with a bounded blocking pool keep
-    /// counts well below that pool's size.
-    pub init_workers: Option<NonZeroUsize>,
+    /// Number of tasks that build the init-time snapshot, including the init task itself
+    /// (which replays and routes the log); `1` builds entirely on the init task. Only certain
+    /// index types (such as the ordered-partitioned index) build in parallel. Counts past a few
+    /// waste tasks without speeding up the build, and each additional task is spawned as
+    /// blocking-friendly shared work, so on runtimes with a bounded blocking pool keep counts
+    /// well below that pool's size.
+    pub init_concurrency: NonZeroUsize,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -396,7 +397,7 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             journal_config: cfg.journal_config,
             translator: cfg.translator,
             init_cache_size: cfg.init_cache_size,
-            init_workers: cfg.init_workers,
+            init_concurrency: cfg.init_concurrency,
         }
     }
 }
@@ -762,7 +763,6 @@ pub mod tests {
     ) -> FixedConfig<T, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -780,6 +780,7 @@ pub mod tests {
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         }
     }
 
@@ -790,7 +791,6 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_workers: None,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -810,6 +810,7 @@ pub mod tests {
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         }
     }
 
@@ -1602,7 +1603,6 @@ pub mod tests {
         executor.start(|context| async move {
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
-                init_workers: None,
                 merkle_config: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),
@@ -1622,6 +1622,7 @@ pub mod tests {
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,
                 init_cache_size: Some(NZUsize!(1024)),
+                init_concurrency: NZUsize!(1),
             };
             let db = ForgedExclusionDb::init(context.child("db"), cfg)
                 .await

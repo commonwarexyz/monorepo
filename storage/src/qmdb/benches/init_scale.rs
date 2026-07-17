@@ -75,15 +75,15 @@ const PRUNE_FREQUENCY: u32 = 100;
 /// workloads. Higher = more skew; ~1.0 is classic Zipf (near YCSB's 0.99).
 const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
-/// Parse a `parallelism` CLI argument into a snapshot-build worker count (`0` = serial, `n` = `n`
-/// worker tasks). The outer `Option` is parse success.
-fn parse_workers(arg: &str) -> Option<Option<NonZeroUsize>> {
-    arg.parse::<usize>().ok().map(NonZeroUsize::new)
+/// Parse a `parallelism` CLI argument into a snapshot-build concurrency (`1` = serial on the
+/// init task, `n` = `n - 1` worker tasks in addition to it). `None` is a parse failure.
+fn parse_concurrency(arg: &str) -> Option<NonZeroUsize> {
+    arg.parse::<usize>().ok().and_then(NonZeroUsize::new)
 }
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  bench     <folder> <cache> <parallelism>   reopen + time one init (cache=entries, 0=off; parallelism=0 serial / N workers)\n  destroy   <folder>                          delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  bench     <folder> <cache> <parallelism>   reopen + time one init (cache=entries, 0=off; parallelism=1 serial / N total build tasks)\n  destroy   <folder>                          delete the database"
     );
 }
 
@@ -114,9 +114,9 @@ fn main() {
         Some("bench") => match (
             argv.get(1),
             argv.get(2).and_then(|a| a.parse().ok()),
-            argv.get(3).and_then(|a| parse_workers(a)),
+            argv.get(3).and_then(|a| parse_concurrency(a)),
         ) {
-            (Some(folder), Some(cache), Some(workers)) => bench(folder, cache, workers),
+            (Some(folder), Some(cache), Some(concurrency)) => bench(folder, cache, concurrency),
             _ => usage(),
         },
         Some("destroy") => match argv.get(1) {
@@ -176,7 +176,7 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
 /// Reopen the database at `folder` (read-only) and time one `init` of the P=3 partitioned ordered
 /// index at the given init cache size (`cache` entries; `0` = off) and worker count. Reports the
 /// replay-region size `R` (a full-coverage cache is `cache = R`) and the elapsed time.
-fn bench(folder: &str, cache: usize, workers: Option<NonZeroUsize>) {
+fn bench(folder: &str, cache: usize, concurrency: NonZeroUsize) {
     if !db_dir_nonempty(folder) {
         eprintln!(
             "no database at {folder}; run `generate {folder} <keyspace> <num_updates>` first"
@@ -184,7 +184,7 @@ fn bench(folder: &str, cache: usize, workers: Option<NonZeroUsize>) {
         return;
     }
     let cfg = Config::default().with_storage_directory(folder);
-    let (elapsed, region) = time_init(&cfg, NonZeroUsize::new(cache), workers);
+    let (elapsed, region) = time_init(&cfg, NonZeroUsize::new(cache), concurrency);
     if region == 0 {
         eprintln!(
             "database at {folder} is empty; run `generate {folder} <keyspace> <num_updates>` first"
@@ -192,7 +192,7 @@ fn bench(folder: &str, cache: usize, workers: Option<NonZeroUsize>) {
         return;
     }
     println!(
-        "init_scale (any::ordered::fixed::p3::mmr) {folder} cache={cache} workers={workers:?} region={region} time={elapsed:?}"
+        "init_scale (any::ordered::fixed::p3::mmr) {folder} cache={cache} concurrency={concurrency} region={region} time={elapsed:?}"
     );
 }
 
@@ -210,12 +210,12 @@ fn destroy(folder: &str) {
 fn time_init(
     cfg: &Config,
     cache_size: Option<NonZeroUsize>,
-    workers: Option<NonZeroUsize>,
+    concurrency: NonZeroUsize,
 ) -> (Duration, u64) {
     Runner::new(cfg.clone()).start(|ctx| async move {
         let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE);
         config.init_cache_size = cache_size;
-        config.init_workers = workers;
+        config.init_concurrency = concurrency;
         let start = Instant::now();
         let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
             .await

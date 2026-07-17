@@ -3002,13 +3002,13 @@ sync_tests_for_harness!(
     unordered_variable_mmb
 );
 
-/// State-sync rebuilds must honor the configured `init_workers`. The partitioned ordered
+/// State-sync rebuilds must honor the configured `init_concurrency`. The partitioned ordered
 /// index is the only index type with a parallel build, and no partitioned db implements
 /// [qmdb::sync::Database] yet, so this exercises the shared [super::build_db] helper directly:
-/// `None` must spawn no snapshot workers, `Some(2)` must spawn them, and both must rebuild the
+/// concurrency `1` must spawn no snapshot workers, `3` must spawn them, and both must rebuild the
 /// source root.
 #[test_traced]
-fn test_sync_build_honors_init_workers() {
+fn test_sync_build_honors_init_concurrency() {
     type PartDb = crate::qmdb::any::ordered::fixed::partitioned::Db<
         mmr::Family,
         deterministic::Context,
@@ -3022,10 +3022,10 @@ fn test_sync_build_honors_init_workers() {
 
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let cfg = fixed_db_config::<TwoCap>("sync_honors_init_workers", &context);
+        let cfg = fixed_db_config::<TwoCap>("sync_honors_init_concurrency", &context);
 
-        // Build a committed source db (the test config's `init_workers` is `None`).
-        let mut db = PartDb::init(context.child("source"), cfg.clone())
+        // Build a committed source db (the test config's `init_concurrency` is `0`).
+        let db = PartDb::init(context.child("source"), cfg.clone())
             .await
             .unwrap();
         let mut batch = db.new_batch();
@@ -3035,9 +3035,9 @@ fn test_sync_build_honors_init_workers() {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        db.sync().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let db = db.sync().await.unwrap();
         let root = db.root();
         let lower = db.sync_boundary();
         let upper = db.bounds().end;
@@ -3060,7 +3060,7 @@ fn test_sync_build_honors_init_workers() {
             non_empty_range!(lower, upper),
             1024,
             cfg.init_cache_size,
-            None,
+            NZUsize!(1),
         )
         .await
         .unwrap();
@@ -3081,7 +3081,7 @@ fn test_sync_build_honors_init_workers() {
             non_empty_range!(lower, upper),
             1024,
             cfg.init_cache_size,
-            Some(NZUsize!(2)),
+            NZUsize!(3),
         )
         .await
         .unwrap();

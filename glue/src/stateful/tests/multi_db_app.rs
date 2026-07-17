@@ -420,7 +420,6 @@ impl EngineDefinition for MultiDbEngine {
 
         // QMDB database configs (one per database)
         let db_config_a = FixedConfig {
-            init_workers: None,
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-a-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-a-mmr-metadata"),
@@ -437,6 +436,7 @@ impl EngineDefinition for MultiDbEngine {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_concurrency: NZUsize!(1),
         };
         // One witness entry per section so the periodic prune actually drops entries
         // (pruning is section-aligned).
