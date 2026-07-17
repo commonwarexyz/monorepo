@@ -178,9 +178,11 @@ stability_scope!(BETA {
         /// never straddles filesystem blocks. The memory backend packs
         /// data directly after the header instead (alignment carries no
         /// meaning there).
+        #[cfg(not(target_arch = "wasm32"))]
         pub(crate) const DATA_OFFSET: usize = 4096;
 
         /// [`Self::DATA_OFFSET`] as u64 for offset calculations.
+        #[cfg(not(target_arch = "wasm32"))]
         pub(crate) const DATA_OFFSET_U64: u64 = Self::DATA_OFFSET as u64;
 
         /// Length of magic bytes.
