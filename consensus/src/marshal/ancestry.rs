@@ -134,7 +134,10 @@ where
     S: Ancestry<B>,
 {
     fn peek(&self) -> Option<&B> {
-        self.blocks.front().map(Arc::as_ref)
+        self.blocks
+            .front()
+            .map(Arc::as_ref)
+            .or_else(|| self.tail.peek())
     }
 }
 
@@ -629,6 +632,36 @@ mod test {
             assert_eq!(ancestry.next().await.as_deref(), Some(&parent));
             assert_eq!(ancestry.peek(), None);
             assert_eq!(ancestry.next().await, None);
+        });
+    }
+
+    #[test]
+    fn test_with_prefix_peeks_tail_when_prefix_empty() {
+        deterministic::Runner::default().start(|_| async move {
+            let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let mut ancestry = with_prefix([], from_iter([Arc::new(block.clone())]));
+
+            assert_eq!(ancestry.peek(), Some(&block));
+            assert_eq!(ancestry.next().await.as_deref(), Some(&block));
+            assert_eq!(ancestry.peek(), None);
+        });
+    }
+
+    #[test]
+    fn test_with_prefix_peeks_tail_after_prefix_consumed() {
+        deterministic::Runner::default().start(|_| async move {
+            let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let child = Block::new::<Sha256>((), parent.digest(), Height::new(2), 2);
+            let mut ancestry = with_prefix(
+                [Arc::new(child.clone())],
+                from_iter([Arc::new(parent.clone())]),
+            );
+
+            assert_eq!(ancestry.peek(), Some(&child));
+            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
+            assert_eq!(ancestry.peek(), Some(&parent));
+            assert_eq!(ancestry.next().await.as_deref(), Some(&parent));
+            assert_eq!(ancestry.peek(), None);
         });
     }
 
