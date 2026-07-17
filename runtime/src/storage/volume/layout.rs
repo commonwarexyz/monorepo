@@ -133,8 +133,11 @@ pub(super) struct Entry {
     pub size: u64,
     pub runs: Vec<Run>,
     pub checksums: Vec<ChecksumRef>,
-    /// CRC over the committed bytes of the final partial chunk (holes as
-    /// zeros). Only meaningful when `size % CHUNK != 0`.
+    /// CRC over the written span of the final backed chunk, full or
+    /// partial (0 when no chunk is backed). Hydration verifies the
+    /// frontier against it without touching the checksum extents, and
+    /// recovery consults it for partial frontier chunks, whose CRC the
+    /// checksum refs do not cover.
     pub tail_crc: u32,
     /// Physical offset of the shadow block holding the committed bytes of
     /// the final partial chunk. Absent when the tail chunk is unbacked (a

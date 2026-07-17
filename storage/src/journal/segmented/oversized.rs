@@ -310,32 +310,7 @@ impl<E: BufferPooler + Batchable + Metrics, I: Record + Send + Sync, V: CodecSha
         Ok(true)
     }
 
-    /// Rewind only the given section to a specific index size. Other sections
-    /// are unaffected.
-    ///
-    /// The value size is derived from the last entry after rewinding the index.
-    pub async fn rewind_section(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
-        // Rewind index first
-        self.index.rewind_section(section, index_size).await?;
-
-        // Derive value size from last entry (section may not exist if empty)
-        let value_size = match self.index.last(section).await {
-            Ok(Some(entry)) => {
-                let (offset, size) = entry.value_location();
-                offset
-                    .checked_add(u64::from(size))
-                    .ok_or(Error::OffsetOverflow)?
-            }
-            Ok(None) => 0,
-            Err(Error::SectionOutOfRange(_)) if index_size == 0 => 0,
-            Err(e) => return Err(e),
-        };
-
-        // Rewind values
-        self.values.rewind_section(section, value_size).await
-    }
-
-    /// Get index size for checkpoint.
+    /// Get the index size for a section.
     ///
     /// The value size can be derived from the last entry's location when needed.
     pub fn size(&self, section: u64) -> Result<u64, Error> {
@@ -2181,24 +2156,6 @@ mod tests {
             let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
                 Oversized::init(context.child("third"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    #[test_traced]
-    fn test_rewind_section_nonzero_on_missing_section_errors() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
-
-            let result = oversized.rewind_section(0, 1).await;
-            assert!(
-                matches!(result, Err(Error::SectionOutOfRange(0))),
-                "nonzero index_size on missing section must fail, got: {result:?}"
-            );
-
-            oversized.destroy().await.expect("Failed to destroy");
         });
     }
 

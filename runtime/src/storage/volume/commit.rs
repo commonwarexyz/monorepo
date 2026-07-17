@@ -18,7 +18,10 @@
 
 use super::{
     alloc::{block_align, Extent},
-    core::{chunk_of, merge_frozen_runs, BlobCore, ChunkCrc, CommittedMeta, Ready},
+    core::{
+        chunk_of, load_committed_refs, merge_frozen_runs, window_value, BlobCore, BlobInner,
+        ChunkCrc, ChunkMap, CommittedMeta, Ready,
+    },
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
     BLOCK,
 };
@@ -153,6 +156,42 @@ pub(super) async fn commit_locked<S: crate::Storage>(
     Ok(())
 }
 
+/// Chunk coverage a blob's checksum refs must provide: every backed chunk
+/// below the frontier, plus the frontier itself when it is a FULL chunk (a
+/// partial frontier is served by `tail_crc`, so coverage stops below it).
+/// Hole positions inside the covered range are never consulted (holes are
+/// identified from the runs, not the array).
+fn covered_end(inner: &BlobInner) -> u64 {
+    let last_backed = inner
+        .runs
+        .iter()
+        .next_back()
+        .map(|(&l, r)| chunk_of(l + r.len - 1));
+    last_backed.map_or(0, |last| {
+        let (_, span) = inner.chunk_span(last).expect("backed chunk");
+        if span == BLOCK {
+            last + 1
+        } else {
+            last
+        }
+    })
+}
+
+/// A captured chunk's exact CRC: its resident value, or the committed
+/// value preloaded from the old extents. Holes encode 0 (never consulted).
+fn resolve_crc(crcs: &ChunkMap, preloaded: &[(u64, Vec<u32>)], chunk: u64) -> u32 {
+    crcs.get(chunk).map_or(0, |s| match s.crc {
+        ChunkCrc::Ready(crc) => crc,
+        // Finalized before encoding (every pending chunk is resident).
+        ChunkCrc::Pending => unreachable!("pending CRC at capture"),
+        // Untouched since hydration, so within the old coverage the
+        // full-rewrite preload read above.
+        ChunkCrc::Unloaded => {
+            window_value(preloaded, chunk).expect("unloaded chunk is preloaded at capture")
+        }
+    })
+}
+
 /// Capture the commit's content and allocate/encode its metadata writes.
 async fn take_snapshot<S: crate::Storage>(
     ready: &Ready<S>,
@@ -193,6 +232,49 @@ async fn take_snapshot<S: crate::Storage>(
         // issued bytes; released before any I/O below (the capture is a
         // value snapshot, and the freeze boundary protects it thereafter).
         let write_guard = blob.write_lock.lock().await;
+
+        // A full-rewrite capture re-encodes every covered chunk's CRC, and
+        // chunks untouched this process hold theirs only on disk: preload
+        // those values from the OLD extents (a read-modify-write of the
+        // checksum array). The inputs of the delta decision recomputed in
+        // the capture below — runs coverage, the committed refs, the first
+        // dirty chunk — are all stable under the write lock and the commit
+        // lock, and the old extents cannot be recycled underneath the read
+        // (their frees are queued by this capture at the earliest and
+        // applied only once this commit confirms).
+        let preloaded = {
+            let plan = {
+                let inner = blob.inner.lock();
+                if inner.removed {
+                    None
+                } else {
+                    let covered_end = covered_end(&inner);
+                    let prev_refs = inner
+                        .committed_entry
+                        .as_ref()
+                        .map_or(&[][..], |e| &e.checksums[..]);
+                    let prev_end = prev_refs
+                        .last()
+                        .map_or(0, |r| r.first_chunk + r.count as u64);
+                    let delta = covered_end >= prev_end
+                        && prev_refs.len() < MAX_CHECKSUM_REFS
+                        && inner
+                            .dirty_chunks
+                            .iter()
+                            .next()
+                            .is_none_or(|&c| c >= prev_end);
+                    (!delta && inner.crcs.has_unloaded(covered_end.min(prev_end)))
+                        .then(|| prev_refs.to_vec())
+                }
+            };
+            match plan {
+                // Boxed: the cold streaming loader would otherwise deepen
+                // every commit future's layout.
+                Some(refs) => Box::pin(load_committed_refs(ready, &blob, &refs)).await?,
+                None => Vec::new(),
+            }
+        };
+
         let (entry, dirty_chunks, array_start, cksum_bytes, shadow_bytes, retained, superseded) = {
             let mut state = ready.state.lock();
             let mut inner = blob.inner.lock();
@@ -248,20 +330,10 @@ async fn take_snapshot<S: crate::Storage>(
                 .next_back()
                 .map(|(&l, r)| chunk_of(l + r.len - 1));
 
-            // Chunk coverage the checksum refs must provide: every backed
-            // chunk below the frontier, plus the frontier itself when it is
-            // a FULL chunk (a partial frontier is served by `tail_crc`, so
-            // coverage stops below it). Hole positions inside the covered
-            // range are never consulted (holes are identified from the
-            // runs, not the array).
-            let covered_end = last_backed.map_or(0, |last| {
-                let (_, span) = inner.chunk_span(last).expect("backed chunk");
-                if span == BLOCK {
-                    last + 1
-                } else {
-                    last
-                }
-            });
+            // Chunk coverage the checksum refs must provide (see
+            // [`covered_end`]). Unchanged by the run merging above, which
+            // preserves chunk coverage exactly.
+            let covered_end = covered_end(&inner);
 
             // Append-shaped dirt leaves every previously covered chunk's
             // CRC valid: extend coverage with one NEW delta ref and keep
@@ -289,12 +361,7 @@ async fn take_snapshot<S: crate::Storage>(
             let cksum_bytes: Vec<u8> = {
                 let mut bytes = Vec::with_capacity(((covered_end - array_start) * 4) as usize);
                 for c in array_start..covered_end {
-                    let crc = inner.crcs.get(&c).map_or(0, |s| match s.crc {
-                        ChunkCrc::Ready(crc) => crc,
-                        // Finalized above (every pending chunk is resident).
-                        ChunkCrc::Pending => unreachable!("pending CRC at capture"),
-                    });
-                    bytes.extend_from_slice(&crc.to_be_bytes());
+                    bytes.extend_from_slice(&resolve_crc(&inner.crcs, &preloaded, c).to_be_bytes());
                 }
                 bytes
             };
@@ -311,13 +378,10 @@ async fn take_snapshot<S: crate::Storage>(
                 })
             });
 
-            let tail_crc =
-                last_backed
-                    .and_then(|last| inner.crcs.get(&last))
-                    .map_or(0, |s| match s.crc {
-                        ChunkCrc::Ready(crc) => crc,
-                        ChunkCrc::Pending => unreachable!("pending CRC at capture"),
-                    });
+            // The final backed chunk's CRC, recorded whether the chunk is
+            // full or partial: hydration verifies the frontier against it
+            // without touching the checksum extents.
+            let tail_crc = last_backed.map_or(0, |last| resolve_crc(&inner.crcs, &preloaded, last));
 
             let runs: Vec<Run> = inner
                 .runs
@@ -532,6 +596,38 @@ async fn take_snapshot<S: crate::Storage>(
 
 /// Publish a confirmed commit.
 fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
+    // Swing each captured blob's committed entry BEFORE releasing frees:
+    // committed-CRC loads validate their ref against the entry after
+    // reading (see `load_committed_page`), so an extent must never become
+    // reusable while an entry referencing it is still visible.
+    for (blob, entry) in snapshot.committed {
+        let mut inner = blob.inner.lock();
+        // The confirmed size is now the exact freeze boundary (a rewind
+        // below the old boundary takes effect here).
+        inner.freeze_size = entry.size;
+        inner.shadow = entry.shadow;
+        // Refs this capture wrote are guard-verified by construction —
+        // their bytes were assembled in process memory, from resident
+        // values and old-extent loads that were themselves guard-checked —
+        // and retained refs keep their standing memo. Everything else
+        // (superseded refs) drops out.
+        let prev = std::mem::take(&mut inner.crc_guarded);
+        let guarded = {
+            let old_refs = inner
+                .committed_entry
+                .as_ref()
+                .map_or(&[][..], |e| &e.checksums[..]);
+            entry
+                .checksums
+                .iter()
+                .filter(|r| prev.contains(r) || !old_refs.contains(r))
+                .copied()
+                .collect()
+        };
+        inner.crc_guarded = guarded;
+        inner.committed_entry = Some(entry);
+    }
+
     let mut state = ready.state.lock();
     state.sacred_slot = 1 - state.sacred_slot;
     state.confirmed_seq = snapshot.seq;
@@ -551,14 +647,4 @@ fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
         !covered
     });
     state.apply_frees();
-    drop(state);
-
-    for (blob, entry) in snapshot.committed {
-        let mut inner = blob.inner.lock();
-        // The confirmed size is now the exact freeze boundary (a rewind
-        // below the old boundary takes effect here).
-        inner.freeze_size = entry.size;
-        inner.shadow = entry.shadow;
-        inner.committed_entry = Some(entry);
-    }
 }

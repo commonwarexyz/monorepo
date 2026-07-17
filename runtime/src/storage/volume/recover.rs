@@ -489,13 +489,26 @@ async fn init_fresh<S: crate::Storage>(
     })
 }
 
-/// Hydrate a dormant entry into live blob state (chunk CRCs + tail buffer),
-/// verifying what it loads.
+/// Hydrate a dormant entry into live blob state (dense chunk state + tail
+/// buffer), verifying what it loads.
+///
+/// Hydration is O(runs + chunks/64): it seeds the dense chunk state (all
+/// unverified, CRCs left on disk) and reads only the frontier span. CRC
+/// values are loaded on demand from the committed checksum extents when a
+/// read first verifies a chunk (see `core::load_committed_page`), so an
+/// open multi-TiB blob holds bitmaps, not its checksum array.
 pub(super) async fn hydrate<S: crate::Storage>(
     ready: &Ready<S>,
     entry: &Entry,
     partition: &str,
 ) -> Result<BlobInner, Error> {
+    let corrupt = |msg: &str| {
+        Error::BlobCorrupt(
+            partition.into(),
+            commonware_formatting::hex(&entry.name),
+            msg.into(),
+        )
+    };
     let mut inner = BlobInner {
         size: entry.size,
         freeze_size: entry.size,
@@ -519,68 +532,60 @@ pub(super) async fn hydrate<S: crate::Storage>(
     // entry captured while a batch held staged state for its blob (which
     // gates capture-time merging) can still carry mergeable runs.
     merge_frozen_runs(&mut inner.runs);
-    // Load + verify chunk CRCs (committed extents: no length bound).
-    let index = ChecksumIndex::load(&ready.file, entry, u64::MAX)
-        .await?
-        .ok_or_else(|| {
-            Error::BlobCorrupt(
-                partition.into(),
-                commonware_formatting::hex(&entry.name),
-                "checksum extent mismatch".into(),
-            )
-        })?;
+    // Seed the dense chunk state from the merged runs: every backed chunk
+    // unverified with its CRC left on disk.
+    inner.crcs.seed(&inner.runs);
+
     if let Some(last) = entry_last_chunk(entry) {
-        for chunk in 0..=last {
-            let Some((_, span)) = entry_chunk_span(entry, chunk) else {
-                continue; // hole
-            };
-            let crc = if chunk == last && span < BLOCK {
-                entry.tail_crc
-            } else {
-                index.get(chunk).ok_or_else(|| {
-                    Error::BlobCorrupt(
-                        partition.into(),
-                        commonware_formatting::hex(&entry.name),
-                        format!("missing checksum for chunk {chunk}"),
-                    )
-                })?
-            };
-            // Every chunk starts unverified: its first read this process
-            // runs the full verification.
-            inner.crcs.insert(
-                chunk,
-                ChunkState {
-                    crc: ChunkCrc::Ready(crc),
-                    verified: false,
-                },
-            );
+        let (phys, span) = entry_chunk_span(entry, last).expect("last chunk is backed");
+        // The refs must cover every backed chunk below the frontier (plus
+        // a full frontier chunk) contiguously from chunk 0 — the invariant
+        // capture maintains and the committed-CRC loader relies on.
+        // Validating it here keeps a corrupt-but-CRC-bound table a loud
+        // open error instead of a read-path panic.
+        let covered_end = if span == BLOCK { last + 1 } else { last };
+        let mut next = 0;
+        for r in &entry.checksums {
+            if r.first_chunk != next {
+                return Err(corrupt("checksum refs not contiguous"));
+            }
+            next += r.count as u64;
         }
-        // Except chunks recovery itself CRC-checked while verifying the
-        // adopted commit's delta manifest: their on-disk bytes are known to
-        // match these same CRCs (nothing can write a dormant blob between
-        // recovery and hydration), so first reads skip re-verification.
+        if next != covered_end {
+            return Err(corrupt("checksum coverage mismatch"));
+        }
+
+        // Chunks recovery itself CRC-checked while verifying the adopted
+        // commit's delta manifest hydrate verified: their on-disk bytes are
+        // known to match the committed CRCs (nothing can write a dormant
+        // blob between recovery and hydration), so first reads skip
+        // re-verification.
         let seeded = ready.state.lock().recovery_verified.remove(&entry.id);
         for chunk in seeded.into_iter().flatten() {
             inner.crcs.set_verified(chunk);
         }
-        // Load + verify the frontier span into the tail buffer.
-        let (phys, span) = entry_chunk_span(entry, last).unwrap();
+
+        // Load + verify the frontier span into the tail buffer. Capture
+        // records the final backed chunk's CRC in `tail_crc` whether the
+        // chunk is full or partial, so the check touches no checksum
+        // extent.
         let bytes = ready.file.read_at(phys, span as usize).await?.coalesce();
-        let expected = match inner.crcs.get(&last).expect("frontier chunk has crc").crc {
-            ChunkCrc::Ready(crc) => crc,
-            ChunkCrc::Pending => unreachable!("hydration computes every CRC"),
-        };
-        if Crc32::checksum(bytes.as_ref()) != expected {
-            return Err(Error::BlobCorrupt(
-                partition.into(),
-                commonware_formatting::hex(&entry.name),
-                "frontier chunk checksum mismatch".into(),
-            ));
+        if Crc32::checksum(bytes.as_ref()) != entry.tail_crc {
+            return Err(corrupt("frontier chunk checksum mismatch"));
         }
-        // Hydration itself verified the frontier chunk.
-        inner.crcs.set_verified(last);
+        // Hydration itself verified the frontier chunk (and holds its CRC).
+        inner.crcs.insert(
+            last,
+            ChunkState {
+                crc: ChunkCrc::Ready(entry.tail_crc),
+                verified: true,
+            },
+        );
         inner.tail_chunk = last;
         inner.tail = bytes.as_ref().to_vec();
+    } else if !entry.checksums.is_empty() {
+        // No backed chunks: capture emits no refs.
+        return Err(corrupt("checksum refs without backed chunks"));
     }
     Ok(inner)
 }

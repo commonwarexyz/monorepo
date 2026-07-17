@@ -97,6 +97,11 @@ harness = false
 path = "src/storage/benches/main.rs"
 
 [[bench]]
+name = "volume_open"
+harness = false
+path = "src/storage/benches/volume_open.rs"
+
+[[bench]]
 name = "buffer_paged"
 harness = false
 path = "src/utils/buffer/benches/bench.rs"

@@ -2516,7 +2516,7 @@ async fn test_volume_recovery_seeds_verified_chunks() {
         let inner = blob.core.inner.lock();
         for chunk in 0..4u64 {
             assert!(
-                inner.crcs.get(&chunk).unwrap().verified,
+                inner.crcs.get(chunk).unwrap().verified,
                 "chunk {chunk} must be seeded verified"
             );
         }
@@ -2566,7 +2566,7 @@ async fn test_volume_read_mixed_coalesces_and_verifies() {
     let (blob, _) = volume.open("p", b"m").await.unwrap();
     {
         let inner = blob.core.inner.lock();
-        assert!(!inner.crcs.get(&1).unwrap().verified, "hydrates unverified");
+        assert!(!inner.crcs.get(1).unwrap().verified, "hydrates unverified");
         inner.crcs.audit();
     }
     // Verify chunk 0 in place with a first read (widened to its block).
@@ -2574,8 +2574,8 @@ async fn test_volume_read_mixed_coalesces_and_verifies() {
     assert_eq!(got.as_ref(), &data[..10]);
     {
         let inner = blob.core.inner.lock();
-        assert!(inner.crcs.get(&0).unwrap().verified, "read-verified");
-        assert!(!inner.crcs.get(&1).unwrap().verified, "still unverified");
+        assert!(inner.crcs.get(0).unwrap().verified, "read-verified");
+        assert!(!inner.crcs.get(1).unwrap().verified, "still unverified");
     }
 
     // Read chunks 0..4 (mixed verified/unverified) with a caller buffer.
@@ -2604,9 +2604,9 @@ async fn test_volume_read_mixed_coalesces_and_verifies() {
     // Every covered chunk is now verified (and the counts agree).
     let inner = blob.core.inner.lock();
     for chunk in 0..4u64 {
-        assert!(inner.crcs.get(&chunk).unwrap().verified, "chunk {chunk}");
+        assert!(inner.crcs.get(chunk).unwrap().verified, "chunk {chunk}");
     }
-    assert!(!inner.crcs.get(&4).unwrap().verified, "uncovered stays");
+    assert!(!inner.crcs.get(4).unwrap().verified, "uncovered stays");
     inner.crcs.audit();
 }
 
@@ -2635,7 +2635,10 @@ async fn test_volume_read_widens_unverified_to_block() {
     let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
     let (blob, _) = volume.open("p", b"w").await.unwrap();
 
-    // First read: 100 bytes at an unaligned offset inside unverified chunk 2.
+    // First read: 100 bytes at an unaligned offset inside unverified chunk
+    // 2. Its expected CRC is not in RAM (hydration leaves values on disk),
+    // so the read first loads the committed-CRC page, then issues the
+    // widened data read.
     let offset = 2 * BLOCK + 100;
     let reads_before = recording.reads();
     let got = blob.read_at(offset, 100).await.unwrap().coalesce();
@@ -2647,14 +2650,31 @@ async fn test_volume_read_widens_unverified_to_block() {
             .filter(|(w, _, _)| !*w)
             .skip(reads_before)
             .collect();
-        assert_eq!(new_reads.len(), 1, "one inner read: {new_reads:?}");
-        assert_eq!(new_reads[0].1 % BLOCK, 0, "read starts block-aligned");
-        assert_eq!(new_reads[0].2, BLOCK as usize, "whole chunk span");
+        assert_eq!(new_reads.len(), 2, "crc load + data read: {new_reads:?}");
+        assert_eq!(new_reads[0].2, 4 * 4, "committed-crc window (4 chunks)");
+        assert_eq!(new_reads[1].1 % BLOCK, 0, "data read starts block-aligned");
+        assert_eq!(new_reads[1].2, BLOCK as usize, "whole chunk span");
     }
     assert!(
-        blob.core.inner.lock().crcs.get(&2).unwrap().verified,
+        blob.core.inner.lock().crcs.get(2).unwrap().verified,
         "the widened read verified the chunk"
     );
+
+    // A read of the neighboring unverified chunk reuses the cached CRC
+    // page: one widened data read, no further extent load.
+    let reads_before = recording.reads();
+    let got = blob.read_at(BLOCK + 7, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[9u8; 100][..]);
+    {
+        let log = recording.log.lock();
+        let new_reads: Vec<_> = log
+            .iter()
+            .filter(|(w, _, _)| !*w)
+            .skip(reads_before)
+            .collect();
+        assert_eq!(new_reads.len(), 1, "one inner read: {new_reads:?}");
+        assert_eq!(new_reads[0].2, BLOCK as usize, "whole chunk span");
+    }
 
     // Second read of the same bytes: exact length, no widening.
     let reads_before = recording.reads();
@@ -2720,6 +2740,219 @@ async fn test_volume_chunk_counts_stay_exact() {
     // Reads verify chunks and decrement the unverified count.
     let _ = blob.read_at(0, BLOCK as usize).await.unwrap();
     audit(&blob);
+}
+
+/// Hydration is lazy: opening a committed blob reads only its frontier
+/// span, leaving every other chunk's CRC on disk (loaded on the first read
+/// that needs it).
+#[tokio::test]
+async fn test_volume_hydrate_reads_only_frontier() {
+    use super::core::ChunkCrc;
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    {
+        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let (blob, _) = volume.open("p", b"lazy").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&vec![5u8; 8 * BLOCK as usize]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        // A second, tiny commit so the reopened manifest covers only the
+        // appended frontier chunk (chunks 0-7 hydrate unverified).
+        blob.write_at(8 * BLOCK, IoBuf::copy_from_slice(&[9u8]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    // Run recovery before opening, so the pinned reads are hydration's.
+    volume.scan("p").await.unwrap();
+    let reads_before = recording.reads();
+    let (blob, size) = volume.open("p", b"lazy").await.unwrap();
+    assert_eq!(size, 8 * BLOCK + 1);
+    {
+        let log = recording.log.lock();
+        let new_reads: Vec<_> = log
+            .iter()
+            .filter(|(w, _, _)| !*w)
+            .skip(reads_before)
+            .collect();
+        assert_eq!(new_reads.len(), 1, "only the frontier span: {new_reads:?}");
+        assert_eq!(new_reads[0].2, 1, "the frontier's written span");
+    }
+    {
+        let inner = blob.core.inner.lock();
+        let state = inner.crcs.get(0).unwrap();
+        assert_eq!(state.crc, ChunkCrc::Unloaded, "CRC left on disk");
+        assert!(!state.verified, "hydrates unverified");
+        let frontier = inner.crcs.get(8).unwrap();
+        assert!(frontier.verified, "hydration verifies the frontier");
+        assert!(
+            matches!(frontier.crc, ChunkCrc::Ready(_)),
+            "the frontier CRC is resident"
+        );
+        inner.crcs.audit();
+    }
+
+    // First read of an unverified chunk: the committed-CRC page load plus
+    // one widened data read, and the chunk comes out verified.
+    let got = blob.read_at(5 * BLOCK + 3, 10).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[5u8; 10][..]);
+    {
+        let inner = blob.core.inner.lock();
+        let state = inner.crcs.get(5).unwrap();
+        assert!(state.verified, "the read verified the chunk");
+        assert_eq!(state.crc, ChunkCrc::Unloaded, "verification needs no value");
+        inner.crcs.audit();
+    }
+}
+
+/// Committed chunks whose CRCs were never loaded survive the full
+/// round-trip of rewrites: a sub-block overwrite relocates via COW (its
+/// read-back checked against the loaded committed CRC), and the capture's
+/// full checksum rewrite reads the values it lacks back from the old
+/// extents (read-modify-write) before encoding the new array.
+#[tokio::test]
+async fn test_volume_unloaded_crcs_cow_and_full_rewrite() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let mut expected = vec![5u8; 8 * BLOCK as usize];
+    {
+        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+            .await
+            .unwrap();
+        let (blob, _) = volume.open("p", b"rmw").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&expected))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        blob.write_at(8 * BLOCK, IoBuf::copy_from_slice(&[9u8]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        expected.push(9);
+    }
+
+    // Reopen (chunks 0-7 unloaded) and overwrite inside frozen chunk 2: a
+    // COW whose expected CRC is loaded from the checksum extents.
+    {
+        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+            .await
+            .unwrap();
+        let (blob, _) = volume.open("p", b"rmw").await.unwrap();
+        blob.write_at(2 * BLOCK + 7, IoBuf::copy_from_slice(&[3u8; 100]))
+            .await
+            .unwrap();
+        expected[2 * BLOCK as usize + 7..2 * BLOCK as usize + 107].fill(3);
+        blob.core.inner.lock().crcs.audit();
+        // Dirt below the covered frontier: the capture rewrites the whole
+        // checksum array, reading unloaded values from the old extents.
+        blob.sync().await.unwrap();
+        blob.core.inner.lock().crcs.audit();
+    }
+
+    // Every chunk reads back correctly against the rewritten array.
+    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let (blob, size) = volume.open("p", b"rmw").await.unwrap();
+    assert_eq!(size, expected.len() as u64);
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+    blob.core.inner.lock().crcs.audit();
+}
+
+/// A delta append after reopen keeps the retained refs untouched, and a
+/// later read of one page straddling the old and new refs loads both
+/// windows.
+#[tokio::test]
+async fn test_volume_delta_append_over_unloaded_crcs() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let mut expected = vec![7u8; 4 * BLOCK as usize];
+    {
+        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+            .await
+            .unwrap();
+        let (blob, _) = volume.open("p", b"delta").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&expected))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+    {
+        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+            .await
+            .unwrap();
+        let (blob, _) = volume.open("p", b"delta").await.unwrap();
+        // Append-shaped dirt: coverage extends with a new delta ref while
+        // the old chunks' CRCs stay unloaded on the retained ref.
+        blob.write_at(
+            4 * BLOCK,
+            IoBuf::copy_from_slice(&vec![8u8; 4 * BLOCK as usize]),
+        )
+        .await
+        .unwrap();
+        expected.extend_from_slice(&[8u8; 4 * BLOCK as usize]);
+        blob.sync().await.unwrap();
+        assert_eq!(
+            blob.core
+                .inner
+                .lock()
+                .committed_entry
+                .as_ref()
+                .unwrap()
+                .checksums
+                .len(),
+            2,
+            "delta commit retains the old ref"
+        );
+    }
+    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let (blob, _) = volume.open("p", b"delta").await.unwrap();
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+    blob.core.inner.lock().crcs.audit();
+}
+
+/// Shrinking a reopened blob truncates its dense chunk state, and the
+/// boundary recompute plus a later regrow keep the counters exact.
+#[tokio::test]
+async fn test_volume_shrink_unloaded_then_regrow() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    {
+        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+            .await
+            .unwrap();
+        let (blob, _) = volume.open("p", b"shrink").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&vec![4u8; 6 * BLOCK as usize]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+    let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+        .await
+        .unwrap();
+    let (blob, _) = volume.open("p", b"shrink").await.unwrap();
+    blob.resize(2 * BLOCK + 10).await.unwrap();
+    blob.core.inner.lock().crcs.audit();
+    blob.write_at(4 * BLOCK, IoBuf::copy_from_slice(&[6u8; 100]))
+        .await
+        .unwrap();
+    blob.core.inner.lock().crcs.audit();
+    blob.sync().await.unwrap();
+
+    let mut expected = vec![4u8; 2 * BLOCK as usize + 10];
+    expected.resize(4 * BLOCK as usize, 0);
+    expected.extend_from_slice(&[6u8; 100]);
+    drop(blob);
+    drop(volume);
+    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let (blob, size) = volume.open("p", b"shrink").await.unwrap();
+    assert_eq!(size, expected.len() as u64);
+    let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+    blob.core.inner.lock().crcs.audit();
 }
 
 /// Contiguous appends land as separate runs, a capture merges them into

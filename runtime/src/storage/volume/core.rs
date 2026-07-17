@@ -23,6 +23,12 @@
 //!   quiesced chunk before reporting corruption. Extent reuse or an
 //!   in-place rewrite under an in-flight read causes a retry, never a false
 //!   corruption report.
+//! - Expected CRCs load lazily: hydration seeds chunk state without values
+//!   (see [`ChunkCrc::Unloaded`]), and the first read to verify a chunk
+//!   loads the covering page from the blob's committed checksum extents —
+//!   the extent's guard CRC is verified on the first touch of each ref —
+//!   into a bounded per-blob cache. A fully verified blob therefore holds
+//!   bitmaps, not its checksum array.
 //!
 //! Write placement follows the freeze rule (see module docs): bytes covered
 //! by the last confirmed table or the in-flight snapshot are never rewritten
@@ -34,14 +40,17 @@
 
 use super::{
     alloc::{block_align, Extent},
-    layout::Entry,
+    layout::{ChecksumRef, Entry},
     BLOCK,
 };
 use crate::{Blob as _, BufferPool, Error, IoBuf, IoBufs, IoBufsMut};
 use bytes::{BufMut as _, Bytes};
 use commonware_cryptography::{Crc32, Hasher as _};
 use commonware_formatting::hex;
-use commonware_utils::sync::{AsyncMutex, Mutex};
+use commonware_utils::{
+    bitmap::BitMap,
+    sync::{AsyncMutex, Mutex},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, OnceLock},
@@ -96,7 +105,8 @@ pub(super) struct ChunkState {
     pub verified: bool,
 }
 
-/// A chunk's CRC32C: computed, or deferred to the blob's overlay.
+/// A chunk's CRC32C: computed, deferred to the blob's overlay, or left on
+/// disk in the blob's committed checksum extents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ChunkCrc {
     /// CRC32C over the chunk's written span.
@@ -104,137 +114,472 @@ pub(super) enum ChunkCrc {
     /// Not computed yet: the chunk's overlay entry holds its authoritative
     /// span bytes (every pending chunk is overlay-resident).
     Pending,
+    /// Not resident: the chunk is untouched since hydration, so its exact
+    /// CRC is the committed value in the blob's checksum extents on disk,
+    /// loaded on demand (see [`load_committed_page`]). Residency is sticky
+    /// (every write installs the CRCs it computes and nothing revokes
+    /// them), so an unloaded chunk's committed value is immutable: delta
+    /// commits keep untouched values by reference, and a full rewrite
+    /// re-encodes them unchanged.
+    Unloaded,
 }
 
-/// Per-chunk checksum states, keyed by chunk index, with running counts of
+/// Chunks per CRC page: the dense store's page granularity and the unit
+/// loaded from a committed checksum extent (1024 chunks of 4 bytes = one
+/// [`BLOCK`] of values, mirroring the overlay's 1024-chunk pattern).
+const CRC_PAGE_CHUNKS: u64 = 1024;
+
+/// Resident-mask words per CRC page.
+const CRC_PAGE_WORDS: usize = (CRC_PAGE_CHUNKS / 64) as usize;
+
+/// One page of resident CRC values within a [`Segment`].
+#[derive(Debug)]
+struct CrcPage {
+    /// Bit `i` set: `values[i]` holds the CRC of the page's chunk `i`.
+    resident: [u64; CRC_PAGE_WORDS],
+    /// Value slots for the page's covered chunks, sized to the segment's
+    /// coverage of the page and growing with it.
+    values: Vec<u32>,
+}
+
+/// One contiguous backed chunk range's dense state: a verified bit per
+/// chunk, plus pages of resident CRC values allocated only where a value
+/// is actually held. A fully hydrated-and-verified range therefore costs
+/// one bit per chunk. A fully process-written range costs ~4.2 bytes per
+/// chunk.
+#[derive(Debug)]
+struct Segment {
+    /// Chunk count: the segment covers `[start, start + len)` where
+    /// `start` is its key in [`ChunkMap::segments`].
+    len: u64,
+    /// Per-chunk verified bits.
+    verified: BitMap,
+    /// Resident CRC values in pages of [`CRC_PAGE_CHUNKS`] chunks.
+    pages: Vec<Option<Box<CrcPage>>>,
+}
+
+impl Segment {
+    /// A segment of `len` chunks, all unverified with no resident values.
+    fn new(len: u64) -> Self {
+        Self {
+            len,
+            verified: BitMap::zeroes(len),
+            pages: (0..len.div_ceil(CRC_PAGE_CHUNKS)).map(|_| None).collect(),
+        }
+    }
+
+    /// Value slots page `page` covers in a segment of `len` chunks.
+    fn page_cover(len: u64, page: usize) -> usize {
+        (len - page as u64 * CRC_PAGE_CHUNKS).min(CRC_PAGE_CHUNKS) as usize
+    }
+
+    /// The resident CRC of segment-relative chunk `rel`, if any.
+    fn resident(&self, rel: u64) -> Option<u32> {
+        let page = self.pages[(rel / CRC_PAGE_CHUNKS) as usize].as_deref()?;
+        let slot = (rel % CRC_PAGE_CHUNKS) as usize;
+        (page.resident[slot / 64] >> (slot % 64) & 1 == 1).then(|| page.values[slot])
+    }
+
+    /// Install a resident CRC for segment-relative chunk `rel`.
+    fn set_resident(&mut self, rel: u64, value: u32) {
+        let len = self.len;
+        let idx = (rel / CRC_PAGE_CHUNKS) as usize;
+        let page = self.pages[idx].get_or_insert_with(|| {
+            Box::new(CrcPage {
+                resident: [0; CRC_PAGE_WORDS],
+                values: vec![0; Self::page_cover(len, idx)],
+            })
+        });
+        let slot = (rel % CRC_PAGE_CHUNKS) as usize;
+        page.resident[slot / 64] |= 1 << (slot % 64);
+        page.values[slot] = value;
+    }
+
+    /// Drop the resident CRC of segment-relative chunk `rel`, if any.
+    fn clear_resident(&mut self, rel: u64) {
+        if let Some(page) = self.pages[(rel / CRC_PAGE_CHUNKS) as usize].as_deref_mut() {
+            let slot = (rel % CRC_PAGE_CHUNKS) as usize;
+            page.resident[slot / 64] &= !(1 << (slot % 64));
+        }
+    }
+
+    /// Append one chunk with `state`, whose CRC must not be
+    /// [`ChunkCrc::Unloaded`]. Pending-set membership is the caller's.
+    fn push(&mut self, state: ChunkState) {
+        self.len += 1;
+        self.verified.push(state.verified);
+        let idx = ((self.len - 1) / CRC_PAGE_CHUNKS) as usize;
+        if idx == self.pages.len() {
+            self.pages.push(None);
+        }
+        // Keep an allocated page's slot coverage in step with the segment
+        // (its new slot starts non-resident: truncation may have left a
+        // stale bit behind).
+        if let Some(page) = self.pages[idx].as_deref_mut() {
+            if page.values.len() < Self::page_cover(self.len, idx) {
+                page.values.push(0);
+            }
+            let slot = ((self.len - 1) % CRC_PAGE_CHUNKS) as usize;
+            page.resident[slot / 64] &= !(1 << (slot % 64));
+        }
+        if let ChunkCrc::Ready(value) = state.crc {
+            self.set_resident(self.len - 1, value);
+        }
+    }
+
+    /// Shrink to `new_len` chunks (0 < `new_len` < `len`).
+    fn truncate(&mut self, new_len: u64) {
+        debug_assert!(0 < new_len && new_len < self.len);
+        self.verified.truncate(new_len);
+        let pages = new_len.div_ceil(CRC_PAGE_CHUNKS) as usize;
+        self.pages.truncate(pages);
+        if let Some(page) = self.pages[pages - 1].as_deref_mut() {
+            let keep = Self::page_cover(new_len, pages - 1);
+            page.values.truncate(keep);
+            // Clear the resident bits of the dropped slots.
+            let word = keep / 64;
+            let partial = !keep.is_multiple_of(64);
+            if partial {
+                page.resident[word] &= (1u64 << (keep % 64)) - 1;
+            }
+            for w in &mut page.resident[word + usize::from(partial)..] {
+                *w = 0;
+            }
+        }
+        self.len = new_len;
+    }
+}
+
+/// Per-chunk checksum state over every backed chunk, stored densely: one
+/// [`Segment`] per contiguous backed chunk range, with running counts of
 /// the chunks that are unverified or pending. The counts let a read prove
 /// "every backed chunk is verified with a ready CRC" in O(1) — the common
-/// steady state — without walking the map. All mutation goes through
+/// steady state — without walking anything. All mutation goes through
 /// methods that keep the counts exact.
+///
+/// A chunk's CRC is resident when it was computed this process, and a
+/// covered chunk without one reports [`ChunkCrc::Unloaded`] (see there).
+/// Pending
+/// chunks are tracked in a small side set (they are overlay-resident, so
+/// at most [`OVERLAY_CHUNKS`]), which overrides any stale resident value.
 #[derive(Debug, Default)]
 pub(super) struct ChunkMap {
-    states: BTreeMap<u64, ChunkState>,
-    /// Chunks with `verified == false`.
-    unverified: usize,
+    /// Dense state per contiguous backed chunk range, keyed by first
+    /// chunk. Segments never overlap. Ranges created out of order may
+    /// touch without merging (adjacent segments read exactly like one).
+    segments: BTreeMap<u64, Segment>,
     /// Chunks with a pending (deferred) CRC.
-    pending: usize,
+    pending: BTreeSet<u64>,
+    /// Chunks with `verified == false`.
+    unverified: u64,
 }
 
 impl ChunkMap {
     /// Whether every backed chunk is verified with a ready CRC.
-    pub const fn all_verified(&self) -> bool {
-        self.unverified == 0 && self.pending == 0
+    pub fn all_verified(&self) -> bool {
+        self.unverified == 0 && self.pending.is_empty()
     }
 
-    pub fn get(&self, chunk: &u64) -> Option<&ChunkState> {
-        self.states.get(chunk)
+    pub fn get(&self, chunk: u64) -> Option<ChunkState> {
+        let (&start, seg) = self.segments.range(..=chunk).next_back()?;
+        let rel = chunk.checked_sub(start).filter(|&r| r < seg.len)?;
+        Some(ChunkState {
+            crc: self.crc_of(seg, rel, chunk),
+            verified: seg.verified.get(rel),
+        })
     }
 
-    pub fn range(
+    /// The CRC state of `chunk` at segment-relative index `rel` of `seg`.
+    fn crc_of(&self, seg: &Segment, rel: u64, chunk: u64) -> ChunkCrc {
+        if !self.pending.is_empty() && self.pending.contains(&chunk) {
+            return ChunkCrc::Pending;
+        }
+        seg.resident(rel)
+            .map_or(ChunkCrc::Unloaded, ChunkCrc::Ready)
+    }
+
+    /// The states of every covered chunk in `[first, last]`, ascending.
+    pub fn iter_range(
         &self,
-        range: impl std::ops::RangeBounds<u64>,
-    ) -> std::collections::btree_map::Range<'_, u64, ChunkState> {
-        self.states.range(range)
+        first: u64,
+        last: u64,
+    ) -> impl Iterator<Item = (u64, ChunkState)> + '_ {
+        let start = self
+            .segments
+            .range(..=first)
+            .next_back()
+            .map_or(first, |(&s, _)| s);
+        self.segments
+            .range(start..=last)
+            .flat_map(move |(&s, seg)| {
+                let lo = first.max(s);
+                let hi = last.min(s + seg.len - 1);
+                (lo..=hi).map(move |chunk| {
+                    let rel = chunk - s;
+                    (
+                        chunk,
+                        ChunkState {
+                            crc: self.crc_of(seg, rel, chunk),
+                            verified: seg.verified.get(rel),
+                        },
+                    )
+                })
+            })
     }
 
-    /// Insert or replace a chunk's state.
+    /// Insert or replace a chunk's state (a known CRC state, never
+    /// [`ChunkCrc::Unloaded`] — only hydration seeds unloaded chunks).
     pub fn insert(&mut self, chunk: u64, state: ChunkState) {
-        self.count(state, 1);
-        if let Some(old) = self.states.insert(chunk, state) {
-            self.count(old, -1);
+        debug_assert!(
+            state.crc != ChunkCrc::Unloaded,
+            "insert carries a known CRC"
+        );
+        if let Some((&start, seg)) = self.segments.range_mut(..=chunk).next_back() {
+            let rel = chunk - start;
+            if rel < seg.len {
+                // Replace in place.
+                match (seg.verified.get(rel), state.verified) {
+                    (true, false) => self.unverified += 1,
+                    (false, true) => self.unverified -= 1,
+                    _ => {}
+                }
+                seg.verified.set(rel, state.verified);
+                match state.crc {
+                    ChunkCrc::Ready(value) => {
+                        self.pending.remove(&chunk);
+                        seg.set_resident(rel, value);
+                    }
+                    ChunkCrc::Pending => {
+                        self.pending.insert(chunk);
+                        seg.clear_resident(rel);
+                    }
+                    ChunkCrc::Unloaded => unreachable!("asserted above"),
+                }
+                return;
+            }
+            if rel == seg.len {
+                // Extend the segment (coverage grows contiguously).
+                seg.push(state);
+                if !state.verified {
+                    self.unverified += 1;
+                }
+                if state.crc == ChunkCrc::Pending {
+                    self.pending.insert(chunk);
+                }
+                return;
+            }
+        }
+        // A new backed range.
+        let mut seg = Segment::new(0);
+        seg.push(state);
+        self.segments.insert(chunk, seg);
+        if !state.verified {
+            self.unverified += 1;
+        }
+        if state.crc == ChunkCrc::Pending {
+            self.pending.insert(chunk);
         }
     }
 
     /// Mark a chunk verified, guarded on its CRC still being the one the
-    /// caller checked its bytes against.
+    /// caller checked its bytes against. Pending chunks were rewritten
+    /// since the check, and resident values must match. An unloaded
+    /// chunk's committed value is immutable (residency is sticky), so it
+    /// is necessarily the value the caller loaded and checked.
     pub fn mark_verified(&mut self, chunk: u64, crc: u32) {
-        if let Some(state) = self.states.get_mut(&chunk) {
-            if state.crc == ChunkCrc::Ready(crc) && !state.verified {
-                state.verified = true;
-                self.unverified -= 1;
-            }
+        let Some((&start, seg)) = self.segments.range_mut(..=chunk).next_back() else {
+            return;
+        };
+        let rel = chunk - start;
+        if rel >= seg.len || seg.verified.get(rel) {
+            return;
         }
+        if !self.pending.is_empty() && self.pending.contains(&chunk) {
+            return;
+        }
+        if seg.resident(rel).is_some_and(|value| value != crc) {
+            return;
+        }
+        seg.verified.set(rel, true);
+        self.unverified -= 1;
     }
 
     /// Mark a chunk verified unconditionally (hydration, whose own loads
     /// establish the bit).
     pub fn set_verified(&mut self, chunk: u64) {
-        if let Some(state) = self.states.get_mut(&chunk) {
-            if !state.verified {
-                state.verified = true;
-                self.unverified -= 1;
-            }
+        let Some((&start, seg)) = self.segments.range_mut(..=chunk).next_back() else {
+            return;
+        };
+        let rel = chunk - start;
+        if rel < seg.len && !seg.verified.get(rel) {
+            seg.verified.set(rel, true);
+            self.unverified -= 1;
         }
     }
 
     /// Defer a resident chunk's CRC to its (just spliced) overlay entry.
     pub fn make_pending(&mut self, chunk: u64) {
-        let state = self.states.get_mut(&chunk).expect("resident chunk has crc");
-        if state.crc != ChunkCrc::Pending {
-            state.crc = ChunkCrc::Pending;
-            self.pending += 1;
+        let (&start, seg) = self
+            .segments
+            .range_mut(..=chunk)
+            .next_back()
+            .expect("resident chunk has crc");
+        let rel = chunk - start;
+        assert!(rel < seg.len, "resident chunk has crc");
+        if self.pending.insert(chunk) {
+            seg.clear_resident(rel);
         }
     }
 
     /// Finalize a chunk's pending CRC from its span content (computed only
     /// when the chunk is in fact pending).
     pub fn finalize(&mut self, chunk: u64, crc: impl FnOnce() -> u32) {
-        if let Some(state) = self.states.get_mut(&chunk) {
-            if state.crc == ChunkCrc::Pending {
-                state.crc = ChunkCrc::Ready(crc());
-                self.pending -= 1;
-            }
+        if !self.pending.remove(&chunk) {
+            return;
         }
+        let (&start, seg) = self
+            .segments
+            .range_mut(..=chunk)
+            .next_back()
+            .expect("pending chunk is covered");
+        seg.set_resident(chunk - start, crc());
     }
 
     pub fn clear(&mut self) {
-        self.states.clear();
+        self.segments.clear();
+        self.pending.clear();
         self.unverified = 0;
-        self.pending = 0;
     }
 
-    /// Drop every chunk the predicate rejects.
-    pub fn retain(&mut self, mut keep: impl FnMut(u64) -> bool) {
-        let Self {
-            states,
-            unverified,
-            pending,
-        } = self;
-        states.retain(|&chunk, state| {
-            if keep(chunk) {
-                return true;
+    /// Drop every chunk beyond `last_kept` (shrink).
+    pub fn truncate(&mut self, last_kept: u64) {
+        drop(self.pending.split_off(&(last_kept + 1)));
+        for (_, seg) in self.segments.split_off(&(last_kept + 1)) {
+            self.unverified -= seg.len - seg.verified.count_ones();
+        }
+        if let Some((&start, seg)) = self.segments.range_mut(..=last_kept).next_back() {
+            let keep = last_kept + 1 - start;
+            if keep < seg.len {
+                for rel in keep..seg.len {
+                    if !seg.verified.get(rel) {
+                        self.unverified -= 1;
+                    }
+                }
+                seg.truncate(keep);
             }
-            if !state.verified {
-                *unverified -= 1;
-            }
-            if state.crc == ChunkCrc::Pending {
-                *pending -= 1;
-            }
-            false
-        });
+        }
     }
 
-    /// Adjust the counts for `state` entering (+1) or leaving (-1) the map.
-    fn count(&mut self, state: ChunkState, delta: isize) {
-        if !state.verified {
-            self.unverified = self.unverified.checked_add_signed(delta).expect("balanced");
+    /// Seed dense state for every chunk covered by `runs` (hydration): all
+    /// unverified, with CRCs left on disk ([`ChunkCrc::Unloaded`]).
+    pub fn seed(&mut self, runs: &BTreeMap<u64, RunMeta>) {
+        debug_assert!(self.segments.is_empty(), "seed into an empty map");
+        let mut open: Option<(u64, u64)> = None;
+        for (&logical, run) in runs {
+            let lo = chunk_of(logical);
+            let hi = chunk_of(logical + run.len - 1);
+            match &mut open {
+                // Runs never share a chunk, but adjacent runs may cover
+                // adjacent chunks: coalesce into one segment.
+                Some((_, end)) if lo <= *end + 1 => *end = hi,
+                _ => {
+                    if let Some((s, e)) = open.replace((lo, hi)) {
+                        self.seed_segment(s, e);
+                    }
+                }
+            }
         }
-        if state.crc == ChunkCrc::Pending {
-            self.pending = self.pending.checked_add_signed(delta).expect("balanced");
+        if let Some((s, e)) = open {
+            self.seed_segment(s, e);
         }
+    }
+
+    /// Seed one all-unverified segment covering chunks `[first, last]`.
+    fn seed_segment(&mut self, first: u64, last: u64) {
+        let len = last - first + 1;
+        self.segments.insert(first, Segment::new(len));
+        self.unverified += len;
+    }
+
+    /// Whether any covered chunk below `end` lacks a resident CRC (its
+    /// value lives only in the committed checksum extents on disk).
+    /// Pending chunks count as resident: their value is derivable from the
+    /// overlay. Word-at-a-time, so a fully resident blob scans
+    /// chunks/64 words.
+    pub fn has_unloaded(&self, end: u64) -> bool {
+        for (&start, seg) in &self.segments {
+            if start >= end {
+                break;
+            }
+            let cover = (end - start).min(seg.len);
+            for (idx, page) in seg.pages.iter().enumerate() {
+                let base = idx as u64 * CRC_PAGE_CHUNKS;
+                if base >= cover {
+                    break;
+                }
+                let slots = ((cover - base).min(CRC_PAGE_CHUNKS)) as usize;
+                let Some(page) = page.as_deref() else {
+                    // An unallocated page holds no values. Only its pending
+                    // chunks (overlay-resident) are covered elsewhere.
+                    let lo = start + base;
+                    if self.pending.range(lo..lo + slots as u64).count() < slots {
+                        return true;
+                    }
+                    continue;
+                };
+                for word in 0..slots.div_ceil(64) {
+                    let covered = if (word + 1) * 64 <= slots {
+                        u64::MAX
+                    } else {
+                        (1u64 << (slots % 64)) - 1
+                    };
+                    let mut missing = !page.resident[word] & covered;
+                    if missing == 0 {
+                        continue;
+                    }
+                    if self.pending.is_empty() {
+                        return true;
+                    }
+                    while missing != 0 {
+                        let bit = missing.trailing_zeros() as u64;
+                        let chunk = start + base + word as u64 * 64 + bit;
+                        if !self.pending.contains(&chunk) {
+                            return true;
+                        }
+                        missing &= missing - 1;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Assert the running counts against a full recount (tests only).
     #[cfg(test)]
     pub fn audit(&self) {
-        let unverified = self.states.values().filter(|s| !s.verified).count();
-        let pending = self
-            .states
-            .values()
-            .filter(|s| s.crc == ChunkCrc::Pending)
-            .count();
+        let mut unverified = 0;
+        let mut pending = 0;
+        for (&start, seg) in &self.segments {
+            assert_eq!(
+                seg.verified.len(),
+                seg.len,
+                "verified bitmap sized to segment"
+            );
+            for (_, state) in self.iter_range(start, start + seg.len - 1) {
+                if !state.verified {
+                    unverified += 1;
+                }
+                if state.crc == ChunkCrc::Pending {
+                    pending += 1;
+                }
+            }
+        }
+        for &chunk in &self.pending {
+            let state = self.get(chunk).expect("pending chunk is covered");
+            assert_eq!(state.crc, ChunkCrc::Pending, "pending set is authoritative");
+        }
         assert_eq!(
-            (self.unverified, self.pending),
+            (self.unverified, self.pending.len()),
             (unverified, pending),
             "chunk counts drifted"
         );
@@ -256,6 +601,73 @@ const OVERLAY_CHUNKS: usize = 1024;
 pub(super) struct OverlayEntry {
     stamp: u64,
     bytes: Vec<u8>,
+}
+
+/// Cap on a blob's cached committed-CRC pages (16 pages of 1024 values is
+/// 64 KiB, covering 64 MiB of data). A page is needed once per chunk
+/// lifetime — a verified chunk never consults its CRC again — so the cache
+/// only has to ride out the current read burst (a sequential scan reuses
+/// one page for 1024 consecutive chunks).
+const CRC_CACHE_PAGES: usize = 16;
+
+/// Committed CRC values loaded from the blob's checksum extents for
+/// verification, cached in pages with LRU stamps (the overlay's pattern).
+///
+/// Entries serve chunks without a resident CRC (residency always wins), so
+/// entries never need invalidation: an unloaded chunk's committed value is
+/// immutable (see [`ChunkCrc::Unloaded`]), and values cached for chunks
+/// that later became resident or uncovered are simply never consulted.
+#[derive(Debug, Default)]
+pub(super) struct CrcCache {
+    clock: u64,
+    /// Loaded windows keyed by page index (chunk / [`CRC_PAGE_CHUNKS`]).
+    pages: BTreeMap<u64, CachedCrcs>,
+}
+
+/// One cached window: committed values for chunks `[first, first + len)`,
+/// the intersection of a page with the checksum ref it was loaded from.
+#[derive(Debug)]
+struct CachedCrcs {
+    stamp: u64,
+    first: u64,
+    values: Vec<u32>,
+}
+
+impl CrcCache {
+    /// The cached committed CRC of `chunk`, refreshing its page's LRU
+    /// stamp.
+    pub fn get(&mut self, chunk: u64) -> Option<u32> {
+        self.clock += 1;
+        let stamp = self.clock;
+        let page = self.pages.get_mut(&(chunk / CRC_PAGE_CHUNKS))?;
+        page.stamp = stamp;
+        let rel = chunk.checked_sub(page.first)?;
+        page.values.get(rel as usize).copied()
+    }
+
+    /// Insert or replace the window starting at chunk `first`, evicting
+    /// the least-recently-used page beyond the cap.
+    pub fn insert(&mut self, first: u64, values: Vec<u32>) {
+        self.clock += 1;
+        let stamp = self.clock;
+        self.pages.insert(
+            first / CRC_PAGE_CHUNKS,
+            CachedCrcs {
+                stamp,
+                first,
+                values,
+            },
+        );
+        if self.pages.len() > CRC_CACHE_PAGES {
+            let lru = self
+                .pages
+                .iter()
+                .min_by_key(|(_, page)| page.stamp)
+                .map(|(&page, _)| page)
+                .expect("cache is nonempty");
+            self.pages.remove(&lru);
+        }
+    }
 }
 
 /// Per-blob mutable state.
@@ -287,6 +699,13 @@ pub(super) struct BlobInner {
     pub overlay_clock: u64,
     /// Chunks whose content changed since the last snapshot.
     pub dirty_chunks: BTreeSet<u64>,
+    /// Committed CRC pages loaded for verification (bounded LRU).
+    pub crc_cache: CrcCache,
+    /// Committed checksum refs whose extent guard was verified this
+    /// process (or whose bytes this process assembled and wrote, see
+    /// `commit::finalize`). Loads from a guarded ref read only the page
+    /// window they need instead of streaming the whole extent.
+    pub crc_guarded: Vec<ChecksumRef>,
     /// Bumped on any relocation/drop of backing (COW, resize-down, remove).
     pub generation: u64,
     /// Durable shadow block from the last commit covering this blob.
@@ -867,135 +1286,171 @@ async fn plan_stretch<S: crate::Storage>(
         },
     }
 
-    let plan = {
-        let mut state = ready.state.lock();
-        let mut inner = blob.inner.lock();
-        let chunk = chunk_of(cursor);
-        let chunk_start = chunk * BLOCK;
+    /// A planning attempt: a plan, or a committed CRC to load first.
+    enum Outcome {
+        Plan(Plan),
+        NeedCrc(u64),
+    }
 
-        // Merged coverage and placement: the base view for published
-        // writes, the overlay-over-base view for staged writes.
-        let covering = staged.map_or_else(
-            || {
-                inner
-                    .covering(chunk_start)
-                    .map(|(logical, run)| (logical, run, false))
-            },
-            |st| st.covering(&inner, chunk_start),
-        );
-        match covering {
-            Some((run_logical, run, private)) => {
-                let backed_end = run_logical + run.len;
-                let writable = match staged {
-                    // Base freeze rule: young extents are exempt; otherwise
-                    // only bytes at or beyond the freeze boundary.
-                    None => run.born > state.snapshot_seq || cursor >= inner.freeze_size,
-                    // Batch placement rule: private extents always; a
-                    // published extent only for bytes no snapshot can
-                    // capture (at or beyond BOTH the published size and the
-                    // freeze boundary; the born exemption does not apply —
-                    // young extents are still published to readers).
-                    Some(_) => private || cursor >= inner.size.max(inner.freeze_size),
-                };
-                if !writable {
-                    let (span_physical, span_len) = staged
-                        .map_or_else(
-                            || inner.chunk_span(chunk),
-                            |st| st.chunk_span(&inner, chunk),
-                        )
-                        .expect("covered chunk has a span");
-                    // Source the old span from the overlay when it is valid
-                    // for the merged view (base content the batch has not
-                    // staged over), otherwise from a checked disk read-back
-                    // whose expected CRC pairs with the merged view that
-                    // produced the span (staged overlays win).
-                    let staged_crc = staged.and_then(|st| st.crcs.get(&chunk)).copied();
-                    let resident = match staged_crc {
-                        None => inner.overlay_get(chunk).map(<[u8]>::to_vec),
-                        Some(_) => None,
+    // The COW of a chunk untouched since hydration needs its committed CRC
+    // (the read-back check): loaded outside the locks, memoized, and the
+    // plan re-derived. The target chunk is fixed by `cursor`, so the memo
+    // guarantees the second attempt resolves.
+    let mut loaded_crc: Option<(u64, u32)> = None;
+    let plan = loop {
+        let outcome = 'plan: {
+            let mut state = ready.state.lock();
+            let mut inner = blob.inner.lock();
+            let chunk = chunk_of(cursor);
+            let chunk_start = chunk * BLOCK;
+
+            // Merged coverage and placement: the base view for published
+            // writes, the overlay-over-base view for staged writes.
+            let covering = staged.map_or_else(
+                || {
+                    inner
+                        .covering(chunk_start)
+                        .map(|(logical, run)| (logical, run, false))
+                },
+                |st| st.covering(&inner, chunk_start),
+            );
+            match covering {
+                Some((run_logical, run, private)) => {
+                    let backed_end = run_logical + run.len;
+                    let writable = match staged {
+                        // Base freeze rule: young extents are exempt; otherwise
+                        // only bytes at or beyond the freeze boundary.
+                        None => run.born > state.snapshot_seq || cursor >= inner.freeze_size,
+                        // Batch placement rule: private extents always; a
+                        // published extent only for bytes no snapshot can
+                        // capture (at or beyond BOTH the published size and the
+                        // freeze boundary; the born exemption does not apply —
+                        // young extents are still published to readers).
+                        Some(_) => private || cursor >= inner.size.max(inner.freeze_size),
                     };
-                    let source = resident.map_or_else(
-                        || {
-                            let crc = staged_crc
-                                .or_else(|| inner.crcs.get(&chunk).copied())
-                                .expect("covered chunk has crc")
-                                .crc;
-                            match crc {
-                                ChunkCrc::Ready(expected) => CowSource::Disk { expected },
-                                // Pending chunks are overlay-resident, and
-                                // residency was checked above.
-                                ChunkCrc::Pending => {
-                                    unreachable!("pending chunk without overlay entry")
-                                }
+                    if !writable {
+                        let (span_physical, span_len) = staged
+                            .map_or_else(
+                                || inner.chunk_span(chunk),
+                                |st| st.chunk_span(&inner, chunk),
+                            )
+                            .expect("covered chunk has a span");
+                        // Source the old span from the overlay when it is valid
+                        // for the merged view (base content the batch has not
+                        // staged over), otherwise from a checked disk read-back
+                        // whose expected CRC pairs with the merged view that
+                        // produced the span (staged overlays win).
+                        let staged_crc = staged.and_then(|st| st.crcs.get(&chunk)).copied();
+                        let resident = match staged_crc {
+                            None => inner.overlay_get(chunk).map(<[u8]>::to_vec),
+                            Some(_) => None,
+                        };
+                        let source = match resident {
+                            Some(bytes) => {
+                                debug_assert_eq!(bytes.len() as u64, span_len);
+                                CowSource::Overlay(bytes)
                             }
-                        },
-                        |bytes| {
-                            debug_assert_eq!(bytes.len() as u64, span_len);
-                            CowSource::Overlay(bytes)
-                        },
-                    );
-                    let extent = state.alloc.allocate(BLOCK);
-                    Plan::Cow {
-                        span_physical,
-                        span_len,
-                        extent,
-                        seq: state.seq,
-                        source,
-                    }
-                } else {
-                    // In place. The write may start beyond the backed end
-                    // (a gap inside this run's frontier chunk): zero-fill
-                    // from the backed end. It may extend past the backing
-                    // but only within the extent's capacity.
-                    let fill_from = cursor.min(backed_end);
-                    let stretch_end = end.min(run_logical + run.capacity);
-                    debug_assert!(stretch_end > cursor);
-                    // Overlay fast path (base mode): the write stays inside
-                    // this chunk's written span and the span is resident.
-                    let chunk_end = chunk_start + BLOCK;
-                    let span_end = chunk_end.min(backed_end);
-                    if staged.is_none()
-                        && end.min(chunk_end) <= span_end
-                        && inner.overlay_get(chunk).is_some()
-                    {
-                        let (span_physical, _) =
-                            inner.chunk_span(chunk).expect("covered chunk has a span");
-                        Plan::Overlay {
-                            stretch_end: end.min(chunk_end),
-                            physical: span_physical + (cursor - chunk_start),
-                            run_logical,
-                            run,
-                            private,
-                        }
+                            None => {
+                                let crc = staged_crc
+                                    .or_else(|| inner.crcs.get(chunk))
+                                    .expect("covered chunk has crc")
+                                    .crc;
+                                let expected = match crc {
+                                    ChunkCrc::Ready(expected) => expected,
+                                    // Pending chunks are overlay-resident, and
+                                    // residency was checked above.
+                                    ChunkCrc::Pending => {
+                                        unreachable!("pending chunk without overlay entry")
+                                    }
+                                    // Untouched since hydration: the expected
+                                    // CRC is the committed value.
+                                    ChunkCrc::Unloaded => {
+                                        let known = loaded_crc
+                                            .filter(|&(c, _)| c == chunk)
+                                            .map(|(_, crc)| crc)
+                                            .or_else(|| inner.crc_cache.get(chunk));
+                                        match known {
+                                            Some(expected) => expected,
+                                            None => break 'plan Outcome::NeedCrc(chunk),
+                                        }
+                                    }
+                                };
+                                CowSource::Disk { expected }
+                            }
+                        };
+                        let extent = state.alloc.allocate(BLOCK);
+                        Outcome::Plan(Plan::Cow {
+                            span_physical,
+                            span_len,
+                            extent,
+                            seq: state.seq,
+                            source,
+                        })
                     } else {
-                        Plan::InPlace {
-                            stretch_end,
-                            run_logical,
-                            run,
-                            fill_from,
-                            private,
+                        // In place. The write may start beyond the backed end
+                        // (a gap inside this run's frontier chunk): zero-fill
+                        // from the backed end. It may extend past the backing
+                        // but only within the extent's capacity.
+                        let fill_from = cursor.min(backed_end);
+                        let stretch_end = end.min(run_logical + run.capacity);
+                        debug_assert!(stretch_end > cursor);
+                        // Overlay fast path (base mode): the write stays inside
+                        // this chunk's written span and the span is resident.
+                        let chunk_end = chunk_start + BLOCK;
+                        let span_end = chunk_end.min(backed_end);
+                        if staged.is_none()
+                            && end.min(chunk_end) <= span_end
+                            && inner.overlay_get(chunk).is_some()
+                        {
+                            let (span_physical, _) =
+                                inner.chunk_span(chunk).expect("covered chunk has a span");
+                            Outcome::Plan(Plan::Overlay {
+                                stretch_end: end.min(chunk_end),
+                                physical: span_physical + (cursor - chunk_start),
+                                run_logical,
+                                run,
+                                private,
+                            })
+                        } else {
+                            Outcome::Plan(Plan::InPlace {
+                                stretch_end,
+                                run_logical,
+                                run,
+                                fill_from,
+                                private,
+                            })
                         }
                     }
                 }
+                None => {
+                    // Unbacked chunk: fresh extent from this chunk's base to the
+                    // end of the write (or the next backed run, which must not
+                    // be overlapped).
+                    let next_backed = staged
+                        .map_or_else(
+                            || inner.runs.range(chunk_start..).next().map(|(&l, _)| l),
+                            |st| st.next_backed(&inner, chunk_start),
+                        )
+                        .unwrap_or(u64::MAX);
+                    let stretch_end = end.min(next_backed);
+                    let len = block_align(stretch_end - chunk_start);
+                    let extent = state.alloc.allocate(len);
+                    Outcome::Plan(Plan::Fresh {
+                        stretch_end,
+                        extent,
+                        chunk_base: chunk_start,
+                        seq: state.seq,
+                    })
+                }
             }
-            None => {
-                // Unbacked chunk: fresh extent from this chunk's base to the
-                // end of the write (or the next backed run, which must not
-                // be overlapped).
-                let next_backed = staged
-                    .map_or_else(
-                        || inner.runs.range(chunk_start..).next().map(|(&l, _)| l),
-                        |st| st.next_backed(&inner, chunk_start),
-                    )
-                    .unwrap_or(u64::MAX);
-                let stretch_end = end.min(next_backed);
-                let len = block_align(stretch_end - chunk_start);
-                let extent = state.alloc.allocate(len);
-                Plan::Fresh {
-                    stretch_end,
-                    extent,
-                    chunk_base: chunk_start,
-                    seq: state.seq,
+        };
+        match outcome {
+            Outcome::Plan(plan) => break plan,
+            Outcome::NeedCrc(chunk) => {
+                if let Some((first, values)) =
+                    Box::pin(load_committed_page(ready, blob, chunk)).await?
+                {
+                    loaded_crc = Some((chunk, values[(chunk - first) as usize]));
                 }
             }
         }
@@ -1376,7 +1831,7 @@ async fn read_span_prefix<S: crate::Storage>(
             if inner.tail_chunk == chunk && inner.tail.len() >= prefix_len {
                 return Ok((inner.tail[..prefix_len].to_vec(), true));
             }
-            let verified = inner.crcs.get(&chunk).is_some_and(|s| s.verified);
+            let verified = inner.crcs.get(chunk).is_some_and(|s| s.verified);
             if let Some(bytes) = inner.overlay_get(chunk) {
                 if bytes.len() >= prefix_len {
                     return Ok((bytes[..prefix_len].to_vec(), verified));
@@ -1424,7 +1879,7 @@ async fn read_span_suffix<S: crate::Storage>(
             if inner.tail_chunk == chunk && inner.tail.len() >= e {
                 return Ok((inner.tail[s..e].to_vec(), true));
             }
-            let verified = inner.crcs.get(&chunk).is_some_and(|st| st.verified);
+            let verified = inner.crcs.get(chunk).is_some_and(|st| st.verified);
             if let Some(bytes) = inner.overlay_get(chunk) {
                 if bytes.len() >= e {
                     return Ok((bytes[s..e].to_vec(), verified));
@@ -1699,6 +2154,184 @@ pub(super) fn merge_frozen_runs(runs: &mut BTreeMap<u64, RunMeta>) {
     }
 }
 
+/// Decode a checksum extent's big-endian CRC values.
+fn decode_crcs(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
+}
+
+/// Read the value window `[w0, w1)` (chunk indexes relative to
+/// `r.first_chunk`) of committed checksum extent `r`. With `verify` set,
+/// the WHOLE extent is streamed to compute its guard CRC, returned for the
+/// caller to check. Otherwise only the window's bytes are read.
+async fn read_ref_window<S: crate::Storage>(
+    ready: &Ready<S>,
+    r: &ChecksumRef,
+    w0: u64,
+    w1: u64,
+    verify: bool,
+) -> Result<(Vec<u32>, Option<u32>), Error> {
+    if !verify {
+        let bytes = ready
+            .file
+            .read_at(r.offset + w0 * 4, ((w1 - w0) * 4) as usize)
+            .await?
+            .coalesce();
+        return Ok((decode_crcs(bytes.as_ref()).collect(), None));
+    }
+    /// Streaming step for guard verification of large extents.
+    const STEP: u64 = 1 << 22;
+    let mut hasher = Crc32::new();
+    let mut values = Vec::with_capacity((w1 - w0) as usize);
+    let total = r.count as u64 * 4;
+    let mut pos = 0;
+    while pos < total {
+        let len = STEP.min(total - pos);
+        let bytes = ready.file.read_at(r.offset + pos, len as usize).await?;
+        let bytes = bytes.coalesce();
+        hasher.update(bytes.as_ref());
+        // Capture the window's intersection with this step.
+        let lo = (w0 * 4).max(pos);
+        let hi = (w1 * 4).min(pos + len);
+        if hi > lo {
+            values.extend(decode_crcs(
+                &bytes.as_ref()[(lo - pos) as usize..(hi - pos) as usize],
+            ));
+        }
+        pos += len;
+    }
+    Ok((values, Some(hasher.finalize().as_u32())))
+}
+
+/// Load the committed-CRC page covering `chunk` from the blob's checksum
+/// extents into its cache, returning the loaded window as
+/// `(first chunk, values)`.
+///
+/// Returns `Ok(None)` when the chunk no longer holds an unloaded CRC
+/// (rewritten or shrunk away meanwhile): the caller re-derives its plan.
+///
+/// The extent's guard CRC is verified on the first touch of each ref (the
+/// whole extent is streamed once). Later loads from the same ref read just
+/// the page window. Loads race commits, which swap the committed entry and
+/// release superseded extents for reuse: like the data path's generation
+/// protocol, the ref is re-checked against the then-current committed
+/// entry after the read, and `commit::finalize` swaps entries BEFORE
+/// applying frees, so a ref that is still referenced was never freed
+/// during the read. A removed blob's extents are gated on its open handles
+/// (every caller reaches this through one).
+///
+/// Callers box this future (a cold path): inlining its streaming reads
+/// would deepen every read and write future's layout.
+pub(super) async fn load_committed_page<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+    chunk: u64,
+) -> Result<Option<(u64, Vec<u32>)>, Error> {
+    loop {
+        let (r, verify) = {
+            let inner = blob.inner.lock();
+            match inner.crcs.get(chunk).map(|s| s.crc) {
+                Some(ChunkCrc::Unloaded) => {}
+                _ => return Ok(None),
+            }
+            let covering = inner.committed_entry.as_ref().and_then(|e| {
+                e.checksums
+                    .iter()
+                    .find(|r| r.first_chunk <= chunk && chunk < r.first_chunk + r.count as u64)
+            });
+            let Some(r) = covering else {
+                // Hydration validates that the committed refs cover every
+                // committed chunk, and residency is never revoked: an
+                // unloaded chunk outside the refs is a bug, never a
+                // reachable disk state.
+                unreachable!("unloaded chunk outside committed checksum coverage")
+            };
+            (*r, !inner.crc_guarded.contains(r))
+        };
+        let page = chunk / CRC_PAGE_CHUNKS;
+        let w0 = (page * CRC_PAGE_CHUNKS).max(r.first_chunk) - r.first_chunk;
+        let w1 = ((page + 1) * CRC_PAGE_CHUNKS).min(r.first_chunk + r.count as u64) - r.first_chunk;
+        let (values, guard) = read_ref_window(ready, &r, w0, w1, verify).await?;
+        {
+            let mut inner = blob.inner.lock();
+            // A commit swapped the entry mid-read (the extent may have been
+            // recycled): retry against the current refs.
+            if !inner
+                .committed_entry
+                .as_ref()
+                .is_some_and(|e| e.checksums.contains(&r))
+            {
+                continue;
+            }
+            if let Some(guard) = guard {
+                if guard != r.crc {
+                    return Err(Error::BlobCorrupt(
+                        blob.partition.clone(),
+                        hex(&blob.name),
+                        "checksum extent mismatch".into(),
+                    ));
+                }
+                if !inner.crc_guarded.contains(&r) {
+                    inner.crc_guarded.push(r);
+                }
+            }
+            inner.crc_cache.insert(r.first_chunk + w0, values.clone());
+        }
+        return Ok(Some((r.first_chunk + w0, values)));
+    }
+}
+
+/// Load the full contents of the committed checksum refs `refs`
+/// (guard-verified) for a capture's read-modify-write of a full checksum
+/// rewrite: chunks untouched this process keep their CRC only on disk, and
+/// re-encoding the array needs every value. The caller must hold the
+/// commit lock and the blob's write lock, under which the refs' extents
+/// stay referenced (their frees are queued by this capture at the earliest
+/// and applied only once this commit confirms).
+pub(super) async fn load_committed_refs<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+    refs: &[ChecksumRef],
+) -> Result<Vec<(u64, Vec<u32>)>, Error> {
+    let mut out = Vec::with_capacity(refs.len());
+    for r in refs {
+        let (values, guard) = read_ref_window(ready, r, 0, r.count as u64, true).await?;
+        if guard.expect("full reads verify") != r.crc {
+            return Err(Error::BlobCorrupt(
+                blob.partition.clone(),
+                hex(&blob.name),
+                "checksum extent mismatch".into(),
+            ));
+        }
+        let mut inner = blob.inner.lock();
+        if !inner.crc_guarded.contains(r) {
+            inner.crc_guarded.push(*r);
+        }
+        out.push((r.first_chunk, values));
+    }
+    Ok(out)
+}
+
+/// The committed value of `chunk` within loaded windows (sorted by first
+/// chunk, non-overlapping).
+pub(super) fn window_value(windows: &[(u64, Vec<u32>)], chunk: u64) -> Option<u32> {
+    let i = windows.partition_point(|(first, _)| *first <= chunk);
+    let (first, values) = &windows[i.checked_sub(1)?];
+    values.get((chunk - first) as usize).copied()
+}
+
+/// Insert `window` into a sorted window list (replacing an identical
+/// start).
+fn insert_window(windows: &mut Vec<(u64, Vec<u32>)>, window: (u64, Vec<u32>)) {
+    let i = windows.partition_point(|(first, _)| *first < window.0);
+    if windows.get(i).is_some_and(|(first, _)| *first == window.0) {
+        windows[i] = window;
+    } else {
+        windows.insert(i, window);
+    }
+}
+
 /// Cap on one coalesced inner read issued by [`read_verified`].
 const MAX_READ_SPAN: u64 = 1 << 20;
 
@@ -1744,16 +2377,27 @@ struct ReadPlan {
     splices: Vec<(u64, Vec<u8>)>,
 }
 
+/// A [`plan_read`] outcome: a servable plan, or the chunks whose committed
+/// CRCs must be loaded from disk before one can be derived.
+enum Planned {
+    Plan(ReadPlan),
+    Missing(Vec<u64>),
+}
+
 /// Derive the read plan for `[offset, end)` under the blob's state lock.
 ///
 /// Runs and chunk states are walked with two linear range scans in logical
 /// order — no per-chunk point queries. Verified chunks contribute exactly
-/// the requested bytes of their span. Unverified chunks contribute their
-/// whole written span, block-aligned within the run, which the read then
-/// CRC-verifies: every read doubles as verification progress. Segments
+/// the requested bytes of their span (their CRC is never consulted).
+/// Unverified chunks contribute their whole written span, block-aligned
+/// within the run, which the read then CRC-verifies: every read doubles as
+/// verification progress. An unverified chunk's expected CRC comes from
+/// its resident value, the caller's loaded windows, or the committed-CRC
+/// cache. Chunks with none yield [`Planned::Missing`] and the caller loads
+/// their pages from the checksum extents before re-planning. Segments
 /// coalesce into one read whenever physically and logically contiguous —
 /// verified and unverified alike — bounded by [`MAX_READ_SPAN`].
-fn plan_read(inner: &mut BlobInner, offset: u64, end: u64) -> ReadPlan {
+fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u32>)]) -> Planned {
     // Steady-state fast path: when every backed chunk is verified with a
     // ready CRC (O(1) to prove), a request covered by one run is a single
     // exact read — no chunk-state walk at all. Other shapes (holes,
@@ -1761,7 +2405,7 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64) -> ReadPlan {
     if inner.crcs.all_verified() {
         if let Some((l, r)) = inner.covering(offset) {
             if end <= l + r.len {
-                return ReadPlan {
+                return Planned::Plan(ReadPlan {
                     generation: inner.generation,
                     head: Some(ReadGroup {
                         physical: r.physical + (offset - l),
@@ -1771,7 +2415,7 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64) -> ReadPlan {
                     }),
                     rest: Vec::new(),
                     splices: Vec::new(),
-                };
+                });
             }
         }
     }
@@ -1781,17 +2425,26 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64) -> ReadPlan {
     let mut rest: Vec<ReadGroup> = Vec::new();
     // Requested slices of pending chunks: (logical start, copy end).
     let mut pending: Vec<(u64, u64)> = Vec::new();
+    // Unverified chunks whose expected CRC is not in RAM.
+    let mut missing: Vec<u64> = Vec::new();
     {
+        // The chunk-state walk borrows the map while the committed-CRC
+        // cache is consulted mutably (LRU stamps): split the fields.
+        let BlobInner {
+            runs: all_runs,
+            crcs,
+            crc_cache,
+            ..
+        } = inner;
         // Track the covering run alongside the chunk walk: start at the run
         // at or before the first chunk and advance as chunks pass.
-        let start = inner
-            .runs
+        let start = all_runs
             .range(..=first * BLOCK)
             .next_back()
             .map_or(first * BLOCK, |(&l, _)| l);
-        let mut runs = inner.runs.range(start..);
+        let mut runs = all_runs.range(start..);
         let mut run: Option<(u64, RunMeta)> = None;
-        for (&chunk, &state) in inner.crcs.range(first..=last) {
+        for (chunk, state) in crcs.iter_range(first, last) {
             let chunk_start = chunk * BLOCK;
             while run.is_none_or(|(l, r)| l + r.len <= chunk_start) {
                 match runs.next() {
@@ -1819,21 +2472,32 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64) -> ReadPlan {
                 }
                 continue;
             }
-            let ChunkCrc::Ready(crc) = state.crc else {
-                unreachable!("pending chunks are handled above")
-            };
-            let (seg_lo, seg_hi) = if state.verified {
+            let (seg_lo, seg_hi, check) = if state.verified {
                 // Bytes past the span within the chunk are holes (zeros
                 // already in place). The request may fall entirely in them.
                 if hi <= lo {
                     continue;
                 }
-                (lo, hi)
+                (lo, hi, None)
             } else {
-                (chunk_start, chunk_start + span)
+                let crc = match state.crc {
+                    ChunkCrc::Ready(crc) => Some(crc),
+                    ChunkCrc::Unloaded => {
+                        window_value(loaded, chunk).or_else(|| crc_cache.get(chunk))
+                    }
+                    ChunkCrc::Pending => unreachable!("pending chunks are handled above"),
+                };
+                let Some(crc) = crc else {
+                    missing.push(chunk);
+                    continue;
+                };
+                (
+                    chunk_start,
+                    chunk_start + span,
+                    Some((chunk_start, span, crc)),
+                )
             };
             let physical = r.physical + (seg_lo - l);
-            let check = (!state.verified).then_some((chunk_start, span, crc));
             let tail = if rest.is_empty() {
                 head.as_mut()
             } else {
@@ -1864,6 +2528,9 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64) -> ReadPlan {
             }
         }
     }
+    if !missing.is_empty() {
+        return Planned::Missing(missing);
+    }
     // Copy the pending slices out of the overlay under the same lock as the
     // plan (coherent regardless of racing writers). A separate mutable pass:
     // overlay reads refresh LRU stamps.
@@ -1881,12 +2548,12 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64) -> ReadPlan {
             )
         })
         .collect();
-    ReadPlan {
+    Planned::Plan(ReadPlan {
         generation: inner.generation,
         head,
         rest,
         splices,
-    }
+    })
 }
 
 /// Publish the chunks a read verified — only where the state each was
@@ -1936,8 +2603,12 @@ pub(super) async fn read_verified<S: crate::Storage>(
         .checked_add(len as u64)
         .ok_or(Error::OffsetOverflow)?;
 
+    // Committed-CRC windows loaded for this read (see below), kept across
+    // retries: an unloaded chunk's committed value is immutable, so the
+    // windows stay valid whatever the retry re-plans.
+    let mut loaded: Vec<(u64, Vec<u32>)> = Vec::new();
     'retry: loop {
-        let plan = {
+        let planned = {
             let mut inner = blob.inner.lock();
             if end > inner.size {
                 return Err(Error::BlobInsufficientLength);
@@ -1949,7 +2620,23 @@ pub(super) async fn read_verified<S: crate::Storage>(
                     bufs
                 }));
             }
-            plan_read(&mut inner, offset, end)
+            plan_read(&mut inner, offset, end, &loaded)
+        };
+        let plan = match planned {
+            Planned::Plan(plan) => plan,
+            // Unverified chunks whose expected CRC is neither resident nor
+            // cached: load their committed pages, then re-plan.
+            Planned::Missing(chunks) => {
+                for chunk in chunks {
+                    if window_value(&loaded, chunk).is_some() {
+                        continue;
+                    }
+                    if let Some(window) = Box::pin(load_committed_page(ready, blob, chunk)).await? {
+                        insert_window(&mut loaded, window);
+                    }
+                }
+                continue 'retry;
+            }
         };
         let generation = plan.generation;
 
@@ -2060,27 +2747,50 @@ pub(super) async fn read_verified<S: crate::Storage>(
                     Disk { phys: u64, span: u64, crc: u32 },
                     Ram(Vec<u8>),
                 }
-                let source = {
-                    let mut inner = blob.inner.lock();
-                    if inner.generation != generation {
-                        continue 'retry;
-                    }
-                    match inner.chunk_span(chunk) {
-                        None => None,
-                        Some((phys, span)) => {
-                            let state = *inner.crcs.get(&chunk).expect("backed chunk has crc");
-                            match state.crc {
-                                ChunkCrc::Ready(crc) => Some(Stable::Disk { phys, span, crc }),
-                                // The racing writer left the chunk pending:
-                                // its overlay entry is the stable content.
-                                ChunkCrc::Pending => Some(Stable::Ram(
-                                    inner
-                                        .overlay_get(chunk)
-                                        .expect("pending chunk is overlay-resident")
-                                        .to_vec(),
-                                )),
+                let source = loop {
+                    let need_load = {
+                        let mut inner = blob.inner.lock();
+                        if inner.generation != generation {
+                            continue 'retry;
+                        }
+                        match inner.chunk_span(chunk) {
+                            None => break None,
+                            Some((phys, span)) => {
+                                let state = inner.crcs.get(chunk).expect("backed chunk has crc");
+                                match state.crc {
+                                    ChunkCrc::Ready(crc) => {
+                                        break Some(Stable::Disk { phys, span, crc })
+                                    }
+                                    // The racing writer left the chunk
+                                    // pending: its overlay entry is the
+                                    // stable content.
+                                    ChunkCrc::Pending => {
+                                        break Some(Stable::Ram(
+                                            inner
+                                                .overlay_get(chunk)
+                                                .expect("pending chunk is overlay-resident")
+                                                .to_vec(),
+                                        ))
+                                    }
+                                    // Untouched since hydration: the stable
+                                    // CRC is the committed value.
+                                    ChunkCrc::Unloaded => {
+                                        match window_value(&loaded, chunk)
+                                            .or_else(|| inner.crc_cache.get(chunk))
+                                        {
+                                            Some(crc) => {
+                                                break Some(Stable::Disk { phys, span, crc })
+                                            }
+                                            None => true,
+                                        }
+                                    }
+                                }
                             }
                         }
+                    };
+                    debug_assert!(need_load);
+                    if let Some(window) = Box::pin(load_committed_page(ready, blob, chunk)).await? {
+                        insert_window(&mut loaded, window);
                     }
                 };
                 let stable: IoBuf = match source {
@@ -2225,7 +2935,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             inner.tail_chunk = 0;
         } else {
             let boundary = chunk_of(len - 1);
-            inner.crcs.retain(|c| c <= boundary);
+            inner.crcs.truncate(boundary);
             inner.dirty_chunks.retain(|&c| c <= boundary);
             inner.dirty_chunks.insert(boundary);
         }
