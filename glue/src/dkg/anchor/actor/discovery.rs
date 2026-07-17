@@ -31,7 +31,6 @@ enum BoundaryResponseError {
     BlockCommitment,
     Decode(CodecError),
     InvalidFinalization,
-    InvalidPayload,
 }
 
 pub(super) struct Pending {
@@ -329,9 +328,7 @@ where
                 return;
             }
             Err(
-                BoundaryResponseError::BlockCommitment
-                | BoundaryResponseError::InvalidFinalization
-                | BoundaryResponseError::InvalidPayload,
+                BoundaryResponseError::BlockCommitment | BoundaryResponseError::InvalidFinalization,
             ) => {
                 commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
                 self.pending = Some(pending);
@@ -394,9 +391,6 @@ where
     V: Variant,
     T: Strategy,
 {
-    if !V::check_payload(verifier, finalization.proposal.payload) {
-        return Err(BoundaryResponseError::InvalidPayload);
-    }
     if !finalization.verify(rng, verifier, strategy) {
         return Err(BoundaryResponseError::InvalidFinalization);
     }
@@ -415,31 +409,34 @@ mod tests {
     use super::*;
     use crate::dkg::tests::mocks;
     use commonware_codec::Write as _;
-    use commonware_coding::{Config as CodingConfig, ReedSolomon};
+    use commonware_coding::ReedSolomon;
     use commonware_consensus::{
         CertifiableBlock,
-        marshal::{
-            coding::{
-                Coding,
-                types::{CodedBlock, coding_config_for_participants},
-            },
+        marshal::coding::{
+            Coding,
+            types::{CodedBlock, coding_config_for_participants},
         },
-        simplex::types::{Finalization, Finalize, Proposal},
+        simplex::{
+            scheme::bls12381_threshold::vrf::Scheme as ThresholdScheme,
+            types::{Finalization, Finalize, Proposal},
+        },
         types::{Epoch, Height, Round, View, coding::Commitment},
     };
     use commonware_cryptography::{
-        Digest as _, Digestible as _, Hasher as _, certificate::Verifier as _, sha256::Sha256,
+        Digest as _, Digestible as _, Hasher as _, bls12381::primitives::variant::MinPk,
+        sha256::Sha256,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::NZU16;
     use std::time::Duration;
+
+    const THRESHOLD_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_ANCHOR_DISCOVERY_TEST";
 
     type CodingContext =
         commonware_consensus::simplex::types::Context<Commitment, mocks::TestPublicKey>;
     type CodingBlock = mocks::MockBlock<mocks::TestDigest, CodingContext>;
-    type TestCodingVariant =
-        Coding<CodingBlock, ReedSolomon<Sha256>, Sha256, mocks::TestPublicKey>;
+    type TestCodingVariant = Coding<CodingBlock, ReedSolomon<Sha256>, Sha256, mocks::TestPublicKey>;
+    type TestThresholdScheme = ThresholdScheme<mocks::TestPublicKey, MinPk>;
 
     impl CertifiableBlock for CodingBlock {
         type Context = CodingContext;
@@ -449,12 +446,10 @@ mod tests {
         }
     }
 
-    fn finalization<D>(
-        proposal: Proposal<D>,
-        schemes: &[mocks::TestScheme],
-    ) -> Finalization<mocks::TestScheme, D>
+    fn finalization<S, D>(proposal: Proposal<D>, schemes: &[S]) -> Finalization<S, D>
     where
         D: commonware_cryptography::Digest,
+        S: commonware_consensus::simplex::scheme::Scheme<D>,
     {
         let finalizes = schemes
             .iter()
@@ -464,21 +459,31 @@ mod tests {
             .expect("finalization quorum")
     }
 
-    fn split_response<'a, V>(
+    fn split_response<'a, S, V>(
         message: &'a [u8],
-        verifier: &mocks::TestScheme,
-    ) -> (Finalization<mocks::TestScheme, V::Commitment>, &'a [u8])
+        verifier: &S,
+    ) -> (Finalization<S, V::Commitment>, &'a [u8])
     where
+        S: Scheme<V::Commitment>,
         V: Variant,
-        mocks::TestScheme: Scheme<V::Commitment>,
     {
-        let response = wire::read_response_finalization::<mocks::TestScheme, V, _>(
+        let response = wire::read_response_finalization::<S, V, _>(
             message,
             &verifier.certificate_codec_config(),
         )
         .expect("response decoded")
         .expect("response tag");
         (response.finalization, response.body)
+    }
+
+    fn threshold_fixture(
+        context: &mut deterministic::Context,
+    ) -> commonware_cryptography::certificate::mocks::Fixture<TestThresholdScheme> {
+        commonware_consensus::simplex::scheme::bls12381_threshold::vrf::fixture::<MinPk, _>(
+            context,
+            THRESHOLD_NAMESPACE,
+            4,
+        )
     }
 
     fn coding_block(
@@ -500,51 +505,71 @@ mod tests {
             ),
         };
         let block = CodingBlock::new::<Sha256>(context, parent, Height::new(1), 0);
-        CodedBlock::new(block, coding_config_for_participants(participants), &Sequential)
+        CodedBlock::new(
+            block,
+            coding_config_for_participants(participants),
+            &Sequential,
+        )
     }
 
     #[test]
-    fn invalid_coding_config_is_rejected_before_block_decode() {
+    fn invalid_coding_finalization_is_rejected_before_block_decode() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|mut context| async move {
-            let fixture = mocks::scheme_fixture_n(&mut context, 4);
-            let invalid_config = CodingConfig {
-                minimum_shards: NZU16!(1),
-                extra_shards: NZU16!(1),
-            };
-            let payload = Commitment::from((
-                Sha256::hash(b"block"),
-                Sha256::hash(b"root"),
-                Sha256::hash(b"context"),
-                invalid_config,
-            ));
-            let finalization = finalization(
-                Proposal::new(Round::new(Epoch::zero(), View::new(1)), View::zero(), payload),
+            let fixture = threshold_fixture(&mut context);
+            let verifier = TestThresholdScheme::certificate_verifier(
+                THRESHOLD_NAMESPACE,
+                *fixture.verifier.identity(),
+            );
+            let block = coding_block(
+                fixture.participants[0].clone(),
+                fixture
+                    .participants
+                    .len()
+                    .try_into()
+                    .expect("participant count fits u16"),
+            );
+            let payload = TestCodingVariant::commitment(&block);
+            let mut finalization = finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    payload,
+                ),
                 &fixture.schemes,
             );
+            finalization.proposal.payload = Commitment::from((
+                Sha256::hash(b"tampered block"),
+                Sha256::hash(b"tampered root"),
+                Sha256::hash(b"tampered context"),
+                coding_config_for_participants(
+                    fixture
+                        .participants
+                        .len()
+                        .try_into()
+                        .expect("participant count fits u16"),
+                ),
+            ));
             let mut message = Vec::new();
             wire::Tag::Response.write(&mut message);
             finalization.write(&mut message);
+            message.extend_from_slice(b"body must not be decoded");
 
             let (finalization, body) =
-                split_response::<TestCodingVariant>(&message, &fixture.schemes[0]);
-            let result = authenticate_boundary_response::<
-                _,
-                mocks::TestScheme,
-                TestCodingVariant,
-                _,
-            >(
-                &mut context,
-                &fixture.schemes[0],
-                &Sequential,
-                &(),
-                finalization,
-                body,
-            );
+                split_response::<TestThresholdScheme, TestCodingVariant>(&message, &verifier);
+            let result =
+                authenticate_boundary_response::<_, TestThresholdScheme, TestCodingVariant, _>(
+                    &mut context,
+                    &verifier,
+                    &Sequential,
+                    &(),
+                    finalization,
+                    body,
+                );
 
             assert!(matches!(
                 result,
-                Err(BoundaryResponseError::InvalidPayload)
+                Err(BoundaryResponseError::InvalidFinalization)
             ));
         });
     }
@@ -572,7 +597,10 @@ mod tests {
             .encode()
             .to_vec();
             let (finalization, body) =
-                split_response::<mocks::TestMarshalVariant>(&message, &fixture.schemes[0]);
+                split_response::<mocks::TestScheme, mocks::TestMarshalVariant>(
+                    &message,
+                    &fixture.schemes[0],
+                );
 
             let response = authenticate_boundary_response::<
                 _,
@@ -608,34 +636,87 @@ mod tests {
             );
             let payload = TestCodingVariant::commitment(&block);
             let finalization = finalization(
-                Proposal::new(Round::new(Epoch::zero(), View::new(1)), View::zero(), payload),
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    payload,
+                ),
                 &fixture.schemes,
             );
-            let message = wire::Message::<mocks::TestScheme, TestCodingVariant>::Response(
-                wire::Response {
+            let message =
+                wire::Message::<mocks::TestScheme, TestCodingVariant>::Response(wire::Response {
                     finalization,
                     block,
-                },
-            )
-            .encode()
-            .to_vec();
-            let (finalization, body) =
-                split_response::<TestCodingVariant>(&message, &fixture.schemes[0]);
-
-            let response = authenticate_boundary_response::<
-                _,
-                mocks::TestScheme,
-                TestCodingVariant,
-                _,
-            >(
-                &mut context,
+                })
+                .encode()
+                .to_vec();
+            let (finalization, body) = split_response::<mocks::TestScheme, TestCodingVariant>(
+                &message,
                 &fixture.schemes[0],
-                &Sequential,
-                &(),
-                finalization,
-                body,
-            )
-            .expect("coding response authenticated");
+            );
+
+            let response =
+                authenticate_boundary_response::<_, mocks::TestScheme, TestCodingVariant, _>(
+                    &mut context,
+                    &fixture.schemes[0],
+                    &Sequential,
+                    &(),
+                    finalization,
+                    body,
+                )
+                .expect("coding response authenticated");
+
+            assert_eq!(response.block.height(), Height::new(1));
+            assert_eq!(TestCodingVariant::commitment(&response.block), payload);
+        });
+    }
+
+    #[test]
+    fn valid_coding_response_decodes_with_certificate_verifier() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|mut context| async move {
+            let fixture = threshold_fixture(&mut context);
+            let verifier = TestThresholdScheme::certificate_verifier(
+                THRESHOLD_NAMESPACE,
+                *fixture.verifier.identity(),
+            );
+            let block = coding_block(
+                fixture.participants[0].clone(),
+                fixture
+                    .participants
+                    .len()
+                    .try_into()
+                    .expect("participant count fits u16"),
+            );
+            let payload = TestCodingVariant::commitment(&block);
+            let finalization = finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    payload,
+                ),
+                &fixture.schemes,
+            );
+            let message =
+                wire::Message::<TestThresholdScheme, TestCodingVariant>::Response(wire::Response {
+                    finalization,
+                    block,
+                })
+                .encode()
+                .to_vec();
+            let (finalization, body) =
+                split_response::<TestThresholdScheme, TestCodingVariant>(&message, &verifier);
+
+            let response =
+                authenticate_boundary_response::<_, TestThresholdScheme, TestCodingVariant, _>(
+                    &mut context,
+                    &verifier,
+                    &Sequential,
+                    &(),
+                    finalization,
+                    body,
+                )
+                .expect("coding response authenticated");
 
             assert_eq!(response.block.height(), Height::new(1));
             assert_eq!(TestCodingVariant::commitment(&response.block), payload);
