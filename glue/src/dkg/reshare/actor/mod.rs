@@ -100,17 +100,14 @@
 //! # Follower Mode
 //!
 //! The actor follows instead of participating when setup cannot read the boundary
-//! [`EpochInfo`] for the epoch containing marshal's
-//! next unprocessed height, and that height is already past the first block of
-//! the epoch. This is the state-sync handoff case: marshal has synchronized into
-//! the middle of an epoch, so the node missed non-replayable P2P dealing traffic
-//! and cannot safely join that ceremony.
+//! [`EpochInfo`] for the epoch containing marshal's next unprocessed height. This can occur during
+//! state-sync handoff because marshal may not retain the preceding boundary block.
 //!
 //! ```text
 //! processed height + 1 = H
 //!        |
 //!        v
-//! H is inside epoch N, not first(N)
+//! H is in epoch N
 //!        |
 //!        v
 //! boundary EpochInfo(N) unavailable locally

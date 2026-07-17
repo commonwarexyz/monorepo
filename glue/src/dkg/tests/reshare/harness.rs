@@ -414,6 +414,8 @@ pub(super) struct ReshareEngine {
     stores: Arc<Mutex<BTreeMap<ed25519::PublicKey, MemorySecretStore>>>,
     pub(super) registrations: Arc<Mutex<BTreeMap<ed25519::PublicKey, Vec<Registration>>>>,
     pub(super) state_syncs: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
+    state_sync_floor: Option<Height>,
+    marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
 }
 
@@ -538,6 +540,8 @@ impl ReshareEngine {
             stores: Arc::new(Mutex::new(BTreeMap::new())),
             registrations: Arc::new(Mutex::new(BTreeMap::new())),
             state_syncs: Arc::new(Mutex::new(BTreeMap::new())),
+            state_sync_floor: None,
+            marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
         }
     }
@@ -550,6 +554,15 @@ impl ReshareEngine {
     pub(super) const fn with_sharing_mode(mut self, sharing_mode: Mode) -> Self {
         self.sharing_mode = sharing_mode;
         self
+    }
+
+    pub(super) const fn with_state_sync_floor(mut self, height: Height) -> Self {
+        self.state_sync_floor = Some(height);
+        self
+    }
+
+    pub(super) const fn state_sync_floor(&self) -> Option<Height> {
+        self.state_sync_floor
     }
 
     fn store(&self, public_key: &ed25519::PublicKey) -> MemorySecretStore {
@@ -722,7 +735,22 @@ impl EngineDefinition for ReshareEngine {
         });
         let probe_handle = probe_actor.start(probe_network);
         if should_state_sync {
-            let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
+            let finalization = match self.state_sync_floor {
+                Some(height) => {
+                    let source = self
+                        .marshals
+                        .lock()
+                        .values()
+                        .next()
+                        .cloned()
+                        .expect("state-sync floor source must be available");
+                    source
+                        .get_finalization(height)
+                        .await
+                        .expect("configured state-sync floor must be finalized")
+                }
+                None => probe_mailbox.subscribe().await.expect("probe stopped"),
+            };
             plan = plan.with_floor(finalization);
         }
         let (marshal_actor, marshal, _) = MarshalActor::init(
@@ -748,6 +776,9 @@ impl EngineDefinition for ReshareEngine {
             },
         )
         .await;
+        self.marshals
+            .lock()
+            .insert(public_key.clone(), marshal.clone());
 
         let db_config = FixedConfig {
             merkle_config: MmrJournalConfig {
