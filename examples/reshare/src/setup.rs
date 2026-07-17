@@ -1,6 +1,6 @@
 use crate::{
     config::{self, NetworkConfig, NodeConfig, PeerConfig},
-    types::{self, FileSecretStore, MAX_PARTICIPANTS, Participants},
+    types::{self, BLOCKS_PER_EPOCH, FileSecretStore, MAX_PARTICIPANTS, Participants},
 };
 use clap::{Args, ValueEnum};
 use commonware_consensus::types::Epoch;
@@ -14,7 +14,7 @@ use commonware_cryptography::{
 };
 use commonware_glue::dkg::types::{EpochInfo, EpochOutcome};
 use commonware_math::algebra::Random;
-use commonware_utils::{N3f1, ordered::Map};
+use commonware_utils::{Faults as _, N3f1, ordered::Map};
 use rand::rngs::StdRng;
 use std::{
     fs,
@@ -152,8 +152,16 @@ fn validate(args: &Setup) -> anyhow::Result<()> {
     if args.committee_size > args.peers {
         anyhow::bail!("committee size exceeds peer count");
     }
+    if u64::from(N3f1::quorum(args.committee_size)) > dealer_log_slots() {
+        anyhow::bail!("committee quorum exceeds available dealer log slots");
+    }
     port(args, args.peers - 1)?;
     Ok(())
+}
+
+const fn dealer_log_slots() -> u64 {
+    let blocks = BLOCKS_PER_EPOCH.get();
+    blocks.saturating_sub(blocks / 2 + 1)
 }
 
 fn port(args: &Setup, i: usize) -> anyhow::Result<u16> {
@@ -249,6 +257,19 @@ mod tests {
             node_dir: PathBuf::from("unused"),
             peers: 2,
             committee_size: 3,
+            base_port: 3000,
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            bootstrap: Bootstrap::Trusted,
+        };
+        assert!(validate(&args).is_err());
+    }
+
+    #[test]
+    fn setup_rejects_committee_without_enough_dealer_log_slots() {
+        let args = Setup {
+            node_dir: PathBuf::from("unused"),
+            peers: 47,
+            committee_size: 47,
             base_port: 3000,
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             bootstrap: Bootstrap::Trusted,
