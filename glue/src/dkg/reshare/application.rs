@@ -161,10 +161,10 @@ where
                 }
             }
         } else if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late)) {
-            let reservation = self.reshare.next_log(height).await;
+            let mut reservation = self.reshare.next_log(height).await;
             let payload = reservation
-                .as_ref()
-                .map(|reservation| reservation.payload().clone());
+                .as_mut()
+                .and_then(|reservation| reservation.take_payload());
             (payload, reservation)
         } else {
             (None, None)

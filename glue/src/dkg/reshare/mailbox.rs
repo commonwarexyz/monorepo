@@ -51,7 +51,7 @@ where
     A: Acknowledgement,
 {
     height: Height,
-    payload: Payload<V, C>,
+    payload: Option<Payload<V, C>>,
     release: Option<ActorSender<Message<B, V, C, A>>>,
 }
 
@@ -69,14 +69,16 @@ where
     ) -> Self {
         Self {
             height,
-            payload,
+            payload: Some(payload),
             release: Some(release),
         }
     }
 
-    /// Returns the reserved dealer log payload.
-    pub const fn payload(&self) -> &Payload<V, C> {
-        &self.payload
+    /// Takes the reserved dealer log payload.
+    ///
+    /// Returns `None` if the payload was already taken.
+    pub const fn take_payload(&mut self) -> Option<Payload<V, C>> {
+        self.payload.take()
     }
 
     /// Keeps the log reserved for this height until finalization confirms
