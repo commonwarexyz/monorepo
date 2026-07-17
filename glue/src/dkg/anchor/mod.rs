@@ -815,6 +815,63 @@ mod tests {
     }
 
     #[test]
+    fn terminal_epoch_boundary_response_does_not_panic() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with_boundaries(&mut context, Vec::new()).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            harness.send_target_finalization();
+            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+
+            let terminal_finalization = finalization(
+                Proposal::new(
+                    Round::new(Epoch::new(u64::MAX), View::new(1)),
+                    View::zero(),
+                    harness.boundary.digest(),
+                ),
+                &harness.schemes,
+            );
+            let message = wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::Response(
+                wire::Response {
+                    finalization: terminal_finalization,
+                    block: harness.boundary.clone(),
+                },
+            )
+            .encode()
+            .to_vec();
+            let decoded = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant>(
+                message.as_slice(),
+                &harness.schemes[2].certificate_codec_config(),
+                &(),
+            )
+            .expect("terminal response decoded")
+            .expect("terminal response tag");
+            assert_eq!(decoded.finalization.epoch(), Epoch::new(u64::MAX));
+
+            harness.source_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                message,
+                false,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(
+                blocked.contains(&(
+                    harness.participants[1].clone(),
+                    harness.participants[0].clone()
+                )),
+                "terminal-epoch response should block source peer"
+            );
+            assert!(matches!(
+                subscription.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+        });
+    }
+
+    #[test]
     fn ignores_certificates_until_subscribed() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

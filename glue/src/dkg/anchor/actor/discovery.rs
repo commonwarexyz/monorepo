@@ -277,10 +277,16 @@ where
             }
         };
 
-        let response_epoch = response.finalization.epoch().next();
-        if response_epoch < pending.epoch {
+        let Some(expected_finalization_epoch) = pending.epoch.previous() else {
+            commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
+            self.pending = Some(pending);
+            return;
+        };
+
+        let response_finalization_epoch = response.finalization.epoch();
+        if response_finalization_epoch < expected_finalization_epoch {
             debug!(
-                response_epoch = %response_epoch,
+                response_finalization_epoch = %response_finalization_epoch,
                 pending_epoch = %pending.epoch,
                 "ignoring stale bootstrap boundary response"
             );
@@ -288,7 +294,7 @@ where
             return;
         }
 
-        match self.artifact_from_response(&pending, response) {
+        match self.artifact_from_response(&pending, expected_finalization_epoch, response) {
             Some(artifact) => self.resolve(artifact),
             None => {
                 commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
@@ -300,12 +306,13 @@ where
     fn artifact_from_response(
         &mut self,
         pending: &Pending,
+        expected_finalization_epoch: Epoch,
         response: wire::Response<S, V>,
     ) -> Option<ActorArtifact<S, V>> {
         if response.block.height() != pending.height {
             return None;
         }
-        if response.finalization.epoch() != pending.epoch.previous()? {
+        if response.finalization.epoch() != expected_finalization_epoch {
             return None;
         }
         if response.finalization.proposal.payload != V::commitment(&response.block) {
