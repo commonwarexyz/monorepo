@@ -13,7 +13,7 @@ use commonware_consensus::{
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
-    BatchVerifier, Signer,
+    BatchVerifier, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{DealerLog, Info, Logs, observe},
         primitives::{group::Share, variant::Variant as BlsVariant},
@@ -34,7 +34,7 @@ use commonware_utils::{
 };
 use futures::StreamExt;
 use rand_core::CryptoRng;
-use std::{collections::BTreeMap, ops::ControlFlow};
+use std::{collections::BTreeMap, num::NonZeroU32, ops::ControlFlow};
 use tracing::{Instrument as _, debug, info, info_span, warn};
 
 #[derive(Clone)]
@@ -59,6 +59,20 @@ struct PendingLogScan<'a, V: BlsVariant, P> {
     epocher: FixedEpocher,
     finalized_tip: Option<Height>,
     final_height: Height,
+}
+
+fn validate_future_participants<P: PublicKey>(participants: &Set<P>, max_participants: NonZeroU32) {
+    assert!(
+        !participants.is_empty(),
+        "participants provider returned empty future participant set"
+    );
+
+    let actual = participants.len();
+    let max = max_participants.get() as usize;
+    assert!(
+        actual <= max,
+        "participants provider returned oversized future participant set: {actual} > {max}"
+    );
 }
 
 /// The final block is special because proposal and verification may run ahead
@@ -517,6 +531,7 @@ where
                         .participants_provider
                         .participants(epoch.next().next())
                         .await;
+                    validate_future_participants(&players, self.max_participants);
                     *next_players = Some(players.clone());
                     players
                 }
@@ -670,7 +685,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-    use commonware_utils::{N3f1, NZU64, channel::oneshot, ordered::Set};
+    use commonware_utils::{N3f1, NZU32, NZU64, channel::oneshot, ordered::Set};
     use futures::{FutureExt, stream};
     use std::sync::Arc;
 
@@ -710,6 +725,18 @@ mod tests {
             finalized_tip: None,
             final_height: Height::new(3),
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "participants provider returned empty future participant set")]
+    fn future_participants_rejects_empty_provider_set() {
+        validate_future_participants(&Set::<PublicKey>::default(), NZU32!(4));
+    }
+
+    #[test]
+    #[should_panic(expected = "participants provider returned oversized future participant set")]
+    fn future_participants_rejects_oversized_provider_set() {
+        validate_future_participants(&players(), NZU32!(3));
     }
 
     #[test]

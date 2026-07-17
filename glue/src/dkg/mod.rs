@@ -223,6 +223,10 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// node MUST return an identical [`Set`], with the same membership AND the
     /// same ordering, and repeated calls MUST return the same `Set`.
     ///
+    /// The returned set MUST be non-empty and MUST contain no more than the
+    /// actor's configured `max_participants` entries. A violation is treated as
+    /// a deterministic provider contract failure.
+    ///
     /// In continuous reshare, this hook is consulted while building or
     /// verifying an epoch's final block. That final block carries the
     /// [`types::EpochInfo`] for the next epoch, and this set is embedded
