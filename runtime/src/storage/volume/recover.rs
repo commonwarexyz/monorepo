@@ -551,9 +551,7 @@ pub(super) async fn hydrate<S: crate::Storage>(
         // recovery and hydration), so first reads skip re-verification.
         let seeded = ready.state.lock().recovery_verified.remove(&entry.id);
         for chunk in seeded.into_iter().flatten() {
-            if let Some(state) = inner.crcs.get_mut(&chunk) {
-                state.verified = true;
-            }
+            inner.crcs.set_verified(chunk);
         }
         // Load + verify the frontier span into the tail buffer.
         let (phys, span) = entry_chunk_span(entry, last).unwrap();
@@ -570,11 +568,7 @@ pub(super) async fn hydrate<S: crate::Storage>(
             ));
         }
         // Hydration itself verified the frontier chunk.
-        inner
-            .crcs
-            .get_mut(&last)
-            .expect("frontier chunk has crc")
-            .verified = true;
+        inner.crcs.set_verified(last);
         inner.tail_chunk = last;
         inner.tail = bytes.as_ref().to_vec();
     }

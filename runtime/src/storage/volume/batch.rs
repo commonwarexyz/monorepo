@@ -493,7 +493,7 @@ fn publish_overlay(inner: &mut BlobInner, overlay: StagedBlob) {
             inner.dirty_chunks.clear();
         } else {
             let boundary = chunk_of(overlay.size - 1);
-            inner.crcs.retain(|&c, _| c <= boundary);
+            inner.crcs.retain(|c| c <= boundary);
             inner.dirty_chunks.retain(|&c| c <= boundary);
             inner.dirty_chunks.insert(boundary);
         }

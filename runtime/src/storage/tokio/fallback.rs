@@ -36,7 +36,7 @@ impl Blob {
         bufs: &mut IoBufs,
     ) -> Result<(), Error> {
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
         file.seek(SeekFrom::Start(offset))
             .await
@@ -76,7 +76,7 @@ impl crate::Blob for Blob {
         unsafe { bufs.set_len(len) };
         let mut file = self.file.lock().await;
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
         file.seek(SeekFrom::Start(offset))
             .await
@@ -124,7 +124,7 @@ impl crate::Blob for Blob {
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.lock().await;
         let len = len
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
         file.set_len(len).await.map_err(|e| {
             Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())

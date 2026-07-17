@@ -178,7 +178,7 @@ impl crate::Storage for Storage {
             let mut header_bytes = [0u8; Header::SIZE];
             file.read_exact(&mut header_bytes)
                 .map_err(|_| Error::ReadFailed)?;
-            Header::from(header_bytes, raw_len, &versions)
+            Header::from(header_bytes, raw_len, &versions, Header::DATA_OFFSET_U64)
                 .map_err(|e| e.into_error(partition, name))?
         };
 
@@ -322,7 +322,7 @@ impl crate::Blob for Blob {
         };
 
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
 
         // Zero-length reads succeed trivially without submitting to the ring.
@@ -348,7 +348,7 @@ impl crate::Blob for Blob {
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
 
         if !bufs.has_remaining() {
@@ -367,7 +367,7 @@ impl crate::Blob for Blob {
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
 
         if !bufs.has_remaining() {
@@ -382,7 +382,7 @@ impl crate::Blob for Blob {
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let len = len
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
         self.file.set_len(len).map_err(|e| {
             Error::BlobResizeFailed(
@@ -513,14 +513,14 @@ mod tests {
             "raw file should have 8-byte header"
         );
 
-        // Test 2: Logical offset handling - write at offset 0 stores at raw offset 8
+        // Test 2: Logical offset handling - write at offset 0 stores at the data offset
         let data = b"hello world";
         blob.write_at(0, data.to_vec()).await.unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
         let metadata = std::fs::metadata(&file_path).unwrap();
-        assert_eq!(metadata.len(), Header::SIZE_U64 + data.len() as u64);
+        assert_eq!(metadata.len(), Header::DATA_OFFSET_U64 + data.len() as u64);
 
         // Verify raw file layout
         let raw_content = std::fs::read(&file_path).unwrap();
@@ -530,10 +530,10 @@ mod tests {
             &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
             &Header::RUNTIME_VERSION.to_be_bytes()
         );
-        // Data should start at offset 8
-        assert_eq!(&raw_content[Header::SIZE..], data);
+        // Data starts at the aligned data offset.
+        assert_eq!(&raw_content[Header::DATA_OFFSET..], data);
 
-        // Test 3: Read at logical offset 0 returns data from raw offset 8
+        // Test 3: Read at logical offset 0 returns data from the data offset
         let read_buf = blob.read_at(0, data.len()).await.unwrap().coalesce();
         assert_eq!(read_buf, data);
 
@@ -543,18 +543,18 @@ mod tests {
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert_eq!(
             metadata.len(),
-            Header::SIZE_U64 + 5,
-            "resize(5) should result in 13 raw bytes"
+            Header::DATA_OFFSET_U64 + 5,
+            "resize(5) should keep 5 data bytes past the data offset"
         );
 
-        // resize(0) should leave only header
+        // resize(0) should leave no data past the data offset
         blob.resize(0).await.unwrap();
         blob.sync().await.unwrap();
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert_eq!(
             metadata.len(),
-            Header::SIZE_U64,
-            "resize(0) should leave only header"
+            Header::DATA_OFFSET_U64,
+            "resize(0) should leave no data past the data offset"
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size

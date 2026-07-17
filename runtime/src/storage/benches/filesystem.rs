@@ -108,11 +108,60 @@ pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+/// On macOS there is no fadvise: map each file under the benchmark root and
+/// ask the kernel to invalidate its cached pages with `msync(MS_INVALIDATE)`.
+/// Walking the whole root covers both per-blob layouts and single-file
+/// (volume) layouts.
+#[cfg(target_os = "macos")]
+pub fn drop_page_cache(root: &Path, _partition: &str, _name: &[u8]) -> io::Result<()> {
+    fn evict_file(path: &Path) -> io::Result<()> {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len() as usize;
+        if len == 0 {
+            return Ok(());
+        }
+        // SAFETY: the fd is valid for the duration of the call and the
+        // mapping is unmapped before the file is closed.
+        unsafe {
+            use std::os::fd::AsRawFd;
+            let addr = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            );
+            if addr == libc::MAP_FAILED {
+                return Err(io::Error::last_os_error());
+            }
+            let rc = libc::msync(addr, len, libc::MS_INVALIDATE);
+            libc::munmap(addr, len);
+            if rc != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+    fn walk(dir: &Path) -> io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(&path)?;
+            } else {
+                evict_file(&path)?;
+            }
+        }
+        Ok(())
+    }
+    walk(root)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn drop_page_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "page cache eviction is only supported on Linux",
+        "page cache eviction is only supported on Linux and macOS",
     ))
 }
 

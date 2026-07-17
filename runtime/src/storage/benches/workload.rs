@@ -46,7 +46,11 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
 async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
     let sequential = cfg.workload == Workload::ReadSeq;
     let file_size = cfg.file_size();
-    let total_blocks = file_size / cfg.io_size as u64;
+    let mut total_blocks = file_size / cfg.io_size as u64;
+    // A shifted read of the final block would run past the file.
+    if cfg.offset_shift > 0 {
+        total_blocks -= 1;
+    }
     let inflight = cfg.inflight as u64;
 
     // Fill the blob with random data so reads return realistic content.
@@ -73,6 +77,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
                         blob,
                         deadline,
                         cfg.io_size,
+                        cfg.offset_shift,
                         sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
                     )
                     .await
@@ -81,6 +86,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
                         blob,
                         deadline,
                         cfg.io_size,
+                        cfg.offset_shift,
                         random_blocks(worker_seed(cfg.seed, worker), total_blocks),
                     )
                     .await
@@ -291,7 +297,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
                     let total_blocks = current_len.load(Ordering::Relaxed) / io_size;
                     rng.random_range(0..total_blocks)
                 };
-                run_read_loop(blob, deadline, cfg.io_size, random_block).await
+                run_read_loop(blob, deadline, cfg.io_size, 0, random_block).await
             }
         })
         .collect::<FuturesUnordered<_>>()

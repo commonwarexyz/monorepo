@@ -171,6 +171,18 @@ stability_scope!(BETA {
         /// Size of the header as u64 for offset calculations.
         pub(crate) const SIZE_U64: u64 = Self::SIZE as u64;
 
+        /// Offset at which blob data begins on file-backed storage. The
+        /// header occupies the first [`Self::SIZE`] bytes and data starts
+        /// at the next 4096-byte boundary, so a block-aligned blob offset
+        /// maps to a block-aligned file offset and block-granular I/O
+        /// never straddles filesystem blocks. The memory backend packs
+        /// data directly after the header instead (alignment carries no
+        /// meaning there).
+        pub(crate) const DATA_OFFSET: usize = 4096;
+
+        /// [`Self::DATA_OFFSET`] as u64 for offset calculations.
+        pub(crate) const DATA_OFFSET_U64: u64 = Self::DATA_OFFSET as u64;
+
         /// Length of magic bytes.
         pub(crate) const MAGIC_LENGTH: usize = 4;
 
@@ -201,16 +213,18 @@ stability_scope!(BETA {
             (header, blob_version)
         }
 
-        /// Parses and validates an existing header, returning the blob version and logical size.
+        /// Parses and validates an existing header, returning the blob version
+        /// and logical size for a backend whose data begins at `data_offset`.
         pub(crate) fn from(
             raw_bytes: [u8; Self::SIZE],
             raw_len: u64,
             versions: &RangeInclusive<u16>,
+            data_offset: u64,
         ) -> Result<(u16, u64), HeaderError> {
             let header: Self = Self::decode(raw_bytes.as_slice())
                 .expect("header decode should never fail for correct size input");
             header.validate(versions)?;
-            Ok((header.blob_version, raw_len - Self::SIZE_U64))
+            Ok((header.blob_version, raw_len.saturating_sub(data_offset)))
         }
 
         /// Validates the magic bytes, runtime version, and blob version.

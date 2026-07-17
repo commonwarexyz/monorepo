@@ -191,6 +191,10 @@ pub struct Config {
     #[arg(long = "sync-every", default_value = "end", value_parser = parse_sync_mode)]
     pub sync_mode: SyncMode,
 
+    /// Byte shift added to every read offset (misaligned-read testing).
+    #[arg(long, default_value_t = 0)]
+    pub offset_shift: u64,
+
     /// Deterministic seed for payloads and random offsets.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
@@ -240,6 +244,13 @@ impl Config {
             return Err("--global-queue-interval must be greater than zero".into());
         }
 
+        if self.offset_shift > 0 && !matches!(self.workload, Workload::ReadSeq | Workload::ReadRand)
+        {
+            return Err("--offset-shift is only valid for read workloads".into());
+        }
+        if self.offset_shift >= self.io_size as u64 {
+            return Err("--offset-shift must be smaller than --io-size".into());
+        }
         match self.workload {
             Workload::WriteAppend => {
                 if self.file_size.is_some() {
@@ -293,8 +304,10 @@ impl Config {
         } else if self.cache.is_some() {
             return Err("--cache is only valid for read-heavy workloads".into());
         }
-        if matches!(self.cache, Some(CacheMode::Cold)) && !cfg!(target_os = "linux") {
-            return Err("--cache cold is only supported on Linux".into());
+        if matches!(self.cache, Some(CacheMode::Cold))
+            && !cfg!(any(target_os = "linux", target_os = "macos"))
+        {
+            return Err("--cache cold is only supported on Linux and macOS".into());
         }
 
         if !self.workload.has_writes() {

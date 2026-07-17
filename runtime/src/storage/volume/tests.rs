@@ -2364,3 +2364,188 @@ async fn test_volume_recovery_seeds_verified_chunks() {
     assert_eq!(new_reads.len(), 1, "one inner read: {new_reads:?}");
     assert_eq!(new_reads[0].2, 50, "seeded chunk read exactly, not widened");
 }
+
+/// A request spanning verified and unverified chunks is served by ONE
+/// coalesced inner read that lands directly in the caller's buffer, and the
+/// read verifies every unverified chunk it covers (opportunistic
+/// verification).
+#[tokio::test]
+async fn test_volume_read_mixed_coalesces_and_verifies() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let span = 8 * BLOCK as usize;
+    let data: Vec<u8> = (0..span).map(|i| (i / 7) as u8).collect();
+    {
+        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let (blob, _) = volume.open("p", b"m").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&data))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        // A second commit appending a fresh chunk, so the reopened manifest
+        // covers only that chunk (chunks 0-7 hydrate unverified).
+        blob.write_at(span as u64, IoBuf::copy_from_slice(&[1u8]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"m").await.unwrap();
+    {
+        let inner = blob.core.inner.lock();
+        assert!(!inner.crcs.get(&1).unwrap().verified, "hydrates unverified");
+        inner.crcs.audit();
+    }
+    // Verify chunk 0 in place with a first read (widened to its block).
+    let got = blob.read_at(0, 10).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &data[..10]);
+    {
+        let inner = blob.core.inner.lock();
+        assert!(inner.crcs.get(&0).unwrap().verified, "read-verified");
+        assert!(!inner.crcs.get(&1).unwrap().verified, "still unverified");
+    }
+
+    // Read chunks 0..4 (mixed verified/unverified) with a caller buffer.
+    let reads_before = recording.reads();
+    let ptrs_before = recording.buf_ptrs.lock().len();
+    let want = 4 * BLOCK as usize;
+    let buf = IoBufMut::with_capacity(want);
+    let got = blob.read_at_buf(0, want, buf).await.unwrap();
+    assert_eq!(got.coalesce().as_ref(), &data[..want]);
+    {
+        let log = recording.log.lock();
+        let new_reads: Vec<_> = log
+            .iter()
+            .filter(|(w, _, _)| !*w)
+            .skip(reads_before)
+            .collect();
+        assert_eq!(new_reads.len(), 1, "one coalesced read: {new_reads:?}");
+        assert_eq!(new_reads[0].2, want, "exact block-aligned length");
+    }
+    assert_eq!(
+        recording.buf_ptrs.lock().len(),
+        ptrs_before + 1,
+        "the caller buffer reaches the inner blob directly"
+    );
+
+    // Every covered chunk is now verified (and the counts agree).
+    let inner = blob.core.inner.lock();
+    for chunk in 0..4u64 {
+        assert!(inner.crcs.get(&chunk).unwrap().verified, "chunk {chunk}");
+    }
+    assert!(!inner.crcs.get(&4).unwrap().verified, "uncovered stays");
+    inner.crcs.audit();
+}
+
+/// A sub-block read of an unverified chunk widens to the chunk's whole
+/// block-aligned span (verifying it), and the next read of the same bytes
+/// is exact.
+#[tokio::test]
+async fn test_volume_read_widens_unverified_to_block() {
+    let pool = test_pool();
+    let recording = Recording::new(pool.clone());
+    let span = 4 * BLOCK as usize;
+    let data = vec![9u8; span];
+    {
+        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let (blob, _) = volume.open("p", b"w").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&data))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&[9u8]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+
+    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"w").await.unwrap();
+
+    // First read: 100 bytes at an unaligned offset inside unverified chunk 2.
+    let offset = 2 * BLOCK + 100;
+    let reads_before = recording.reads();
+    let got = blob.read_at(offset, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[9u8; 100][..]);
+    {
+        let log = recording.log.lock();
+        let new_reads: Vec<_> = log
+            .iter()
+            .filter(|(w, _, _)| !*w)
+            .skip(reads_before)
+            .collect();
+        assert_eq!(new_reads.len(), 1, "one inner read: {new_reads:?}");
+        assert_eq!(new_reads[0].1 % BLOCK, 0, "read starts block-aligned");
+        assert_eq!(new_reads[0].2, BLOCK as usize, "whole chunk span");
+    }
+    assert!(
+        blob.core.inner.lock().crcs.get(&2).unwrap().verified,
+        "the widened read verified the chunk"
+    );
+
+    // Second read of the same bytes: exact length, no widening.
+    let reads_before = recording.reads();
+    let got = blob.read_at(offset, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[9u8; 100][..]);
+    let log = recording.log.lock();
+    let new_reads: Vec<_> = log
+        .iter()
+        .filter(|(w, _, _)| !*w)
+        .skip(reads_before)
+        .collect();
+    assert_eq!(new_reads.len(), 1);
+    assert_eq!(new_reads[0].2, 100, "verified chunk is read exactly");
+}
+
+/// Chunk verification counts stay exact across writes, overlay splices,
+/// batch publishes, resizes, and verifying reads.
+#[tokio::test]
+async fn test_volume_chunk_counts_stay_exact() {
+    let pool = test_pool();
+    let volume = volume_over_memory();
+    let _ = pool;
+    let (blob, _) = volume.open("p", b"c").await.unwrap();
+    let audit = |blob: &crate::storage::volume::Blob<memory::Storage>| {
+        blob.core.inner.lock().crcs.audit();
+    };
+
+    // Fresh writes (verified by construction) and appends.
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![1u8; 3 * BLOCK as usize]))
+        .await
+        .unwrap();
+    audit(&blob);
+    blob.sync().await.unwrap();
+    audit(&blob);
+
+    // Sub-block splices drive chunks pending, then a sync finalizes them.
+    for i in 0..10u64 {
+        blob.write_at(i * 100, IoBuf::copy_from_slice(&[7u8; 50]))
+            .await
+            .unwrap();
+    }
+    audit(&blob);
+    blob.sync().await.unwrap();
+    audit(&blob);
+
+    // Batch writes publish staged chunk states.
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&blob, BLOCK, IoBuf::copy_from_slice(&[3u8; 200]))
+        .await
+        .unwrap();
+    batch.apply_sync().await.unwrap();
+    audit(&blob);
+
+    // Shrink and grow.
+    blob.resize(BLOCK + 1).await.unwrap();
+    audit(&blob);
+    blob.resize(2 * BLOCK).await.unwrap();
+    audit(&blob);
+    blob.sync().await.unwrap();
+    audit(&blob);
+
+    // Reads verify chunks and decrement the unverified count.
+    let _ = blob.read_at(0, BLOCK as usize).await.unwrap();
+    audit(&blob);
+}

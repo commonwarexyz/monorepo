@@ -125,7 +125,7 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let pool = self.pool.clone();
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || {
             if let Some(buf) = bufs.as_single_mut() {
@@ -148,7 +148,7 @@ impl crate::Blob for Blob {
         let bufs = bufs.into();
         let file = self.file.clone();
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || match bufs.try_into_single() {
             Ok(buf) => Self::write_single_at(&file, offset, buf.as_ref()),
@@ -166,7 +166,7 @@ impl crate::Blob for Blob {
         let bufs = bufs.into();
         let file = self.file.clone();
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
 
         if !bufs.has_remaining() {
@@ -196,7 +196,7 @@ impl crate::Blob for Blob {
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.clone();
         let len = len
-            .checked_add(Header::SIZE_U64)
+            .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || file.set_len(len))
             .await

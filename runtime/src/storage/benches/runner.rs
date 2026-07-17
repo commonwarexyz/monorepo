@@ -67,12 +67,13 @@ pub async fn run_read_loop(
     blob: impl Blob,
     deadline: Instant,
     io_size: usize,
+    offset_shift: u64,
     mut next_block: impl FnMut() -> u64,
 ) -> Result<Stats> {
     let mut stats = Stats::default();
     let mut buffer = IoBufMut::with_capacity(io_size).into();
     while should_continue(deadline, stats.ops) {
-        let offset = next_block() * io_size as u64;
+        let offset = next_block() * io_size as u64 + offset_shift;
         let started = should_sample_latency(stats.ops).then(Instant::now);
         buffer = blob.read_at_buf(offset, io_size, buffer).await?;
         stats.record(io_size as u64, started.map(|s| s.elapsed()));
