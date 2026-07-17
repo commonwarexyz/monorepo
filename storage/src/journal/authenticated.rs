@@ -363,18 +363,23 @@ where
             .batch()
             .await
             .map_err(|err| Error::Journal(JournalError::Runtime(err)))?;
-        self.journal
-            .sync_into(&mut batch)
-            .await
-            .map_err(Error::Journal)?;
-        self.merkle
-            .sync_into(&mut batch)
-            .await
-            .map_err(Error::Merkle)?;
+        self.sync_into(&mut batch).await?;
         batch
             .apply_sync()
             .await
             .map_err(|err| Error::Journal(JournalError::Runtime(err)))
+    }
+
+    /// [Self::sync], staged with `batch`: the journal's items and the Merkle structure's
+    /// state become durable when the caller applies the batch, atomically with everything
+    /// else it stages.
+    pub(crate) async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error<F>> {
+        self.journal
+            .sync_into(batch)
+            .await
+            .map_err(Error::Journal)?;
+        self.merkle.sync_into(batch).await.map_err(Error::Merkle)?;
+        Ok(())
     }
 
     /// Prune both the Merkle structure and journal to the given location.
@@ -396,39 +401,50 @@ where
             return Ok((Location::new(self.journal.bounds().start), false));
         }
 
-        // ONE batch stages the whole prune: both sides' durability (the prune target may be
-        // justified by a buffered append, e.g. a commit operation), the item journal's prune,
-        // and the Merkle structure's prune (its pins record plus its journal's prune). No
-        // crash can leave the two sides describing different histories.
         let mut batch = self
             .journal
             .context()
             .batch()
             .await
             .map_err(|err| Error::Journal(JournalError::Runtime(err)))?;
-        self.journal
-            .sync_into(&mut batch)
+        let result = self.prune_into(prune_loc, &mut batch).await?;
+        batch
+            .apply_sync()
             .await
-            .map_err(Error::Journal)?;
-        self.merkle
-            .sync_into(&mut batch)
-            .await
-            .map_err(Error::Merkle)?;
+            .map_err(|err| Error::Journal(JournalError::Runtime(err)))?;
+        Ok(result)
+    }
 
-        let journal_pruned = self.journal.prune_into(*prune_loc, &mut batch).await?;
+    /// Stage [Self::prune] with `batch`: the whole prune joins one commit — both sides'
+    /// durability (the prune target may be justified by a buffered append, e.g. a commit
+    /// operation), the item journal's prune, and the Merkle structure's prune (its pins
+    /// record plus its journal's prune). No crash can leave the two sides describing
+    /// different histories.
+    ///
+    /// # Returns
+    /// The new pruning boundary (which may be less than the requested `prune_loc`) and
+    /// whether a prune was staged.
+    pub(crate) async fn prune_into(
+        &mut self,
+        prune_loc: Location<F>,
+        batch: &mut E::Batch,
+    ) -> Result<(Location<F>, bool), Error<F>> {
+        if self.merkle.size() == 0 {
+            // DB is empty, nothing to prune.
+            return Ok((Location::new(self.journal.bounds().start), false));
+        }
+
+        self.sync_into(batch).await?;
+
+        let journal_pruned = self.journal.prune_into(*prune_loc, batch).await?;
         let bounds = self.journal.bounds();
         let boundary = Location::new(bounds.start);
         let merkle_boundary = self.merkle.bounds().start;
 
         if boundary > merkle_boundary {
             debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
-            self.merkle.prune_into(boundary, &mut batch).await?;
+            self.merkle.prune_into(boundary, batch).await?;
         }
-
-        batch
-            .apply_sync()
-            .await
-            .map_err(|err| Error::Journal(JournalError::Runtime(err)))?;
 
         Ok((boundary, journal_pruned || boundary > merkle_boundary))
     }

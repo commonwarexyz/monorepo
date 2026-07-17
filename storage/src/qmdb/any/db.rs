@@ -423,6 +423,25 @@ where
         Ok(self.log.prune(prune_loc).await?)
     }
 
+    /// Stage [Self::prune_log] with `batch`: the log's durability (the prune target may be
+    /// justified by a buffered append) and both sides of its prune land when the caller
+    /// applies the batch with `apply_sync`, atomically with everything else it stages.
+    pub(crate) async fn prune_log_into(
+        &mut self,
+        prune_loc: Location<F>,
+        batch: &mut E::Batch,
+    ) -> Result<Location<F>, crate::qmdb::Error<F>> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(crate::qmdb::Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        let (boundary, _) = self.log.prune_into(prune_loc, batch).await?;
+        Ok(boundary)
+    }
+
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -819,6 +838,18 @@ where
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.log.sync().await?;
+        Ok(())
+    }
+
+    /// Stage [Self::sync] with `batch`: all pending log state becomes durable when the
+    /// caller applies the batch, atomically with everything else it stages.
+    pub(crate) async fn sync_into(
+        &mut self,
+        batch: &mut E::Batch,
+    ) -> Result<(), crate::qmdb::Error<F>> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
+        self.log.sync_into(batch).await?;
         Ok(())
     }
 

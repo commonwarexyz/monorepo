@@ -222,8 +222,6 @@ where
         strategy,
         root,
         metrics,
-        #[cfg(test)]
-        halt_before_prune_log: false,
     };
     current_db.update_metrics();
 

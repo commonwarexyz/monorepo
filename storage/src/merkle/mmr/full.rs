@@ -1,7 +1,7 @@
 //! An MMR backed by a fixed-item-length journal.
 //!
-//! A [crate::journal] is used to store all unpruned MMR nodes, and a [crate::metadata] store is
-//! used to preserve digests required for root and proof generation that would have otherwise been
+//! A [crate::journal] is used to store all unpruned MMR nodes, and a native pins record
+//! preserves digests required for root and proof generation that would have otherwise been
 //! pruned.
 //!
 //! This module is a thin wrapper around the generic `Merkle` type, specialized for the

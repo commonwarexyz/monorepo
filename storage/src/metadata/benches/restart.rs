@@ -19,8 +19,7 @@ fn bench_restart(c: &mut Criterion) {
                 metadata.put(k, v);
             }
 
-            // Sync twice to ensure both blobs populated
-            metadata.sync().await.unwrap();
+            // Persist the initial state
             metadata.sync().await.unwrap();
         });
 

@@ -31,8 +31,7 @@ fn bench_sync(c: &mut Criterion) {
                                 metadata.put(k.clone(), v.clone());
                             }
 
-                            // Sync twice to ensure both blobs populated
-                            metadata.sync().await.unwrap();
+                            // Persist the initial state
                             metadata.sync().await.unwrap();
 
                             // Update some keys
