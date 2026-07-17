@@ -1483,9 +1483,7 @@ mod tests {
             let root = db.root();
 
             // Drop the production prune future while it is parked after the metadata sync,
-            // before the log prune: a genuine cancellation at that await. The dropped future
-            // consumes the db, so the parked prune's in-flight state is only observable via
-            // reopen.
+            // before the log prune: a genuine cancellation at that await.
             db.halt_before_prune_log = true;
             let boundary = db.sync_boundary();
             {

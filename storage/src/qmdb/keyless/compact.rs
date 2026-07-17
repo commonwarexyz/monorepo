@@ -1204,7 +1204,7 @@ mod tests {
             .unwrap();
             assert_eq!(reopened.target(), tip_target);
 
-            // The corrupt entry fails the rewind before any truncation, consuming the handle.
+            // The corrupt entry fails the rewind before any truncation.
             assert!(matches!(
                 reopened.rewind(rewind_target).await,
                 Err(Error::DataCorrupted(_))
@@ -1390,7 +1390,6 @@ mod tests {
                 Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
             ));
 
-            // The failed rewind consumed the db; reopen to continue.
             let db = open_db::<mmr::Family>(context.child("reopen"), "keyless-rewind-beyond").await;
             // A target past the tip is not a commit either.
             let beyond_tip = Location::new(*db.size() + 100);
@@ -1435,7 +1434,7 @@ mod tests {
             let root_b = db.root();
 
             // Targets inside a commit's span match no entry, even though entries exist on
-            // both sides. Each failed rewind consumes the db, so reopen to continue.
+            // both sides.
             let mut db = db;
             for target in [2u64, 3, 5] {
                 assert!(matches!(
@@ -1571,8 +1570,7 @@ mod tests {
                 Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
             ));
 
-            // The failed rewind consumed the db; the prune was durable, so reopen and
-            // rewind to B.
+            // The prune was durable, so reopen and rewind to B.
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
             let db: TestDb<mmr::Family> = Db::init_from_merkle(
                 merkle,

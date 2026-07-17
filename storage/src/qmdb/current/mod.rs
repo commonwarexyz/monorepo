@@ -2238,7 +2238,6 @@ pub mod tests {
                 "unexpected rewind error for unsettled delayed-merge window: {err:?}"
             );
 
-            // The failed rewind consumed the db; reopen to continue.
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 context.child("reopen"),
                 variable_config::<OneCap>(partition, &context),
@@ -2744,7 +2743,6 @@ pub mod tests {
                 "expected prune rejection above sync boundary, got {err:?}"
             );
 
-            // The failed prune consumed the db; reopen to continue.
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen"),
                 variable_config::<OneCap>(partition, &context),

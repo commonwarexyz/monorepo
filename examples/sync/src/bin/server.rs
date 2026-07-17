@@ -640,8 +640,7 @@ where
             debug!("{}", Mode::SHUTDOWN_MESSAGE);
         },
         _ = context.sleep_until(next_op_time) => {
-            // Add operations to the database. A failed mutation consumes the database,
-            // so treat it as fatal and stop serving.
+            // Add operations to the database. A failed mutation is fatal; stop serving.
             if let Err(err) = maybe_add_operations(&state, &mut context, &config).await {
                 error!(?err, "failed to add additional operations; shutting down");
                 return Err(err);

@@ -2647,7 +2647,7 @@ mod tests {
             assert_eq!(journal.size(), u64::MAX);
 
             // The next append would overflow the size; it must return a recoverable error
-            // rather than panicking. The error consumes the journal.
+            // rather than panicking.
             assert!(matches!(journal.append(&8).await, Err(Error::SizeOverflow)));
         });
     }
@@ -3642,7 +3642,7 @@ mod tests {
 
             // Drop the production prune future while it is parked after the data-blob
             // removal, before offsets.prune has made the appended offsets durable: a
-            // genuine cancellation at that await. The dropped future consumes the journal.
+            // genuine cancellation at that await.
             journal.0.halt_before_offsets_prune = true;
             {
                 let fut = journal.prune(10);

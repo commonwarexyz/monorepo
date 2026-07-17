@@ -594,7 +594,6 @@ mod test {
                 Err(Error::PruneBeyondMinRequired(_, _))
             ));
 
-            // The failed prune consumed the db; reopen the partition to continue.
             let db = create_test_store(context.child("store").with_attribute("index", 3)).await;
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
@@ -1141,13 +1140,15 @@ mod test {
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
-    fn assert_read_futures_are_send(db: TestStore, key: Digest, loc: Location, which: u8) {
+    fn assert_read_futures_are_send(db: TestStore, key: Digest, loc: Location) {
         is_send(db.get(&key));
         is_send(db.get_metadata());
-        match which {
-            0 => is_send(db.prune(loc)),
-            _ => is_send(db.sync()),
-        }
+        is_send(db.prune(loc));
+    }
+
+    #[allow(dead_code)]
+    fn assert_sync_is_send(db: TestStore) {
+        is_send(db.sync());
     }
 
     #[allow(dead_code)]
@@ -1155,16 +1156,12 @@ mod test {
         db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap>,
         key: Digest,
         value: Vec<u8>,
-        which: u8,
     ) {
         is_send(db.get(&key));
         let batch = db.new_batch();
         is_send(batch.get(&key));
         drop(batch);
-        match which {
-            0 => is_send(db.apply_batch(Changeset::from([(key, Some(value))]))),
-            _ => is_send(db.apply_batch(Changeset::from([(key, None)]))),
-        }
+        is_send(db.apply_batch(Changeset::from([(key, Some(value))])));
     }
 
     #[allow(dead_code)]

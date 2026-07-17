@@ -1760,7 +1760,6 @@ mod compact_variable_mmr {
             let boundary = seeded.size();
             let seeded = seeded.prune(boundary).await.unwrap();
             // The prune moved the journal's pruning boundary: the first commit is unreachable.
-            // The failed rewind consumes the import.
             assert!(matches!(
                 seeded.rewind(first_size.unwrap()).await,
                 Err(crate::qmdb::Error::Merkle(
@@ -1866,12 +1865,10 @@ mod compact_variable_mmr {
             assert_eq!(imported.target(), target_b);
 
             // Rewind is rejected until the import is persisted, even to the imported leaf
-            // count itself: the fast path must not report unpersisted state as durable. The
-            // failed rewind consumes the import.
+            // count itself: the fast path must not report unpersisted state as durable.
             assert!(imported.rewind(target_b.leaf_count).await.is_err());
 
-            // Prune is likewise rejected while the import is pending; rebuild the import,
-            // since the failed rewind consumed the first one.
+            // Prune is likewise rejected while the import is pending; rebuild the import.
             let fetched = sync::compact::Resolver::get_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();

@@ -618,8 +618,8 @@ async fn run_ops<J: FuzzJournal>(
     params: Params,
 ) {
     for op in ops {
-        // A mutation error consumes the journal, ending the cycle. Each arm takes the journal
-        // and evaluates to its successor.
+        // A mutation error ends the cycle. Each arm takes the journal and evaluates to
+        // its successor.
         journal = match op {
             JournalOperation::Append { value } => {
                 let item = Item::from(*value);
@@ -682,9 +682,9 @@ async fn run_ops<J: FuzzJournal>(
                             expected.values.truncate(target as usize);
                             journal
                         }
-                        // Any error consumes the journal, ending the cycle. Validation
-                        // errors reject before mutating and are only possible for a raw
-                        // target; seeing one for a clamped target is a bug. Any other error
+                        // Any error ends the cycle. Validation errors reject before
+                        // mutating and are only possible for a raw target; seeing one for
+                        // a clamped target is a bug. Any other error
                         // may have interrupted the truncation and lost data above `target`,
                         // so lower durable_len conservatively.
                         Err(e @ (Error::InvalidRewind(_) | Error::ItemPruned(_))) => {

@@ -253,17 +253,17 @@ where
     }
 }
 
-/// Resolver-side errors for sync serving.
+/// Resolver-side errors for compact state serving.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError<F: Family, D: Digest> {
-    /// The source database returned an error while serving.
-    #[error("sync source database error: {0}")]
+    /// The source database returned an error while building compact state.
+    #[error("compact source database error: {0}")]
     Database(#[from] qmdb::Error<F>),
     /// The caller requested a target that compact sync cannot serve.
     #[error("invalid compact target: {0}")]
     InvalidTarget(&'static str),
     /// The resolver wrapper did not currently hold a database.
-    #[error("sync source missing")]
+    #[error("compact source missing")]
     MissingSource,
     /// The caller requested a target different from the source's current witness.
     #[error("stale compact target - requested {requested:?}, current {current:?}")]

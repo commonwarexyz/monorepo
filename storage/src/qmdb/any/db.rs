@@ -637,8 +637,8 @@ where
             (rewind_floor, undos, active_keys_delta)
         };
 
-        // Journal rewind happens before in-memory undo application. An error at any step
-        // consumes the handle. This step is not restart-stable until a later commit/sync.
+        // Journal rewind happens before in-memory undo application. This step is not
+        // restart-stable until a later commit/sync.
         self.log = self.log.rewind(rewind_size).await?;
 
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below

@@ -44,15 +44,15 @@ pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 const PAGE_SIZE: NonZeroU16 = NZU16!(77);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-/// Harness that abstracts per-family details so the generic tests below can operate on
-/// any immutable database.
-/// [`SyncTestHarness::prune`] with a heap-allocated state machine (the future embeds the
-/// database twice and exceeds the size lint in the deepest test).
+/// Wraps [`SyncTestHarness::prune`] with a heap-allocated state machine (the future embeds
+/// the database twice and exceeds the size lint in the deepest test).
 #[boxed]
 async fn prune_boxed<H: SyncTestHarness>(db: H::Db, loc: Location<H::Family>) -> H::Db {
     H::prune(db, loc).await
 }
 
+/// Harness that abstracts per-family details so the generic tests below can operate on
+/// any immutable database.
 pub(crate) trait SyncTestHarness: Sized + 'static {
     type Family: merkle::Family;
     type Db: qmdb::sync::Database<
@@ -1830,7 +1830,6 @@ mod compact_variable_mmr {
             let boundary = seeded.size();
             let seeded = seeded.prune(boundary).await.unwrap();
             // The prune moved the journal's pruning boundary: the first commit is unreachable.
-            // The failed rewind consumes the import.
             assert!(matches!(
                 seeded.rewind(first_size.unwrap()).await,
                 Err(crate::qmdb::Error::Merkle(
@@ -1936,12 +1935,10 @@ mod compact_variable_mmr {
             assert_eq!(imported.target(), target_b);
 
             // Rewind is rejected until the import is persisted, even to the imported leaf
-            // count itself: the fast path must not report unpersisted state as durable. The
-            // failed rewind consumes the import.
+            // count itself: the fast path must not report unpersisted state as durable.
             assert!(imported.rewind(target_b.leaf_count).await.is_err());
 
-            // Prune is likewise rejected while the import is pending; rebuild the import,
-            // since the failed rewind consumed the first one.
+            // Prune is likewise rejected while the import is pending; rebuild the import.
             let fetched = sync::compact::Resolver::get_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();

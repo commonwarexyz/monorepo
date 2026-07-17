@@ -2986,7 +2986,6 @@ mod tests {
                 .await
                 .expect("failed to initialize journal");
             let journal = journal.rewind(0).await.unwrap();
-            // The failed rewind consumes the journal.
             assert!(matches!(
                 journal.rewind(1).await,
                 Err(Error::InvalidRewind(1))
@@ -4461,7 +4460,7 @@ mod tests {
             journal = journal.rewind(10).await.unwrap();
             assert_eq!(journal.size(), 10);
 
-            // Rewind to before pruning_boundary should fail. The error consumes the journal.
+            // Rewind to before pruning_boundary should fail.
             let result = journal.rewind(9).await;
             assert!(matches!(result, Err(Error::ItemPruned(9))));
 

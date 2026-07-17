@@ -118,9 +118,9 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(57);
 const PAGE_CACHE_SIZE: usize = 1;
 
-/// Reopen the journal after an operation consumed it, returning the recovered journal with
-/// its size and pruning boundary. The consuming errors this harness exercises reject before
-/// any mutation, so the on-disk state is intact and recovery matches a restart.
+/// Reopen the journal, returning the recovered journal with its size and pruning
+/// boundary. The errors this harness exercises reject before any mutation, so the
+/// on-disk state is intact and recovery matches a restart.
 async fn reopen(
     context: &deterministic::Context,
     cfg: &JournalConfig,
@@ -174,7 +174,6 @@ fn fuzz(input: FuzzInput) {
                             journal_size += 1;
                             journal
                         }
-                        // The error consumed the journal; reopen and continue.
                         Err(Error::SizeOverflow) => {
                             let (journal, size, start) =
                                 reopen(&context, &cfg, &mut restarts).await;
@@ -290,8 +289,7 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::AppendMany { count } => {
                     if *count == 0 {
-                        // Exercise the EmptyAppend error path; the error consumes the
-                        // journal, so reopen to continue.
+                        // Exercise the EmptyAppend error path.
                         let err = journal.append_many(Many::Flat(&[])).await;
                         assert!(matches!(err, Err(Error::EmptyAppend)));
                         let (journal, size, start) = reopen(&context, &cfg, &mut restarts).await;
@@ -331,7 +329,6 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::AppendNested { count_a, count_b } => {
                     if *count_a == 0 && *count_b == 0 {
-                        // The error consumes the journal, so reopen to continue.
                         let err = journal.append_many(Many::Nested(&[&[], &[]])).await;
                         assert!(matches!(err, Err(Error::EmptyAppend)));
                         let (journal, size, start) = reopen(&context, &cfg, &mut restarts).await;

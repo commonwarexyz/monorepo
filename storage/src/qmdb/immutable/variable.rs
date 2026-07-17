@@ -185,15 +185,19 @@ mod tests {
         db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
         key: Digest,
         loc: crate::merkle::mmr::Location,
-        which: u8,
     ) {
         is_send(db.get(&key));
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
-        match which {
-            0 => is_send(db.sync()),
-            _ => is_send(db.rewind(loc)),
-        }
+        is_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_rewind_is_send(
+        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+        loc: crate::merkle::mmr::Location,
+    ) {
+        is_send(db.rewind(loc));
     }
 
     fn small_sections_config(

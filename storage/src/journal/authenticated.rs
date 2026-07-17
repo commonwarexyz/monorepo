@@ -1786,7 +1786,7 @@ mod tests {
             assert_eq!(bounds.start, 98);
             assert!(bounds.is_empty());
 
-            // Rewinding into the pruned region fails, consuming the journal.
+            // Rewinding into the pruned region fails.
             let res = journal.rewind(97).await;
             assert!(matches!(
                 res,
@@ -1794,7 +1794,7 @@ mod tests {
             ));
         }
 
-        // Test 8: Rewind target beyond current size fails, consuming the journal.
+        // Test 8: Rewind target beyond current size fails.
         {
             let merkle_cfg = merkle_config("rewind-invalid", &context);
             let journal_cfg = journal_config("rewind-invalid", &context);
@@ -2829,7 +2829,7 @@ mod tests {
             .unwrap();
         assert_eq!(ops, vec![op_a.clone()]);
 
-        // Apply B -- should fail (stale), consuming the journal.
+        // Apply B -- should fail (stale).
         let result = journal.apply_batch(&merkleized_b).await;
         assert!(
             matches!(

@@ -127,7 +127,7 @@ async fn run_operations<F: MerkleFamily>(
     let mut min_pruned = 0u64;
     let mut max_pruned = merkle.bounds().start.as_u64();
 
-    // A failed operation consumes the handle, so it breaks out of the loop.
+    // A failed operation breaks out of the loop.
     for op in operations.iter() {
         // Each arm takes the merkle and evaluates to its successor.
         merkle = match op {

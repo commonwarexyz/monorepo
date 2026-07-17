@@ -1113,7 +1113,7 @@ mod tests {
         mmr = mmr.sync().await.unwrap();
         assert!(matches!(mmr.rewind(1).await, Err(Error::Empty)));
 
-        // The failed rewind consumed the mmr; reopen the same partitions.
+        // Reopen the same partitions.
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopen"),
             &hasher,
@@ -1248,8 +1248,7 @@ mod tests {
             Err(Error::ElementPruned(_))
         ));
 
-        // The failed rewind consumed the mmr before mutating anything durable; reopening
-        // recovers the synced state.
+        // The failed rewind mutated nothing durable; reopening recovers the synced state.
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             element_pruned_context.child("element_pruned_reopen"),
             &hasher,

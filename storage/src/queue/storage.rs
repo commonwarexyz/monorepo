@@ -352,7 +352,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         Ok(self)
     }
 
-    /// See [Queue::destroy].
+    /// Destroy the queue, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await?;

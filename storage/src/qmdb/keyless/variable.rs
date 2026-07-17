@@ -1011,14 +1011,15 @@ mod test {
     fn assert_db_futures_are_send(
         db: TestDb<mmr::Family>,
         loc: crate::merkle::Location<mmr::Family>,
-        which: u8,
     ) {
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.get(loc));
-        match which {
-            0 => is_send(db.sync()),
-            _ => is_send(db.rewind(loc)),
-        }
+        is_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_rewind_is_send(db: TestDb<mmr::Family>, loc: crate::merkle::Location<mmr::Family>) {
+        is_send(db.rewind(loc));
     }
 }

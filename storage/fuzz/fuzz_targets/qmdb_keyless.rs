@@ -217,7 +217,7 @@ fn test_config<S: Strategy>(
     }
 }
 
-/// Reopen the database after the previous instance was consumed or dropped.
+/// Reopen the database.
 async fn reopen<F: Family, S: Strategy>(
     context: &deterministic::Context,
     suffix: &str,
@@ -310,8 +310,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                                 Err(err) => err,
                             };
                             assert_bad_floor_error(&err, kind);
-                            // The rejected apply consumed the db; reopen and verify the
-                            // reject persisted nothing.
+                            // Reopen and verify the reject persisted nothing.
                             let db = reopen(&context, suffix, &strategy, &mut restarts).await;
                             assert_eq!(db.last_commit_loc(), before_last_commit);
                             assert_eq!(db.inactivity_floor_loc(), before_floor);
@@ -366,8 +365,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         Err(err) => err,
                     };
                     assert_bad_floor_error(&err, kind);
-                    // The rejected apply consumed the db; reopen and verify the reject
-                    // persisted nothing.
+                    // Reopen and verify the reject persisted nothing.
                     let db = reopen(&context, suffix, &strategy, &mut restarts).await;
                     assert_eq!(db.last_commit_loc(), before_last_commit);
                     assert_eq!(db.inactivity_floor_loc(), before_floor);

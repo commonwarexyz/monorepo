@@ -929,7 +929,6 @@ pub(crate) mod tests {
                 if prune_loc == Location::new(1) && floor == Location::new(0))
         );
 
-        // The failed prune consumed the db; reopen the partition to continue.
         let db = reopen(context.child("reopen_empty")).await;
 
         // Add values and commit, advancing the floor to the new commit location.
@@ -2247,7 +2246,6 @@ pub(crate) mod tests {
             "unexpected rewind error at retained boundary: {boundary_err:?}"
         );
 
-        // The failed rewind consumed the db; reopen the partition to continue.
         let db = reopen(context.child("reopen_boundary")).await;
         let Err(err) = db.rewind(first_range.start).await else {
             panic!("expected rewind to fail");
@@ -2352,8 +2350,7 @@ pub(crate) mod tests {
             "unexpected error: {err:?}"
         );
 
-        // The failed apply_batch consumed the db; reopen the partition and
-        // verify the rejected batch persisted nothing.
+        // Reopen the partition and verify the rejected batch persisted nothing.
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
         assert_eq!(db.last_commit_loc(), last_commit_before);
@@ -2399,7 +2396,7 @@ pub(crate) mod tests {
             "unexpected error: {err:?}"
         );
 
-        // The failed apply_batch consumed the db; reopen and confirm nothing persisted.
+        // Reopen and confirm nothing persisted.
         let db = reopen(context.child("reopen_boundary")).await;
         assert_eq!(db.inactivity_floor_loc(), floor);
         assert_eq!(db.last_commit_loc(), last_commit_loc);
@@ -2641,8 +2638,7 @@ pub(crate) mod tests {
             "unexpected error: {err:?}"
         );
 
-        // The failed apply_batch consumed the db; reopen the partition and
-        // verify the rejected chain persisted nothing.
+        // Reopen the partition and verify the rejected chain persisted nothing.
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.last_commit_loc(), last_commit_before);
@@ -2747,7 +2743,7 @@ pub(crate) mod tests {
         assert_eq!(db.root(), root_after_commit);
 
         // Persist the prune, then verify pruning one past the floor is rejected — the
-        // floor is the hard ceiling. The failing prune consumes the db in place of a drop.
+        // floor is the hard ceiling.
         let db = db.sync().await.unwrap();
         let Err(err) = db.prune(Location::new(*commit_loc + 1)).await else {
             panic!("expected prune to fail");

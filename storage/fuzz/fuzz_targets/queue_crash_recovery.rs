@@ -209,7 +209,7 @@ fn make_item(value: u8) -> Vec<u8> {
 }
 
 /// Run operations on the queue, tracking state for recovery verification. A mutation
-/// error consumes the queue, ending the run (the crash).
+/// error ends the run (the crash).
 async fn run_operations(
     mut queue: Queue<deterministic::Context, Vec<u8>>,
     operations: &[QueueOperation],
