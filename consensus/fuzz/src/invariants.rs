@@ -6,6 +6,7 @@ use crate::{
 use commonware_codec::{Encode, Read};
 use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
+    types::Activity,
 };
 use commonware_cryptography::{
     certificate::{self, Signers},
@@ -14,7 +15,7 @@ use commonware_cryptography::{
 use commonware_utils::ordered::Quorum;
 use rand_core::CryptoRng;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
 };
 
@@ -215,8 +216,8 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     }
 }
 
-/// Checks invariants that require per-vote signer information.
-/// `faults` is the number of Byzantine nodes by participant index
+/// Checks invariants that require per-signer information (votes and fault
+/// evidence). `faults` is the number of Byzantine nodes by participant index
 /// (`0..faults`); only correct nodes (`faults..n`) are checked for equivocation.
 pub fn check_vote_invariants<E, S, L>(faults: usize, reporters: &[Reporter<E, S, L, Sha256Digest>])
 where
@@ -267,6 +268,50 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     S::PublicKey: Eq + Hash + Clone,
     L: Elector<S>,
 {
+    // Invariant: no_fault_evidence_against_correct_signers
+    // Fault proofs (ConflictingNotarize, ConflictingFinalize, NullifyFinalize)
+    // are signature-verified by the reporter before being recorded, so evidence
+    // against a correct signer proves that key signed conflicting messages: an
+    // engine bug (e.g. mishandled WAL state on restart), not adversarial noise.
+    // Byzantine signers are expected to equivocate and are excluded.
+    //
+    // This complements no_vote_equivocation below: fault proofs catch conflicts
+    // even when one side never reached quorum verification (and thus never
+    // entered the vote maps), while vote aggregation catches conflicts no
+    // single batcher observed.
+    for reporter in reporters {
+        let faults = reporter.faults.lock();
+        let mut offenders: Vec<_> = faults
+            .iter()
+            .filter(|&(pk, _)| {
+                reporter
+                    .participants
+                    .index(pk)
+                    .is_some_and(|idx| !byzantine.contains(&usize::from(idx)))
+            })
+            .map(|(pk, by_view)| {
+                let mut views: Vec<u64> = by_view.keys().map(|view| view.get()).collect();
+                views.sort_unstable();
+                let kinds: BTreeSet<&'static str> = by_view
+                    .values()
+                    .flatten()
+                    .map(|activity| match activity {
+                        Activity::ConflictingNotarize(_) => "conflicting_notarize",
+                        Activity::ConflictingFinalize(_) => "conflicting_finalize",
+                        Activity::NullifyFinalize(_) => "nullify_finalize",
+                        _ => "unexpected",
+                    })
+                    .collect();
+                (pk.as_ref().to_vec(), views, kinds)
+            })
+            .collect();
+        offenders.sort_unstable();
+        assert!(
+            offenders.is_empty(),
+            "Invariant violation: fault evidence against correct signers: {offenders:?}",
+        );
+    }
+
     // Invariant: no_vote_equivocation
     // A correct node cannot sign multiple payloads of the same vote kind in a
     // view, or both nullify and finalize in the same view.
