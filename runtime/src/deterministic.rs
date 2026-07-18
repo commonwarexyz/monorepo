@@ -76,6 +76,7 @@ use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::{
+    channel::mpsc,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
     Cached, SystemTimeExt,
@@ -83,9 +84,8 @@ use commonware_utils::{
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    channel::mpsc,
     task::{waker, ArcWake},
-    Future, StreamExt as _,
+    Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -583,7 +583,7 @@ impl Runner {
         // forwards them here so they run under the runtime's scheduler,
         // panic policy, and supervision (and therefore deterministically).
         crate::Supervisor::child(&context, "volume_commit").spawn(move |context| async move {
-            while let Some(fut) = volume_commits.next().await {
+            while let Some(fut) = volume_commits.recv().await {
                 crate::Supervisor::child(&context, "volume_commit").spawn(move |_| fut);
             }
         });
@@ -980,11 +980,11 @@ impl Context {
             rng.clone(),
             storage_fault_config,
         );
-        let (driver_tx, volume_commits) = mpsc::unbounded();
+        let (driver_tx, volume_commits) = mpsc::unbounded_channel();
         let driver = VolumeDriver::new(move |fut| {
             // A send failure means the runtime (and its forwarder) is
             // gone; the future's observers are being torn down with it.
-            let _ = driver_tx.unbounded_send(fut);
+            let _ = driver_tx.send(fut);
         });
         let volume = VolumeStorage::new_registered(
             faulty,
@@ -1080,11 +1080,11 @@ impl Context {
         // allocator, unsynced write-through bytes held by its inner blob
         // handle) dies here, and its recovery protocol re-runs from the
         // durable image on first use.
-        let (driver_tx, volume_commits) = mpsc::unbounded();
+        let (driver_tx, volume_commits) = mpsc::unbounded_channel();
         let driver = VolumeDriver::new(move |fut| {
             // A send failure means the runtime (and its forwarder) is
             // gone; the future's observers are being torn down with it.
-            let _ = driver_tx.unbounded_send(fut);
+            let _ = driver_tx.send(fut);
         });
         let storage = {
             let volume = checkpoint.storage.inner().inner();
@@ -1697,9 +1697,7 @@ mod tests {
     use commonware_utils::channel::oneshot;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
-    #[cfg(feature = "external")]
-    use futures::StreamExt;
-    use futures::{stream::FuturesUnordered, task::noop_waker};
+    use futures::{stream::FuturesUnordered, task::noop_waker, StreamExt as _};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {

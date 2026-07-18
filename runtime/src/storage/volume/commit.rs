@@ -28,11 +28,7 @@ use super::{
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, Error, IoBuf};
 use bytes::Bytes;
 use commonware_cryptography::Crc32;
-use commonware_utils::sync::Mutex;
-use futures::{
-    channel::oneshot,
-    future::{FutureExt as _, Shared},
-};
+use commonware_utils::sync::Notify;
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
@@ -73,9 +69,8 @@ pub(super) type Ticket = Arc<TicketState>;
 /// A ticket's resolution cell plus the notification observers await.
 pub(super) struct TicketState {
     result: OnceLock<Result<(), Error>>,
-    /// Consumed by the resolver to fire `rx` (after `result` is set).
-    tx: Mutex<Option<oneshot::Sender<()>>>,
-    rx: Shared<oneshot::Receiver<()>>,
+    /// Fired (wake-all) once `result` is set.
+    notify: Notify,
 }
 
 impl Default for super::core::PendingCommit {
@@ -89,11 +84,9 @@ impl Default for super::core::PendingCommit {
 
 /// A fresh unresolved ticket.
 pub(super) fn new_ticket() -> Ticket {
-    let (tx, rx) = oneshot::channel();
     Arc::new(TicketState {
         result: OnceLock::new(),
-        tx: Mutex::new(Some(tx)),
-        rx: rx.shared(),
+        notify: Notify::new(),
     })
 }
 
@@ -109,7 +102,7 @@ impl TicketState {
         self.result
             .set(result)
             .expect("only the draining leader resolves a ticket");
-        self.notify();
+        self.notify.notify_waiters();
     }
 
     /// Resolve with [`Error::Aborted`] if still unresolved (the
@@ -117,25 +110,25 @@ impl TicketState {
     /// tolerate an already-resolved ticket).
     fn abort(&self) {
         let _ = self.result.set(Err(Error::Aborted));
-        self.notify();
-    }
-
-    fn notify(&self) {
-        if let Some(tx) = self.tx.lock().take() {
-            let _ = tx.send(());
-        }
+        self.notify.notify_waiters();
     }
 
     /// Wait for the resolution. Never blocks the resolver: observers hold
     /// only this shared state, so dropping or parking a waiting future is
     /// always benign.
     pub async fn wait(&self) -> Result<(), Error> {
-        if self.result.get().is_none() {
-            let _ = self.rx.clone().await;
+        loop {
+            if let Some(result) = self.result.get() {
+                return result.clone();
+            }
+            // Register before re-checking: a resolution landing between
+            // the check and the await wakes this registration.
+            let notified = self.notify.notified();
+            if let Some(result) = self.result.get() {
+                return result.clone();
+            }
+            notified.await;
         }
-        // An observer's own Arc keeps the sender half alive, so the
-        // channel fires only through resolve/abort: the result is set.
-        self.result.get().cloned().unwrap_or(Err(Error::Aborted))
     }
 }
 

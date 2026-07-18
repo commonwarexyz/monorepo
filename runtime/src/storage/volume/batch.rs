@@ -63,8 +63,10 @@ use super::{
 use crate::{Blob as _, Error, Handle, IoBufs, DEFAULT_BLOB_VERSION};
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
-use commonware_utils::sync::{AsyncMutex, Mutex};
-use futures::channel::oneshot;
+use commonware_utils::{
+    channel::oneshot,
+    sync::{AsyncMutex, Mutex},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -658,12 +660,14 @@ impl<S: crate::Storage> Batch<S> {
         driver.spawn(async move {
             let _ = tx.send(apply_task(shared, ready, staged, removals, creations, mode).await);
         });
-        match rx.await.unwrap_or(Err(Error::Aborted))? {
-            Some(ticket) => Ok(Some(Handle::from_future(
-                async move { ticket.wait().await },
-            ))),
-            None => Ok(None),
-        }
+        rx.await.unwrap_or(Err(Error::Aborted))?.map_or_else(
+            || Ok(None),
+            |ticket| {
+                Ok(Some(Handle::from_future(
+                    async move { ticket.wait().await },
+                )))
+            },
+        )
     }
 }
 

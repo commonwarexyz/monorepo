@@ -256,13 +256,14 @@ impl Default for Config {
 /// task aborted mid-commit poisons the volume, exactly like a failed
 /// commit, because its half-consumed state cannot be unwound).
 #[derive(Clone)]
-pub struct Driver(Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>);
+pub struct Driver(Arc<dyn Fn(CommitFuture) + Send + Sync>);
+
+/// A boxed commit future handed to a [`Driver`]'s spawn.
+pub type CommitFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 impl Driver {
     /// A driver from `spawn`.
-    pub fn new(
-        spawn: impl Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync + 'static,
-    ) -> Self {
+    pub fn new(spawn: impl Fn(CommitFuture) + Send + Sync + 'static) -> Self {
         Self(Arc::new(spawn))
     }
 
