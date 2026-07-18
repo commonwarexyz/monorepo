@@ -1259,14 +1259,18 @@ pub(super) async fn write_locked<S: crate::Storage>(
         if stretch.replaced.is_some() {
             ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
         }
-        let written = async {
-            ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
-            ready
-                .file
-                .write_at(stretch.physical, stretch.bytes.clone())
-                .await
+        let provisioned =
+            ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await;
+        let written = match provisioned {
+            Ok(()) => {
+                ready
+                    .file
+                    .write_at(stretch.physical, stretch.bytes.clone())
+                    .await
+            }
+            Err(e) => Err(e),
         };
-        if let Err(e) = written.await {
+        if let Err(e) = written {
             // The unpublished stretch's fresh extent would otherwise strand
             // until restart: return it through the deferred-free path.
             free_unpublished(ready, stretch.allocated);
@@ -1311,14 +1315,18 @@ pub(super) async fn stage_write<S: crate::Storage>(
         if stretch.replaced.is_some() {
             ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
         }
-        let written = async {
-            ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
-            ready
-                .file
-                .write_at(stretch.physical, stretch.bytes.clone())
-                .await
+        let provisioned =
+            ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await;
+        let written = match provisioned {
+            Ok(()) => {
+                ready
+                    .file
+                    .write_at(stretch.physical, stretch.bytes.clone())
+                    .await
+            }
+            Err(e) => Err(e),
         };
-        if let Err(e) = written.await {
+        if let Err(e) = written {
             // Not yet recorded in the staged overlay, so the batch's drop
             // path cannot reclaim it either: free it here.
             free_unpublished(ready, stretch.allocated);

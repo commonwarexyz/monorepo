@@ -772,18 +772,25 @@ fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
     state.table_extent = Some(snapshot.table_extent);
     // Applied-batch groups covered by this capture are committed. Capture
     // expansion guarantees all-or-nothing coverage (never-split).
+    let mut resolved_members: Vec<u64> = Vec::new();
     state.groups.retain(|group| {
         let covered = group.iter().any(|id| snapshot.capture.contains(id));
         debug_assert!(
             !covered || group.iter().all(|id| snapshot.capture.contains(id)),
             "commit split an applied batch group"
         );
+        if covered {
+            resolved_members.extend(group.iter().copied());
+        }
         !covered
     });
     state.apply_frees();
     // Captured blobs whose last handle dropped mid-commit could not demote
-    // then (their next entry lived only in this snapshot): demote them now.
-    for id in captured_ids {
+    // then (their next entry lived only in this snapshot), and clean
+    // resolved-group members (for example batch-created blobs whose handle
+    // dropped before apply) have no later drop to demote them: demote both
+    // now.
+    for id in captured_ids.into_iter().chain(resolved_members) {
         state.maybe_demote(id);
     }
     ready.metrics.observe_state(&state);
