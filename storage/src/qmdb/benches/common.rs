@@ -18,7 +18,10 @@ use commonware_storage::{
                 variable::Db as OVariable,
             },
             traits::{DbAny, UnmerkleizedBatch},
-            unordered::{fixed::Db as UFixed, variable::Db as UVariable},
+            unordered::{
+                fixed::{Db as UFixed, partitioned::Db as UFixPart},
+                variable::Db as UVariable,
+            },
         },
         current::{
             FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
@@ -61,6 +64,10 @@ pub type AnyOFixP256Db<F> = OFixP256<F, Context, Digest, Digest, Sha256, EightCa
 /// for very large key sets (P=2 spills past ~33M entries), used by the `init_scale` bench.
 #[allow(dead_code)]
 pub type AnyOFixP3Db<F> = OFixPart<F, Context, Digest, Digest, Sha256, EightCap, 3, Rayon>;
+/// Unordered "any" DB with a partitioned snapshot index (65,536 partitions, P=2), used by the
+/// `init_scale` bench to exercise the unordered index's parallel snapshot build.
+#[allow(dead_code)]
+pub type AnyUFixP64kDb<F> = UFixPart<F, Context, Digest, Digest, Sha256, EightCap, 2, Rayon>;
 pub type CurUFixDb<F> = UCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 pub type CurOFixDb<F> = OCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 

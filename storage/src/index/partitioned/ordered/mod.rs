@@ -43,6 +43,8 @@ mod partition;
 
 pub use self::cursor::Cursor;
 use self::partition::Partition;
+#[commonware_macros::stability(ALPHA)]
+use crate::index::partitioned::{BuildRange, ParallelBuild};
 use crate::{
     index::{
         Cursor as CursorTrait, Factory, Ordered, Unordered,
@@ -223,12 +225,6 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         self.spills.get() as usize
     }
 
-    /// The number of partitions (`2^(8*P)`).
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn partition_count(&self) -> usize {
-        self.partitions.len()
-    }
-
     /// Mutable cursor over the values of sub-key `sub` in the partition at local slot `i`, if the
     /// key exists (see [Unordered::get_mut]).
     fn get_mut_slot(&mut self, i: usize, sub: &[u8]) -> Option<Cursor<'_, T::Key, V>> {
@@ -325,15 +321,24 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
         None
     }
+}
 
-    /// Create a [RangeIndex] covering only partitions `[offset, offset + count)` for a parallel
-    /// snapshot-build worker, matching this index's translator and spill threshold. It allocates
-    /// just `count` partition slots, so per-worker memory is the range, not the full `2^(8*P)` --
-    /// which is what makes a large `P` affordable. Its metric handles are detached (never
-    /// registered): they only accumulate the counts that [`Self::install_range`] folds back into a
-    /// full index.
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
+#[commonware_macros::stability(ALPHA)]
+impl<T: Translator, V: Send + Sync + 'static, const P: usize> ParallelBuild for Index<T, V, P> {
+    type Range = RangeIndex<T, V, P>;
+
+    fn partition_count(&self) -> usize {
+        self.partitions.len()
+    }
+
+    fn partition_of(key: &[u8]) -> usize {
+        partition_index_and_sub_key::<P>(key).0
+    }
+
+    /// The range matches this index's translator and spill threshold. It allocates just `count`
+    /// partition slots, so per-worker memory is the range, not the full `2^(8*P)` -- which is
+    /// what makes a large `P` affordable.
+    fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
         fn detached<M: Default>() -> Registered<M> {
             Registered::with_registration(M::default(), Registration::from(()))
         }
@@ -356,13 +361,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         }
     }
 
-    /// Move a build `worker`'s partitions and spilled entries into self (a full index), at the
-    /// global slot range the worker was created with, which must be empty. Build workers
-    /// are transient, so all of the worker's metric counts (`spills`, `pruned`, `keys`, `items`)
-    /// are folded into self's here. Returns the worker's item count so the caller can total items
-    /// across workers.
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn install_range(&mut self, mut worker: RangeIndex<T, V, P>) -> usize {
+    /// Moves the worker's partitions and spilled entries wholesale, folding all of its metric
+    /// counts (`spills`, `pruned`, `keys`, `items`) into this index's handles.
+    fn install_range(&mut self, mut worker: RangeIndex<T, V, P>) -> usize {
         let lo = worker.offset;
         for (local, partition) in worker.index.partitions.iter_mut().enumerate() {
             self.partitions[lo + local] = std::mem::take(partition);
@@ -387,9 +388,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         usize::try_from(items).expect("worker item count fits usize")
     }
 
-    /// Visit every value held across all partitions (inline and spilled), in unspecified order.
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn for_each_value(&self, mut f: impl FnMut(&V)) {
+    /// Visits inline and spilled values.
+    fn for_each_value(&self, mut f: impl FnMut(&V)) {
         for (p, partition) in self.partitions.iter().enumerate() {
             for v in partition.values_iter() {
                 f(v);
@@ -420,22 +420,19 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<T: Translator, V: Send + Sync, const P: usize> RangeIndex<T, V, P> {
-    /// Provides mutable access to the values associated with a translated key, if the key exists.
-    /// The key's global partition index must fall within this worker's range.
-    pub(crate) fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<'_, T::Key, V>> {
+impl<T: Translator, V: Send + Sync, const P: usize> BuildRange for RangeIndex<T, V, P> {
+    type Value = V;
+    type Cursor<'a>
+        = Cursor<'a, T::Key, V>
+    where
+        Self: 'a;
+
+    fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<'_, T::Key, V>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         self.index.get_mut_slot(i - self.offset, sub)
     }
 
-    /// Provides mutable access to the values associated with a translated key if the key exists,
-    /// otherwise inserts `value` for it and returns `None`. The key's global partition index must
-    /// fall within this worker's range.
-    pub(crate) fn get_mut_or_insert(
-        &mut self,
-        key: &[u8],
-        value: V,
-    ) -> Option<Cursor<'_, T::Key, V>> {
+    fn get_mut_or_insert(&mut self, key: &[u8], value: V) -> Option<Cursor<'_, T::Key, V>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         self.index
             .get_mut_or_insert_slot(i - self.offset, sub, value)

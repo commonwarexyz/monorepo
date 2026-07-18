@@ -134,8 +134,8 @@ pub struct Config<T: Translator, J, S: Strategy> {
     pub init_cache_size: Option<NonZeroUsize>,
 
     /// Number of tasks that build the init-time snapshot, including the init task itself
-    /// (which replays and routes the log); `1` builds entirely on the init task. Only certain
-    /// index types (such as the ordered-partitioned index) build in parallel.
+    /// (which replays and routes the log); `1` builds entirely on the init task. Only the
+    /// partitioned index types build in parallel.
     pub init_concurrency: NonZeroUsize,
 }
 

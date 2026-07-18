@@ -9,6 +9,8 @@ use crate::{
     },
     translator::Translator,
 };
+#[commonware_macros::stability(ALPHA)]
+use commonware_runtime::telemetry::metrics::{Registered, Registration};
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
@@ -76,6 +78,65 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
+        }
+    }
+
+    /// Create an empty index with this index's translator whose metric handles are detached
+    /// (never registered). Parallel snapshot-build workers use it for their partition slots:
+    /// the detached handles only accumulate the counts that [`Self::absorb`] folds back into a
+    /// registered index. The maps start without capacity, since a worker slot often receives
+    /// nothing.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn detached(&self) -> Self {
+        fn detached<M: Default>() -> Registered<M> {
+            Registered::with_registration(M::default(), Registration::from(()))
+        }
+        Self {
+            translator: self.translator.clone(),
+            overflow: HashMap::with_hasher(self.translator.clone()),
+            map: HashMap::with_hasher(self.translator.clone()),
+            keys: detached(),
+            items: detached(),
+            pruned: detached(),
+        }
+    }
+
+    /// Move `other`'s contents into self, which must be empty, folding `other`'s metric counts
+    /// (`keys`, `items`, `pruned`) into self's handles. Wholesale moves are what let
+    /// [`Self::detached`] build-worker slots install without re-inserting each entry. Returns the
+    /// number of items moved.
+    ///
+    /// # Panics
+    ///
+    /// Panics if self is not empty.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn absorb(&mut self, other: Self) -> usize {
+        assert!(
+            self.map.is_empty() && self.overflow.is_empty(),
+            "absorb target must be empty"
+        );
+        self.map = other.map;
+        self.overflow = other.overflow;
+        self.keys.inc_by(other.keys.get());
+        self.pruned.inc_by(other.pruned.get());
+        let items = other.items.get();
+        self.items.inc_by(items);
+
+        // A detached worker slot only ever holds in-memory entries, so its item gauge is
+        // non-negative and fits in a usize.
+        usize::try_from(items).expect("absorbed item count fits usize")
+    }
+
+    /// Visit every value held by the index (inline and overflow), in unspecified order.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn for_each_value(&self, mut f: impl FnMut(&V)) {
+        for v in self.map.values() {
+            f(v);
+        }
+        for chain in self.overflow.values() {
+            for v in chain {
+                f(v);
+            }
         }
     }
 }

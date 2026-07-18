@@ -439,6 +439,226 @@ pub(crate) mod test {
         });
     }
 
+    /// Build a `P`-partitioned unordered db with churny ops, then assert that reopening it with a
+    /// range of `init_concurrency` values (`1` for the serial path, `2` for the single-worker
+    /// de-interleave, counts that round down to fewer workers with wider ranges, and counts
+    /// above the partition count that clamp) all reconstruct the identical root and key-value
+    /// state: the parallel build replays the same immutable log, just split across workers
+    /// owning disjoint partition ranges.
+    #[commonware_macros::boxed]
+    async fn check_parallel_init_equivalence<const P: usize>(
+        context: deterministic::Context,
+        partition: &'static str,
+        concurrency_sweep: &[usize],
+    ) {
+        use crate::translator::OneCap;
+        type PartDb<const P: usize, S> =
+            partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, P, S>;
+
+        /// The value each key holds after the three commits below. Keys deleted in commit 2 and
+        /// reinserted in commit 3 hold the reinserted value. Keys deleted and not reinserted are
+        /// absent. Updated keys hold the commit-2 value. The rest hold their commit-1 value.
+        fn expected_value(i: u64) -> Option<Digest> {
+            if i % 21 == 1 {
+                Some(Sha256::hash(&(i * 13).to_be_bytes()))
+            } else if i % 7 == 1 {
+                None
+            } else if i.is_multiple_of(3) {
+                Some(Sha256::hash(&((i + 1) * 11).to_be_bytes()))
+            } else {
+                Some(Sha256::hash(&(i * 7).to_be_bytes()))
+            }
+        }
+
+        /// Assert every key resolves to its expected value, catching a location filed under the
+        /// wrong key (which the root comparison alone cannot detect since the `any` root is a pure
+        /// function of the log).
+        async fn assert_expected_values<const P: usize, S: commonware_parallel::Strategy>(
+            db: &PartDb<P, S>,
+        ) {
+            for i in 0u64..4000 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected_value(i),
+                    "value mismatch for key {i}"
+                );
+            }
+        }
+
+        let cfg = fixed_db_config::<OneCap>(partition, &context);
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+            .await
+            .unwrap();
+
+        // Commit 1: insert every key.
+        let mut batch = db.new_batch();
+        for i in 0u64..4000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&(i * 7).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
+        let mut batch = db.new_batch();
+        for i in (0u64..4000).step_by(3) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&((i + 1) * 11).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        for i in (1u64..4000).step_by(7) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            batch = batch.write(k, None);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // Commit 3: reinsert a third of the deleted keys, so the replayed log contains
+        // delete-then-reinsert sequences for the parallel build to resolve.
+        let mut batch = db.new_batch();
+        for i in (1u64..4000).step_by(21) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&(i * 13).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let db = db.sync().await.unwrap();
+        let root = db.root();
+        drop(db);
+
+        // Reopen with a range of concurrency values. All rebuild from the same log and must
+        // match the original root and serve the expected value for every key.
+        for &concurrency in concurrency_sweep {
+            let mut cfg = fixed_db_config::<OneCap>(partition, &context);
+            cfg.init_concurrency = NonZeroUsize::new(concurrency).unwrap();
+            let ctx = context
+                .child("reopen")
+                .with_attribute("concurrency", concurrency);
+            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            assert_eq!(
+                db.root(),
+                root,
+                "root mismatch at P={P} concurrency={concurrency}"
+            );
+            assert_expected_values(&db).await;
+            drop(db);
+        }
+    }
+
+    /// `P=2` allocates 65,536 hash sub-indexes per index instance (each pre-sizing its map), which
+    /// is too memory-heavy for the default suite, and the range/offset arithmetic is shared with
+    /// the ordered variant's P=2 coverage -- so the unordered sweep runs at P=1 only.
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_p1_parallel_init_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            // Concurrency 201 (200 workers) rounds down to 128 equal two-partition ranges for
+            // P=1 (count=256) and 301 exceeds the partition count and clamps. Both must
+            // reconstruct the same root without panicking.
+            check_parallel_init_equivalence::<1>(
+                context,
+                "unordered_parallel_equiv_p1",
+                &[1, 2, 3, 5, 9, 201, 301],
+            )
+            .await;
+        });
+    }
+
+    /// A fresh db's log holds only the auto-appended CommitFloor. A multi-worker reopen must
+    /// handle the keyless single-op replay (every routed batch empty).
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_fresh_db_parallel_init() {
+        deterministic::Runner::default().start(|context| async move {
+            use crate::translator::OneCap;
+            type FreshDb<S> =
+                partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
+
+            let cfg = fixed_db_config::<OneCap>("unordered_parallel_fresh", &context);
+            let db = FreshDb::<Sequential>::init(context.child("create"), cfg)
+                .await
+                .unwrap();
+            let root = db.root();
+            drop(db);
+
+            let mut cfg = fixed_db_config::<OneCap>("unordered_parallel_fresh", &context);
+            cfg.init_concurrency = NZUsize!(4);
+            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+        });
+    }
+
+    /// A replay failure during a parallel build must join every worker before surfacing the
+    /// error: no worker may outlive the failed build, retaining a clone of the log and its
+    /// partition-range allocation (the [crate::qmdb::SnapshotBuild] cleanup invariant).
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_parallel_init_replay_failure_drains_workers() {
+        deterministic::Runner::default().start(|context| async move {
+            use crate::{
+                journal::contiguous::Contiguous as _, qmdb::SnapshotBuild as _, translator::OneCap,
+            };
+            use std::sync::Arc;
+
+            type FailDb<S> =
+                partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
+
+            // Populate a db so the log has committed operations to replay.
+            let cfg = fixed_db_config::<OneCap>("unordered_parallel_replay_fail", &context);
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0u64..100 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&(i * 7).to_be_bytes());
+                batch = batch.write(k, Some(v));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen the op log directly (init's reads run before faults are enabled) and build
+            // against a fresh index, mirroring init's parallel snapshot build.
+            let cfg = fixed_db_config::<OneCap>("unordered_parallel_replay_fail", &context);
+            let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                context.child("log"),
+                cfg.journal_config,
+            )
+            .await
+            .unwrap();
+            let floor = Location::new(log.bounds().start);
+            let log = Arc::new(log);
+            let mut index = crate::index::partitioned::unordered::Index::<OneCap, Location, 1>::new(
+                context.child("index"),
+                OneCap,
+            );
+
+            // Every read now fails, and the failure necessarily surfaces through the replay
+            // stream: the reopened journal's page cache is fresh (only the buffer pool is shared
+            // across configs, never cached pages), so replay's first item forces a storage read,
+            // and with far fewer ops than the routing batch size no batch reaches a worker, so
+            // workers never read the log themselves.
+            context.storage_fault_config().write().read_rate = Some(1.0);
+            let result = index
+                .build_snapshot(context.child("build"), floor, &log, NZUsize!(4), None)
+                .await;
+            assert!(result.is_err(), "replay must fail under read faults");
+
+            // Every worker was joined before the error surfaced: nothing else may retain the log.
+            assert_eq!(Arc::strong_count(&log), 1);
+
+            context.storage_fault_config().write().read_rate = None;
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_any_unordered_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {

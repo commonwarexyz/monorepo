@@ -1,5 +1,7 @@
 //! The unordered variant of a partitioned index.
 
+#[commonware_macros::stability(ALPHA)]
+use crate::index::partitioned::{BuildRange, ParallelBuild};
 use crate::{
     index::{
         Unordered as UnorderedTrait, partitioned::partition_index_and_sub_key,
@@ -45,6 +47,81 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         let (i, sub_key) = partition_index_and_sub_key::<P>(key);
 
         (&mut self.partitions[i], sub_key)
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<T: Translator, V: Send + Sync + 'static, const P: usize> ParallelBuild for Index<T, V, P> {
+    type Range = RangeIndex<T, V, P>;
+
+    fn partition_count(&self) -> usize {
+        self.partitions.len()
+    }
+
+    fn partition_of(key: &[u8]) -> usize {
+        partition_index_and_sub_key::<P>(key).0
+    }
+
+    /// The range's slots match this index's translator. It allocates just `count` slots, so
+    /// per-worker memory is the range, not the full `2^(8*P)`. Each slot's metric handles are
+    /// detached (never registered): they only accumulate the counts that [Self::install_range]
+    /// folds back into the full index's per-partition handles.
+    fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
+        let partitions = (0..count)
+            .map(|i| self.partitions[offset + i].detached())
+            .collect();
+        RangeIndex { partitions, offset }
+    }
+
+    /// Absorbs each slot's maps wholesale into the matching partition, folding the slot's metric
+    /// counts into that partition's registered handles.
+    fn install_range(&mut self, worker: RangeIndex<T, V, P>) -> usize {
+        let lo = worker.offset;
+        let mut items = 0;
+        for (local, slot) in worker.partitions.into_iter().enumerate() {
+            items += self.partitions[lo + local].absorb(slot);
+        }
+        items
+    }
+
+    /// Visits inline and overflow values.
+    fn for_each_value(&self, mut f: impl FnMut(&V)) {
+        for partition in &self.partitions {
+            partition.for_each_value(&mut f);
+        }
+    }
+}
+
+/// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
+/// parallel snapshot-build worker (created by [Index::new_range], folded back into a full index by
+/// [Index::install_range]). It exposes only the cursor operations, which map a key's global
+/// partition index to the worker's local slot; the other [UnorderedTrait] operations index
+/// partitions globally and are deliberately unavailable so they cannot be miscalled on a worker.
+#[commonware_macros::stability(ALPHA)]
+pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
+    /// The worker's partition slots, addressed by local slot (`global partition - offset`).
+    partitions: Vec<UnorderedIndex<T, V>>,
+
+    /// The first global partition index the worker covers.
+    offset: usize,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<T: Translator, V: Send + Sync, const P: usize> BuildRange for RangeIndex<T, V, P> {
+    type Value = V;
+    type Cursor<'a>
+        = <UnorderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
+    where
+        Self: 'a;
+
+    fn get_mut(&mut self, key: &[u8]) -> Option<Self::Cursor<'_>> {
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        self.partitions[i - self.offset].get_mut(sub)
+    }
+
+    fn get_mut_or_insert(&mut self, key: &[u8], value: V) -> Option<Self::Cursor<'_>> {
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        self.partitions[i - self.offset].get_mut_or_insert(sub, value)
     }
 }
 
@@ -140,5 +217,96 @@ impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, 
         }
 
         pruned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{index::Cursor as _, translator::OneCap};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+
+    /// A `P=1` index over `u64` values with a one-byte translator, so distinct keys sharing a
+    /// partition and translated sub-key collide into an overflow chain.
+    fn new_index(ctx: impl Metrics) -> Index<OneCap, u64, 1> {
+        Index::new(ctx, OneCap)
+    }
+
+    /// A worker with a nonzero offset must land its slots at the global partitions
+    /// `offset + local` when installed, carrying inline values, overflow chains, and the
+    /// key/item counts.
+    #[test_traced]
+    fn test_install_range_nonzero_offset() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut full = new_index(context.child("full"));
+
+            // A worker covering global partitions [0x80, 0x82): two keys in partition 0x80, one
+            // in 0x81.
+            let mut worker = full.new_range(0x80, 2);
+            assert!(worker.get_mut_or_insert(&[0x80, 0x01], 1).is_none());
+            assert!(worker.get_mut_or_insert(&[0x80, 0x02], 2).is_none());
+            assert!(worker.get_mut_or_insert(&[0x81, 0x07], 3).is_none());
+
+            // A colliding key (same partition and translated sub-key as the first) joins the
+            // first key's chain through the cursor, the same path the build worker's collision
+            // resolution takes.
+            {
+                let mut cursor = worker.get_mut_or_insert(&[0x80, 0x01, 0xFF], 4).unwrap();
+                while cursor.next().is_some() {}
+                cursor.insert(4);
+            }
+
+            // Installing must remap the slots to the worker's global range and count every
+            // value, including the chained one.
+            assert_eq!(full.install_range(worker), 4);
+            assert_eq!(full.keys(), 3);
+            assert_eq!(full.items(), 4);
+            assert_eq!(
+                full.get(&[0x80, 0x01]).copied().collect::<Vec<_>>(),
+                vec![1, 4]
+            );
+            assert_eq!(
+                full.get(&[0x80, 0x02]).copied().collect::<Vec<_>>(),
+                vec![2]
+            );
+            assert_eq!(
+                full.get(&[0x81, 0x07]).copied().collect::<Vec<_>>(),
+                vec![3]
+            );
+        });
+    }
+
+    /// A worker's cursor deletes (the parallel build's delete path) accumulate on its detached
+    /// `pruned` handle and must fold into the full index's metric at install.
+    #[test_traced]
+    fn test_install_range_carries_pruned() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut full = new_index(context.child("full"));
+            assert_eq!(full.pruned(), 0);
+
+            // Give one translated key two values, then delete both through a cursor so the
+            // worker records prunes the full index never sees directly.
+            let mut worker = full.new_range(0, full.partition_count());
+            assert!(worker.get_mut_or_insert(&[0x10, 0x01], 1).is_none());
+            {
+                let mut cursor = worker.get_mut_or_insert(&[0x10, 0x01, 0xFF], 2).unwrap();
+                while cursor.next().is_some() {}
+                cursor.insert(2);
+            }
+            {
+                let mut cursor = worker.get_mut(&[0x10, 0x01]).unwrap();
+                while cursor.next().is_some() {
+                    cursor.delete();
+                }
+            }
+
+            // Installing folds the prune count in (matching the serial build, which records
+            // prunes on the full index directly).
+            assert_eq!(full.install_range(worker), 0);
+            assert_eq!(full.pruned(), 2);
+            assert_eq!(full.keys(), 0);
+            assert_eq!(full.items(), 0);
+        });
     }
 }
