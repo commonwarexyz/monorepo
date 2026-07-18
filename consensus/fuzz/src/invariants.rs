@@ -174,7 +174,11 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // nullified, so none of them may be finalized. This validates recorded
     // parent links only (consistency of the extracted certificate graph);
     // ancestry whose intermediate certificates were never reported is not
-    // reconstructed.
+    // reconstructed. Comparing unevenly-progressed replicas (e.g. a frozen
+    // crash-stopped reporter against live ones) is sound: skipped intervals
+    // are permanently nullified by construction, so a finalization observed
+    // later by another replica can only reveal a real violation, never create
+    // a spurious one.
     let finalized_ordered: BTreeSet<u64> = finalized_views.keys().copied().collect();
     for (idx, (notarizations, _, finalizations)) in replicas.iter().enumerate() {
         let links = notarizations
