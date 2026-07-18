@@ -91,9 +91,10 @@ pub(super) struct RunMeta {
 /// chunk, or by construction when every byte under the CRC came from process
 /// memory (write payloads, gap zeros, tail buffers, overlay entries, or a
 /// COW read-back that was itself checked against the old CRC at assembly).
-/// Chunks whose CRC assembly spliced in unchecked disk read-backs (partial
-/// in-place prefix/suffix read-backs, resize boundary recomputation) stay
-/// unverified, so their first read still runs the full check. A pending
+/// Disk read-backs spliced into CRC assembly (prefix/suffix sourcing, resize
+/// boundary recomputation) are likewise checked against the chunk's expected
+/// CRC, so the assembled chunk inherits that CRC's provenance — unverified
+/// only when the expected value was resident unverified state. A pending
 /// chunk carries the bit its finalized CRC will have. Verified chunks are
 /// read exactly (no span widening) with no CRC pass. The bit travels with
 /// the entry: rewrites and relocations re-decide it at publish, and dropping
@@ -720,7 +721,7 @@ pub(super) struct BlobInner {
     pub crcs: ChunkMap,
     /// Bytes of the frontier chunk's written span (from its chunk base),
     /// kept in memory so append CRCs and commit shadows never read back.
-    /// Meaningful only when `frontier_chunk` is backed.
+    /// Meaningful only when `tail_chunk` is backed.
     pub tail: Vec<u8>,
     /// Chunk `tail` describes.
     pub tail_chunk: u64,
@@ -1341,16 +1342,16 @@ fn assert_meta_parity(id: u64, entry: &Entry, meta: &CommittedMeta) {
     }
 }
 
-/// Capture roots pooled by syncs queued on the commit lock, with the
-/// completion latch their commit resolves.
+/// Capture roots pooled by commit registrations, with the completion latch
+/// their commit resolves.
 ///
-/// Whichever queued sync acquires the commit lock first drains the pool and
-/// commits the UNION, so one fsync acknowledges every pooled sync (commit
-/// coalescing, see `commit::commit`). The ticket is swapped out atomically
-/// with the roots at drain: a ticket therefore resolves exactly when a
-/// commit whose snapshot began after every covered registration completes,
-/// and a failed commit resolves it with the poisoning error (every pooled
-/// sync was promised durability).
+/// Whichever driver task acquires the commit lock first drains the pool and
+/// commits the UNION, so one fsync acknowledges every pooled registration
+/// (commit coalescing, see `commit::commit`). The ticket is swapped out
+/// atomically with the roots at drain: a ticket therefore resolves exactly
+/// when a commit whose snapshot began after every covered registration
+/// completes, and a failed commit resolves it with the poisoning error
+/// (every pooled registration was promised durability).
 pub(super) struct PendingCommit {
     pub roots: BTreeSet<u64>,
     pub ticket: super::commit::Ticket,
@@ -2346,7 +2347,7 @@ async fn read_span_checked<S: crate::Storage>(
     Ok((span.as_ref().to_vec(), verified))
 }
 
-/// Source the first affected chunk's committed prefix `[base, fill_from)`:
+/// Source the first affected chunk's current prefix `[base, fill_from)`:
 /// from an in-memory tail buffer or overlay entry when one describes this
 /// chunk, otherwise a checked read-back of the chunk's whole span (rare:
 /// the first splice into a chunk the overlay does not hold).
@@ -2396,7 +2397,8 @@ async fn read_span_prefix<S: crate::Storage>(
     let span_end = (run_logical + run.len).min(base + BLOCK);
     let phys = run.physical + (base - run_logical);
     // Boxed: the cold checked read-back would otherwise deepen every
-    // write future's layout (see the loader in `plan_stretch`).
+    // write future's layout (as the committed-CRC loaders are, see
+    // [`load_committed_page`]).
     let (mut span, verified) = Box::pin(read_span_checked(
         ready,
         blob,
@@ -3506,6 +3508,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
         }
         let mut state = ready.state.lock();
         let mut inner = blob.inner.lock();
+        // A removal raced the resize: adopt nothing (see `publish_stretch`).
         if !inner.removed {
             inner.size = inner.size.max(len);
             state.dirty.insert(blob.id);
@@ -3598,6 +3601,14 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                     verified,
                 };
             }
+            // No overlay probe here, unlike the staged shrink in
+            // `Batch::resize`: the tail buffer's invariant — it always
+            // describes the frontier chunk — covers the dominant shape,
+            // and a mid-blob chunk becomes the frontier only through this
+            // very shrink. That rare overlay-resident case falls through
+            // to the CHECKED read-back below (correct, one extra read).
+            // The staged sibling serves its overlay too because staged
+            // chunks are routinely overlay-backed.
             let state = inner.crcs.get(chunk).expect("backed chunk has crc");
             match state.crc {
                 ChunkCrc::Ready(expected) => {

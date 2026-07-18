@@ -1,7 +1,7 @@
 //! Trace conformance: the exhaustive `model` as an oracle over the REAL
 //! volume implementation.
 //!
-//! The model proves the commit PROTOCOL; this module checks that the
+//! The model proves the commit PROTOCOL. This module checks that the
 //! implementation REFINES it (the middle layer of the trust story in the
 //! model docs). Every workload here executes real volume operations in
 //! lockstep with the model's transition function:
@@ -15,7 +15,7 @@
 //!   loss at the model's granularity — each pending inner write resolves
 //!   per block to any queued version, the durable content, or a torn
 //!   block — and re-opens the real volume over each outcome. Crash points
-//!   inside a commit are pinned by parking the leader at the inner fsync
+//!   inside a commit are pinned by parking its driver task at the inner fsync
 //!   (all metadata writes issued, nothing durable), which covers both of
 //!   the model's in-flight phases: the disk state after `Snapshot` alone
 //!   is a subset of the `MetaWritten` outcomes (every metadata block
@@ -32,7 +32,7 @@
 //!
 //! Nondeterminism delta against the model, stated precisely: the model
 //! resolves fsyncgate residue (`FsyncFail`) into per-block
-//! kept/landed/lost cache states; the harness collapses that step because
+//! kept/landed/lost cache states. The harness collapses that step because
 //! the union of crash outcomes over every residue state equals the crash
 //! outcomes of the pre-fail state (kept and lost both resolve to
 //! {durable, any version, torn} minus nothing), and the implementation's
@@ -187,7 +187,7 @@ fn translated(t: &Tracked, logical: &Logical) -> Obs {
 }
 
 /// Step `tracked` through `actions`, returning every reachable state with
-/// its parent index. Non-final actions must be deterministic; the final
+/// its parent index. Non-final actions must be deterministic. The final
 /// action may fan out (a crash).
 fn states_after(
     tracked: &[Tracked],
@@ -425,13 +425,15 @@ async fn pause(active: &Arc<AtomicBool>) {
 }
 
 /// A pass-through storage wrapper that (while `active`) yields once before
-/// every inner operation, turning each inner I/O into a poll boundary:
-/// dropping a commit future after N polls enumerates cancellation between
-/// any two sequentially issued inner operations — the await-point analogue
-/// of crash-at-every-write. Concurrently joined I/O shares one poll
-/// boundary (the commit's metadata writes all yield in one parent poll of
-/// their `try_join_all` and issue in the next), which costs nothing for
-/// the checked contracts because the joined writes commute.
+/// every inner operation, turning each inner I/O into a scheduling
+/// boundary that discretizes a driver task's progress: dropping an
+/// observer future after every poll count (polls interleaved with
+/// `yield_now`) samples the drop against each inner-I/O stage — the
+/// await-point analogue of crash-at-every-write, and every stage must be
+/// benign. Concurrently joined I/O shares one boundary (the commit's
+/// metadata writes all yield in one poll of their `try_join_all` and
+/// issue in the next), which costs nothing for the checked contracts
+/// because the joined writes commute.
 #[derive(Clone)]
 struct Yielding<S> {
     inner: S,
@@ -536,14 +538,16 @@ enum Op {
     Remove(u8),
     Recreate(u8),
     /// Sync every live blob in the mask as ONE commit (multi-bit masks
-    /// register every root, then drive one handle: the pooled union).
+    /// register every root, then await every handle: one union commit
+    /// resolves them all).
     Sync(u8),
     BatchAppend(u8),
     BatchOverwrite(u8),
     BatchCreate(u8),
     /// Join the batch's group without staging content (Batch::sync).
     BatchSync(u8),
-    /// Stage the slot's removal (Batch::remove; apply commits in-step).
+    /// Stage the slot's removal (Batch::remove), committed in-step at
+    /// apply.
     BatchRemove(u8),
     BatchApply,
     BatchDrop,
@@ -920,8 +924,10 @@ impl Rig {
                         .await
                         .unwrap_or_else(|e| panic!("{}: sync: {e}", self.ctx()));
                 } else {
-                    // Register every root, then drive one handle: the
-                    // leader drains the pool and commits the union.
+                    // Register every root — each registration schedules a
+                    // driver task — then await every handle: whichever
+                    // driver task leads drains the pool and commits the
+                    // union, resolving them all.
                     let mut handles = Vec::new();
                     for slot in slots {
                         handles.push(self.blobs[&slot].start_sync().await);
@@ -988,7 +994,7 @@ impl Rig {
                         .await
                         .unwrap_or_else(|e| panic!("{}: apply: {e}", self.ctx()));
                 }
-                // Removed slots drop their handles; a same-slot recreation
+                // Removed slots drop their handles. A same-slot recreation
                 // re-inserts the created handle below.
                 for slot in removals {
                     self.blobs.remove(&slot);
@@ -1162,9 +1168,10 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
 ///
 /// - `Blob::write_at_sync`: `write_at` + `sync` composition (both mapped).
 /// - `Batch::resize`: no model action by design (the model docs'
-///   uncovered list); pinned by directed unit tests in `tests`.
+///   uncovered list), pinned by directed unit tests in `tests`.
 /// - `Batch::apply_start_sync`: `apply`'s publish plus `start_sync`'s
-///   registered commit; the cancellation injector drives the composite.
+///   registered commit, with the cancellation injector driving the
+///   composite.
 ///
 /// Extending the volume's public semantics requires extending the op
 /// vocabulary (and a workload reaching it) or adding a line above with
@@ -1246,15 +1253,10 @@ async fn replay(prefix: &[Op]) -> Option<Rig> {
     Some(rig)
 }
 
-/// Park a commit of `mask` at the inner fsync on `rig`. Returns the leader
-/// task plus the follower handles.
-async fn park_commit(
-    rig: &mut Rig,
-    mask: u8,
-) -> (
-    tokio::task::JoinHandle<Result<(), Error>>,
-    Vec<crate::Handle<()>>,
-) {
+/// Park a commit of `mask` at the inner fsync on `rig`: registration
+/// schedules a driver task, and the gate holds that task at the fsync.
+/// Returns the observer handles.
+async fn park_commit(rig: &mut Rig, mask: u8) -> Vec<crate::Handle<()>> {
     let slots: Vec<u8> = (0..BLOBS)
         .filter(|&s| mask & (1 << s) != 0 && rig.live(s))
         .collect();
@@ -1264,7 +1266,6 @@ async fn park_commit(
     for slot in &slots {
         handles.push(rig.blobs[slot].start_sync().await);
     }
-    let leader = tokio::spawn(handles.remove(0));
     // Bounded wait: the model said the commit is non-clean, so it must
     // reach the inner fsync.
     for _ in 0..1_000_000u32 {
@@ -1280,7 +1281,7 @@ async fn park_commit(
     );
     rig.step_model_only(&[Action::Snapshot(mask), Action::WriteMeta]);
     rig.in_flight = true;
-    (leader, handles)
+    handles
 }
 
 /// One commit-window probe: park a sync at the fsync, interleave `suffix`,
@@ -1310,13 +1311,13 @@ async fn window_probe(
             return;
         }
     }
-    let (leader, followers) = park_commit(&mut rig, mask).await;
+    let handles = park_commit(&mut rig, mask).await;
     // Interleave ops in the commit window (the post-snapshot write races
     // the model proves the freeze rule against).
     for &op in suffix {
         if !rig.enabled(op) {
-            leader.abort();
-            let _ = leader.await;
+            // The released driver task finishes its commit into a rig
+            // being torn down, which is inert.
             rig.gated.sync_gate.release();
             return;
         }
@@ -1324,14 +1325,10 @@ async fn window_probe(
     }
     if confirm {
         rig.gated.sync_gate.release();
-        leader
-            .await
-            .expect("leader task")
-            .unwrap_or_else(|e| panic!("{}: parked commit failed: {e}", rig.ctx()));
-        for handle in followers {
+        for handle in handles {
             handle
                 .await
-                .unwrap_or_else(|e| panic!("{}: follower sync failed: {e}", rig.ctx()));
+                .unwrap_or_else(|e| panic!("{}: parked commit failed: {e}", rig.ctx()));
         }
         rig.in_flight = false;
         rig.step_model_only(&[Action::FsyncOk]);
@@ -1341,10 +1338,10 @@ async fn window_probe(
     } else {
         // Crash while the commit's metadata writes are pending.
         rig.crash_probe(&[], cap, seed, stats).await;
-        leader.abort();
-        let _ = leader.await;
+        // The released driver task finishes its commit into a rig being
+        // torn down, which is inert.
         rig.gated.sync_gate.release();
-        drop(followers);
+        drop(handles);
     }
 }
 
@@ -1498,10 +1495,12 @@ async fn conformance_recycle() {
 }
 
 /// Batch workload: cross-blob staging, publish, drop, selective commits
-/// that must respect the applied group (never-split), plus staging
-/// interleaved into a parked commit's window (the model's stage_invisible
-/// rule: staged content stays out of the in-flight commit's crash fan).
-/// The counterpart of the model's BATCH/BATCH_COW workloads.
+/// that must respect the applied group (never-split), membership joining
+/// the group without staged content (Batch::sync) under those selective
+/// commits, plus staging interleaved into a parked commit's window (the
+/// model's stage_invisible rule: staged content stays out of the in-flight
+/// commit's crash fan). The counterpart of the model's BATCH/BATCH_COW and
+/// BATCH_MEMBER workloads.
 #[tokio::test]
 async fn conformance_batch() {
     let stats = explore(&Workload {
@@ -1529,8 +1528,10 @@ async fn conformance_batch() {
 
 /// Batch-creation workload: recreating a removed blob through a batch
 /// (mixed batches commit atomically via apply_sync, creation-only batches
-/// publish commit-free). The counterpart of the model's BATCH_CREATE and
-/// BATCH_CREATE_FREE workloads.
+/// publish commit-free), plus staged removals and remove-then-recreate
+/// shapes committing in-step at apply (Batch::remove). The counterpart of
+/// the model's BATCH_CREATE, BATCH_CREATE_FREE, BATCH_REMOVE, and
+/// BATCH_RECREATE workloads.
 #[tokio::test]
 async fn conformance_batch_create() {
     let stats = explore(&Workload {
@@ -1747,14 +1748,17 @@ const DEEP_MENU: &[Op] = &[
     Op::BatchAppend(0),
     Op::BatchAppend(1),
     Op::BatchOverwrite(0),
+    Op::BatchCreate(1),
+    Op::BatchSync(0),
+    Op::BatchRemove(1),
     Op::BatchApply,
     Op::BatchDrop,
 ];
 
 /// Seeded random deep walk: long traces over the full vocabulary with
-/// mid-walk crashes (sampled outcomes, all checked; one outcome resumed
+/// mid-walk crashes (sampled outcomes, all checked — one outcome resumed
 /// with the lockstep filtered to the matching model states). Deeper
-/// budgets than the default suite; run with the full test profile.
+/// budgets than the default suite, run with the full test profile.
 #[tokio::test]
 #[ignore]
 async fn conformance_random_deep() {
@@ -2108,7 +2112,7 @@ async fn conformance_cancel_apply_queued() {
     rig.gated.sync_gate.wait_reached().await;
     rig.step_model_only(&[Action::Snapshot(0b100), Action::WriteMeta]);
 
-    // The apply task queues on the commit lock; drop the observer while
+    // The apply task queues on the commit lock. Drop the observer while
     // it waits.
     let batch_rig = rig.batch.take().expect("staged batch");
     {
@@ -2127,7 +2131,7 @@ async fn conformance_cancel_apply_queued() {
         "queued apply drop must stay benign"
     );
 
-    // Release the parked sync; its commit confirms, then the apply task
+    // Release the parked sync: its commit confirms, then the apply task
     // acquires the lock, publishes, and commits the batch whole.
     rig.gated.sync_gate.release();
     parked.await.expect("parked task").expect("parked sync");
@@ -2182,7 +2186,7 @@ async fn conformance_cancel_apply_start_sync() {
         drop(batch_rig.created);
 
         // The apply task publishes and registers the group's commit
-        // regardless; the started commit then lands on its own.
+        // regardless, and the started commit then lands on its own.
         let completed = outcome.is_some();
         if let Some(handle) = outcome {
             handle.await.expect("started commit lands");

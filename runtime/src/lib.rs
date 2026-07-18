@@ -620,9 +620,9 @@ stability_scope!(BETA {
     ///
     /// Failure is latched: after any failed sync or commit (a failed
     /// [`Blob::sync`] or [`Blob::write_at_sync`], a failed blob
-    /// creation/removal, a failed [WriteBatch::apply_sync], or a failed —
-    /// or cancelled mid-commit — [`Blob::start_sync`] /
-    /// [WriteBatch::apply_start_sync] handle), the volume
+    /// creation/removal, a failed [WriteBatch::apply_sync], a failed
+    /// [`Blob::start_sync`] / [WriteBatch::apply_start_sync] handle, or a
+    /// commit task aborted in flight by runtime teardown), the volume
     /// is poisoned and EVERY subsequent storage operation — reads and
     /// [`Storage::scan`] included, on every blob — returns the original
     /// error until restart. A failed fsync of the shared volume file leaves
@@ -790,18 +790,14 @@ stability_scope!(BETA {
 
         /// Request that all pending data is durably persisted.
         ///
-        /// Awaiting this future ENQUEUES the sync; awaiting the returned [`Handle`]
-        /// waits for the same durability guarantee as [`Blob::sync`]. The handle must
-        /// be observed: durability failures are reported only through it, and on
-        /// runtime contexts awaiting it is what drives the commit when no other sync
-        /// arrives.
-        ///
-        /// A handle that was never polled leaves the request queued for a later
-        /// commit. A handle that WAS polled must be driven to completion or dropped:
-        /// on runtime contexts a polled handle may hold the commit lock, so parking
-        /// it (keeping it alive unpolled) can block every later commit, and dropping
-        /// it mid-commit aborts that commit — which, like any commit failure here,
-        /// poisons ALL storage until restart (see the [Storage] crash contract).
+        /// Awaiting this future REGISTERS the sync and schedules its commit on
+        /// the runtime immediately; awaiting the returned [`Handle`] waits for
+        /// the same durability guarantee as [`Blob::sync`]. The handle only
+        /// OBSERVES that commit: it progresses (and lands) regardless of what
+        /// happens to the handle, so dropping or parking the handle is benign.
+        /// A durability failure is reported through the handle and, on runtime
+        /// contexts, additionally poisons ALL storage until restart (see the
+        /// [Storage] crash contract) — an unobserved handle cannot hide one.
         ///
         /// # Examples
         ///
@@ -986,13 +982,12 @@ stability_scope!(BETA {
         /// commit discards the applied batch exactly like [Self::apply],
         /// and a failed handle is fatal to the backend's storage.
         ///
-        /// The handle must be observed: durability failures are reported
-        /// only through it, and on runtime contexts awaiting it is what
-        /// drives the commit when no other sync arrives. A polled handle
-        /// must then be driven to completion or dropped — parking it can
-        /// hold the commit lock, and dropping it mid-commit aborts the
-        /// commit, poisoning ALL storage until restart (see
-        /// [`Blob::start_sync`]).
+        /// The group's commit is scheduled on the runtime immediately and
+        /// lands regardless of the returned handle, which only OBSERVES its
+        /// result: dropping or parking the handle is benign. A durability
+        /// failure is reported through the handle and, on runtime contexts,
+        /// additionally poisons the backend's storage (see
+        /// [`Blob::start_sync`]) — an unobserved handle cannot hide one.
         ///
         /// Implementations outside the runtime contexts may weaken the
         /// atomicity (see [crate::mocks::SequentialBatch]).

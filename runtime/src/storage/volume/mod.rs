@@ -680,6 +680,10 @@ async fn remove_task<S: crate::Storage>(
     let _commit = ready.commit_lock.lock().await;
     ready.check_poisoned()?;
 
+    // The namespace edit needs no `commit::PoisonOnCancel` of its own
+    // (unlike the batch apply task's publish): no await point separates
+    // the edit from `commit_locked`, whose guard arms before consuming
+    // state, so the task cannot be dropped inside the half-removed window.
     let removed = {
         let mut state = ready.state.lock();
         let Some(blobs) = state.partitions.get(partition) else {

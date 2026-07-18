@@ -158,7 +158,7 @@
 //!    the model: caller futures dropped at every await boundary. Commits
 //!    execute in runtime-driven tasks and callers only observe, so the
 //!    injector pins that every drop point is BENIGN (the commit lands
-//!    regardless); the one remaining cancellation hazard — a driver task
+//!    regardless). The one remaining cancellation hazard — a driver task
 //!    aborted mid-commit at runtime teardown — poisons, pinned by a
 //!    directed unit test.
 //!
@@ -172,10 +172,7 @@
 //! superblock-bound table, so the implementation's separately stored
 //! commit-written checksum extents — the whole-extent guard CRCs,
 //! recovery's unconditional last-ref load, and the `MAX_CHECKSUM_REFS`
-//! compaction commit — sit outside all exhaustive checking. So is
-//! `Batch::sync` (touched-only group membership): a directly written blob
-//! joining a batch's never-split group without staged content has no
-//! model action.
+//! compaction commit — sit outside all exhaustive checking.
 //!
 //! # Deliberately out of scope
 //!
@@ -594,10 +591,10 @@ pub(super) enum Action {
     /// Stage the slot's removal into the current batch (Batch::remove),
     /// resolved at apply against the pre-publish state.
     BatchRemove(u8),
-    /// Atomically publish the staged batch. A batch staging creations
-    /// alongside anything else also begins its commit in the same step
-    /// (the apply_sync requirement). A creation-ONLY batch publishes
-    /// commit-free.
+    /// Atomically publish the staged batch. A batch staging removals — or
+    /// creations alongside anything else — also begins its commit in the
+    /// same step (the apply_sync requirement). A creation-ONLY batch
+    /// publishes commit-free.
     BatchApply,
     /// Drop the staged batch without applying it.
     BatchDrop,
@@ -2538,12 +2535,11 @@ mod tests {
     }
 
     /// A staged removal must publish and begin its commit in one step.
-    /// Without that (modeling an apply that does not sync), an unrelated
-    /// commit drops the removed slot's entry — making the removal durable
-    /// — while the batch's staged write to its sibling stays uncommitted:
-    /// the NEXT commit sees the split (I6). The first unrelated commit
-    /// cannot see it (neither part is resolved until its own confirm), so
-    /// the trace carries a second one.
+    /// Without that (modeling an apply that does not sync), the first
+    /// unrelated snapshot itself trips I6: it counts the removed slot's
+    /// part as resolved — every commit drops the removed entry, making
+    /// the removal durable — while the batch's staged write to its
+    /// sibling stays unresolved.
     #[test]
     fn mutation_remove_commit_detected() {
         let spec_trace: &[Action] = &[
@@ -2555,7 +2551,7 @@ mod tests {
             Action::BatchAppend(1),
             Action::BatchRemove(0),
             // Under SPEC the apply also begins the batch's commit. Finish
-            // it, after which the unrelated commits are harmless.
+            // it, after which the unrelated commit is harmless.
             Action::BatchApply,
             Action::WriteMeta,
             Action::FsyncOk,
@@ -2577,10 +2573,6 @@ mod tests {
             Action::BatchAppend(1),
             Action::BatchRemove(0),
             Action::BatchApply,
-            Action::Snapshot(0b100),
-            Action::WriteMeta,
-            Action::FsyncOk,
-            Action::Append(2),
             Action::Snapshot(0b100),
         ];
         let rules = Rules {

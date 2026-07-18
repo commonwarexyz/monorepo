@@ -62,8 +62,8 @@ struct Snapshot {
 
 /// A registration in the pending-commit pool: the shared result of the
 /// coalesced commit that will cover the registered roots. Callers OBSERVE
-/// tickets ([`TicketState::wait`]); driver tasks resolve them — a commit's
-/// progress never depends on any observer being polled.
+/// tickets ([`TicketState::wait`]) and driver tasks resolve them — a
+/// commit's progress never depends on any observer being polled.
 pub(super) type Ticket = Arc<TicketState>;
 
 /// A ticket's resolution cell plus the notification observers await.

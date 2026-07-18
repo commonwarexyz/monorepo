@@ -610,7 +610,8 @@ pub(super) async fn recover<S: crate::Storage>(
         pending: Default::default(),
         poisoned: Default::default(),
         pool: pool.clone(),
-        // Config promises a growth step of whole blocks.
+        // Deliver the Config doc's promise: round the configured step
+        // up to whole blocks.
         growth_quantum: block_align(cfg.growth_quantum),
         provision_lock: AsyncMutex::new(()),
     })
@@ -686,7 +687,8 @@ async fn init_fresh<S: crate::Storage>(
         pending: Default::default(),
         poisoned: Default::default(),
         pool: pool.clone(),
-        // Config promises a growth step of whole blocks.
+        // Deliver the Config doc's promise: round the configured step
+        // up to whole blocks.
         growth_quantum: block_align(cfg.growth_quantum),
         provision_lock: AsyncMutex::new(()),
     })

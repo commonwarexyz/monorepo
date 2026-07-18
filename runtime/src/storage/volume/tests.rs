@@ -449,7 +449,7 @@ impl crate::Blob for TearingBlob {
 }
 
 /// Randomized power-loss soak: drive a workload over `Volume<Tearing>`,
-/// tracking the exact committed state; at random points, crash (keeping an
+/// tracking the exact committed state. At random points, crash (keeping an
 /// arbitrary subset of unsynced volume-file writes, torn at block
 /// granularity), reopen, and assert every blob reads back exactly its
 /// last-committed content.
@@ -457,8 +457,8 @@ impl crate::Blob for TearingBlob {
 /// Commits are SELECTIVE: a sync commits only the synced blob plus its
 /// applied-batch group (never split), so the ledger tracks committed
 /// content per blob and pending groups explicitly. Batches interleave with
-/// direct writes, syncs, and crashes; a batch dropped (or crashed) before
-/// apply must be fully invisible.
+/// direct writes, syncs, and crashes, and a batch dropped before apply
+/// must be fully invisible.
 #[tokio::test]
 async fn test_volume_power_loss_soak() {
     for seed in 0..32u64 {
@@ -530,9 +530,10 @@ async fn power_loss_round(seed: u64) {
         current.insert(name, Vec::new());
     }
 
+    let mut crashes = 0u32;
     for step in 0..200u32 {
         let name = NAMES[rng.random_range(0..NAMES.len())];
-        match rng.random_range(0..13u8) {
+        match rng.random_range(0..15u8) {
             // Append a random amount (small through multi-block).
             0..=4 => {
                 let len = match rng.random_range(0..3u8) {
@@ -584,14 +585,15 @@ async fn power_loss_round(seed: u64) {
                 cur.resize(cur.len() + grow, 0);
             }
             // Sync: the synced blob (plus its applied-batch group) becomes
-            // committed; other blobs' dirty state stays pending.
+            // committed, while other blobs' dirty state stays pending.
             8 => {
                 blobs[name].sync().await.unwrap();
                 ledger_commit(name, &mut committed, &current, &mut groups);
             }
             // Batch: stage appends on two blobs, then apply / apply_sync /
-            // drop / crash mid-stage. Staged state must be invisible until
-            // apply, and applied state must commit all-or-nothing.
+            // drop. Staged state must be invisible until apply, and applied
+            // state must commit all-or-nothing (mid-stage crash coverage
+            // lives in `test_volume_batch_crash_mid_stage`).
             9..=11 => {
                 let other = NAMES[rng.random_range(0..NAMES.len())];
                 let mut batch = volume.batch().await.unwrap();
@@ -612,7 +614,7 @@ async fn power_loss_round(seed: u64) {
                     staged.push((pick, data));
                 }
                 match rng.random_range(0..3u8) {
-                    // Publish; the two blobs form one atomic group.
+                    // Publish: the two blobs form one atomic group.
                     0 => {
                         batch.apply().await.unwrap();
                         for (pick, data) in staged {
@@ -661,6 +663,7 @@ async fn power_loss_round(seed: u64) {
             }
             // Crash + recover.
             _ => {
+                crashes += 1;
                 let image = tearing.crash(&mut rng);
                 drop(blobs);
                 tearing = Tearing::from_image(pool.clone(), image).await;
@@ -707,6 +710,10 @@ async fn power_loss_round(seed: u64) {
         // must hold exactly.
         audit_volume(&volume, true);
     }
+    // Structural guard: an arm-range drift once made the crash arm
+    // unreachable, silently turning the power-loss soak into a clean-run
+    // soak.
+    assert!(crashes > 0, "seed {seed}: the soak never crashed");
 }
 
 /// A crash while a batch is still STAGED (never applied) must leave the
@@ -2429,7 +2436,7 @@ async fn test_volume_coalesced_commit_failure_poisons_waiters() {
     gated.sync_gate.arm_fail();
     gated.sync_gate.release();
 
-    // The parked commit succeeds; both pooled syncs fail together.
+    // The parked commit succeeds, and both pooled syncs fail together.
     ta.await.unwrap().unwrap();
     assert!(
         tb.await.unwrap().is_err(),
@@ -3934,7 +3941,7 @@ async fn test_volume_apply_start_sync_durable_after_handle() {
     let got = a.read_at(0, 100).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &[0x1u8; 100]);
 
-    // The handle lead-drives the covering commit and resolves Ok.
+    // The handle resolves Ok once the covering commit lands.
     handle.await.unwrap();
 
     // Durable: every crash outcome recovers the batch.
@@ -3961,8 +3968,9 @@ async fn test_volume_apply_start_sync_durable_after_handle() {
 }
 
 /// A crash before any covering commit erases a started-sync batch exactly
-/// like a batch published with plain `apply`: the handle was never awaited,
-/// no commit ran, and recovery serves the pre-batch state.
+/// like a batch published with plain `apply`: the driver task is parked
+/// before its first metadata write, so nothing of the commit is durable
+/// and recovery serves the pre-batch state.
 #[tokio::test]
 async fn test_volume_apply_start_sync_crash_before_commit_erases() {
     let pool = test_pool();
@@ -4013,7 +4021,7 @@ async fn test_volume_apply_start_sync_crash_before_commit_erases() {
 
 /// The coalescing ticket IS the completion handle: a later unrelated sync
 /// drains the pending pool and its commit covers the started batch, so the
-/// handle resolves without leading a commit of its own.
+/// handle resolves without a second commit.
 #[tokio::test]
 async fn test_volume_apply_start_sync_resolved_by_later_sync() {
     let pool = test_pool();
@@ -4034,8 +4042,8 @@ async fn test_volume_apply_start_sync_resolved_by_later_sync() {
         .unwrap();
     let handle = batch.apply_start_sync().await.unwrap();
 
-    // An unrelated blob's sync leads: it drains the pool (the batch's roots
-    // were registered before it queued) and commits the union.
+    // An unrelated blob's sync leads: its driver task drains the pool (the
+    // batch's roots were registered first) and commits the union.
     let before = gated.syncs();
     b.write_at(0, IoBuf::copy_from_slice(&[0x2u8; 50]))
         .await
@@ -4045,7 +4053,11 @@ async fn test_volume_apply_start_sync_resolved_by_later_sync() {
 
     // The handle observes the covering commit's ticket: no second fsync.
     handle.await.unwrap();
-    assert_eq!(gated.syncs() - before, 1, "handle must not lead a commit");
+    assert_eq!(
+        gated.syncs() - before,
+        1,
+        "covering commit serves the handle: no second fsync"
+    );
 }
 
 /// A started sync's commit failure is reported through the handle and
@@ -4075,7 +4087,7 @@ async fn test_volume_apply_start_sync_failure_poisons() {
     assert!(a.sync().await.is_err(), "volume must be poisoned");
 }
 
-/// `Blob::start_sync` registers eagerly and lead-drives when awaited: two
+/// `Blob::start_sync` registers eagerly and schedules a driver task: two
 /// started syncs of different blobs coalesce into ONE commit, and both
 /// handles resolve with its result.
 #[tokio::test]
@@ -4579,8 +4591,8 @@ async fn test_volume_torn_shadow_rolls_back_one_commit() {
 /// commit can neither complete nor unwind, and no later commit may vouch
 /// over it. Every observer sees the error, later syncs fail loudly, and
 /// nothing silently reports durability. (Caller-side futures — sync,
-/// handles — are pure observers now: dropping them is benign, pinned by
-/// the conformance cancellation injector.)
+/// handles — are pure observers: dropping them is benign, pinned by the
+/// conformance cancellation injector.)
 #[tokio::test]
 async fn test_volume_aborted_commit_task_poisons() {
     let pool = test_pool();
@@ -4606,11 +4618,11 @@ async fn test_volume_aborted_commit_task_poisons() {
         .await
         .unwrap();
 
-    // Both register under one ticket; the first driver task leads and
+    // Both register under one ticket, and the first driver task leads and
     // parks at the gated inner fsync. Abort every spawned task (the ones
     // from the creations above already completed, so aborting them is a
-    // no-op; the queued follower never assumed leadership, so its abort
-    // is benign).
+    // no-op, and the queued second driver task never assumed leadership,
+    // so its abort is benign).
     gated.sync_gate.arm();
     let ha = a.start_sync().await;
     let hb = b.start_sync().await;
@@ -4622,7 +4634,7 @@ async fn test_volume_aborted_commit_task_poisons() {
     }
     gated.sync_gate.release();
 
-    // The aborted commit never completed its fsync; the volume must be
+    // The aborted commit never completed its fsync: the volume must be
     // poisoned rather than silently losing the drained roots.
     assert_eq!(
         gated.syncs(),
@@ -4644,12 +4656,12 @@ async fn test_volume_aborted_commit_task_poisons() {
     assert!(volume.batch().await.is_err(), "volume must be poisoned");
 }
 
-/// Dropping a start_sync handle that never assumed commit leadership is
-/// benign: never-polled handles and handles dropped while still queued on
-/// the commit lock leave their registered root pooled for the next commit
-/// and must not poison the volume.
+/// Dropping a start_sync handle is benign at every point: the handle only
+/// observes, so a never-polled drop and a drop while the root's driver
+/// task is still queued on the commit lock both leave the commit to that
+/// task, and nothing poisons.
 #[tokio::test]
-async fn test_volume_undriven_start_sync_drop_is_benign() {
+async fn test_volume_start_sync_handle_drop_is_benign() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
     let volume = Volume::new(
@@ -4671,8 +4683,9 @@ async fn test_volume_undriven_start_sync_drop_is_benign() {
     // Never polled at all.
     drop(a.start_sync().await);
 
-    // Polled only while ANOTHER commit held the lock: queued, then dropped
-    // before ever leading.
+    // Polled only while ANOTHER commit held the lock: the handle's driver
+    // task is queued behind the parked commit, and the handle is dropped
+    // while it waits.
     gated.sync_gate.arm();
     let commit = {
         let b = b.clone();
@@ -4684,7 +4697,7 @@ async fn test_volume_undriven_start_sync_drop_is_benign() {
     for _ in 0..8 {
         assert!(
             futures::poll!(hq.as_mut()).is_pending(),
-            "queued handle cannot lead while the lock is held"
+            "observed commit cannot resolve while the lock is held"
         );
         tokio::task::yield_now().await;
     }

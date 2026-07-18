@@ -894,8 +894,9 @@ enum ApplyMode {
     Publish,
     /// Publish and commit the group under the same hold of the commit lock.
     Commit,
-    /// Publish and register the group in the pending-commit pool, returning
-    /// a handle that lead-drives (or observes) the covering commit.
+    /// Publish and register the group in the pending-commit pool,
+    /// scheduling its driver task and returning a handle that observes the
+    /// covering commit.
     StartCommit,
 }
 
@@ -954,18 +955,7 @@ impl<S: crate::Storage> Drop for Batch<S> {
         if self.applied {
             return;
         }
-        // Dropped without apply: nothing references the staged extents;
-        // return them through the ordinary deferred-free path.
-        let mut state = self.ready.state.lock();
-        let seq = state.seq;
-        for st in self.staged.values_mut() {
-            st.core.inner.lock().staged_batches -= 1;
-            for extent in st.overlay.fresh.drain(..) {
-                state.defer_free(extent, seq, None);
-            }
-            for extent in st.discarded.drain(..) {
-                state.defer_free(extent, seq, None);
-            }
-        }
+        // Dropped without apply: nothing references the staged extents.
+        discard_staged(&self.ready, std::mem::take(&mut self.staged));
     }
 }
