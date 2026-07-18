@@ -21,12 +21,16 @@
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
 //!
-//! **Value Blob** - Raw values with CRC32 checksums (direct reads, no page cache):
+//! **Value Blob** - Raw values stored back to back (direct reads, no page cache):
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! |     Compressed Data (variable)    |   CRC32   |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! +---+---+---+---+---+---+---+---+
+//! | Compressed Data (variable)    |
+//! +---+---+---+---+---+---+---+---+
 //! ```
+//!
+//! Each value is the zstd compressed (if enabled) or raw codec output, with no
+//! per-value framing or checksum: the entry's location comes from the index and
+//! integrity is provided by the storage backend, which verifies all reads.
 //!
 //! # Uniqueness
 //!

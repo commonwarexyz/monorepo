@@ -90,7 +90,7 @@ use crate::journal::{
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay, Writer},
-    Blob, Buf, Handle, IoBuf, Metrics, Storage,
+    Batchable, Blob, Buf, Handle, IoBuf, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -363,7 +363,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Appends an item to `Journal` in a given `section`, returning the offset
     /// where the item was written and the size of the item (which may differ
     /// from the raw encoded size if compression is enabled).
-    pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
+    pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error>
+    where
+        E: Batchable,
+    {
         let (buf, item_len) = Self::encode_item(self.compression, item)?;
         self.append_raw(section, IoBuf::from(buf))
             .await
@@ -374,7 +377,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// where the data was written.
     ///
     /// The buffer must be in the on-disk format produced by [Self::encode_item].
-    async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
+    async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error>
+    where
+        E: Batchable,
+    {
         let blob = self.manager.get_or_create(section).await?;
         let offset = blob.append_owned(buf).await?;
         trace!(blob = section, offset, "appended item");

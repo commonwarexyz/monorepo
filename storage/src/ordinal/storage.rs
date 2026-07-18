@@ -6,7 +6,7 @@ use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
-    Blob, Buf, BufMut, BufferPooler, Error as RError,
+    Buf, BufMut, BufferPooler, Error as RError,
 };
 use commonware_utils::bitmap::BitMap;
 use futures::future::try_join_all;
@@ -14,7 +14,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -126,23 +126,19 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
         // Open all blobs and check for partial records
         for name in stored_blobs {
-            let (blob, mut len) = context.open(&config.partition, &name).await?;
+            let (blob, len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
 
-            // Check if blob size is aligned to record size
-            if bits.is_some() && len % record_size != 0 {
-                warn!(
-                    blob = index,
-                    invalid_size = len,
-                    record_size,
-                    "blob size is not a multiple of record size, truncating"
-                );
-                len -= len % record_size;
-                blob.resize(len).await?;
-                blob.sync().await?;
+            // The storage backend guarantees per-blob atomic sync, so torn
+            // writes cannot survive a crash: a size that is not a record
+            // multiple is corruption or tampering
+            if len % record_size != 0 {
+                return Err(Error::Corruption(format!(
+                    "section {index} size {len} is not a multiple of record size {record_size}"
+                )));
             }
 
             debug!(blob = index, len, "found index blob");
@@ -158,20 +154,31 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let mut items = 0;
         let mut intervals = RMap::new();
         if let Some(bits) = &bits {
-            // Drop sections the committed bits do not cover
-            let sections = blobs.keys().copied().collect::<Vec<_>>();
-            for section in sections {
-                let keep = match bits.get(&section) {
-                    Some(Some(bits)) => bits.count_ones() != 0,
-                    Some(None) => true,
-                    None => false,
-                };
-                if !keep {
-                    context
-                        .remove(&config.partition, Some(&section.to_be_bytes()))
-                        .await?;
-                    blobs.remove(&section);
+            // Drop sections the committed bits do not cover: every removal lands in
+            // ONE atomic commit
+            let sections_to_remove: Vec<u64> = blobs
+                .keys()
+                .filter(|section| match bits.get(section) {
+                    Some(Some(bits)) => bits.count_ones() == 0,
+                    Some(None) => false,
+                    None => true,
+                })
+                .copied()
+                .collect();
+            if !sections_to_remove.is_empty() {
+                let mut batch = context.batch().await.map_err(Error::Runtime)?;
+                for &section in &sections_to_remove {
+                    let blob = blobs.remove(&section).expect("collected from keys");
+                    drop(blob);
+                    commonware_runtime::WriteBatch::remove(
+                        &mut batch,
+                        &config.partition,
+                        Some(&section.to_be_bytes()),
+                    );
                 }
+                commonware_runtime::WriteBatch::apply_sync(batch)
+                    .await
+                    .map_err(Error::Runtime)?;
             }
 
             // Rebuild intervals from the committed records
@@ -266,14 +273,24 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
         if let Entry::Vacant(entry) = self.blobs.entry(section) {
-            let (blob, len) = self
-                .context
-                .open(&self.config.partition, &section.to_be_bytes())
-                .await?;
+            // Stage the blob's creation in a creation-only batch, published WITHOUT
+            // a commit: its entry becomes durable at the next commit (records are
+            // pending until sync anyway), or a crash before one erases the section
+            // together with its unsynced records
+            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+            let blob = commonware_runtime::WriteBatch::create(
+                &mut batch,
+                &self.config.partition,
+                &section.to_be_bytes(),
+            )
+            .await?;
+            commonware_runtime::WriteBatch::apply(batch)
+                .await
+                .map_err(Error::Runtime)?;
             entry.insert(Write::from_pooler(
                 &self.context,
                 blob,
-                len,
+                0,
                 self.config.write_buffer,
             ));
             debug!(section, "created blob");
@@ -405,7 +422,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Write all pending entries and sync all modified [Blob]s.
+    /// Write all pending entries and sync all modified [commonware_runtime::Blob]s.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
@@ -427,7 +444,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Write all pending entries and stage the modified [Blob]s' durability
+    /// Write all pending entries and stage the modified [commonware_runtime::Blob]s' durability
     /// with `batch`.
     pub async fn sync_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
         &mut self,

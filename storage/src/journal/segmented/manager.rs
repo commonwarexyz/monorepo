@@ -276,15 +276,23 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Get a mutable reference to a blob, creating it if it doesn't exist.
-    pub async fn get_or_create(&mut self, section: u64) -> Result<&mut F::Buffer, Error> {
+    ///
+    /// A missing section's blob is staged in a creation-only batch, published
+    /// WITHOUT a commit: its entry becomes durable at the backend's next
+    /// commit (records appended to it are pending until then anyway), or a
+    /// crash before one erases the section together with its unsynced
+    /// records. Initialization rescans the partition, so a vanished section
+    /// is simply never observed.
+    pub async fn get_or_create(&mut self, section: u64) -> Result<&mut F::Buffer, Error>
+    where
+        E: Batchable,
+    {
         self.prune_guard(section)?;
 
         if !self.blobs.contains_key(&section) {
-            let name = section.to_be_bytes();
-            let (blob, size) = self.context.open(&self.partition, &name).await?;
-            let buffer = self.factory.create(blob, size).await?;
-            self.tracked.inc();
-            self.blobs.insert(section, buffer);
+            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+            self.create_into(section, &mut batch).await?;
+            batch.apply().await.map_err(Error::Runtime)?;
         }
 
         Ok(self.blobs.get_mut(&section).unwrap())

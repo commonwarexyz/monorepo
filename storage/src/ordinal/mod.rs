@@ -33,6 +33,10 @@
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
 //!
+//! The CRC32 does not guard integrity (the storage backend verifies all reads). It distinguishes
+//! written records from never-written (hole) space: out-of-order insertion leaves sparse regions
+//! that read back as zeroes, which fail the CRC check.
+//!
 //! # Performance Characteristics
 //!
 //! - **Writes**: O(1) - direct offset calculation
@@ -54,11 +58,14 @@
 //! # Recovery
 //!
 //! To recover existing data, pass `Some(bits)` to [Ordinal::init]. The bits identify which records
-//! were durably committed by the caller. [Ordinal] validates required records using their CRC32 and
-//! rebuilds the in-memory [crate::rmap::RMap]. Stored sections omitted from `bits` are removed, and
-//! stored records whose bits are unset are ignored during replay (unreachable through [Ordinal]).
-//! Missing or invalid required records fail initialization. Passing `Some(BTreeMap::new())` or
-//! `None` removes all stored sections and starts empty.
+//! were durably committed by the caller. [Ordinal] checks each required record's CRC32 to confirm
+//! it was written (a never-written hole fails the check) and rebuilds the in-memory
+//! [crate::rmap::RMap]. Stored sections omitted from `bits` are removed, and stored records whose
+//! bits are unset are ignored during replay (unreachable through [Ordinal]). Missing or invalid
+//! required records fail initialization. The storage backend guarantees per-blob atomic sync, so
+//! torn writes cannot survive a crash: a section size that is not a record multiple fails
+//! initialization with [Error::Corruption]. Passing `Some(BTreeMap::new())` or `None` removes all
+//! stored sections and starts empty.
 //!
 //! # Example
 //!
@@ -114,6 +121,8 @@ pub enum Error {
     Codec(#[from] commonware_codec::Error),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
+    #[error("corruption detected: {0}")]
+    Corruption(String),
     #[error("invalid record: {0}")]
     InvalidRecord(u64),
     #[error("missing record at {0}")]
@@ -731,6 +740,59 @@ mod tests {
                     store_mut.get(1).await.unwrap().unwrap(),
                     FixedBytes::new([44u8; 32])
                 );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_non_multiple_blob_size_corruption() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with data
+            {
+                let mut store =
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
+                        .await
+                        .expect("Failed to initialize store");
+
+                store
+                    .put(0, FixedBytes::new([42u8; 32]))
+                    .await
+                    .expect("Failed to put data");
+                store.sync().await.expect("Failed to sync store");
+            }
+
+            // Extend the blob by a non-record-multiple of durable junk bytes
+            {
+                let (blob, size) = context
+                    .open("test-ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                blob.write_at_sync(size, vec![0xFF; 10]).await.unwrap();
+            }
+
+            // Reopen with bits: a size that is not a record multiple is corruption
+            {
+                let mut bits0 = BitMap::zeroes(DEFAULT_ITEMS_PER_BLOB);
+                bits0.set(0, true);
+                let bits0 = Some(bits0);
+                let mut bits = BTreeMap::new();
+                bits.insert(0, &bits0);
+                let result = Ordinal::<_, FixedBytes<32>>::init(
+                    context.child("second"),
+                    cfg.clone(),
+                    Some(bits),
+                )
+                .await;
+                assert!(matches!(result, Err(Error::Corruption(_))));
             }
         });
     }

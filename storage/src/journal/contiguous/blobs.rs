@@ -721,7 +721,8 @@ pub(super) struct Replay<'a, B: RBlob> {
 
 /// Backing strategy for sequential blob replay.
 enum ReplayInner<'a, B: RBlob> {
-    /// Paged replay over sealed data. CRC bytes are validated and skipped by the runtime buffer.
+    /// Paged replay over sealed data. The runtime buffer serves raw logical
+    /// bytes (integrity is verified by the storage backend).
     Paged(PagedReplay<B>),
     /// Logical replay over a live writer or any other blob view.
     View(ViewReplay<'a, B>),

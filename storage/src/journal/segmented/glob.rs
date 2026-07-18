@@ -21,7 +21,7 @@
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared};
-use commonware_runtime::{BufferPooler, Handle, Metrics, Storage};
+use commonware_runtime::{Batchable, BufferPooler, Handle, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -80,7 +80,10 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// The returned offset is the byte offset where the entry was written.
     /// The returned size is the total bytes written.
     /// Both should be stored in the index entry for later retrieval.
-    pub async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
+    pub async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error>
+    where
+        E: Batchable,
+    {
         // Encode and optionally compress
         let buf = if let Some(level) = self.compression {
             let encoded = value.encode();

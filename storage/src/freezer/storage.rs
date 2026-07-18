@@ -337,11 +337,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
     /// Scan the table, validating every slot and counting resizable entries.
     ///
-    /// Committed slots always reference committed journal records: [Freezer::sync_into]
-    /// commits the journals and the table atomically, and [Freezer::sync] commits the
-    /// journals before the table. A slot that does not decode, or that references a
-    /// record the journals do not hold, is therefore corruption or tampering, never a
-    /// state a crash can produce.
+    /// Committed slots always reference committed journal records: [Freezer::sync] and
+    /// [Freezer::sync_into] commit the journals and the table in ONE atomic commit. A
+    /// slot that does not decode, or that references a record the journals do not
+    /// hold, is therefore corruption or tampering, never a state a crash can produce.
     ///
     /// Returns the number of entries that can be resized.
     async fn scan_table(
@@ -792,27 +791,14 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     //
     // TODO:(<https://github.com/commonwarexyz/monorepo/issues/2910>): Make this non &mut.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Sync all modified sections for oversized journal. The journals must commit
-        // before the table: a crash between the two commits then leaves the table
-        // referencing only records the journals hold (any newer journal records stay
-        // unreferenced, bounded waste rather than a dangling slot).
-        self.oversized.sync(&self.modified_sections).await?;
-        self.modified_sections.clear();
-
-        // Start a resize (if needed)
-        if self.should_resize() && self.resize_progress.is_none() {
-            self.start_resize();
-        }
-
-        // Continue a resize (if ongoing)
-        if self.resize_progress.is_some() {
-            self.advance_resize().await?;
-        }
-
-        // Sync updated table entries
-        self.table.sync().await?;
-
-        Ok(())
+        // Stage the oversized journals' syncs and the table write with one batch:
+        // ONE atomic commit makes them durable together, so the table can never
+        // reference records the journals do not hold.
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        self.sync_into(&mut batch).await?;
+        commonware_runtime::WriteBatch::apply_sync(batch)
+            .await
+            .map_err(Error::Runtime)
     }
 
     /// [Self::sync], staged with `batch` instead of synced directly: the

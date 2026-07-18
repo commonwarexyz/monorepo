@@ -25,7 +25,7 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, Handle, Metrics, Storage,
+    Batchable, Blob, Buf, Handle, Metrics, Storage,
 };
 use commonware_utils::NZUsize;
 use futures::{
@@ -108,7 +108,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal in the given section.
     ///
     /// Returns the position of the item within the section (0-indexed).
-    pub async fn append(&mut self, section: u64, item: &A) -> Result<u64, Error> {
+    pub async fn append(&mut self, section: u64, item: &A) -> Result<u64, Error>
+    where
+        E: Batchable,
+    {
         let blob = self.manager.get_or_create(section).await?;
 
         // Encode the item

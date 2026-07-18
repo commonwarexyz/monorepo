@@ -159,10 +159,9 @@
 //! # Recovery
 //!
 //! [Freezer::init] recovers from the freezer's own committed state, which is always
-//! internally consistent: [Freezer::sync_into] commits the journals and the table
-//! atomically, and [Freezer::sync] commits the journals before the table (a crash
-//! between the two commits leaves newer journal records unreferenced, never a slot
-//! referencing a missing record). The committed table length encodes the table's
+//! internally consistent: [Freezer::sync] and [Freezer::sync_into] commit the
+//! journals and the table atomically, so a committed slot never references a
+//! missing record. The committed table length encodes the table's
 //! geometry: the blob grows one slot per landed resize chunk, so a length between two
 //! powers of two is a resize the freezer did not finish and initialization drops the
 //! partially copied upper half (the resize restarts once triggered again).

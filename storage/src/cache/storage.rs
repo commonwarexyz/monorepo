@@ -242,7 +242,10 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// Store an item in the [Cache].
     ///
     /// If the index already exists, put does nothing and returns.
-    pub async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
+    pub async fn put(&mut self, index: u64, value: V) -> Result<(), Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
@@ -284,7 +287,10 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// Stores an item in the [Cache] and syncs it, plus any other pending writes, to disk.
     ///
     /// If the index already exists, the cache is just synced.
-    pub async fn put_sync(&mut self, index: u64, value: V) -> Result<(), Error> {
+    pub async fn put_sync(&mut self, index: u64, value: V) -> Result<(), Error>
+    where
+        E: commonware_runtime::Batchable,
+    {
         self.put(index, value).await?;
         self.sync().await
     }
