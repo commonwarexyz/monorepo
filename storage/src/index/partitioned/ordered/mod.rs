@@ -419,10 +419,10 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
     offset: usize,
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync, const P: usize> RangeIndex<T, V, P> {
     /// Provides mutable access to the values associated with a translated key, if the key exists.
     /// The key's global partition index must fall within this worker's range.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<'_, T::Key, V>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         self.index.get_mut_slot(i - self.offset, sub)
@@ -431,7 +431,6 @@ impl<T: Translator, V: Send + Sync, const P: usize> RangeIndex<T, V, P> {
     /// Provides mutable access to the values associated with a translated key if the key exists,
     /// otherwise inserts `value` for it and returns `None`. The key's global partition index must
     /// fall within this worker's range.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn get_mut_or_insert(
         &mut self,
         key: &[u8],

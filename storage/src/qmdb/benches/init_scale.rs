@@ -1,6 +1,6 @@
 //! Standalone, opt-in large-scale measurement of two QMDB operations at multi-GB scale: building a
 //! database (`generate`) and reopening it, i.e. rebuilding the snapshot (`bench`), at a chosen
-//! init-time `(location -> key)` cache size and build parallelism.
+//! init-time `(location -> key)` cache size and build concurrency.
 //!
 //! The criterion init benchmark ([init](super::init)) can't reach these sizes: it resamples, and the
 //! database is multi-GB. This binary instead builds a *real* on-disk database once and then times a
@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! cargo bench -p commonware-storage --bench init_scale --features test-traits -- generate /tmp/db <keyspace> <num_updates> [zipf_exponent]
-//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- bench    /tmp/db <cache> <parallelism>
+//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- bench    /tmp/db <cache> <concurrency>
 //! cargo bench -p commonware-storage --bench init_scale --features test-traits -- destroy  /tmp/db
 //! ```
 //!
@@ -26,10 +26,11 @@
 //! reporting the total build time.
 //!
 //! `bench` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
-//! `0` = off) and `parallelism` (`0` = serial, `N` = N worker tasks). It reports the
+//! `0` = off) and `concurrency` (`1` = serial, `N` = N total build tasks, so N-1 workers alongside
+//! the init task). It reports the
 //! replay-region size `R` (so a full-coverage cache is `cache = R`)
 //! and the elapsed time, and uses the P=3 partitioned ordered index (the inline-SoA config for large
-//! key sets) so the parallel `build_snapshot` override is exercised. Sweep cache/parallelism by
+//! key sets) so the parallel `build_snapshot` override is exercised. Sweep cache/concurrency by
 //! driving the command from a shell loop.
 //!
 //! Each invocation does exactly one reopen, so numbers are warm only if the OS file cache is already
@@ -75,7 +76,7 @@ const PRUNE_FREQUENCY: u32 = 100;
 /// workloads. Higher = more skew; ~1.0 is classic Zipf (near YCSB's 0.99).
 const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
-/// Parse a `parallelism` CLI argument into a snapshot-build concurrency (`1` = serial on the
+/// Parse a `concurrency` CLI argument into a snapshot-build concurrency (`1` = serial on the
 /// init task, `n` = `n - 1` worker tasks in addition to it). `None` is a parse failure.
 fn parse_concurrency(arg: &str) -> Option<NonZeroUsize> {
     arg.parse::<usize>().ok().and_then(NonZeroUsize::new)
@@ -83,7 +84,7 @@ fn parse_concurrency(arg: &str) -> Option<NonZeroUsize> {
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  bench     <folder> <cache> <parallelism>   reopen + time one init (cache=entries, 0=off; parallelism=1 serial / N total build tasks)\n  destroy   <folder>                          delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  bench     <folder> <cache> <concurrency>   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N total build tasks)\n  destroy   <folder>                          delete the database"
     );
 }
 
