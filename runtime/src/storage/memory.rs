@@ -1,15 +1,25 @@
 use super::Header;
-use crate::{deterministic::AuditHasher, Buf, BufferPool, Handle, IoBufs, IoBufsMut};
+use crate::{
+    deterministic::{AuditHasher, BoxDynRng},
+    Buf, BufferPool, Handle, IoBufs, IoBufsMut,
+};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
+use rand::RngExt as _;
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
+
+/// Writes not yet published by a sync, per blob (keyed by partition then
+/// blob name, in write order, at logical offsets). Shared by every handle
+/// so records survive handle drops.
+type CrashLog = Arc<Mutex<BTreeMap<String, BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>>>>>;
 
 /// In-memory storage implementation for the commonware runtime.
 #[derive(Clone)]
 pub struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     pool: BufferPool,
+    crash_log: Option<CrashLog>,
 }
 
 impl Storage {
@@ -17,7 +27,87 @@ impl Storage {
         Self {
             partitions: Arc::new(Mutex::new(BTreeMap::new())),
             pool,
+            crash_log: None,
         }
+    }
+
+    /// Like [Self::new], but additionally records every write until a sync
+    /// publishes it, so [Self::crash] can materialize power-loss outcomes
+    /// for unsynced writes.
+    pub(crate) fn crash_logged(pool: BufferPool) -> Self {
+        Self {
+            partitions: Arc::new(Mutex::new(BTreeMap::new())),
+            pool,
+            crash_log: Some(Arc::new(Mutex::new(BTreeMap::new()))),
+        }
+    }
+
+    /// Materialize a simulated power loss over the recorded unsynced
+    /// writes, then clear the log. A no-op unless the storage was built
+    /// with [Self::crash_logged].
+    ///
+    /// Mirrors the tearing granularity the volume assumes
+    /// ([super::volume::BLOCK]): each recorded write is split at block
+    /// boundaries of the blob's logical offset space, and each piece
+    /// independently vanishes, lands, or fills its whole containing block
+    /// with garbage derived from the published bytes. Pieces resolve in
+    /// write order (blobs in key order) with one `rng` draw each, so the
+    /// outcome is reproducible from the rng state.
+    pub(crate) fn crash(&self, rng: &mut BoxDynRng) {
+        let Some(log) = &self.crash_log else {
+            return;
+        };
+        let block = super::volume::BLOCK as usize;
+        let mut log = log.lock();
+        let mut partitions = self.partitions.lock();
+        for (partition, blobs) in log.iter() {
+            for (name, writes) in blobs.iter() {
+                // A blob removed after its last write has nothing to keep.
+                let Some(content) = partitions
+                    .get_mut(partition)
+                    .and_then(|blobs| blobs.get_mut(name))
+                else {
+                    continue;
+                };
+                for (offset, bytes) in writes {
+                    // Split the write into block-granular pieces. Blocks
+                    // align to logical offsets: the raw content additionally
+                    // carries the header prefix.
+                    let mut cursor = 0usize;
+                    while cursor < bytes.len() {
+                        let at = *offset as usize + cursor;
+                        let piece_end =
+                            bytes.len().min((at / block + 1) * block - *offset as usize);
+                        match rng.random_range(0..3u8) {
+                            // Vanished
+                            0 => {}
+                            // Landed
+                            1 => {
+                                let raw = Header::SIZE + at;
+                                let stop = raw + (piece_end - cursor);
+                                if content.len() < stop {
+                                    content.resize(stop, 0);
+                                }
+                                content[raw..stop].copy_from_slice(&bytes[cursor..piece_end]);
+                            }
+                            // Torn: the whole containing block becomes garbage
+                            _ => {
+                                let start = Header::SIZE + (at / block) * block;
+                                let stop = start + block;
+                                if content.len() < stop {
+                                    content.resize(stop, 0);
+                                }
+                                for b in &mut content[start..stop] {
+                                    *b = !*b ^ 0x5a;
+                                }
+                            }
+                        }
+                        cursor = piece_end;
+                    }
+                }
+            }
+        }
+        log.clear();
     }
 }
 
@@ -80,6 +170,7 @@ impl crate::Storage for Storage {
                 name,
                 content.clone(),
                 self.pool.clone(),
+                self.crash_log.clone(),
             ),
             logical_len,
             blob_version,
@@ -89,19 +180,38 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
         super::validate_partition_name(partition)?;
 
-        let mut partitions = self.partitions.lock();
-        match name {
-            Some(name) => {
-                partitions
-                    .get_mut(partition)
-                    .ok_or(crate::Error::PartitionMissing(partition.into()))?
-                    .remove(name)
-                    .ok_or(crate::Error::BlobMissing(partition.into(), hex(name)))?;
+        {
+            let mut partitions = self.partitions.lock();
+            match name {
+                Some(name) => {
+                    partitions
+                        .get_mut(partition)
+                        .ok_or(crate::Error::PartitionMissing(partition.into()))?
+                        .remove(name)
+                        .ok_or(crate::Error::BlobMissing(partition.into(), hex(name)))?;
+                }
+                None => {
+                    partitions
+                        .remove(partition)
+                        .ok_or(crate::Error::PartitionMissing(partition.into()))?;
+                }
             }
-            None => {
-                partitions
-                    .remove(partition)
-                    .ok_or(crate::Error::PartitionMissing(partition.into()))?;
+        }
+
+        // Removed blobs have no unsynced writes to materialize. The
+        // partitions guard is released first: [Self::crash] locks the log
+        // and then the partitions.
+        if let Some(log) = &self.crash_log {
+            let mut log = log.lock();
+            match name {
+                Some(name) => {
+                    if let Some(blobs) = log.get_mut(partition) {
+                        blobs.remove(name);
+                    }
+                }
+                None => {
+                    log.remove(partition);
+                }
             }
         }
         Ok(())
@@ -132,6 +242,7 @@ pub struct Blob {
     name: Vec<u8>,
     content: Arc<RwLock<Vec<u8>>>,
     pool: BufferPool,
+    crash_log: Option<CrashLog>,
 }
 
 impl Blob {
@@ -141,6 +252,7 @@ impl Blob {
         name: &[u8],
         content: Vec<u8>,
         pool: BufferPool,
+        crash_log: Option<CrashLog>,
     ) -> Self {
         Self {
             partitions,
@@ -148,6 +260,7 @@ impl Blob {
             name: name.into(),
             content: Arc::new(RwLock::new(content)),
             pool,
+            crash_log,
         }
     }
 
@@ -167,6 +280,15 @@ impl Blob {
                 hex(&self.name),
             ))?;
         *content = new_content;
+        drop(partitions);
+
+        // The publish supersedes every record for this blob: the durable
+        // image is now this handle's full content.
+        if let Some(log) = &self.crash_log {
+            if let Some(blobs) = log.lock().get_mut(&self.partition) {
+                blobs.remove(&self.name);
+            }
+        }
         Ok(())
     }
 }
@@ -206,18 +328,27 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), crate::Error> {
         let buf = bufs.into().coalesce();
-        let offset = offset
+        let raw = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
-        let offset: usize = offset
-            .try_into()
-            .map_err(|_| crate::Error::OffsetOverflow)?;
+        let raw: usize = raw.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
+
+        // Record the write until a sync publishes it.
+        if let Some(log) = &self.crash_log {
+            log.lock()
+                .entry(self.partition.clone())
+                .or_default()
+                .entry(self.name.clone())
+                .or_default()
+                .push((offset, buf.as_ref().to_vec()));
+        }
+
         let mut content = self.content.write();
-        let required = offset + buf.len();
+        let required = raw + buf.len();
         if required > content.len() {
             content.resize(required, 0);
         }
-        content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
+        content[raw..raw + buf.len()].copy_from_slice(buf.as_ref());
         Ok(())
     }
 

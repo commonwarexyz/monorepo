@@ -242,15 +242,21 @@ pub struct Config {
     /// Defaults to no faults being injected.
     storage_fault_cfg: FaultConfig,
 
+    /// Whether a simulated crash materializes power-loss outcomes for
+    /// unsynced storage writes instead of discarding them atomically.
+    /// Defaults to false. See [Config::with_storage_crash_fan].
+    storage_crash_fan: bool,
+
     /// Configuration for the storage volume that serves all
     /// storage (over the in-memory backend). Fault injection applies to the
     /// volume's inner file operations, and simulated crashes reconstruct
     /// the volume so its recovery protocol re-runs from the durable image.
-    /// The in-memory backend publishes writes only at sync, so a simulated
-    /// crash exercises the volume's crash contract (recovery to the last
-    /// commit's image) but not the crash-outcome fan of torn or partially
-    /// landed commits, which the volume's own conformance and power-loss
-    /// suites cover.
+    /// The in-memory backend publishes writes only at sync, so by default a
+    /// simulated crash exercises the volume's crash contract (recovery to
+    /// the last commit's image) but not the crash-outcome fan of torn or
+    /// partially landed commits, which the volume's own conformance and
+    /// power-loss suites cover. [Config::with_storage_crash_fan] opts a
+    /// simulation into that fan.
     storage_volume_cfg: VolumeConfig,
 
     /// Buffer pool configuration for network I/O.
@@ -287,6 +293,7 @@ impl Config {
             timeout: None,
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
+            storage_crash_fan: false,
             storage_volume_cfg: VolumeConfig::default(),
             network_buffer_pool_cfg,
             storage_buffer_pool_cfg,
@@ -347,6 +354,22 @@ impl Config {
     /// reproducible failure patterns for a given seed.
     pub const fn with_storage_fault_config(mut self, faults: FaultConfig) -> Self {
         self.storage_fault_cfg = faults;
+        self
+    }
+
+    /// Materialize a power-loss outcome fan for unsynced storage writes on
+    /// simulated crashes.
+    ///
+    /// When enabled, the in-memory backend records every write until a sync
+    /// publishes it, and a simulated crash ([Runner::start_and_recover]
+    /// into a recovered runtime) resolves each recorded write per
+    /// 4096-byte block from the shared RNG: each block-granular piece
+    /// independently vanishes (the durable bytes stay), lands, or fills its
+    /// whole containing block with garbage — reproducible for a given seed.
+    /// When disabled (the default), unsynced writes vanish atomically and
+    /// recovery always sees the image of the last sync.
+    pub const fn with_storage_crash_fan(mut self, enabled: bool) -> Self {
+        self.storage_crash_fan = enabled;
         self
     }
 
@@ -975,11 +998,12 @@ impl Context {
 
         // Create storage fault config (default to disabled if None)
         let storage_fault_config = Arc::new(RwLock::new(cfg.storage_fault_cfg));
-        let faulty = FaultyStorage::new(
-            MemStorage::new(storage_buffer_pool.clone()),
-            rng.clone(),
-            storage_fault_config,
-        );
+        let mem = if cfg.storage_crash_fan {
+            MemStorage::crash_logged(storage_buffer_pool.clone())
+        } else {
+            MemStorage::new(storage_buffer_pool.clone())
+        };
+        let faulty = FaultyStorage::new(mem, rng.clone(), storage_fault_config);
         let (driver_tx, volume_commits) = mpsc::unbounded_channel();
         let driver = VolumeDriver::new(move |fut| {
             // A send failure means the runtime (and its forwarder) is
@@ -1043,6 +1067,11 @@ impl Context {
     /// does not inherit the current runtime's pending tasks, unsynced storage, network connections, nor
     /// its shutdown signaler.
     ///
+    /// By default unsynced storage writes vanish atomically, so the recovered runtime always sees
+    /// the image of the last sync. With [Config::with_storage_crash_fan], the crash instead
+    /// resolves each unsynced write per block from the seeded RNG — kept, landed, or torn — so the
+    /// recovered image is one seeded outcome of the physical power-loss fan.
+    ///
     /// This is useful for performing a deterministic simulation that spans multiple runtime instantiations,
     /// like simulating unclean shutdown (which involves repeatedly halting the runtime at unexpected intervals).
     ///
@@ -1091,6 +1120,12 @@ impl Context {
             let volume_cfg = volume.config().clone();
             let fault_cfg = volume.inner().config();
             let mem = volume.inner().inner().clone();
+            // Materialize the crash-outcome fan over the surviving image
+            // before the recovered volume reads it: each block dirtied by
+            // an unsynced write independently keeps its durable bytes,
+            // lands a pending version, or tears (a no-op unless the backend
+            // was built with [Config::with_storage_crash_fan]).
+            mem.crash(&mut checkpoint.rng.lock());
             let faulty = FaultyStorage::new(mem, checkpoint.rng.clone(), fault_cfg);
             let volume = VolumeStorage::new_registered(
                 faulty,
@@ -1909,6 +1944,78 @@ mod tests {
             let (_, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, 0);
         });
+    }
+
+    #[test]
+    fn test_recover_storage_crash_fan() {
+        use crate::storage::volume::BLOCK;
+
+        const BASE_LEN: usize = 2 * BLOCK as usize + 700;
+        const EXTRA_LEN: usize = 3 * BLOCK as usize + 100;
+
+        // Commit a base state, extend the blob, register (but never
+        // confirm) a second commit, and crash at a seed-dependent point:
+        // the commit may not have started or may have fully landed when
+        // the fan materializes. Returns the recovered (length, content).
+        fn run(seed: u64) -> (u64, Vec<u8>) {
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_crash_fan(true);
+            let (_, checkpoint) =
+                deterministic::Runner::new(cfg).start_and_recover(|mut context| async move {
+                    let (blob, _) = context.open("crash_fan", b"blob").await.unwrap();
+                    blob.write_at(0, vec![0x11u8; BASE_LEN]).await.unwrap();
+                    blob.sync().await.unwrap();
+                    blob.write_at(BASE_LEN as u64, vec![0x22u8; EXTRA_LEN])
+                        .await
+                        .unwrap();
+                    let _commit = blob.start_sync().await;
+                    // Survive a seed-dependent number of scheduler
+                    // iterations before crashing.
+                    let spins = context.try_next_u64().unwrap() % 6;
+                    for _ in 0..spins {
+                        reschedule().await;
+                    }
+                });
+            Runner::from(checkpoint).start(|context| async move {
+                let (blob, len) = context.open("crash_fan", b"blob").await.unwrap();
+                let content = blob.read_at(0, len as usize).await.unwrap().coalesce();
+                (len, content.as_ref().to_vec())
+            })
+        }
+
+        // Every outcome must be exactly one of the two commit candidates,
+        // and both must occur across the seed range (recovery adopts the
+        // base commit on some seeds and rolls forward on others).
+        let base = vec![0x11u8; BASE_LEN];
+        let full: Vec<u8> = base
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(0x22u8, EXTRA_LEN))
+            .collect();
+        let mut rolled_back = false;
+        let mut rolled_forward = false;
+        for seed in 0..16u64 {
+            let (len, content) = run(seed);
+            if len as usize == BASE_LEN && content == base {
+                rolled_back = true;
+            } else if len as usize == BASE_LEN + EXTRA_LEN && content == full {
+                rolled_forward = true;
+            } else {
+                panic!("recovered state matches neither commit candidate (seed {seed}, len {len})");
+            }
+            let rerun = run(seed);
+            assert_eq!(
+                rerun,
+                (len, content),
+                "same seed must recover identically (seed {seed})"
+            );
+        }
+        assert!(rolled_back, "no seed recovered the base commit");
+        assert!(
+            rolled_forward,
+            "no seed rolled forward to the started commit"
+        );
     }
 
     #[test]

@@ -32,11 +32,16 @@
 //! tails, partial frames, and (through [`Batch`]) cross-blob skew are
 //! impossible by construction. A simulated crash on the deterministic
 //! runtime exercises this crash CONTRACT — its in-memory backend publishes
-//! writes only at sync, so recovery always sees the last commit's image —
-//! while the crash-outcome FAN (each pending write independently landing,
-//! vanishing, or tearing) and the recovery paths it drives (roll-forward,
-//! torn-candidate fallback, losing-slot zeroing) are exercised by the
-//! volume's own conformance and power-loss suites.
+//! writes only at sync, so by default recovery sees the last commit's
+//! image — while the crash-outcome FAN (each pending write independently
+//! landing, vanishing, or tearing) and the recovery paths it drives
+//! (roll-forward, torn-candidate fallback, losing-slot zeroing) are
+//! exercised by the volume's own conformance and power-loss suites.
+//! Deterministic simulations can opt into the fan with
+//! [`crate::deterministic::Config::with_storage_crash_fan`]: a simulated
+//! crash then materializes one seeded fan outcome for the writes pending
+//! at that crash, so recovery in simulation also runs against torn and
+//! partially landed images.
 //!
 //! Corruption loudness has ONE bounded exception: media corruption (bit
 //! rot) that lands inside the NEWEST commit's table or in the extents its
