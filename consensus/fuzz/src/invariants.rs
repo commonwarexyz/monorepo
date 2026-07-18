@@ -5,8 +5,7 @@ use crate::{
 };
 use commonware_codec::{Encode, Read};
 use commonware_consensus::simplex::{
-    elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
-    types::Activity,
+    elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme, types::Activity,
 };
 use commonware_cryptography::{
     certificate::{self, Signers},
@@ -23,25 +22,28 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     let threshold = bounds::quorum(n) as usize;
 
     // Invariant: agreement
-    // All replicas that finalized a given view must have the same digest for that view.
+    // All replicas that finalized a given view must have the same proposal
+    // (parent, payload) for that view.
     let all_views: HashSet<u64> = replicas
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.keys().cloned())
         .collect();
     for view in all_views {
-        let finalizations_for_view: Vec<(usize, Sha256Digest)> = replicas
+        let finalizations_for_view: Vec<(usize, (u64, Sha256Digest))> = replicas
             .iter()
             .enumerate()
             .filter_map(|(idx, (_, _, finalizations))| {
-                finalizations.get(&view).map(|d| (idx, d.payload))
+                finalizations
+                    .get(&view)
+                    .map(|d| (idx, (d.parent, d.payload)))
             })
             .collect();
 
-        if let Some((first_idx, first_digest)) = finalizations_for_view.first() {
-            for (idx, digest) in &finalizations_for_view[1..] {
+        if let Some((first_idx, first_proposal)) = finalizations_for_view.first() {
+            for (idx, proposal) in &finalizations_for_view[1..] {
                 assert_eq!(
-                    digest, first_digest,
-                    "Invariant violation: finalized digest mismatch in view {view}: replica {idx} has {digest:?} but replica {first_idx} has {first_digest:?}",
+                    proposal, first_proposal,
+                    "Invariant violation: finalized proposal mismatch in view {view}: replica {idx} has {proposal:?} but replica {first_idx} has {first_proposal:?}",
                 );
             }
         }
@@ -49,9 +51,13 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
 
     // Invariant: no_nullification_in_finalized_view
     // If any replica finalized view v, no replica may have a nullification for view v.
-    let finalized_views: HashMap<u64, Sha256Digest> = replicas
+    let finalized_views: HashMap<u64, (u64, Sha256Digest)> = replicas
         .iter()
-        .flat_map(|(_, _, finalizations)| finalizations.iter().map(|(&view, d)| (view, d.payload)))
+        .flat_map(|(_, _, finalizations)| {
+            finalizations
+                .iter()
+                .map(|(&view, d)| (view, (d.parent, d.payload)))
+        })
         .collect();
     for finalized_view in finalized_views.keys() {
         for (idx, (_, nullifications, _)) in replicas.iter().enumerate() {
@@ -63,60 +69,68 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: no_conflicting_notarization_in_finalized_view
-    // If any replica finalized view v for a digest, no replica may have a notarization for a different digest.
+    // If any replica finalized view v for a proposal, no replica may have a
+    // notarization for a different proposal (parent, payload).
     for (idx, (notarizations, _, _)) in replicas.iter().enumerate() {
         for (&view, data) in notarizations.iter() {
-            if let Some(&finalized_digest) = finalized_views.get(&view) {
+            if let Some(&finalized_proposal) = finalized_views.get(&view) {
                 assert_eq!(
-                    finalized_digest, data.payload,
-                    "Invariant violation: replica {idx} notarized view {view} with {:?} but finalized with {finalized_digest:?}",
-                    data.payload
+                    finalized_proposal,
+                    (data.parent, data.payload),
+                    "Invariant violation: replica {idx} notarized view {view} with {:?} but finalized with {finalized_proposal:?}",
+                    (data.parent, data.payload)
                 );
             }
         }
     }
 
     // Invariant: no_conflicting_quorum_notarizations
-    // In any view, there cannot be quorum notarizations for multiple digests.
-    // This is a payload-level check; duplicate certificates for the same
-    // (view, payload) are intentionally equivalent here.
+    // In any view, there cannot be quorum notarizations for multiple proposals.
+    // Proposal identity is (parent, payload); duplicate certificates for the
+    // same (view, parent, payload) are intentionally equivalent here.
     // Reporter extraction retains one certificate per reporter/view, so
     // same-reporter conflicts overwritten before extraction remain invisible.
-    let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
+    let mut per_view: HashMap<u64, HashSet<(u64, Sha256Digest)>> = HashMap::new();
     for (notarizations, _, _) in replicas.iter() {
         for (v, d) in notarizations {
             let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
             if is_quorum {
-                per_view.entry(*v).or_default().insert(d.payload);
+                per_view
+                    .entry(*v)
+                    .or_default()
+                    .insert((d.parent, d.payload));
             }
         }
     }
-    for (v, payloads) in per_view {
+    for (v, proposals) in per_view {
         assert!(
-            payloads.len() <= 1,
-            "Invariant violation: conflicting quorum notarizations in view {v}: {payloads:?}"
+            proposals.len() <= 1,
+            "Invariant violation: conflicting quorum notarizations in view {v}: {proposals:?}"
         );
     }
 
     // Invariant: no_conflicting_quorum_finalizations
-    // In any view, there cannot be quorum finalizations for multiple digests.
-    // This is a payload-level check; duplicate certificates for the same
-    // (view, payload) are intentionally equivalent here.
+    // In any view, there cannot be quorum finalizations for multiple proposals.
+    // Proposal identity is (parent, payload); duplicate certificates for the
+    // same (view, parent, payload) are intentionally equivalent here.
     // Reporter extraction retains one certificate per reporter/view, so
     // same-reporter conflicts overwritten before extraction remain invisible.
-    let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
+    let mut per_view: HashMap<u64, HashSet<(u64, Sha256Digest)>> = HashMap::new();
     for (_, _, finalizations) in replicas.iter() {
         for (v, d) in finalizations {
             let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
             if is_quorum {
-                per_view.entry(*v).or_default().insert(d.payload);
+                per_view
+                    .entry(*v)
+                    .or_default()
+                    .insert((d.parent, d.payload));
             }
         }
     }
-    for (v, payloads) in per_view {
+    for (v, proposals) in per_view {
         assert!(
-            payloads.len() <= 1,
-            "Invariant violation: conflicting quorum finalizations in view {v}: {payloads:?}"
+            proposals.len() <= 1,
+            "Invariant violation: conflicting quorum finalizations in view {v}: {proposals:?}"
         );
     }
 
@@ -136,16 +150,20 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: finalization_requires_notarization
-    // Any finalization must be backed by some notarization for the same (view, payload).
-    let notarized: HashSet<(u64, Sha256Digest)> = replicas
+    // Any finalization must be backed by some notarization for the same
+    // (view, parent, payload).
+    let notarized: HashSet<(u64, u64, Sha256Digest)> = replicas
         .iter()
-        .flat_map(|(notarizations, _, _)| notarizations.iter().map(|(&v, d)| (v, d.payload)))
+        .flat_map(|(notarizations, _, _)| {
+            notarizations.iter().map(|(&v, d)| (v, d.parent, d.payload))
+        })
         .collect();
     for (_, _, finalizations) in replicas.iter() {
         for (&v, d) in finalizations.iter() {
             assert!(
-                notarized.contains(&(v, d.payload)),
-                "Invariant violation: finalization without notarization: view {v}, payload={:?}",
+                notarized.contains(&(v, d.parent, d.payload)),
+                "Invariant violation: finalization without notarization: view {v}, parent={}, payload={:?}",
+                d.parent,
                 d.payload
             );
         }
@@ -153,13 +171,20 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
 
     // Invariant: chain_consistency
     // A certificate at view v with parent p implies every view in (p, v) was
-    // nullified, so none of them may be finalized.
+    // nullified, so none of them may be finalized. This validates recorded
+    // parent links only (consistency of the extracted certificate graph);
+    // ancestry whose intermediate certificates were never reported is not
+    // reconstructed.
     let finalized_ordered: BTreeSet<u64> = finalized_views.keys().copied().collect();
     for (idx, (notarizations, _, finalizations)) in replicas.iter().enumerate() {
         let links = notarizations
             .iter()
             .map(|(&v, d)| (v, d.parent, "notarization"))
-            .chain(finalizations.iter().map(|(&v, d)| (v, d.parent, "finalization")));
+            .chain(
+                finalizations
+                    .iter()
+                    .map(|(&v, d)| (v, d.parent, "finalization")),
+            );
         for (view, parent, kind) in links {
             assert!(
                 parent < view,
@@ -295,7 +320,8 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     // are signature-verified by the reporter before being recorded, so evidence
     // against a correct signer proves that key signed conflicting messages: an
     // engine bug (e.g. mishandled WAL state on restart), not adversarial noise.
-    // Byzantine signers are expected to equivocate and are excluded.
+    // Byzantine signers are expected to equivocate and are excluded. Evidence
+    // against a key outside the participant set is flagged rather than skipped.
     //
     // This complements no_vote_equivocation below: fault proofs catch conflicts
     // even when one side never reached quorum verification (and thus never
@@ -309,7 +335,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                 reporter
                     .participants
                     .index(pk)
-                    .is_some_and(|idx| !byzantine.contains(&usize::from(idx)))
+                    .is_none_or(|idx| !byzantine.contains(&usize::from(idx)))
             })
             .map(|(pk, by_view)| {
                 let mut views: Vec<u64> = by_view.keys().map(|view| view.get()).collect();
