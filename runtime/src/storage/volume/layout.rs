@@ -148,8 +148,10 @@ pub(super) struct Entry {
     /// checksum refs do not cover.
     pub tail_crc: u32,
     /// Physical offset of the shadow block holding the committed bytes of
-    /// the final partial chunk. Absent when the tail chunk is unbacked (a
-    /// hole) or `size` is chunk-aligned.
+    /// the final BACKED chunk's span, when that span is partial (the last
+    /// backed chunk may sit below trailing hole chunks after a sparse
+    /// resize). Absent when no chunk is backed or the last backed chunk's
+    /// span fills a whole block.
     pub shadow: Option<u64>,
 }
 

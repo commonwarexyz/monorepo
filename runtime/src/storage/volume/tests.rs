@@ -3590,3 +3590,138 @@ async fn test_volume_blob_start_sync_coalesces() {
         &[0x2u8; 200]
     );
 }
+
+/// Shrinking a sparse blob so the new boundary chunk falls in a HOLE (runs
+/// survive below, dropped runs above) must refresh the tail buffer to the
+/// last BACKED chunk: the next capture's shadow carries that chunk's bytes,
+/// and recovery's shadow splice must not destroy the committed frontier on
+/// a clean reopen.
+#[tokio::test]
+async fn test_volume_shrink_into_hole() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+
+    // Backed [0, 3B+100) and [7B, 9B+100): chunks 4-6 are holes.
+    blob.write_at(
+        0,
+        IoBuf::copy_from_slice(&vec![0x11u8; 3 * BLOCK as usize + 100]),
+    )
+    .await
+    .unwrap();
+    blob.write_at(
+        7 * BLOCK,
+        IoBuf::copy_from_slice(&vec![0x22u8; 2 * BLOCK as usize + 100]),
+    )
+    .await
+    .unwrap();
+    blob.sync().await.unwrap();
+
+    // Shrink into the hole: the boundary chunk (5) is unbacked; the last
+    // backed chunk (3) keeps its partial 100-byte span untouched.
+    blob.resize(5 * BLOCK + 50).await.unwrap();
+    blob.sync().await.unwrap();
+
+    // Clean reopen: the committed frontier (chunk 3) must survive the
+    // recovery shadow splice.
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"b").await.unwrap();
+    assert_eq!(size, 5 * BLOCK + 50);
+    let got = blob
+        .read_at(0, 3 * BLOCK as usize + 100)
+        .await
+        .unwrap()
+        .coalesce();
+    assert_eq!(got.as_ref(), &vec![0x11u8; 3 * BLOCK as usize + 100][..]);
+    // The hole reads as zeros.
+    let got = blob.read_at(3 * BLOCK + 100, 200).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[0u8; 200]);
+}
+
+/// The shrink-into-hole shape where EVERY run is dropped (all backing lay
+/// beyond the new size): the tail buffer must be cleared, not left
+/// describing a dropped chunk.
+#[tokio::test]
+async fn test_volume_shrink_into_leading_hole() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+
+    // Backed only at [4B, 5B+100): chunks 0-3 are holes.
+    blob.write_at(
+        4 * BLOCK,
+        IoBuf::copy_from_slice(&vec![0x33u8; BLOCK as usize + 100]),
+    )
+    .await
+    .unwrap();
+    blob.sync().await.unwrap();
+
+    // Shrink below all backing: no chunk is backed anymore, so the tail
+    // buffer must be cleared.
+    blob.resize(2 * BLOCK + 50).await.unwrap();
+    blob.sync().await.unwrap();
+
+    // A later partial write into a LOW chunk becomes the new frontier: its
+    // capture must shadow the new bytes, not the stale pre-shrink tail.
+    blob.write_at(BLOCK, IoBuf::copy_from_slice(&[0x44u8; 10]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"b").await.unwrap();
+    assert_eq!(size, 2 * BLOCK + 50);
+    let got = blob.read_at(BLOCK, 10).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[0x44u8; 10]);
+    let got = blob.read_at(0, BLOCK as usize).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &vec![0u8; BLOCK as usize][..]);
+}
+
+/// The batch twin of [`test_volume_shrink_into_hole`]: a staged shrink whose
+/// boundary chunk is a hole must publish a refreshed tail (last BACKED
+/// chunk), not keep the stale published one.
+#[tokio::test]
+async fn test_volume_batch_shrink_into_hole() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+
+    blob.write_at(
+        0,
+        IoBuf::copy_from_slice(&vec![0x11u8; 3 * BLOCK as usize + 100]),
+    )
+    .await
+    .unwrap();
+    blob.write_at(
+        7 * BLOCK,
+        IoBuf::copy_from_slice(&vec![0x22u8; 2 * BLOCK as usize + 100]),
+    )
+    .await
+    .unwrap();
+    blob.sync().await.unwrap();
+
+    let mut batch = volume.batch().await.unwrap();
+    batch.resize(&blob, 5 * BLOCK + 50).await.unwrap();
+    batch.apply_sync().await.unwrap();
+
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"b").await.unwrap();
+    assert_eq!(size, 5 * BLOCK + 50);
+    let got = blob
+        .read_at(0, 3 * BLOCK as usize + 100)
+        .await
+        .unwrap()
+        .coalesce();
+    assert_eq!(got.as_ref(), &vec![0x11u8; 3 * BLOCK as usize + 100][..]);
+    let got = blob.read_at(3 * BLOCK + 100, 200).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[0u8; 200]);
+}

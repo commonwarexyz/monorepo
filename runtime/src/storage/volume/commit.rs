@@ -399,12 +399,17 @@ async fn take_snapshot<S: crate::Storage>(
 
             // Shadow: the frontier chunk's span, when partial (post-commit
             // appends will write into its block in place; recovery restores
-            // the frozen span from the shadow).
+            // the frozen span from the shadow). The shadow bytes come from
+            // the tail buffer, whose invariant — it always describes the
+            // last BACKED chunk — every mutation path maintains; the model
+            // derives the shadow from the captured runs directly, so a
+            // desynced tail cache here would durably record a wrong shadow:
+            // assert coherence instead of writing one.
             let shadow_bytes = last_backed.and_then(|last| {
                 let (_, span) = inner.chunk_span(last).expect("backed chunk");
                 (span < BLOCK).then(|| {
-                    debug_assert_eq!(inner.tail_chunk, last);
-                    debug_assert_eq!(inner.tail.len() as u64, span);
+                    assert_eq!(inner.tail_chunk, last, "tail buffer desynced from runs");
+                    assert_eq!(inner.tail.len() as u64, span, "tail span desynced from runs");
                     inner.tail.clone()
                 })
             });

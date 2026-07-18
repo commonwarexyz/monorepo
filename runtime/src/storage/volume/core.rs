@@ -2931,17 +2931,153 @@ pub(super) async fn resize_locked<S: crate::Storage>(
     }
 
     // Shrink: drop runs beyond the new size, trim the boundary run, refresh
-    // the boundary chunk's CRC + tail buffer. Dropped extents are
-    // capture-gated: the confirmed table may still reference them through
-    // this blob's cached committed entry.
+    // the tail buffer to the post-shrink FRONTIER (the last backed chunk,
+    // which may sit below unbacked hole chunks when the new size lands in a
+    // hole) and the frontier chunk's CRC. Dropped extents are capture-gated:
+    // the confirmed table may still reference them through this blob's
+    // cached committed entry.
+    //
+    // The fallible read-back runs BEFORE any state is published: a failure
+    // leaves the blob exactly as it was (clean unwind, never a poisonous
+    // half-shrink).
+
+    /// How the tail buffer is refreshed for the post-shrink frontier.
+    enum Frontier {
+        /// No backed chunk survives: clear the tail.
+        Empty,
+        /// The tail buffer already describes the frontier chunk and its
+        /// span is unchanged by the shrink: keep it (process memory).
+        Keep { chunk: u64 },
+        /// Read the frontier span back from disk. `expected` carries the
+        /// chunk's CRC when the shrink leaves its span unchanged (the
+        /// read-back is verified against it); `None` means the span was
+        /// trimmed mid-chunk, so the CRC is recomputed from the (unchecked)
+        /// read-back and the chunk goes unverified.
+        Read {
+            chunk: u64,
+            phys: u64,
+            span: u64,
+            expected: Option<u32>,
+        },
+    }
+
+    // The COW-style memo for an unloaded frontier CRC (see `plan_stretch`).
+    let mut loaded_crc: Option<(u64, u32)> = None;
+    let frontier = loop {
+        let outcome = {
+            let mut inner = blob.inner.lock();
+            // Deferred CRCs do not survive the shrink bookkeeping below:
+            // finalize every pending chunk now so the frontier's CRC state
+            // is resolvable (the overlay itself is dropped at publish).
+            inner.overlay_finalize();
+
+            // The last run surviving the shrink (runs at or beyond `len`
+            // drop; a run below `len` survives, trimmed to `len - l`).
+            let Some((&l, run)) = inner.runs.range(..len).next_back() else {
+                break Frontier::Empty;
+            };
+            let post_len = run.len.min(len - l);
+            let chunk = chunk_of(l + post_len - 1);
+            let chunk_start = chunk * BLOCK;
+            let phys = run.physical + (chunk_start - l);
+            let span = l + post_len - chunk_start;
+            if post_len < run.len {
+                // Trimmed mid-chunk: the span shrank, so its old CRC no
+                // longer applies and a prefix cannot be checked.
+                break Frontier::Read {
+                    chunk,
+                    phys,
+                    span,
+                    expected: None,
+                };
+            }
+            // Untrimmed frontier (the new size lands in a hole at or above
+            // the run's end): the chunk's bytes and CRC are unchanged.
+            if inner.tail_chunk == chunk && inner.tail.len() as u64 == span {
+                break Frontier::Keep { chunk };
+            }
+            let crc = inner.crcs.get(chunk).expect("backed chunk has crc").crc;
+            match crc {
+                ChunkCrc::Ready(expected) => {
+                    break Frontier::Read {
+                        chunk,
+                        phys,
+                        span,
+                        expected: Some(expected),
+                    }
+                }
+                // Pending chunks were finalized above.
+                ChunkCrc::Pending => unreachable!("pending CRC after overlay finalize"),
+                // Untouched since hydration: the expected CRC is the
+                // committed value.
+                ChunkCrc::Unloaded => {
+                    let known = loaded_crc
+                        .filter(|&(c, _)| c == chunk)
+                        .map(|(_, crc)| crc)
+                        .or_else(|| inner.crc_cache.get(chunk));
+                    match known {
+                        Some(expected) => {
+                            break Frontier::Read {
+                                chunk,
+                                phys,
+                                span,
+                                expected: Some(expected),
+                            }
+                        }
+                        None => chunk,
+                    }
+                }
+            }
+        };
+        if let Some((first, values)) = Box::pin(load_committed_page(ready, blob, outcome)).await? {
+            loaded_crc = Some((outcome, values[(outcome - first) as usize]));
+        }
+    };
+
+    // Perform the read-back (the only fallible step) before publishing.
+    let tail = match frontier {
+        Frontier::Empty => None,
+        Frontier::Keep { chunk } => {
+            let inner = blob.inner.lock();
+            Some((chunk, inner.tail.clone(), None))
+        }
+        Frontier::Read {
+            chunk,
+            phys,
+            span,
+            expected,
+        } => {
+            let bytes = ready.file.read_at(phys, span as usize).await?.coalesce();
+            if let Some(expected) = expected {
+                // The span is unchanged by the shrink, so its bytes must
+                // still match the chunk's CRC.
+                if Crc32::checksum(bytes.as_ref()) != expected {
+                    return Err(Error::BlobCorrupt(
+                        blob.partition.clone(),
+                        hex(&blob.name),
+                        format!("chunk {chunk} checksum mismatch"),
+                    ));
+                }
+            }
+            let recompute = expected.is_none();
+            Some((chunk, bytes.as_ref().to_vec(), recompute.then(|| {
+                // Recomputed from an unchecked read-back: the frontier
+                // chunk goes unverified (see [`ChunkState`]).
+                ChunkState {
+                    crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
+                    verified: false,
+                }
+            })))
+        }
+    };
+
+    // Publish the shrink (pure RAM, infallible).
     {
         let mut state = ready.state.lock();
         let mut inner = blob.inner.lock();
 
-        // Deferred CRCs and overlay entries do not survive a shrink (spans
-        // at and beyond the boundary move): finalize every pending chunk,
-        // then drop the overlay wholesale (resize is cold).
-        inner.overlay_finalize();
+        // Overlay entries do not survive a shrink (spans at and beyond the
+        // boundary move); their pending CRCs were finalized above.
         inner.overlay.clear();
 
         let dropped: Vec<u64> = inner.runs.range(len..).map(|(&l, _)| l).collect();
@@ -2967,46 +3103,29 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                 }
             }
         }
-        if len == 0 {
-            inner.crcs.clear();
-            inner.dirty_chunks.clear();
-            inner.tail.clear();
-            inner.tail_chunk = 0;
-        } else {
-            let boundary = chunk_of(len - 1);
-            inner.crcs.truncate(boundary);
-            inner.dirty_chunks.retain(|&c| c <= boundary);
-            inner.dirty_chunks.insert(boundary);
+        match tail {
+            None => {
+                inner.crcs.clear();
+                inner.dirty_chunks.clear();
+                inner.tail.clear();
+                inner.tail_chunk = 0;
+            }
+            Some((chunk, bytes, recomputed)) => {
+                inner.crcs.truncate(chunk);
+                if let Some(state) = recomputed {
+                    inner.crcs.insert(chunk, state);
+                }
+                // The (possibly newly partial) frontier must re-commit: its
+                // shadow changes even when its bytes do not.
+                inner.dirty_chunks.retain(|&c| c <= chunk);
+                inner.dirty_chunks.insert(chunk);
+                inner.tail_chunk = chunk;
+                inner.tail = bytes;
+            }
         }
         inner.generation += 1;
         inner.size = len;
         state.dirty.insert(blob.id);
-    }
-
-    // Recompute the boundary chunk's CRC/tail from its (unchanged) bytes.
-    if len > 0 {
-        let boundary = chunk_of(len - 1);
-        let span = {
-            let inner = blob.inner.lock();
-            inner.chunk_span(boundary)
-        };
-        if let Some((phys, span_len)) = span {
-            let bytes = ready
-                .file
-                .read_at(phys, span_len as usize)
-                .await?
-                .coalesce();
-            let mut inner = blob.inner.lock();
-            // Recomputed from an unchecked read-back: the boundary chunk
-            // stays unverified (see [`ChunkState`]).
-            let state = ChunkState {
-                crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
-                verified: false,
-            };
-            inner.crcs.insert(boundary, state);
-            inner.tail_chunk = boundary;
-            inner.tail = bytes.as_ref().to_vec();
-        }
     }
     Ok(())
 }

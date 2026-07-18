@@ -55,8 +55,8 @@ use super::{
     alloc::Extent,
     commit,
     core::{
-        chunk_of, stage_write, BlobCore, BlobInner, ChunkCrc, ChunkState, Ready, RunMeta,
-        StagedBlob, StagedRun,
+        chunk_of, load_committed_page, stage_write, BlobCore, BlobInner, ChunkCrc, ChunkState,
+        Ready, RunMeta, StagedBlob, StagedRun,
     },
     unlink, Blob, HandleTracker, Shared, BLOCK,
 };
@@ -178,6 +178,178 @@ impl<S: crate::Storage> Batch<S> {
 
         // Staged shrink: trim the overlay so apply publishes the truncated
         // view; base extents dropped from coverage are replaced at apply.
+        // Mirrors `core::resize_locked`: the staged tail is refreshed to
+        // the post-shrink FRONTIER (the last merged backed chunk, which may
+        // sit below hole chunks), and the fallible read-back runs BEFORE
+        // any overlay state changes (clean unwind).
+
+        /// How the staged tail is refreshed (see `core::resize_locked`).
+        enum Frontier {
+            Empty,
+            Keep {
+                chunk: u64,
+                bytes: Vec<u8>,
+            },
+            Read {
+                chunk: u64,
+                phys: u64,
+                span: u64,
+                expected: Option<u32>,
+            },
+        }
+
+        let mut loaded_crc: Option<(u64, u32)> = None;
+        let frontier = loop {
+            let outcome = {
+                let mut inner = core.inner.lock();
+                let overlay = &staged.overlay;
+                // The last merged (overlay-over-base) run surviving the
+                // shrink.
+                let overlay_last = overlay
+                    .runs
+                    .range(..len)
+                    .next_back()
+                    .map(|(&l, sr)| (l, sr.meta));
+                let base_last = inner
+                    .runs
+                    .range(..len)
+                    .rev()
+                    .find(|(l, _)| !overlay.removed.contains(l) && !overlay.runs.contains_key(l))
+                    .map(|(&l, r)| (l, *r));
+                let last = match (overlay_last, base_last) {
+                    (Some(a), Some(b)) => Some(if a.0 >= b.0 { a } else { b }),
+                    (a, b) => a.or(b),
+                };
+                let Some((l, run)) = last else {
+                    break Frontier::Empty;
+                };
+                let post_len = run.len.min(len - l);
+                let chunk = chunk_of(l + post_len - 1);
+                let chunk_start = chunk * BLOCK;
+                let phys = run.physical + (chunk_start - l);
+                let span = l + post_len - chunk_start;
+                if post_len < run.len {
+                    // Trimmed mid-chunk: recompute from an unchecked
+                    // read-back.
+                    break Frontier::Read {
+                        chunk,
+                        phys,
+                        span,
+                        expected: None,
+                    };
+                }
+                // Untrimmed frontier: bytes and CRC are unchanged. Prefer
+                // in-memory sources (the staged tail, then — for chunks the
+                // batch has not staged over — the published tail or overlay
+                // entry), falling back to a verified disk read-back.
+                if let Some((tail_chunk, bytes)) = &staged.overlay.tail {
+                    if *tail_chunk == chunk && bytes.len() as u64 == span {
+                        break Frontier::Keep {
+                            chunk,
+                            bytes: bytes.clone(),
+                        };
+                    }
+                }
+                let staged_crc = staged.overlay.crcs.get(&chunk).copied();
+                if staged_crc.is_none() {
+                    if inner.tail_chunk == chunk && inner.tail.len() as u64 == span {
+                        break Frontier::Keep {
+                            chunk,
+                            bytes: inner.tail.clone(),
+                        };
+                    }
+                    if let Some(bytes) = inner.overlay_get(chunk) {
+                        if bytes.len() as u64 == span {
+                            break Frontier::Keep {
+                                chunk,
+                                bytes: bytes.to_vec(),
+                            };
+                        }
+                    }
+                }
+                let crc = staged_crc
+                    .or_else(|| inner.crcs.get(chunk))
+                    .expect("covered chunk has crc")
+                    .crc;
+                match crc {
+                    ChunkCrc::Ready(expected) => {
+                        break Frontier::Read {
+                            chunk,
+                            phys,
+                            span,
+                            expected: Some(expected),
+                        }
+                    }
+                    // Pending chunks are overlay-resident with a full-span
+                    // entry, caught above.
+                    ChunkCrc::Pending => unreachable!("pending chunk without overlay entry"),
+                    ChunkCrc::Unloaded => {
+                        let known = loaded_crc
+                            .filter(|&(c, _)| c == chunk)
+                            .map(|(_, crc)| crc)
+                            .or_else(|| inner.crc_cache.get(chunk));
+                        match known {
+                            Some(expected) => {
+                                break Frontier::Read {
+                                    chunk,
+                                    phys,
+                                    span,
+                                    expected: Some(expected),
+                                }
+                            }
+                            None => chunk,
+                        }
+                    }
+                }
+            };
+            if let Some((first, values)) =
+                Box::pin(load_committed_page(&ready, &core, outcome)).await?
+            {
+                loaded_crc = Some((outcome, values[(outcome - first) as usize]));
+            }
+        };
+
+        // Perform the read-back (the only fallible step) before mutating
+        // the overlay.
+        let tail = match frontier {
+            Frontier::Empty => None,
+            Frontier::Keep { chunk, bytes } => Some((chunk, bytes, None)),
+            Frontier::Read {
+                chunk,
+                phys,
+                span,
+                expected,
+            } => {
+                let bytes = ready.file.read_at(phys, span as usize).await?.coalesce();
+                if let Some(expected) = expected {
+                    // The span is unchanged by the shrink, so its bytes
+                    // must still match the chunk's CRC.
+                    if Crc32::checksum(bytes.as_ref()) != expected {
+                        return Err(Error::BlobCorrupt(
+                            core.partition.clone(),
+                            hex(&core.name),
+                            format!("chunk {chunk} checksum mismatch"),
+                        ));
+                    }
+                }
+                let recompute = expected.is_none();
+                Some((
+                    chunk,
+                    bytes.as_ref().to_vec(),
+                    recompute.then(|| {
+                        // Recomputed from an unchecked read-back: the
+                        // frontier chunk stays unverified (see
+                        // `ChunkState`).
+                        ChunkState {
+                            crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
+                            verified: false,
+                        }
+                    }),
+                ))
+            }
+        };
+
+        // Publish the staged shrink (pure RAM, infallible).
         {
             let inner = core.inner.lock();
             let overlay = &mut staged.overlay;
@@ -228,40 +400,21 @@ impl<S: crate::Storage> Batch<S> {
                     }
                 }
             }
-            if len == 0 {
-                overlay.crcs.clear();
-                overlay.tail = Some((0, Vec::new()));
-            } else {
-                let boundary = chunk_of(len - 1);
-                overlay.crcs.retain(|&c, _| c <= boundary);
+            match tail {
+                None => {
+                    overlay.crcs.clear();
+                    overlay.tail = Some((0, Vec::new()));
+                }
+                Some((chunk, bytes, recomputed)) => {
+                    overlay.crcs.retain(|&c, _| c <= chunk);
+                    if let Some(state) = recomputed {
+                        overlay.crcs.insert(chunk, state);
+                    }
+                    overlay.tail = Some((chunk, bytes));
+                }
             }
             overlay.relocated = true;
             overlay.size = len;
-        }
-
-        // Recompute the boundary chunk's CRC/tail from its (unchanged)
-        // bytes in the merged view.
-        if len > 0 {
-            let boundary = chunk_of(len - 1);
-            let span = {
-                let inner = core.inner.lock();
-                staged.overlay.chunk_span(&inner, boundary)
-            };
-            if let Some((phys, span_len)) = span {
-                let bytes = ready
-                    .file
-                    .read_at(phys, span_len as usize)
-                    .await?
-                    .coalesce();
-                // Recomputed from an unchecked read-back: the boundary chunk
-                // stays unverified (see `ChunkState`).
-                let state = ChunkState {
-                    crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
-                    verified: false,
-                };
-                staged.overlay.crcs.insert(boundary, state);
-                staged.overlay.tail = Some((boundary, bytes.as_ref().to_vec()));
-            }
         }
         Ok(())
     }
