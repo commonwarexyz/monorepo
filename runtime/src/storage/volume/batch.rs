@@ -55,12 +55,12 @@ use super::{
     alloc::{block_align, Extent},
     commit,
     core::{
-        chunk_of, load_committed_page, stage_write, BlobCore, BlobInner, ChunkCrc, ChunkState,
-        Ready, RunMeta, StagedBlob, StagedRun,
+        chunk_of, load_committed_page, stage_write, zeroed, BlobCore, BlobInner, ChunkCrc,
+        ChunkState, Ready, RunMeta, StagedBlob, StagedRun,
     },
     unlink, Blob, HandleTracker, Shared, BLOCK,
 };
-use crate::{Blob as _, Error, Handle, IoBuf, IoBufs, DEFAULT_BLOB_VERSION};
+use crate::{Blob as _, Error, Handle, IoBufs, DEFAULT_BLOB_VERSION};
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
 use commonware_utils::sync::{AsyncMutex, Mutex};
@@ -113,6 +113,13 @@ impl<S: crate::Storage> Batch<S> {
     /// The staged entry for `blob`, created (at the blob's published size)
     /// on first touch.
     fn staged_mut(&mut self, blob: &Blob<S>) -> &mut Staged {
+        // Caller contract: the blob belongs to this batch's volume. Blob
+        // ids are per-volume counters, so a foreign blob would silently
+        // cross-wire two volumes' allocator, file, and group state.
+        assert!(
+            Arc::ptr_eq(&self.ready, &blob.ready),
+            "blob belongs to a different volume"
+        );
         self.staged.entry(blob.core.id).or_insert_with(|| {
             let mut inner = blob.core.inner.lock();
             // Gates capture-time run merging until apply or drop: the
@@ -141,19 +148,34 @@ impl<S: crate::Storage> Batch<S> {
         let ready = self.ready.clone();
         let core = blob.core.clone();
         let staged = self.staged_mut(blob);
-        staged.touched_only = false;
         let _guard = core.write_lock.lock().await;
+        if staged.touched_only {
+            staged.touched_only = false;
+            // A membership-only touch snapshots a base the blob may have
+            // legally outgrown through direct writes: staging begins NOW,
+            // against the blob's current size.
+            staged.overlay.rebase(core.inner.lock().size);
+        }
         stage_write(&ready, &core, &mut staged.overlay, offset, data).await
     }
 
     /// Stage a resize to `len`.
     pub async fn resize(&mut self, blob: &Blob<S>, len: u64) -> Result<(), Error> {
         self.ready.check_poisoned()?;
+        // Chunk-end representability, as in `core::write_locked`.
+        if len > u64::MAX - BLOCK {
+            return Err(Error::OffsetOverflow);
+        }
         let ready = self.ready.clone();
         let core = blob.core.clone();
         let staged = self.staged_mut(blob);
-        staged.touched_only = false;
         let _guard = core.write_lock.lock().await;
+        if staged.touched_only {
+            staged.touched_only = false;
+            // Staging begins now, against the blob's current size (see
+            // [`Self::write_at`]).
+            staged.overlay.rebase(core.inner.lock().size);
+        }
 
         if len >= staged.overlay.size {
             // Zero extension: physically zero the backed portion of the
@@ -169,7 +191,7 @@ impl<S: crate::Storage> Batch<S> {
                 }
             };
             if zero_to > size {
-                let zeros = IoBuf::copy_from_slice(&vec![0u8; (zero_to - size) as usize]);
+                let zeros = zeroed(&ready.pool, (zero_to - size) as usize);
                 stage_write(&ready, &core, &mut staged.overlay, size, zeros).await?;
             }
             staged.overlay.size = staged.overlay.size.max(len);
@@ -186,15 +208,31 @@ impl<S: crate::Storage> Batch<S> {
         /// How the staged tail is refreshed (see `core::resize_locked`).
         enum Frontier {
             Empty,
+            /// An in-memory copy holds the frontier chunk's span,
+            /// unchanged by the shrink: keep it.
             Keep {
                 chunk: u64,
                 bytes: Vec<u8>,
             },
+            /// An in-memory copy holds the chunk's full current span and
+            /// the shrink trims it mid-chunk: slice the surviving prefix
+            /// and recompute its CRC (no I/O, no re-check).
+            Trim {
+                chunk: u64,
+                bytes: Vec<u8>,
+                verified: bool,
+            },
+            /// Read the chunk's current span (`old_span`) back from disk
+            /// and check it against `expected` before slicing the
+            /// surviving prefix (see `core::resize_locked`'s Read arm).
             Read {
                 chunk: u64,
                 phys: u64,
                 span: u64,
-                expected: Option<u32>,
+                old_span: u64,
+                expected: u32,
+                verified: bool,
+                resident: bool,
             },
         }
 
@@ -228,61 +266,68 @@ impl<S: crate::Storage> Batch<S> {
                 let chunk_start = chunk * BLOCK;
                 let phys = run.physical + (chunk_start - l);
                 let span = l + post_len - chunk_start;
-                if post_len < run.len {
-                    // Trimmed mid-chunk: recompute from an unchecked
-                    // read-back.
-                    break Frontier::Read {
+                let old_span = (l + run.len - chunk_start).min(BLOCK);
+                let trimmed = span < old_span;
+
+                // The merged CRC state (a Trim's provenance, the Read
+                // arms' expected value).
+                let staged_crc = overlay.crcs.get(&chunk).copied();
+                let state = staged_crc.or_else(|| inner.crcs.get(chunk));
+
+                // In-memory sources first: a copy of the chunk's full
+                // current span needs no read and no re-check. The staged
+                // tail wins; published sources serve only chunks the
+                // batch has not staged over.
+                let mem = overlay
+                    .tail
+                    .as_ref()
+                    .filter(|(tail_chunk, bytes)| {
+                        *tail_chunk == chunk && bytes.len() as u64 == old_span
+                    })
+                    .map(|(_, bytes)| bytes.clone())
+                    .or_else(|| {
+                        if staged_crc.is_some() {
+                            return None;
+                        }
+                        if inner.tail_chunk == chunk && inner.tail.len() as u64 == old_span {
+                            return Some(inner.tail.clone());
+                        }
+                        inner
+                            .overlay_get(chunk)
+                            .filter(|bytes| bytes.len() as u64 == old_span)
+                            .map(<[u8]>::to_vec)
+                    });
+                if let Some(bytes) = mem {
+                    if !trimmed {
+                        break Frontier::Keep { chunk, bytes };
+                    }
+                    let verified = state.expect("covered chunk has crc").verified;
+                    break Frontier::Trim {
                         chunk,
-                        phys,
-                        span,
-                        expected: None,
+                        bytes: bytes[..span as usize].to_vec(),
+                        verified,
                     };
                 }
-                // Untrimmed frontier: bytes and CRC are unchanged. Prefer
-                // in-memory sources (the staged tail, then — for chunks the
-                // batch has not staged over — the published tail or overlay
-                // entry), falling back to a verified disk read-back.
-                if let Some((tail_chunk, bytes)) = &staged.overlay.tail {
-                    if *tail_chunk == chunk && bytes.len() as u64 == span {
-                        break Frontier::Keep {
-                            chunk,
-                            bytes: bytes.clone(),
-                        };
-                    }
-                }
-                let staged_crc = staged.overlay.crcs.get(&chunk).copied();
-                if staged_crc.is_none() {
-                    if inner.tail_chunk == chunk && inner.tail.len() as u64 == span {
-                        break Frontier::Keep {
-                            chunk,
-                            bytes: inner.tail.clone(),
-                        };
-                    }
-                    if let Some(bytes) = inner.overlay_get(chunk) {
-                        if bytes.len() as u64 == span {
-                            break Frontier::Keep {
-                                chunk,
-                                bytes: bytes.to_vec(),
-                            };
-                        }
-                    }
-                }
-                let crc = staged_crc
-                    .or_else(|| inner.crcs.get(chunk))
-                    .expect("covered chunk has crc")
-                    .crc;
-                match crc {
+                let state = state.expect("covered chunk has crc");
+                match state.crc {
                     ChunkCrc::Ready(expected) => {
                         break Frontier::Read {
                             chunk,
                             phys,
                             span,
-                            expected: Some(expected),
+                            old_span,
+                            expected,
+                            verified: state.verified,
+                            resident: true,
                         }
                     }
                     // Pending chunks are overlay-resident with a full-span
                     // entry, caught above.
                     ChunkCrc::Pending => unreachable!("pending chunk without overlay entry"),
+                    // Untouched since hydration: the expected CRC is the
+                    // committed value — the authoritative one, so checking
+                    // the read-back against it IS the chunk's
+                    // verification.
                     ChunkCrc::Unloaded => {
                         let known = loaded_crc
                             .filter(|&(c, _)| c == chunk)
@@ -294,7 +339,10 @@ impl<S: crate::Storage> Batch<S> {
                                     chunk,
                                     phys,
                                     span,
-                                    expected: Some(expected),
+                                    old_span,
+                                    expected,
+                                    verified: true,
+                                    resident: false,
                                 }
                             }
                             None => chunk,
@@ -314,39 +362,56 @@ impl<S: crate::Storage> Batch<S> {
         let tail = match frontier {
             Frontier::Empty => None,
             Frontier::Keep { chunk, bytes } => Some((chunk, bytes, None)),
+            Frontier::Trim {
+                chunk,
+                bytes,
+                verified,
+            } => {
+                let state = ChunkState {
+                    crc: ChunkCrc::Ready(Crc32::checksum(&bytes)),
+                    verified,
+                };
+                Some((chunk, bytes, Some(state)))
+            }
             Frontier::Read {
                 chunk,
                 phys,
                 span,
+                old_span,
                 expected,
+                verified,
+                resident,
             } => {
-                let bytes = ready.file.read_at(phys, span as usize).await?.coalesce();
-                if let Some(expected) = expected {
-                    // The span is unchanged by the shrink, so its bytes
-                    // must still match the chunk's CRC.
-                    if Crc32::checksum(bytes.as_ref()) != expected {
-                        ready.metrics.corruptions.inc();
-                        return Err(Error::BlobCorrupt(
-                            core.partition.clone(),
-                            hex(&core.name),
-                            format!("chunk {chunk} checksum mismatch"),
-                        ));
-                    }
+                let read = ready
+                    .file
+                    .read_at(phys, old_span as usize)
+                    .await?
+                    .coalesce();
+                // The chunk's current span must match its expected CRC:
+                // rot in it surfaces loudly here, never laundered under
+                // the recomputed prefix CRC.
+                if Crc32::checksum(read.as_ref()) != expected {
+                    ready.metrics.corruptions.inc();
+                    return Err(Error::BlobCorrupt(
+                        core.partition.clone(),
+                        hex(&core.name),
+                        format!("chunk {chunk} checksum mismatch"),
+                    ));
                 }
-                let recompute = expected.is_none();
-                Some((
-                    chunk,
-                    bytes.as_ref().to_vec(),
-                    recompute.then(|| {
-                        // Recomputed from an unchecked read-back: the
-                        // frontier chunk stays unverified (see
-                        // `ChunkState`).
-                        ChunkState {
-                            crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
-                            verified: false,
-                        }
+                let bytes = read.as_ref()[..span as usize].to_vec();
+                let trimmed = span < old_span;
+                // (Re)install the frontier state when the span changed or
+                // the checked value was never resident (see
+                // `core::resize_locked`).
+                let state = (trimmed || !resident).then(|| ChunkState {
+                    crc: ChunkCrc::Ready(if trimmed {
+                        Crc32::checksum(&bytes)
+                    } else {
+                        expected
                     }),
-                ))
+                    verified,
+                });
+                Some((chunk, bytes, state))
             }
         };
 
@@ -433,9 +498,9 @@ impl<S: crate::Storage> Batch<S> {
                     overlay.crcs.clear();
                     overlay.tail = Some((0, Vec::new()));
                 }
-                Some((chunk, bytes, recomputed)) => {
+                Some((chunk, bytes, refreshed)) => {
                     overlay.crcs.retain(|&c, _| c <= chunk);
-                    if let Some(state) = recomputed {
+                    if let Some(state) = refreshed {
                         overlay.crcs.insert(chunk, state);
                     }
                     overlay.tail = Some((chunk, bytes));
@@ -443,6 +508,7 @@ impl<S: crate::Storage> Batch<S> {
             }
             overlay.relocated = true;
             overlay.size = len;
+            overlay.min_size = overlay.min_size.min(len);
         }
         Ok(())
     }
@@ -629,10 +695,14 @@ impl<S: crate::Storage> Batch<S> {
             }
         }
 
-        // Publish staged creations first (their namespace entries must exist
-        // before any staged overlay against them publishes), then each
-        // blob's overlay (blob-id order; the commit lock keeps any snapshot
-        // from observing a partial publish).
+        // Publish in the simulation's order: removals first (resolving
+        // names against the SAME pre-publish namespace the validation
+        // checked — a creation may rebind a removed name, and the removal
+        // must never unlink the recreated blob), then staged creations
+        // (their namespace entries must exist before any staged overlay
+        // against them publishes), then each blob's overlay (blob-id
+        // order; the commit lock keeps any snapshot from observing a
+        // partial publish).
         //
         // The publish (and, for apply_sync, its commit) is one cancellation
         // domain: the per-blob loop awaits write locks, so the caller's
@@ -642,6 +712,35 @@ impl<S: crate::Storage> Batch<S> {
         // impl cannot finish or unwind the publish, so cancellation poisons
         // (found by the conformance cancellation injector).
         let guard = commit::PoisonOnCancel::arm(&self.ready);
+        let mut removed: Vec<u64> = Vec::new();
+        if !self.removals.is_empty() {
+            let mut state = self.ready.state.lock();
+            for (partition, name) in std::mem::take(&mut self.removals) {
+                let blobs = state.partitions.get(&partition).expect("validated");
+                let ids: Vec<u64> = name.as_ref().map_or_else(
+                    || blobs.values().copied().collect(),
+                    |name| vec![*blobs.get(name).expect("validated")],
+                );
+                for &id in &ids {
+                    unlink(&mut state, id);
+                }
+                removed.extend(ids);
+                match name {
+                    Some(name) => {
+                        state
+                            .partitions
+                            .get_mut(&partition)
+                            .expect("validated")
+                            .remove(&name);
+                    }
+                    None => {
+                        state.partitions.remove(&partition);
+                        state.partition_epoch += 1;
+                    }
+                }
+                state.meta_dirty = true;
+            }
+        }
         let staged = std::mem::take(&mut self.staged);
         let mut roots: Vec<u64> = Vec::with_capacity(self.creations.len() + staged.len());
         if !self.creations.is_empty() {
@@ -662,7 +761,6 @@ impl<S: crate::Storage> Batch<S> {
             }
         }
         for (id, st) in staged {
-            roots.push(id);
             let _guard = st.core.write_lock.lock().await;
             let mut state = self.ready.state.lock();
             let seq = state.seq;
@@ -671,6 +769,18 @@ impl<S: crate::Storage> Batch<S> {
             }
             let mut inner = st.core.inner.lock();
             inner.staged_batches -= 1;
+            // Removed mid-batch (a removal staged in THIS batch, or an
+            // outside removal): the overlay must not publish into a dead
+            // blob. Its fresh extents are unreferenced — the drop path's
+            // treatment — and the base extents it replaced were already
+            // freed by the unlink.
+            if inner.removed {
+                for extent in st.overlay.fresh {
+                    state.defer_free(extent, seq, None);
+                }
+                continue;
+            }
+            roots.push(id);
             if !st.touched_only {
                 publish_overlay(&mut inner, st.overlay);
                 state.dirty.insert(id);
@@ -682,35 +792,10 @@ impl<S: crate::Storage> Batch<S> {
         }
         self.applied = true;
 
-        // Namespace removals (validated above; cannot fail).
-        if !self.removals.is_empty() {
-            let mut state = self.ready.state.lock();
-            for (partition, name) in std::mem::take(&mut self.removals) {
-                let blobs = state.partitions.get(&partition).expect("validated");
-                let ids: Vec<u64> = name.as_ref().map_or_else(
-                    || blobs.values().copied().collect(),
-                    |name| vec![*blobs.get(name).expect("validated")],
-                );
-                for &id in &ids {
-                    unlink(&mut state, id);
-                }
-                roots.extend(ids);
-                match name {
-                    Some(name) => {
-                        state
-                            .partitions
-                            .get_mut(&partition)
-                            .expect("validated")
-                            .remove(&name);
-                    }
-                    None => {
-                        state.partitions.remove(&partition);
-                        state.partition_epoch += 1;
-                    }
-                }
-                state.meta_dirty = true;
-            }
-        }
+        // Removed ids root the commit (never captured — every commit drops
+        // their entries — but their applied-batch groups must land with the
+        // removal), exactly as `Storage::remove` roots its own commit.
+        roots.extend(removed);
 
         match mode {
             ApplyMode::Publish => {
@@ -754,13 +839,17 @@ enum ApplyMode {
 /// Swing a blob's published state to the staged overlay. Caller holds the
 /// commit lock, the blob's write lock, and the blob's state lock.
 fn publish_overlay(inner: &mut BlobInner, overlay: StagedBlob) {
-    if overlay.size < inner.size {
-        // Staged shrink: mirror the published resize bookkeeping.
-        if overlay.size == 0 {
+    if overlay.min_size < inner.size {
+        // Staged shrink: mirror the published resize bookkeeping, at the
+        // DEEPEST staged size. A shrink drops base coverage that a later
+        // staged regrow does not restore, so truncating at the final size
+        // would keep vacated chunk states alive past their runs; the
+        // regrown coverage's states reinstall from the overlay below.
+        if overlay.min_size == 0 {
             inner.crcs.clear();
             inner.dirty_chunks.clear();
         } else {
-            let boundary = chunk_of(overlay.size - 1);
+            let boundary = chunk_of(overlay.min_size - 1);
             inner.crcs.truncate(boundary);
             inner.dirty_chunks.retain(|&c| c <= boundary);
             inner.dirty_chunks.insert(boundary);

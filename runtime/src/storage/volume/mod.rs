@@ -349,8 +349,12 @@ struct HandleTracker<S: crate::Storage> {
 impl<S: crate::Storage> Drop for HandleTracker<S> {
     fn drop(&mut self) {
         let mut state = self.ready.state.lock();
-        let count = state.handles.entry(self.id).or_insert(1);
-        *count = count.saturating_sub(1);
+        let count = state
+            .handles
+            .get_mut(&self.id)
+            .expect("open handle is counted");
+        assert!(*count > 0, "open handle is counted");
+        *count -= 1;
         if *count == 0 {
             state.handles.remove(&self.id);
             // Drop the blob entirely if it was removed (no name references
@@ -649,26 +653,31 @@ fn unlink(state: &mut core::State, id: u64) {
         let mut inner = core.inner.lock();
         inner.removed = true;
         inner.generation += 1;
+        // The runs map keeps its entries — reads through live handles
+        // stay served — but every extent is queued now, released once the
+        // removal commits and the last handle drops (the gate). Mutations
+        // of a removed blob are rejected (see `core::write_locked`), so
+        // no new extent can enter the map after this point.
         for run in inner.runs.values() {
-            state.pending_free.push((
+            state.defer_free(
                 Extent {
                     offset: run.physical,
                     len: run.capacity,
                 },
                 seq,
                 gate,
-            ));
+            );
         }
         // Capture-gated frees resolve with the removal commit: the entry
         // that referenced them is dropped (never readable via handles).
         for extent in std::mem::take(&mut inner.pending_frees) {
-            state.pending_free.push((extent, seq, None));
+            state.defer_free(extent, seq, None);
         }
         state.dirty.remove(&id);
         // Committed metadata extents (checksums + shadow).
         if let Some(meta) = state.committed_meta.remove(&id) {
             for extent in meta.into_extents() {
-                state.pending_free.push((extent, seq, gate));
+                state.defer_free(extent, seq, gate);
             }
         }
         // No handles: nothing can read it; drop immediately.
@@ -678,18 +687,18 @@ fn unlink(state: &mut core::State, id: u64) {
         }
     } else if let Some((_, entry)) = state.dormant.remove(&id) {
         for r in &entry.runs {
-            state.pending_free.push((
+            state.defer_free(
                 Extent {
                     offset: r.physical,
                     len: block_align(r.len),
                 },
                 seq,
                 None,
-            ));
+            );
         }
         if let Some(meta) = state.committed_meta.remove(&id) {
             for extent in meta.into_extents() {
-                state.pending_free.push((extent, seq, None));
+                state.defer_free(extent, seq, None);
             }
         }
     }
@@ -721,10 +730,6 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
-        if !bytes::Buf::has_remaining(&bufs) {
-            return Ok(());
-        }
         self.write_at(offset, bufs).await?;
         self.sync().await
     }

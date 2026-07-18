@@ -1429,6 +1429,11 @@ pub(super) struct StagedRun {
 pub(super) struct StagedBlob {
     /// Staged logical size.
     pub size: u64,
+    /// The smallest staged size this overlay passed through. A staged
+    /// shrink drops base coverage that a later staged regrow does not
+    /// restore, so publish truncates the published chunk state to THIS
+    /// boundary — the final size alone would keep vacated states alive.
+    pub min_size: u64,
     /// Overlay runs keyed by logical start (replacing base runs at the same
     /// key). Merged with the base runs, coverage stays non-overlapping.
     pub runs: BTreeMap<u64, StagedRun>,
@@ -1452,8 +1457,21 @@ impl StagedBlob {
     pub fn new(size: u64) -> Self {
         Self {
             size,
+            min_size: size,
             ..Default::default()
         }
+    }
+
+    /// Reset the overlay's base to the blob's CURRENT published size: a
+    /// membership-only touch ([`super::Batch::sync`]) snapshots a size
+    /// that direct writes may legally outgrow before staging begins.
+    pub fn rebase(&mut self, size: u64) {
+        debug_assert!(
+            self.runs.is_empty() && self.crcs.is_empty() && self.tail.is_none(),
+            "rebase precedes staging"
+        );
+        self.size = size;
+        self.min_size = size;
     }
 
     /// The merged (overlay-over-base) run covering `at`:
@@ -1551,11 +1569,16 @@ pub(super) async fn write_locked<S: crate::Storage>(
     data: IoBuf,
 ) -> Result<(), Error> {
     ready.check_poisoned()?;
+    check_not_removed(blob)?;
     if data.is_empty() {
         return Ok(());
     }
+    // The per-chunk planning below computes chunk-end offsets
+    // ((chunk + 1) * BLOCK): keep the last touched chunk's end
+    // representable.
     let end = offset
         .checked_add(data.len() as u64)
+        .filter(|&end| end <= u64::MAX - BLOCK)
         .ok_or(Error::OffsetOverflow)?;
 
     let mut cursor = offset;
@@ -1585,13 +1608,28 @@ pub(super) async fn write_locked<S: crate::Storage>(
         publish_stretch(ready, blob, stretch);
     }
 
-    // Publish the size extension once all stretches landed.
+    // Publish the size extension once all stretches landed (unless a
+    // removal raced the write, see `publish_stretch`).
     let mut state = ready.state.lock();
     let mut inner = blob.inner.lock();
-    if end > inner.size {
-        inner.size = end;
+    if !inner.removed {
+        if end > inner.size {
+            inner.size = end;
+        }
+        state.dirty.insert(blob.id);
     }
-    state.dirty.insert(blob.id);
+    Ok(())
+}
+
+/// Reject a mutation of a removed blob (unspecified by the trait): its
+/// extents are already queued for reuse (see `unlink`), so a fresh
+/// allocation would leak until restart and a COW would later double-free
+/// the replaced block. Reads stay served (extents are gated on the open
+/// handles).
+fn check_not_removed(blob: &BlobCore) -> Result<(), Error> {
+    if blob.inner.lock().removed {
+        return Err(Error::BlobMissing(blob.partition.clone(), hex(&blob.name)));
+    }
     Ok(())
 }
 
@@ -1607,11 +1645,14 @@ pub(super) async fn stage_write<S: crate::Storage>(
     data: IoBuf,
 ) -> Result<(), Error> {
     ready.check_poisoned()?;
+    check_not_removed(blob)?;
     if data.is_empty() {
         return Ok(());
     }
+    // Chunk-end representability, as in `write_locked`.
     let end = offset
         .checked_add(data.len() as u64)
+        .filter(|&end| end <= u64::MAX - BLOCK)
         .ok_or(Error::OffsetOverflow)?;
 
     let mut cursor = offset;
@@ -1951,11 +1992,7 @@ async fn plan_stretch<S: crate::Storage>(
                 (Vec::new(), true)
             };
             let gap = (cursor - fill_from) as usize;
-            let zeros = (gap > 0).then(|| {
-                let mut buf = ready.pool.alloc(gap);
-                buf.put_bytes(0, gap);
-                buf.freeze()
-            });
+            let zeros = (gap > 0).then(|| zeroed(&ready.pool, gap));
             let payload = data.slice(d0..d1);
 
             // The logical pieces of `[base, suffix_end)`, in order.
@@ -1971,10 +2008,11 @@ async fn plan_stretch<S: crate::Storage>(
             for chunk in first_chunk..=last_chunk {
                 let lo = chunk * BLOCK;
                 let hi = suffix_end.min(lo + BLOCK);
-                // A chunk assembled purely from process memory (payload, gap
+                // A chunk assembled from process memory (payload, gap
                 // zeros, tail-buffer or overlay-sourced prefix/suffix) is
-                // verified by construction; a chunk that spliced in an
-                // unchecked disk read-back is not (see [`ChunkState`]).
+                // verified by construction; a checked disk read-back
+                // confers its expected CRC's provenance (see
+                // [`expected_span_crc`]).
                 let verified = (chunk != first_chunk || prefix_verified)
                     && (chunk != last_chunk || suffix_verified);
                 // Splice-rewritten chunks keep their span in the overlay
@@ -2034,11 +2072,7 @@ async fn plan_stretch<S: crate::Storage>(
             let d0 = (cursor - data_base) as usize;
             let d1 = (stretch_end - data_base) as usize;
             let lead = (cursor - chunk_base) as usize;
-            let zeros = (lead > 0).then(|| {
-                let mut buf = ready.pool.alloc(lead);
-                buf.put_bytes(0, lead);
-                buf.freeze()
-            });
+            let zeros = (lead > 0).then(|| zeroed(&ready.pool, lead));
             let payload = data.slice(d0..d1);
             let pieces: [(u64, &[u8]); 2] = [
                 (chunk_base, zeros.as_ref().map_or(&[][..], |z| z.as_ref())),
@@ -2198,6 +2232,13 @@ async fn plan_stretch<S: crate::Storage>(
     }
 }
 
+/// A pooled all-zero buffer of `len` bytes.
+pub(super) fn zeroed(pool: &BufferPool, len: usize) -> IoBuf {
+    let mut buf = pool.alloc(len);
+    buf.put_bytes(0, len);
+    buf.freeze()
+}
+
 /// Return a freshly allocated but never-published extent through the
 /// deferred-free path (a failed stretch or COW read-back: nothing
 /// references it, but only restart would otherwise rebuild it into the
@@ -2241,15 +2282,81 @@ fn copy_over(pieces: &[(u64, &[u8])], start: u64, end: u64) -> Vec<u8> {
     out
 }
 
+/// The expected CRC of `chunk`'s current span under the merged view — the
+/// staged CRC when the batch staged over the chunk, else the resident
+/// state, else the committed value (loaded on demand) — plus the verified
+/// provenance a checked read-back of the span confers. A committed value
+/// is the chunk's authoritative CRC, so a successful check against it IS
+/// the chunk's verification (see [`ChunkState`]); a resident value passes
+/// its own bit through.
+async fn expected_span_crc<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+    staged: Option<&StagedBlob>,
+    chunk: u64,
+) -> Result<(u32, bool), Error> {
+    loop {
+        {
+            let mut inner = blob.inner.lock();
+            let state = staged
+                .and_then(|st| st.crcs.get(&chunk))
+                .copied()
+                .or_else(|| inner.crcs.get(chunk))
+                .expect("covered chunk has crc");
+            match state.crc {
+                ChunkCrc::Ready(expected) => return Ok((expected, state.verified)),
+                // Pending chunks are overlay-resident, and the caller
+                // exhausted the in-memory sources before falling back.
+                ChunkCrc::Pending => unreachable!("pending chunk without overlay entry"),
+                ChunkCrc::Unloaded => {
+                    if let Some(expected) = inner.crc_cache.get(chunk) {
+                        return Ok((expected, true));
+                    }
+                }
+            }
+        }
+        // Unloaded with no cached value: load the committed page and
+        // re-derive (a None load means the chunk became resident).
+        Box::pin(load_committed_page(ready, blob, chunk)).await?;
+    }
+}
+
+/// Read `chunk`'s whole current span `[chunk_start, span_end)` back from
+/// disk and check it against the chunk's expected CRC — the COW
+/// read-back's discipline — so rot in the span surfaces loudly at the
+/// operation instead of being laundered under a freshly assembled CRC.
+/// Returns the span bytes plus the verified provenance they confer.
+async fn read_span_checked<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+    staged: Option<&StagedBlob>,
+    chunk: u64,
+    phys: u64,
+    span_len: usize,
+) -> Result<(Vec<u8>, bool), Error> {
+    let (expected, verified) = expected_span_crc(ready, blob, staged, chunk).await?;
+    let span = ready.file.read_at(phys, span_len).await?.coalesce();
+    if Crc32::checksum(span.as_ref()) != expected {
+        ready.metrics.corruptions.inc();
+        return Err(Error::BlobCorrupt(
+            blob.partition.clone(),
+            hex(&blob.name),
+            format!("chunk {chunk} checksum mismatch"),
+        ));
+    }
+    Ok((span.as_ref().to_vec(), verified))
+}
+
 /// Source the first affected chunk's committed prefix `[base, fill_from)`:
 /// from an in-memory tail buffer or overlay entry when one describes this
-/// chunk, otherwise a read-back (rare: the first splice into a chunk the
-/// overlay does not hold).
+/// chunk, otherwise a checked read-back of the chunk's whole span (rare:
+/// the first splice into a chunk the overlay does not hold).
 ///
 /// The second element reports the provenance the assembled chunk inherits:
 /// tail buffers are trusted process memory, overlay bytes carry their
-/// chunk's verified bit, and a disk read-back is spliced unchecked, leaving
-/// the assembled chunk unverified (see [`ChunkState`]).
+/// chunk's verified bit, and a disk read-back — checked against the
+/// chunk's expected CRC — confers the CRC's own provenance (see
+/// [`expected_span_crc`]).
 async fn read_span_prefix<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
@@ -2287,21 +2394,19 @@ async fn read_span_prefix<S: crate::Storage>(
             }
         }
     }
+    let span_end = (run_logical + run.len).min(base + BLOCK);
     let phys = run.physical + (base - run_logical);
-    let prefix = ready
-        .file
-        .read_at(phys, prefix_len)
-        .await?
-        .coalesce()
-        .as_ref()
-        .to_vec();
-    Ok((prefix, false))
+    let (mut span, verified) =
+        read_span_checked(ready, blob, staged, chunk, phys, (span_end - base) as usize).await?;
+    span.truncate(prefix_len);
+    Ok((span, verified))
 }
 
 /// Source the last affected chunk's trailing span `[stretch_end,
 /// suffix_end)` (an in-place overwrite inside a longer span): from an
 /// in-memory tail buffer or overlay entry when one describes this chunk,
-/// otherwise a disk read-back. Provenance as for [`read_span_prefix`].
+/// otherwise a checked read-back of the chunk's whole span. Provenance as
+/// for [`read_span_prefix`].
 async fn read_span_suffix<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
@@ -2312,8 +2417,9 @@ async fn read_span_suffix<S: crate::Storage>(
     suffix_end: u64,
 ) -> Result<(Vec<u8>, bool), Error> {
     let chunk = chunk_of(stretch_end - 1);
-    let s = (stretch_end - chunk * BLOCK) as usize;
-    let e = (suffix_end - chunk * BLOCK) as usize;
+    let chunk_start = chunk * BLOCK;
+    let s = (stretch_end - chunk_start) as usize;
+    let e = (suffix_end - chunk_start) as usize;
     {
         let mut inner = blob.inner.lock();
         if let Some(st) = staged {
@@ -2335,21 +2441,29 @@ async fn read_span_suffix<S: crate::Storage>(
             }
         }
     }
-    let phys = run.physical + (stretch_end - run_logical);
-    let suffix = ready
-        .file
-        .read_at(phys, e - s)
-        .await?
-        .coalesce()
-        .as_ref()
-        .to_vec();
-    Ok((suffix, false))
+    // A suffix exists only when the run extends past the write, so the
+    // chunk's span ends exactly at `suffix_end`.
+    let phys = run.physical + (chunk_start - run_logical);
+    let (span, verified) = read_span_checked(ready, blob, staged, chunk, phys, e).await?;
+    Ok((span[s..e].to_vec(), verified))
 }
 
 /// Publish a completed stretch. Caller holds the blob write lock.
 fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch: Stretch) {
     let mut state = ready.state.lock();
     let mut inner = blob.inner.lock();
+
+    // A removal raced this write (`write_locked` rejects removed blobs at
+    // entry, but remove does not take the write lock): the blob's extents
+    // are already queued for reuse, so adopt nothing — a fresh extent
+    // would leak until restart and a COW's replaced block would later
+    // double-free. Mutating a removed blob is unspecified by the trait.
+    if inner.removed {
+        drop(inner);
+        drop(state);
+        free_unpublished(ready, stretch.allocated);
+        return;
+    }
     let (logical, run) = stretch.run;
 
     if let Some(replaced) = stretch.replaced {
@@ -3357,6 +3471,11 @@ pub(super) async fn resize_locked<S: crate::Storage>(
     len: u64,
 ) -> Result<(), Error> {
     ready.check_poisoned()?;
+    check_not_removed(blob)?;
+    // Chunk-end representability, as in `write_locked`.
+    if len > u64::MAX - BLOCK {
+        return Err(Error::OffsetOverflow);
+    }
     let old_size = blob.inner.lock().size;
 
     if len >= old_size {
@@ -3373,13 +3492,15 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             }
         };
         if zero_to > old_size {
-            let zeros = IoBuf::copy_from_slice(&vec![0u8; (zero_to - old_size) as usize]);
+            let zeros = zeroed(&ready.pool, (zero_to - old_size) as usize);
             write_locked(ready, blob, old_size, zeros).await?;
         }
         let mut state = ready.state.lock();
         let mut inner = blob.inner.lock();
-        inner.size = inner.size.max(len);
-        state.dirty.insert(blob.id);
+        if !inner.removed {
+            inner.size = inner.size.max(len);
+            state.dirty.insert(blob.id);
+        }
         return Ok(());
     }
 
@@ -3401,16 +3522,27 @@ pub(super) async fn resize_locked<S: crate::Storage>(
         /// The tail buffer already describes the frontier chunk and its
         /// span is unchanged by the shrink: keep it (process memory).
         Keep { chunk: u64 },
-        /// Read the frontier span back from disk. `expected` carries the
-        /// chunk's CRC when the shrink leaves its span unchanged (the
-        /// read-back is verified against it); `None` means the span was
-        /// trimmed mid-chunk, so the CRC is recomputed from the (unchecked)
-        /// read-back and the chunk goes unverified.
+        /// The tail buffer holds the frontier chunk's full current span
+        /// and the shrink trims it mid-chunk: slice the surviving prefix
+        /// from process memory and recompute its CRC (no I/O, no
+        /// re-check).
+        Trim { chunk: u64, span: u64, verified: bool },
+        /// Read the frontier chunk's CURRENT span (`old_span`) back from
+        /// disk and check it against `expected` — rot in the span
+        /// surfaces loudly here, never laundered under the recomputed
+        /// prefix CRC. The surviving `span` is the read's prefix.
+        /// `verified` is the provenance the post-shrink state carries
+        /// (the expected CRC's own, see [`expected_span_crc`]); a state
+        /// installs when the span changed or the checked value was never
+        /// resident (the frontier's CRC must be resolvable at capture).
         Read {
             chunk: u64,
             phys: u64,
             span: u64,
-            expected: Option<u32>,
+            old_span: u64,
+            expected: u32,
+            verified: bool,
+            resident: bool,
         },
     }
 
@@ -3434,35 +3566,39 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             let chunk_start = chunk * BLOCK;
             let phys = run.physical + (chunk_start - l);
             let span = l + post_len - chunk_start;
-            if post_len < run.len {
-                // Trimmed mid-chunk: the span shrank, so its old CRC no
-                // longer applies and a prefix cannot be checked.
-                break Frontier::Read {
+            let old_span = (l + run.len - chunk_start).min(BLOCK);
+            // The tail buffer holding the chunk's full current span needs
+            // no read and no re-check (its bytes are the span's
+            // authoritative content), trimmed or not.
+            if inner.tail_chunk == chunk && inner.tail.len() as u64 == old_span {
+                if span == old_span {
+                    break Frontier::Keep { chunk };
+                }
+                let verified = inner.crcs.get(chunk).expect("backed chunk has crc").verified;
+                break Frontier::Trim {
                     chunk,
-                    phys,
                     span,
-                    expected: None,
+                    verified,
                 };
             }
-            // Untrimmed frontier (the new size lands in a hole at or above
-            // the run's end): the chunk's bytes and CRC are unchanged.
-            if inner.tail_chunk == chunk && inner.tail.len() as u64 == span {
-                break Frontier::Keep { chunk };
-            }
-            let crc = inner.crcs.get(chunk).expect("backed chunk has crc").crc;
-            match crc {
+            let state = inner.crcs.get(chunk).expect("backed chunk has crc");
+            match state.crc {
                 ChunkCrc::Ready(expected) => {
                     break Frontier::Read {
                         chunk,
                         phys,
                         span,
-                        expected: Some(expected),
+                        old_span,
+                        expected,
+                        verified: state.verified,
+                        resident: true,
                     }
                 }
                 // Pending chunks were finalized above.
                 ChunkCrc::Pending => unreachable!("pending CRC after overlay finalize"),
                 // Untouched since hydration: the expected CRC is the
-                // committed value.
+                // committed value — the authoritative one, so checking
+                // the read-back against it IS the chunk's verification.
                 ChunkCrc::Unloaded => {
                     let known = loaded_crc
                         .filter(|&(c, _)| c == chunk)
@@ -3474,7 +3610,10 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                                 chunk,
                                 phys,
                                 span,
-                                expected: Some(expected),
+                                old_span,
+                                expected,
+                                verified: true,
+                                resident: false,
                             }
                         }
                         None => chunk,
@@ -3494,38 +3633,58 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             let inner = blob.inner.lock();
             Some((chunk, inner.tail.clone(), None))
         }
+        Frontier::Trim {
+            chunk,
+            span,
+            verified,
+        } => {
+            let inner = blob.inner.lock();
+            let bytes = inner.tail[..span as usize].to_vec();
+            let state = ChunkState {
+                crc: ChunkCrc::Ready(Crc32::checksum(&bytes)),
+                verified,
+            };
+            Some((chunk, bytes, Some(state)))
+        }
         Frontier::Read {
             chunk,
             phys,
             span,
+            old_span,
             expected,
+            verified,
+            resident,
         } => {
-            let bytes = ready.file.read_at(phys, span as usize).await?.coalesce();
-            if let Some(expected) = expected {
-                // The span is unchanged by the shrink, so its bytes must
-                // still match the chunk's CRC.
-                if Crc32::checksum(bytes.as_ref()) != expected {
-                    ready.metrics.corruptions.inc();
-                    return Err(Error::BlobCorrupt(
-                        blob.partition.clone(),
-                        hex(&blob.name),
-                        format!("chunk {chunk} checksum mismatch"),
-                    ));
-                }
+            let bytes = ready
+                .file
+                .read_at(phys, old_span as usize)
+                .await?
+                .coalesce();
+            // The chunk's current span must match its expected CRC: rot
+            // in it surfaces loudly here, never laundered under the
+            // recomputed prefix CRC.
+            if Crc32::checksum(bytes.as_ref()) != expected {
+                ready.metrics.corruptions.inc();
+                return Err(Error::BlobCorrupt(
+                    blob.partition.clone(),
+                    hex(&blob.name),
+                    format!("chunk {chunk} checksum mismatch"),
+                ));
             }
-            let recompute = expected.is_none();
-            Some((
-                chunk,
-                bytes.as_ref().to_vec(),
-                recompute.then(|| {
-                    // Recomputed from an unchecked read-back: the frontier
-                    // chunk goes unverified (see [`ChunkState`]).
-                    ChunkState {
-                        crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
-                        verified: false,
-                    }
+            let bytes = bytes.as_ref()[..span as usize].to_vec();
+            let trimmed = span < old_span;
+            // (Re)install the frontier state when the span changed or the
+            // checked value was never resident: the frontier chunk's CRC
+            // must be resolvable at capture without a preload.
+            let state = (trimmed || !resident).then(|| ChunkState {
+                crc: ChunkCrc::Ready(if trimmed {
+                    Crc32::checksum(&bytes)
+                } else {
+                    expected
                 }),
-            ))
+                verified,
+            });
+            Some((chunk, bytes, state))
         }
     };
 
@@ -3533,6 +3692,12 @@ pub(super) async fn resize_locked<S: crate::Storage>(
     {
         let mut state = ready.state.lock();
         let mut inner = blob.inner.lock();
+
+        // A removal raced the resize: adopt nothing (see
+        // `publish_stretch`).
+        if inner.removed {
+            return Ok(());
+        }
 
         // Overlay entries do not survive a shrink (spans at and beyond the
         // boundary move); their pending CRCs were finalized above.
@@ -3568,9 +3733,9 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                 inner.tail.clear();
                 inner.tail_chunk = 0;
             }
-            Some((chunk, bytes, recomputed)) => {
+            Some((chunk, bytes, refreshed)) => {
                 inner.crcs.truncate(chunk);
-                if let Some(state) = recomputed {
+                if let Some(state) = refreshed {
                     inner.crcs.insert(chunk, state);
                 }
                 // The (possibly newly partial) frontier must re-commit: its

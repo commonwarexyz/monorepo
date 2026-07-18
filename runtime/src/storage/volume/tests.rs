@@ -968,6 +968,118 @@ async fn test_volume_batch_create_with_write_requires_apply_sync() {
     let _ = batch.apply().await;
 }
 
+/// A batch removes a name and recreates it in one apply (the validated
+/// remove-then-recreate shape): the removal must resolve against the
+/// pre-publish namespace — unlinking the OLD blob — and leave the staged
+/// creation live, in RAM and across reopen.
+#[tokio::test]
+async fn test_volume_batch_remove_recreate_same_name() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"x").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    drop(blob);
+
+    let mut batch = volume.batch().await.unwrap();
+    batch.remove("p", Some(b"x"));
+    let fresh = batch.create("p", b"x").unwrap();
+    batch.apply_sync().await.unwrap();
+
+    // The name survives, bound to the (empty) recreated blob.
+    assert_eq!(volume.scan("p").await.unwrap(), vec![b"x".to_vec()]);
+    fresh
+        .write_at(0, IoBuf::copy_from_slice(&[0x22u8; 50]))
+        .await
+        .unwrap();
+    fresh.sync().await.unwrap();
+    audit_volume(&volume, true);
+    drop(fresh);
+    drop(volume);
+
+    // Reopen: the recreated content, never the removed blob's.
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"x").await.unwrap();
+    assert_eq!(size, 50, "the removed blob's size resurrected");
+    let got = blob.read_at(0, 50).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[0x22u8; 50]);
+}
+
+/// A batch removes a whole partition and creates a new blob inside it in
+/// the same apply: the removal must sweep only the blobs that existed at
+/// validation, never the staged creation published alongside it.
+#[tokio::test]
+async fn test_volume_batch_remove_partition_recreate() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"x").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    drop(blob);
+
+    let mut batch = volume.batch().await.unwrap();
+    batch.remove("p", None);
+    let fresh = batch.create("p", b"y").unwrap();
+    batch.apply_sync().await.unwrap();
+    assert_eq!(volume.scan("p").await.unwrap(), vec![b"y".to_vec()]);
+    audit_volume(&volume, true);
+    drop(fresh);
+    drop(volume);
+
+    let volume = Volume::new(inner, pool, Config::default());
+    assert_eq!(volume.scan("p").await.unwrap(), vec![b"y".to_vec()]);
+    let (_, size) = volume.open("p", b"y").await.unwrap();
+    assert_eq!(size, 0, "the staged creation was swept by the removal");
+}
+
+/// [`Batch::sync`] stages membership only, and the blob may legally keep
+/// growing through direct writes until staging actually begins: the
+/// publish must treat the grown size as the overlay's base, not misread
+/// the growth as a staged shrink.
+#[tokio::test]
+async fn test_volume_batch_sync_then_grow_then_stage() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"g").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+
+    let mut batch = volume.batch().await.unwrap();
+    batch.sync(&blob);
+    blob.write_at(100, IoBuf::copy_from_slice(&[0x33u8; 200]))
+        .await
+        .unwrap();
+    batch
+        .write_at(&blob, 0, IoBuf::copy_from_slice(&[0x44u8; 10]))
+        .await
+        .unwrap();
+    batch.apply_sync().await.unwrap();
+
+    let mut expected = vec![0x44u8; 10];
+    expected.extend_from_slice(&[0x11u8; 90]);
+    expected.extend_from_slice(&[0x33u8; 200]);
+    assert_eq!(blob.core.inner.lock().size, 300, "growth truncated");
+    let got = blob.read_at(0, 300).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+    drop(blob);
+    drop(volume);
+
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"g").await.unwrap();
+    assert_eq!(size, 300);
+    let got = blob.read_at(0, 300).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..]);
+}
+
 /// A selective commit persists exactly the synced blob: an unrelated dirty
 /// blob's unsynced data vanishes with the crash, and a later sync of that
 /// blob commits everything it accumulated.
@@ -3228,6 +3340,49 @@ async fn test_volume_shrink_unloaded_then_regrow() {
     blob.core.inner.lock().crcs.audit();
 }
 
+/// Shrinking a REOPENED blob into a hole can make an untouched-since-
+/// hydration chunk the new frontier: the resize must leave the frontier's
+/// CRC resident (it just checked the read-back against the committed
+/// value), so the next capture resolves the tail CRC without a preload.
+/// This exact shape panicked the capture before.
+#[tokio::test]
+async fn test_volume_shrink_unloaded_frontier_then_sync() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    {
+        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+            .await
+            .unwrap();
+        let (blob, _) = volume.open("p", b"f").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
+            .await
+            .unwrap();
+        blob.write_at(2 * BLOCK, IoBuf::copy_from_slice(&[0x22u8; 100]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+    let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+        .await
+        .unwrap();
+    let (blob, _) = volume.open("p", b"f").await.unwrap();
+    // The surviving run is untouched since hydration (its chunk unloaded);
+    // the new size lands in the hole above it.
+    blob.resize(5000).await.unwrap();
+    blob.sync().await.unwrap();
+    blob.core.inner.lock().crcs.audit();
+
+    drop(blob);
+    drop(volume);
+    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let (blob, size) = volume.open("p", b"f").await.unwrap();
+    assert_eq!(size, 5000);
+    let got = blob.read_at(0, 5000).await.unwrap().coalesce();
+    let mut expected = vec![0x11u8; 100];
+    expected.resize(5000, 0);
+    assert_eq!(got.as_ref(), &expected[..]);
+}
+
 /// Contiguous appends land as separate runs, a capture merges them into
 /// one (all frozen at that point), and the merged entry round-trips across
 /// reopen.
@@ -3782,6 +3937,162 @@ async fn test_volume_batch_shrink_trims_capacity() {
     audit_volume(&volume, true);
     let got = blob.read_at(0, 100).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &[0x22u8; 100]);
+}
+
+/// A staged shrink dropping a mid-blob run followed by a staged regrow in
+/// the SAME batch: the publish must clear the vacated chunks' states with
+/// the shrink bookkeeping (the final size alone does not truncate them),
+/// or the next read of the hole panics on a stale chunk state.
+#[tokio::test]
+async fn test_volume_batch_shrink_then_regrow_covers_hole() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"h").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
+        .await
+        .unwrap();
+    blob.write_at(2 * BLOCK, IoBuf::copy_from_slice(&[0x22u8; 100]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+
+    let mut batch = volume.batch().await.unwrap();
+    batch.resize(&blob, BLOCK).await.unwrap();
+    batch
+        .write_at(&blob, 3 * BLOCK, IoBuf::copy_from_slice(&[0x33u8; 100]))
+        .await
+        .unwrap();
+    batch.apply_sync().await.unwrap();
+
+    blob.core.inner.lock().audit();
+    // The vacated chunk reads as a hole.
+    let got = blob.read_at(2 * BLOCK, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[0u8; 100]);
+    audit_volume(&volume, true);
+
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, size) = volume.open("p", b"h").await.unwrap();
+    assert_eq!(size, 3 * BLOCK + 100);
+    let got = blob
+        .read_at(0, 3 * BLOCK as usize + 100)
+        .await
+        .unwrap()
+        .coalesce();
+    let mut expected = vec![0x11u8; 100];
+    expected.resize(3 * BLOCK as usize, 0);
+    expected.extend_from_slice(&[0x33u8; 100]);
+    assert_eq!(got.as_ref(), &expected[..]);
+}
+
+/// Media rot in a committed chunk must surface as loud corruption at a
+/// mid-chunk shrink (whose surviving prefix is re-fingerprinted): the
+/// read-back is checked against the chunk's expected CRC before the
+/// recompute, never laundered under the fresh value.
+#[tokio::test]
+async fn test_volume_resize_trim_detects_rot() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    {
+        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+            .await
+            .unwrap();
+        let (blob, _) = volume.open("p", b"rot").await.unwrap();
+        blob.write_at(
+            0,
+            IoBuf::copy_from_slice(&vec![0x11u8; 2 * BLOCK as usize + 100]),
+        )
+        .await
+        .unwrap();
+        blob.sync().await.unwrap();
+    }
+    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let (blob, _) = volume.open("p", b"rot").await.unwrap();
+    // Rot a committed byte of the first chunk through the volume's own
+    // file handle (memory blobs are per-handle copies: the volume's handle
+    // must see the rot).
+    let phys = blob.core.inner.lock().runs.get(&0).unwrap().physical;
+    blob.ready
+        .file
+        .write_at(phys + 50, IoBuf::copy_from_slice(&[0xFF]))
+        .await
+        .unwrap();
+    let err = blob.resize(100).await;
+    assert!(
+        matches!(err, Err(Error::BlobCorrupt(..))),
+        "trim must detect rot: {err:?}"
+    );
+}
+
+/// [`Batch::resize`]'s staged mid-chunk shrink re-fingerprints the
+/// surviving prefix exactly like a published shrink: the read-back is
+/// checked against the chunk's expected CRC first.
+#[tokio::test]
+async fn test_volume_batch_resize_trim_detects_rot() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    {
+        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
+            .await
+            .unwrap();
+        let (blob, _) = volume.open("p", b"rot").await.unwrap();
+        blob.write_at(
+            0,
+            IoBuf::copy_from_slice(&vec![0x11u8; 2 * BLOCK as usize + 100]),
+        )
+        .await
+        .unwrap();
+        blob.sync().await.unwrap();
+    }
+    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let (blob, _) = volume.open("p", b"rot").await.unwrap();
+    let phys = blob.core.inner.lock().runs.get(&0).unwrap().physical;
+    blob.ready
+        .file
+        .write_at(phys + 50, IoBuf::copy_from_slice(&[0xFF]))
+        .await
+        .unwrap();
+    let mut batch = volume.batch().await.unwrap();
+    let err = batch.resize(&blob, 100).await;
+    assert!(
+        matches!(err, Err(Error::BlobCorrupt(..))),
+        "staged trim must detect rot: {err:?}"
+    );
+}
+
+/// An in-place write inside a young run sources its prefix span from disk
+/// when no in-memory copy covers it: the read-back is checked against the
+/// chunk's expected CRC, so rot surfaces loudly at the write instead of
+/// being laundered into the assembled chunk's fresh CRC.
+#[tokio::test]
+async fn test_volume_inplace_gap_write_detects_rot() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner, pool, Config::default());
+    let (blob, _) = volume.open("p", b"r").await.unwrap();
+    // A young run's chunk with a written span, then a later tail so
+    // neither the tail buffer nor an overlay entry covers the first chunk.
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
+        .await
+        .unwrap();
+    blob.write_at(5 * BLOCK, IoBuf::copy_from_slice(&[0x22u8; 100]))
+        .await
+        .unwrap();
+    let phys = blob.core.inner.lock().runs.get(&0).unwrap().physical;
+    blob.ready
+        .file
+        .write_at(phys + 50, IoBuf::copy_from_slice(&[0xFF]))
+        .await
+        .unwrap();
+    // The gap write's prefix [0, 100) comes from disk: the whole-span
+    // check must catch the rot.
+    let err = blob.write_at(200, IoBuf::copy_from_slice(&[0x33u8; 100])).await;
+    assert!(
+        matches!(err, Err(Error::BlobCorrupt(..))),
+        "gap write must detect rot: {err:?}"
+    );
 }
 
 /// A power-loss outcome that tears exactly the newest commit's SHADOW
