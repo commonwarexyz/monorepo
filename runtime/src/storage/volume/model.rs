@@ -1703,10 +1703,16 @@ pub(super) fn step(
                 return Ok(None);
             }
             let gen = b.gen + 1;
+            // Publish-sequence bookkeeping survives the reset for
+            // never-split tracking.
+            let pubseq = b.pubseq;
+            let committed_pubseq = b.committed_pubseq;
             *b = BlobState {
                 live: true,
                 gen,
                 dirty: true,
+                pubseq,
+                committed_pubseq,
                 ..Default::default()
             };
             Ok(Some(vec![s]))
@@ -2799,6 +2805,56 @@ mod tests {
         assert!(
             run_trace(trace, &SPEC).is_ok(),
             "spec must allow an unrelated commit after remove and recreate"
+        );
+    }
+
+    /// The never-split checker must stay sensitive on a freshly recreated
+    /// blob. A removal's commit confirms while the recreation happens
+    /// mid-flight, resolving the slot at the removal's pubseq. A recreation
+    /// that reset the publish-sequence bookkeeping would let that stale
+    /// resolution dominate the first batch applied to the new incarnation,
+    /// counting its part as already resolved. With group expansion disabled,
+    /// a selective commit capturing only the sibling is a split batch and
+    /// must be flagged (I6).
+    #[test]
+    fn mutation_recreated_blob_split_detected() {
+        let spec_trace: &[Action] = &[
+            Action::Remove(0),
+            Action::Snapshot(ALL),
+            Action::Recreate(0),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::BatchAppend(0),
+            Action::BatchAppend(1),
+            Action::BatchApply,
+            // Under SPEC the group expands the capture to both members.
+            Action::Snapshot(0b010),
+            Action::WriteMeta,
+            Action::FsyncOk,
+        ];
+        assert!(
+            run_trace(spec_trace, &SPEC).is_ok(),
+            "spec must allow the trace"
+        );
+
+        let mutated_trace: &[Action] = &[
+            Action::Remove(0),
+            Action::Snapshot(ALL),
+            Action::Recreate(0),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::BatchAppend(0),
+            Action::BatchAppend(1),
+            Action::BatchApply,
+            Action::Snapshot(0b010),
+        ];
+        let rules = Rules {
+            respect_groups: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(mutated_trace, &rules).is_err(),
+            "checker missed the split batch on the recreated blob"
         );
     }
 
