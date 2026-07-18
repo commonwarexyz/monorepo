@@ -83,6 +83,20 @@
 //! recorded (found by this model; it is the Blob contract's writer
 //! exclusivity applied to the batch as a deferred writer).
 //!
+//! A batch can also stage a blob REMOVAL ([`Action::BatchRemove`]),
+//! resolved at apply against the PRE-publish state — so a batch may
+//! remove a slot and recreate it, and the removal never touches the
+//! staged recreation. Removal-bearing batches publish and begin their
+//! commit in ONE step (every commit drops a removed slot's entry, so an
+//! interleaving commit would make the removal durable without the
+//! batch's other members — see `mutation_remove_commit_detected`). And a
+//! batch can join a slot for MEMBERSHIP only ([`Action::BatchSync`],
+//! Batch::sync): its directly written dirt commits with the group, the
+//! slot stays writable outside the batch, and a later staged write
+//! REBASES to the then-current published size (direct growth between the
+//! touch and the first staged write is never misread as a staged
+//! shrink).
+//!
 //! A batch can also stage a blob CREATION ([`Action::BatchCreate`]): the
 //! blob does not exist until apply publishes it. A batch that stages
 //! creations ALONGSIDE anything else publishes and begins its commit in
@@ -171,7 +185,7 @@
 //! `remove` durability (modeled as a table change committed by the next
 //! sync — crash-equivalent, since an uncommitted remove never happened).
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 /// Total blocks (blocks 0/1 are superblock slots).
 const BLOCKS: usize = 12;
@@ -382,6 +396,22 @@ pub(super) struct StagedSlot {
     /// The slot is a staged CREATION: the blob does not exist until apply
     /// publishes it (and, per the spec, immediately begins its commit).
     pub(super) created: bool,
+    /// MEMBERSHIP only (Batch::sync): the slot joins the batch's group so
+    /// its directly written dirt commits with it, but no content is
+    /// staged — the slot stays writable outside the batch, and a later
+    /// staged write REBASES to the then-current published size.
+    pub(super) member: bool,
+}
+
+/// A staged (unapplied) batch: per-slot overlays plus staged removals.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub(super) struct Batch {
+    pub(super) slots: BTreeMap<u8, StagedSlot>,
+    /// Slots staged for removal, resolved at apply against the
+    /// PRE-publish state (so a batch may remove a slot and recreate it).
+    /// Removal-bearing batches commit in-step
+    /// ([`Rules::atomic_remove_commit`]).
+    pub(super) removals: BTreeSet<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -425,7 +455,7 @@ pub(super) struct Volume {
     in_flight: Option<InFlight>,
     poisoned: bool,
     /// The staged (unapplied) batch, if any. At most one at a time.
-    pub(super) batch: Option<BTreeMap<u8, StagedSlot>>,
+    pub(super) batch: Option<Batch>,
     /// Applied-but-uncommitted atomic groups: disjoint slot sets, merged
     /// when batches share slots, cleared when a commit resolves them.
     groups: Vec<Vec<u8>>,
@@ -495,6 +525,13 @@ pub(super) struct Rules {
     /// `atomic_create_commit` and splitting mixed batches exactly as
     /// described there (I6).
     commit_free_creation_gate: bool,
+    /// Publish a batch that stages REMOVALS and begin its commit in ONE
+    /// step (the implementation's apply_sync requirement for removals).
+    /// Disabling lets an unrelated commit run between publish and the
+    /// batch's commit: every commit drops a removed slot's entry, so the
+    /// removal becomes durable while the batch's staged writes stay
+    /// uncommitted (I6).
+    atomic_remove_commit: bool,
     /// Include the tail block in the manifest whenever a capture writes a
     /// FRESH shadow, so verification always checks the shadow's content
     /// against the committed tail before adoption. Every capture with a
@@ -518,6 +555,7 @@ pub(super) const SPEC: Rules = Rules {
     capture_gated_frees: true,
     atomic_create_commit: true,
     commit_free_creation_gate: true,
+    atomic_remove_commit: true,
     manifest_fresh_shadow: true,
 };
 
@@ -546,8 +584,16 @@ pub(super) enum Action {
     BatchAppend(u8),
     /// Stage an overwrite of cell 0 into the current batch.
     BatchOverwrite(u8),
-    /// Stage the creation of a (removed) blob into the current batch.
+    /// Stage the creation of a (removed, or removal-staged) blob into the
+    /// current batch.
     BatchCreate(u8),
+    /// Join the current batch's group without staging content
+    /// (Batch::sync): the slot's directly written dirt commits with the
+    /// group, and the slot stays writable outside the batch.
+    BatchSync(u8),
+    /// Stage the slot's removal into the current batch (Batch::remove),
+    /// resolved at apply against the pre-publish state.
+    BatchRemove(u8),
     /// Atomically publish the staged batch. A batch staging creations
     /// alongside anything else also begins its commit in the same step
     /// (the apply_sync requirement). A creation-ONLY batch publishes
@@ -743,7 +789,7 @@ impl Volume {
         let base = self.blobs[slot as usize].runs.get(&lblock).cloned();
         let mut batch = self.batch.take().expect("staging requires a batch");
         {
-            let staged = batch.get_mut(&slot).expect("staged slot exists");
+            let staged = batch.slots.get_mut(&slot).expect("staged slot exists");
             let merge = |cells: (Cell, Cell)| {
                 if idx == 0 {
                     (val, cells.1)
@@ -1317,16 +1363,19 @@ fn begin_snapshot(
     // an earlier commit did (committed_pubseq), or it is a CREATION —
     // always empty in this model — whose entry table assembly emits
     // for every live blob, so any commit makes the creation durable
-    // regardless of capture. Removal-nulled parts (None) count on
-    // NEITHER side: the removal already resolved them and only their
-    // siblings' capture state matters, so counting a nulled part as
-    // included would flag a remove-then-recreate history as a split
-    // batch while a live sibling stays legitimately uncaptured (see
-    // `removed_then_recreated_part_not_counted`).
+    // regardless of capture. A part on a DEAD slot is a staged REMOVAL
+    // (Action::Remove nulls parts instead): every commit drops the
+    // removed entry, so this commit resolves it. Removal-nulled parts
+    // (None) count on NEITHER side: the removal already resolved them
+    // and only their siblings' capture state matters, so counting a
+    // nulled part as included would flag a remove-then-recreate history
+    // as a split batch while a live sibling stays legitimately
+    // uncaptured (see `removed_then_recreated_part_not_counted`).
     for pb in &s.volume.pending_batches {
         let resolved = |slot: u8, (bp, created): (u64, bool)| {
             created
                 || captured.contains(&slot)
+                || !s.volume.blobs[slot as usize].live
                 || s.volume.blobs[slot as usize].committed_pubseq >= bp
         };
         let parts: Vec<(u8, (u64, bool))> = pb
@@ -1379,7 +1428,7 @@ fn begin_snapshot(
             // batch state, vouching for bytes the API never
             // published (and that no manifest verifies).
             if !rules.stage_invisible {
-                if let Some(staged) = s.volume.batch.as_ref().and_then(|b| b.get(&slot)) {
+                if let Some(staged) = s.volume.batch.as_ref().and_then(|b| b.slots.get(&slot)) {
                     entry = Entry {
                         gen: b.gen,
                         size: staged.size,
@@ -1515,7 +1564,7 @@ pub(super) fn step(
         s.volume
             .batch
             .as_ref()
-            .is_some_and(|batch| batch.contains_key(&slot))
+            .is_some_and(|batch| batch.slots.get(&slot).is_some_and(|staged| !staged.member))
     };
 
     match action {
@@ -1829,14 +1878,22 @@ pub(super) fn step(
                 return Ok(None);
             }
             let published = s.volume.blobs[slot as usize].size;
-            let batch = s.volume.batch.get_or_insert_with(BTreeMap::new);
-            let staged = batch.entry(slot).or_insert_with(|| StagedSlot {
+            let batch = s.volume.batch.get_or_insert_with(Batch::default);
+            let staged = batch.slots.entry(slot).or_insert_with(|| StagedSlot {
                 size: published,
                 runs: BTreeMap::new(),
                 fresh: Vec::new(),
                 replaced: Vec::new(),
                 created: false,
+                member: false,
             });
+            if staged.member {
+                // Membership only until now: staging begins against the
+                // slot's CURRENT published size (direct writes may have
+                // legally grown it since the touch — the overlay rebases).
+                staged.member = false;
+                staged.size = published;
+            }
             if staged.size >= MAX_CELLS {
                 return Ok(None);
             }
@@ -1851,14 +1908,22 @@ pub(super) fn step(
                 return Ok(None);
             }
             let published = s.volume.blobs[slot as usize].size;
-            let batch = s.volume.batch.get_or_insert_with(BTreeMap::new);
-            let staged = batch.entry(slot).or_insert_with(|| StagedSlot {
+            let batch = s.volume.batch.get_or_insert_with(Batch::default);
+            let staged = batch.slots.entry(slot).or_insert_with(|| StagedSlot {
                 size: published,
                 runs: BTreeMap::new(),
                 fresh: Vec::new(),
                 replaced: Vec::new(),
                 created: false,
+                member: false,
             });
+            if staged.member {
+                // Membership only until now: staging begins against the
+                // slot's CURRENT published size (direct writes may have
+                // legally grown it since the touch — the overlay rebases).
+                staged.member = false;
+                staged.size = published;
+            }
             if staged.size == 0 {
                 return Ok(None);
             }
@@ -1867,11 +1932,26 @@ pub(super) fn step(
             Ok(Some(vec![s]))
         }
         Action::BatchCreate(slot) => {
-            if mutations_blocked || batch_staged(&s, slot) || s.volume.blobs[slot as usize].live {
+            // A live slot may be recreated only when this batch also
+            // stages its removal (resolved first at apply).
+            let staged_already = s
+                .volume
+                .batch
+                .as_ref()
+                .is_some_and(|b| b.slots.contains_key(&slot));
+            let removing = s
+                .volume
+                .batch
+                .as_ref()
+                .is_some_and(|b| b.removals.contains(&slot));
+            if mutations_blocked
+                || staged_already
+                || (s.volume.blobs[slot as usize].live && !removing)
+            {
                 return Ok(None);
             }
-            let batch = s.volume.batch.get_or_insert_with(BTreeMap::new);
-            batch.insert(
+            let batch = s.volume.batch.get_or_insert_with(Batch::default);
+            batch.slots.insert(
                 slot,
                 StagedSlot {
                     size: 0,
@@ -1879,8 +1959,61 @@ pub(super) fn step(
                     fresh: Vec::new(),
                     replaced: Vec::new(),
                     created: true,
+                    member: false,
                 },
             );
+            Ok(Some(vec![s]))
+        }
+        Action::BatchSync(slot) => {
+            // Membership only (Batch::sync): the slot's directly written
+            // dirt commits with the batch's group. No content is staged,
+            // so the slot stays writable outside the batch.
+            if mutations_blocked || !s.volume.blobs[slot as usize].live {
+                return Ok(None);
+            }
+            let already = s
+                .volume
+                .batch
+                .as_ref()
+                .is_some_and(|b| b.slots.contains_key(&slot) || b.removals.contains(&slot));
+            if already {
+                return Ok(None);
+            }
+            let published = s.volume.blobs[slot as usize].size;
+            let batch = s.volume.batch.get_or_insert_with(Batch::default);
+            batch.slots.insert(
+                slot,
+                StagedSlot {
+                    size: published,
+                    runs: BTreeMap::new(),
+                    fresh: Vec::new(),
+                    replaced: Vec::new(),
+                    created: false,
+                    member: true,
+                },
+            );
+            Ok(Some(vec![s]))
+        }
+        Action::BatchRemove(slot) => {
+            // Stage the slot's removal, resolved at apply against the
+            // pre-publish state (a batch may remove a slot and recreate
+            // it). Removal-bearing batches commit in-step at apply.
+            if mutations_blocked || !s.volume.blobs[slot as usize].live {
+                return Ok(None);
+            }
+            let already = s
+                .volume
+                .batch
+                .as_ref()
+                .is_some_and(|b| b.removals.contains(&slot));
+            if already {
+                return Ok(None);
+            }
+            s.volume
+                .batch
+                .get_or_insert_with(Batch::default)
+                .removals
+                .insert(slot);
             Ok(Some(vec![s]))
         }
         Action::BatchApply => {
@@ -1889,26 +2022,46 @@ pub(super) fn step(
             if mutations_blocked || s.volume.in_flight.is_some() {
                 return Ok(None);
             }
-            // A batch staging creations alongside anything else also begins
-            // its commit (apply_sync), which the latch blocks like any other
-            // sync. A creation-ONLY batch publishes commit-free: every
-            // member is an empty creation, so any later commit emits all of
-            // their entries together (staged content into a created slot is
-            // unreachable here: BatchAppend/BatchOverwrite require a live
-            // blob, and a staged creation's blob is not live until apply).
-            let (has_creation, creation_only) =
-                s.volume.batch.as_ref().map_or((false, false), |batch| {
-                    (
-                        batch.values().any(|staged| staged.created),
-                        batch.values().all(|staged| staged.created),
-                    )
-                });
+            // A staged removal whose slot was directly removed before the
+            // apply fails the implementation's validation (the name no
+            // longer resolves): the apply errors and publishes nothing,
+            // so the action is disabled here.
+            let removal_dead = s.volume.batch.as_ref().is_some_and(|batch| {
+                batch
+                    .removals
+                    .iter()
+                    .any(|&slot| !s.volume.blobs[slot as usize].live)
+            });
+            if removal_dead {
+                return Ok(None);
+            }
+            // A batch staging removals — or creations alongside anything
+            // else — also begins its commit (apply_sync), which the latch
+            // blocks like any other sync. A creation-ONLY batch publishes
+            // commit-free: every member is an empty creation, so any later
+            // commit emits all of their entries together (staged content
+            // into a created slot is unreachable here:
+            // BatchAppend/BatchOverwrite require a live blob, and a staged
+            // creation's blob is not live until apply).
+            let (has_creation, creation_only, has_removal) =
+                s.volume
+                    .batch
+                    .as_ref()
+                    .map_or((false, false, false), |batch| {
+                        (
+                            batch.slots.values().any(|staged| staged.created),
+                            !batch.slots.is_empty()
+                                && batch.slots.values().all(|staged| staged.created),
+                            !batch.removals.is_empty(),
+                        )
+                    });
             let commit_free = if rules.commit_free_creation_gate {
                 creation_only
             } else {
                 true
             };
-            let must_commit = has_creation && !commit_free && rules.atomic_create_commit;
+            let must_commit = (has_creation && !commit_free && rules.atomic_create_commit)
+                || (has_removal && rules.atomic_remove_commit);
             if must_commit && syncs_blocked {
                 return Ok(None);
             }
@@ -1917,7 +2070,39 @@ pub(super) fn step(
             };
             let mut record = BTreeMap::new();
             let mut members = Vec::new();
-            for (slot, staged) in batch {
+            // Removals resolve FIRST, against the pre-publish state (the
+            // implementation resolves names against the namespace its
+            // validation simulated): a batch may remove a slot and
+            // recreate it, and the removal never touches the staged
+            // recreation. Mirrors Action::Remove's unlink. Each removal is
+            // a batch part — the record entry below makes I6 require the
+            // entry drop to land with the group (a same-slot recreation
+            // overwrites the part with its own, strictly-live obligation).
+            for &slot in &batch.removals {
+                let b = &mut s.volume.blobs[slot as usize];
+                b.live = false;
+                b.dirty = true;
+                b.pubseq += 1;
+                let runs = std::mem::take(&mut b.runs);
+                let shadow = b.shadow.take();
+                let pending = std::mem::take(&mut b.pending_frees);
+                for run in runs.into_values() {
+                    s.volume.release(run.phys, rules);
+                }
+                if let Some(sh) = shadow {
+                    s.volume.release(sh, rules);
+                }
+                for block in pending {
+                    s.volume.release(block, rules);
+                }
+                for pb in &mut s.volume.pending_batches {
+                    if let Some(entry) = pb.get_mut(&slot) {
+                        *entry = None;
+                    }
+                }
+                record.insert(slot, Some((s.volume.blobs[slot as usize].pubseq, false)));
+            }
+            for (slot, staged) in batch.slots {
                 if staged.created {
                     // Publish the creation: a fresh generation, empty,
                     // dirty. Publish-sequence bookkeeping survives the
@@ -1940,10 +2125,20 @@ pub(super) fn step(
                 }
                 let b = &mut s.volume.blobs[slot as usize];
                 if !b.live {
-                    // Removed mid-batch: its staged blocks are unreferenced.
+                    // Removed mid-batch (this batch's own staged removal,
+                    // or an earlier Remove): its staged blocks are
+                    // unreferenced.
                     for block in staged.fresh {
                         s.volume.release(block, rules);
                     }
+                    continue;
+                }
+                if staged.member {
+                    // Membership only: no content publishes, but the
+                    // slot's direct dirt must commit with the group.
+                    b.pubseq += 1;
+                    record.insert(slot, Some((b.pubseq, false)));
+                    members.push(slot);
                     continue;
                 }
                 let touched: Vec<u8> = staged.runs.keys().copied().collect();
@@ -1968,13 +2163,13 @@ pub(super) fn step(
             }
             // The apply_sync requirement: publish and the batch's commit
             // snapshot happen under ONE hold of the commit lock, so no
-            // other commit can emit the created blob's entry without
-            // capturing the whole group. Creation-only batches are exempt
-            // (commit-free publish).
+            // other commit can emit the created blob's entry — or drop a
+            // removed slot's — without capturing the whole group.
+            // Creation-only batches are exempt (commit-free publish).
             if must_commit {
                 let mask = members.iter().fold(0u8, |mask, &slot| mask | (1 << slot));
                 let started = begin_snapshot(&mut s, mask, rules, trace)?;
-                assert!(started, "a creation batch must begin its commit");
+                assert!(started, "a creation or removal batch must begin its commit");
             }
             Ok(Some(vec![s]))
         }
@@ -1986,8 +2181,9 @@ pub(super) fn step(
                 return Ok(None);
             };
             // Staged blocks were never referenced: return them through the
-            // ordinary deferred-free path.
-            for staged in batch.into_values() {
+            // ordinary deferred-free path (staged removals simply never
+            // happened).
+            for staged in batch.slots.into_values() {
                 for block in staged.fresh {
                     s.volume.release(block, rules);
                 }
@@ -2216,6 +2412,39 @@ mod tests {
         Action::Crash,
     ];
 
+    /// Staged-removal workload: one batch removes a slot, recreates it,
+    /// and stages a sibling write — published and committed in one step,
+    /// atomic across crash (the removal resolves against the pre-publish
+    /// state, so it never touches the recreation).
+    const BATCH_RECREATE: &[Action] = &[
+        Action::Append(0),
+        Action::BatchAppend(1),
+        Action::BatchRemove(0),
+        Action::BatchCreate(0),
+        Action::BatchApply,
+        Action::Snapshot(ALL),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
+    /// Membership workload (Batch::sync): a directly written slot joins
+    /// the group without staged content, stays writable (its growth
+    /// rebases a later staged write), and its dirt commits with the group
+    /// under selective commits (never-split).
+    const BATCH_MEMBER: &[Action] = &[
+        Action::Append(0),
+        Action::BatchSync(0),
+        Action::BatchAppend(0),
+        Action::BatchAppend(1),
+        Action::BatchApply,
+        Action::Snapshot(0b010),
+        Action::Snapshot(ALL),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
     fn render(v: Violation) -> String {
         let mut out = String::from("model violation\n");
         out.push_str(&format!("  reason: {}\n  trace:\n", v.reason));
@@ -2296,6 +2525,72 @@ mod tests {
     #[test]
     fn spec_holds_batch_create_free() {
         assert_holds(BATCH_CREATE_FREE, 8, 2, 1_000);
+    }
+
+    #[test]
+    fn spec_holds_batch_recreate() {
+        assert_holds(BATCH_RECREATE, 8, 2, 1_000);
+    }
+
+    #[test]
+    fn spec_holds_batch_member() {
+        assert_holds(BATCH_MEMBER, 8, 2, 1_000);
+    }
+
+    /// A staged removal must publish and begin its commit in one step.
+    /// Without that (modeling an apply that does not sync), an unrelated
+    /// commit drops the removed slot's entry — making the removal durable
+    /// — while the batch's staged write to its sibling stays uncommitted:
+    /// the NEXT commit sees the split (I6). The first unrelated commit
+    /// cannot see it (neither part is resolved until its own confirm), so
+    /// the trace carries a second one.
+    #[test]
+    fn mutation_remove_commit_detected() {
+        let spec_trace: &[Action] = &[
+            Action::Append(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Append(2),
+            Action::BatchAppend(1),
+            Action::BatchRemove(0),
+            // Under SPEC the apply also begins the batch's commit. Finish
+            // it, after which the unrelated commits are harmless.
+            Action::BatchApply,
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Snapshot(0b100),
+            Action::WriteMeta,
+            Action::FsyncOk,
+        ];
+        assert!(
+            run_trace(spec_trace, &SPEC).is_ok(),
+            "spec must allow the trace"
+        );
+
+        let mutated_trace: &[Action] = &[
+            Action::Append(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Append(2),
+            Action::BatchAppend(1),
+            Action::BatchRemove(0),
+            Action::BatchApply,
+            Action::Snapshot(0b100),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Append(2),
+            Action::Snapshot(0b100),
+        ];
+        let rules = Rules {
+            atomic_remove_commit: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(mutated_trace, &rules).is_err(),
+            "checker missed the uncommitted staged removal"
+        );
     }
 
     /// A creation-only batch publishes WITHOUT its own commit: a later

@@ -541,6 +541,10 @@ enum Op {
     BatchAppend(u8),
     BatchOverwrite(u8),
     BatchCreate(u8),
+    /// Join the batch's group without staging content (Batch::sync).
+    BatchSync(u8),
+    /// Stage the slot's removal (Batch::remove; apply commits in-step).
+    BatchRemove(u8),
     BatchApply,
     BatchDrop,
 }
@@ -677,7 +681,8 @@ impl Rig {
             .volume
             .batch
             .as_ref()
-            .and_then(|batch| batch.get(&slot))
+            .and_then(|batch| batch.slots.get(&slot))
+            .filter(|staged| !staged.member)
             .map_or(self.size_cells(slot), |staged| staged.size)
     }
 
@@ -705,19 +710,22 @@ impl Rig {
             Op::BatchAppend(s) => vec![Action::BatchAppend(s)],
             Op::BatchOverwrite(s) => vec![Action::BatchOverwrite(s)],
             Op::BatchCreate(s) => vec![Action::BatchCreate(s)],
+            Op::BatchSync(s) => vec![Action::BatchSync(s)],
+            Op::BatchRemove(s) => vec![Action::BatchRemove(s)],
             Op::BatchApply => {
-                let (has_creation, creation_only) = self.tracked[0]
-                    .state
-                    .volume
-                    .batch
-                    .as_ref()
-                    .map_or((false, false), |batch| {
-                        (
-                            batch.values().any(|staged| staged.created),
-                            batch.values().all(|staged| staged.created),
-                        )
-                    });
-                if has_creation && !creation_only {
+                let (has_creation, creation_only, has_removal) =
+                    self.tracked[0].state.volume.batch.as_ref().map_or(
+                        (false, false, false),
+                        |batch| {
+                            (
+                                batch.slots.values().any(|staged| staged.created),
+                                !batch.slots.is_empty()
+                                    && batch.slots.values().all(|staged| staged.created),
+                                !batch.removals.is_empty(),
+                            )
+                        },
+                    );
+                if has_removal || (has_creation && !creation_only) {
                     // The implementation requires apply_sync here: publish
                     // and the group's commit under one commit-lock hold.
                     vec![Action::BatchApply, Action::WriteMeta, Action::FsyncOk]
@@ -946,18 +954,30 @@ impl Rig {
                     .unwrap_or_else(|e| panic!("batch create: {e}"));
                 rig.created.insert(s, blob);
             }
+            Op::BatchSync(s) => {
+                let blob = self.blobs[&s].clone();
+                let rig = self.batch_mut().await;
+                rig.batch.sync(&blob);
+            }
+            Op::BatchRemove(s) => {
+                let target = name(s);
+                let rig = self.batch_mut().await;
+                rig.batch.remove(PARTITION, Some(&target));
+            }
             Op::BatchApply => {
                 let rig = self.batch.take().expect("apply without a batch");
-                let (has_creation, creation_only) = {
+                let (has_creation, creation_only, removals) = {
                     let batch = self.tracked[0].state.volume.batch.as_ref();
-                    batch.map_or((false, false), |batch| {
+                    batch.map_or((false, false, Vec::new()), |batch| {
                         (
-                            batch.values().any(|staged| staged.created),
-                            batch.values().all(|staged| staged.created),
+                            batch.slots.values().any(|staged| staged.created),
+                            !batch.slots.is_empty()
+                                && batch.slots.values().all(|staged| staged.created),
+                            batch.removals.iter().copied().collect(),
                         )
                     })
                 };
-                if has_creation && !creation_only {
+                if !removals.is_empty() || (has_creation && !creation_only) {
                     rig.batch
                         .apply_sync()
                         .await
@@ -967,6 +987,11 @@ impl Rig {
                         .apply()
                         .await
                         .unwrap_or_else(|e| panic!("{}: apply: {e}", self.ctx()));
+                }
+                // Removed slots drop their handles; a same-slot recreation
+                // re-inserts the created handle below.
+                for slot in removals {
+                    self.blobs.remove(&slot);
                 }
                 self.blobs.extend(rig.created);
             }
@@ -1128,6 +1153,41 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
     // The freshly recovered state is quiesced: bookkeeping must be exact.
     audit_volume(&volume, true);
     Ok(obs)
+}
+
+/// Surface-parity tripwire: the exhaustive match forces this ledger to be
+/// revisited whenever the harness op vocabulary grows, and the ledger
+/// names the volume APIs each op drives. The public durability surface
+/// with NO op of its own, and the pin that stands in for each:
+///
+/// - `Blob::write_at_sync`: `write_at` + `sync` composition (both mapped).
+/// - `Batch::resize`: no model action by design (the model docs'
+///   uncovered list); pinned by directed unit tests in `tests`.
+/// - `Batch::apply_start_sync`: `apply`'s publish plus `start_sync`'s
+///   registered commit; the cancellation injector drives the composite.
+///
+/// Extending the volume's public semantics requires extending the op
+/// vocabulary (and a workload reaching it) or adding a line above with
+/// its stand-in pin — a silent gap is what the 2026-07 review found five
+/// of six bugs hiding in.
+#[test]
+fn conformance_surface_parity() {
+    fn drives(op: Op) -> &'static str {
+        match op {
+            Op::Append(_) | Op::Overwrite(_) => "Blob::write_at",
+            Op::ResizeDown(_) | Op::ResizeUp(_) => "Blob::resize",
+            Op::Sync(_) => "Blob::sync / Blob::start_sync (pooled union)",
+            Op::Remove(_) => "Storage::remove",
+            Op::Recreate(_) => "Storage::open (creation commit)",
+            Op::BatchAppend(_) | Op::BatchOverwrite(_) => "Batch::write_at",
+            Op::BatchSync(_) => "Batch::sync",
+            Op::BatchRemove(_) => "Batch::remove",
+            Op::BatchCreate(_) => "Batch::create",
+            Op::BatchApply => "Batch::apply / Batch::apply_sync",
+            Op::BatchDrop => "drop(Batch)",
+        }
+    }
+    let _ = drives(Op::BatchApply);
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,6 +1510,7 @@ async fn conformance_batch() {
             Op::BatchAppend(0),
             Op::BatchAppend(1),
             Op::BatchOverwrite(0),
+            Op::BatchSync(0),
             Op::BatchApply,
             Op::BatchDrop,
             Op::Sync(0b001),
@@ -1475,6 +1536,7 @@ async fn conformance_batch_create() {
     let stats = explore(&Workload {
         menu: &[
             Op::Remove(1),
+            Op::BatchRemove(1),
             Op::BatchCreate(1),
             Op::BatchAppend(0),
             Op::BatchApply,
@@ -1548,6 +1610,55 @@ async fn conformance_directed_shrink_into_hole() {
         stats.exhaustive_points == stats.crash_points && stats.cases > 30,
         "suspiciously thin coverage: {stats:?}"
     );
+}
+
+/// Directed batch-namespace family: remove-and-recreate-same-name in
+/// one batch (the publish-order blocker — the removal must resolve
+/// against the pre-publish namespace, never the staged recreation), a
+/// bare staged removal alongside a sibling write (all-or-nothing across
+/// crash), and the membership rebase (Batch::sync, then legal direct
+/// growth, then staged writes: publish must rebase, never truncate the
+/// growth as a staged shrink).
+#[tokio::test]
+async fn conformance_directed_batch_namespace() {
+    let mut stats = Stats::default();
+    let traces: &[&[Op]] = &[
+        &[
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::BatchAppend(1),
+            Op::BatchRemove(0),
+            Op::BatchCreate(0),
+            Op::BatchApply,
+            Op::Append(0),
+            Op::Sync(0b001),
+        ],
+        &[
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::BatchAppend(1),
+            Op::BatchRemove(0),
+            Op::BatchApply,
+        ],
+        &[
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::BatchSync(0),
+            Op::Append(0),
+            Op::BatchAppend(1),
+            Op::BatchAppend(0),
+            Op::BatchApply,
+        ],
+    ];
+    for (i, trace) in traces.iter().enumerate() {
+        let mut rig = Rig::new().await;
+        for &op in *trace {
+            assert!(rig.enabled(op), "directed trace {i}: {op:?} disabled");
+            rig.execute(op).await;
+            rig.crash_probe(&[], 2048, i as u64, &mut stats).await;
+        }
+    }
+    assert!(stats.cases > 60, "suspiciously few cases: {stats:?}");
 }
 
 /// The torn-shadow directed family (blocker B2's shape): a committed
