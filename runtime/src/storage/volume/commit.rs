@@ -28,6 +28,11 @@ use super::{
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, Error, IoBuf};
 use bytes::Bytes;
 use commonware_cryptography::Crc32;
+use commonware_utils::sync::Mutex;
+use futures::{
+    channel::oneshot,
+    future::{FutureExt as _, Shared},
+};
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
@@ -60,22 +65,95 @@ struct Snapshot {
 }
 
 /// A registration in the pending-commit pool: the shared result of the
-/// coalesced commit that will cover the registered roots.
-pub(super) type Ticket = Arc<OnceLock<Result<(), Error>>>;
+/// coalesced commit that will cover the registered roots. Callers OBSERVE
+/// tickets ([`TicketState::wait`]); driver tasks resolve them — a commit's
+/// progress never depends on any observer being polled.
+pub(super) type Ticket = Arc<TicketState>;
 
-/// Poisons the volume and fails the drained ticket if the leader's commit
-/// future is dropped mid-flight (a cancelled sync future, or a
-/// partially-driven [`crate::Handle`] that was dropped).
+/// A ticket's resolution cell plus the notification observers await.
+pub(super) struct TicketState {
+    result: OnceLock<Result<(), Error>>,
+    /// Consumed by the resolver to fire `rx` (after `result` is set).
+    tx: Mutex<Option<oneshot::Sender<()>>>,
+    rx: Shared<oneshot::Receiver<()>>,
+}
+
+impl Default for super::core::PendingCommit {
+    fn default() -> Self {
+        Self {
+            roots: BTreeSet::new(),
+            ticket: new_ticket(),
+        }
+    }
+}
+
+/// A fresh unresolved ticket.
+pub(super) fn new_ticket() -> Ticket {
+    let (tx, rx) = oneshot::channel();
+    Arc::new(TicketState {
+        result: OnceLock::new(),
+        tx: Mutex::new(Some(tx)),
+        rx: rx.shared(),
+    })
+}
+
+impl TicketState {
+    /// The result, if resolved.
+    pub fn get(&self) -> Option<&Result<(), Error>> {
+        self.result.get()
+    }
+
+    /// Resolve with `result` and wake every observer. Asserts single
+    /// resolution: only the leader that drained this ticket resolves it.
+    pub fn resolve(&self, result: Result<(), Error>) {
+        self.result
+            .set(result)
+            .expect("only the draining leader resolves a ticket");
+        self.notify();
+    }
+
+    /// Resolve with [`Error::Aborted`] if still unresolved (the
+    /// cancellation guard's drop path, which may race nothing but must
+    /// tolerate an already-resolved ticket).
+    fn abort(&self) {
+        let _ = self.result.set(Err(Error::Aborted));
+        self.notify();
+    }
+
+    fn notify(&self) {
+        if let Some(tx) = self.tx.lock().take() {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Wait for the resolution. Never blocks the resolver: observers hold
+    /// only this shared state, so dropping or parking a waiting future is
+    /// always benign.
+    pub async fn wait(&self) -> Result<(), Error> {
+        if self.result.get().is_none() {
+            let _ = self.rx.clone().await;
+        }
+        // An observer's own Arc keeps the sender half alive, so the
+        // channel fires only through resolve/abort: the result is set.
+        self.result.get().cloned().unwrap_or(Err(Error::Aborted))
+    }
+}
+
+/// Poisons the volume and fails the drained ticket if the leader's driver
+/// task is dropped mid-flight. Commits execute only in driver tasks, so
+/// this fires exclusively when the runtime tears down with a commit in
+/// flight — caller-side futures are pure ticket observers and cannot
+/// cancel a commit (pinned by the conformance cancellation injector).
 ///
 /// A leader dropped mid-commit has already swapped the pool's ticket and
 /// may have consumed snapshot state (dirty marks, deferred frees,
 /// committed-meta swaps, cached entry encodings) or issued metadata
 /// writes. The half-driven commit can neither be completed nor unwound
 /// from a `Drop` impl, and a later commit would vouch for state it cannot
-/// prove landed — so cancellation latches the same poison as a failed
-/// commit, and every pooled waiter observes the error through the ticket.
-/// Futures dropped BEFORE leadership (never polled, or still queued on the
-/// commit lock) never arm this guard and stay benign.
+/// prove landed — so the abort latches the same poison as a failed
+/// commit, and every observer sees the error through the ticket. Tasks
+/// dropped BEFORE leadership (still queued on the commit lock) never arm
+/// this guard and stay benign.
 struct CancelGuard<'a, S: crate::Storage> {
     ready: &'a Ready<S>,
     ticket: Option<Ticket>,
@@ -86,9 +164,7 @@ impl<S: crate::Storage> CancelGuard<'_, S> {
     /// result.
     fn resolve(mut self, result: Result<(), Error>) {
         let ticket = self.ticket.take().expect("guard resolves once");
-        ticket
-            .set(result)
-            .expect("only the draining leader resolves a ticket");
+        ticket.resolve(result);
     }
 }
 
@@ -97,27 +173,25 @@ impl<S: crate::Storage> Drop for CancelGuard<'_, S> {
         let Some(ticket) = self.ticket.take() else {
             return;
         };
-        let error = Error::Aborted;
-        tracing::error!("volume commit future dropped mid-commit; storage poisoned until restart");
-        let _ = self.ready.poisoned.set(error.clone());
+        tracing::error!("volume commit task dropped mid-commit; storage poisoned until restart");
+        let _ = self.ready.poisoned.set(Error::Aborted);
         let _ = self.ready.metrics.poisoned.try_set(1);
-        let _ = ticket.set(Err(error));
+        ticket.abort();
     }
 }
 
 /// Poisons the volume if dropped while armed: guards a commit's mutation
-/// span against CANCELLATION (the caller's future dropped mid-flight).
+/// span against its driver task being dropped mid-flight (the runtime
+/// tearing down).
 ///
-/// [`commit_locked`] is driven directly inside caller futures on the
-/// `Batch::apply_sync` and `Storage::remove` paths (no pooled ticket, so
-/// [`CancelGuard`] never sees them). Once the snapshot starts consuming
-/// state — dirty marks, committed-meta swaps, deferred frees, cached
-/// encodings — a dropped future can neither complete the commit nor
-/// unwind it, and the next confirming commit would publish the
-/// half-snapshot (a durable table referencing never-written extents):
-/// found by the conformance cancellation injector. `Batch::apply_inner`
-/// arms one across its publish for the same reason (a half-published
-/// batch splits the group).
+/// [`commit_locked`] runs inside the removal and batch-apply driver tasks
+/// with no pooled ticket, so [`CancelGuard`] never sees them. Once the
+/// snapshot starts consuming state — dirty marks, committed-meta swaps,
+/// deferred frees, cached encodings — a dropped task can neither complete
+/// the commit nor unwind it, and the next confirming commit would publish
+/// the half-snapshot (a durable table referencing never-written extents).
+/// The batch apply task arms one across its publish for the same reason
+/// (a half-published batch splits the group).
 pub(super) struct PoisonOnCancel<'a, S: crate::Storage> {
     ready: &'a Ready<S>,
     armed: bool,
@@ -155,11 +229,12 @@ pub(super) fn register<S: crate::Storage>(ready: &Ready<S>, roots: &[u64]) -> Ti
     pending.ticket.clone()
 }
 
-/// Resolve a registration: lead-or-observe. Queues on the commit lock and,
-/// if a leader's commit already resolved `ticket` while queued, returns its
-/// result. Otherwise this caller is the leader: it drains the pool (the
-/// registered roots plus everything registered since the previous drain)
-/// and commits the UNION, so one fsync acknowledges every pooled caller.
+/// Resolve a registration: lead-or-observe, inside a driver task. Queues
+/// on the commit lock and, if a leader's commit already resolved `ticket`
+/// while queued, returns its result. Otherwise this task is the leader: it
+/// drains the pool (the registered roots plus everything registered since
+/// the previous drain) and commits the UNION, so one fsync acknowledges
+/// every pooled caller.
 pub(super) async fn drive<S: crate::Storage>(
     ready: &Ready<S>,
     ticket: Ticket,
@@ -176,7 +251,7 @@ pub(super) async fn drive<S: crate::Storage>(
     let (union, ticket) = {
         let mut pending = ready.pending.lock();
         let union: Vec<u64> = std::mem::take(&mut pending.roots).into_iter().collect();
-        let drained = std::mem::replace(&mut pending.ticket, Arc::new(OnceLock::new()));
+        let drained = std::mem::replace(&mut pending.ticket, new_ticket());
         assert!(
             Arc::ptr_eq(&ticket, &drained),
             "unresolved ticket must be the pool's current ticket"
@@ -194,9 +269,32 @@ pub(super) async fn drive<S: crate::Storage>(
     result
 }
 
+/// Request a commit covering `roots`: register in the pending pool and
+/// schedule a driver task ([`drive`]) for the pool's ticket. The returned
+/// ticket is the observation point — the commit's progress never depends
+/// on the caller polling anything, so a dropped or parked observer is
+/// benign (the commit still runs to completion).
+pub(super) fn request<S: crate::Storage>(ready: &Arc<Ready<S>>, roots: &[u64]) -> Ticket {
+    let ticket = register(ready, roots);
+    spawn_drive(ready, ticket.clone());
+    ticket
+}
+
+/// Schedule a driver task for `ticket`: queue on the commit lock and
+/// lead-or-observe, exactly one spawned task per durability request (the
+/// same queue depth the caller-driven design produced). The task's result
+/// reaches observers through the ticket, and failures additionally latch
+/// the poison.
+pub(super) fn spawn_drive<S: crate::Storage>(ready: &Arc<Ready<S>>, ticket: Ticket) {
+    let driven = ready.clone();
+    ready.driver.spawn(async move {
+        let _ = drive(&driven, ticket).await;
+    });
+}
+
 /// Commit the dirty state of the blobs rooted at `roots` (expanded across
 /// applied-batch groups), coalescing with concurrent syncs: callers pool
-/// their roots ([`register`]), and whichever queued caller acquires the
+/// their roots ([`register`]), and whichever driver task acquires the
 /// commit lock first drains the pool and commits the UNION ([`drive`]), so
 /// one fsync acknowledges every pooled caller. Each caller's durability
 /// promise is met exactly — the union's snapshot begins after every pooled
@@ -205,14 +303,13 @@ pub(super) async fn drive<S: crate::Storage>(
 /// Returns without I/O when the captured state is clean.
 ///
 /// Coalescing is keyed off the commit-lock queue alone (no timers): under
-/// the deterministic runtime, identical schedules produce identical commit
-/// grouping.
+/// the deterministic runtime, driver tasks schedule like any other task,
+/// so identical schedules produce identical commit grouping.
 pub(super) async fn commit<S: crate::Storage>(
-    ready: &Ready<S>,
+    ready: &Arc<Ready<S>>,
     roots: &[u64],
 ) -> Result<(), Error> {
-    let ticket = register(ready, roots);
-    drive(ready, ticket).await
+    request(ready, roots).wait().await
 }
 
 /// [`commit`] with `Ready::commit_lock` already held by the caller.

@@ -490,7 +490,14 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("volume_pool"));
-        let storage = crate::storage::volume::Storage::new(storage, pool, Default::default());
+        let storage = crate::storage::volume::Storage::new(
+            storage,
+            pool,
+            Default::default(),
+            crate::storage::volume::Driver::new(|fut| {
+                tokio::spawn(fut);
+            }),
+        );
         run_storage_tests(storage).await;
         let _ = std::fs::remove_dir_all(storage_directory);
     }

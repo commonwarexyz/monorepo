@@ -300,6 +300,9 @@ mod tests {
             Storage::new(config, pool.clone()),
             pool,
             Default::default(),
+            crate::storage::volume::Driver::new(|fut| {
+                tokio::spawn(fut);
+            }),
         );
         run_storage_tests(storage).await;
     }

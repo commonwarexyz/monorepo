@@ -11,7 +11,8 @@
 //! > on [`crate::Storage`] blob creation/removal, on
 //! > [`Batch::apply_sync`], and when a commit registered by
 //! > [`crate::Blob::start_sync`] / [`Batch::apply_start_sync`] lands
-//! > (driven by its handle, or coalesced into any later commit). It atomically
+//! > (scheduled immediately on the runtime's [`Driver`], or coalesced
+//! > into an earlier pooled commit). It atomically
 //! > covers the CAPTURED blobs: the synced blob (pooled with every
 //! > concurrently queued sync's blob, see Concurrency below) or the
 //! > applying batch's blobs, expanded across applied-batch groups so an
@@ -93,11 +94,14 @@
 //!   retry). File growth serializes on a provision lock but is rare (once
 //!   per growth quantum).
 //! - Commits serialize on ONE commit lock, and every commit ends in an
-//!   fsync of the ONE volume file. Concurrent syncs therefore COALESCE:
-//!   syncs arriving while a commit is in flight pool their blobs, and
-//!   whichever queued sync acquires the lock first commits the pooled
-//!   UNION under a single fsync, acknowledging every pooled sync at once
-//!   (see `commit::commit`). Callers see only their own `sync` return.
+//!   fsync of the ONE volume file. Commits execute in driver tasks the
+//!   runtime provides (see [`Driver`]): callers only observe, so a
+//!   dropped or parked sync-shaped future never wedges or cancels a
+//!   commit. Concurrent syncs COALESCE: syncs arriving while a commit is
+//!   in flight pool their blobs, and whichever driver task acquires the
+//!   lock first commits the pooled UNION under a single fsync,
+//!   acknowledging every pooled sync at once (see `commit::commit`).
+//!   Callers see only their own `sync` return.
 //!   Coalescing is keyed off the lock queue alone — no timers — so the
 //!   deterministic runtime stays deterministic, and a serial caller (no
 //!   overlap) commits exactly as without coalescing. With 16 concurrent
@@ -197,7 +201,9 @@ use commonware_formatting::hex;
 use commonware_utils::sync::AsyncMutex;
 use core::{BlobCore, Ready};
 use std::{
+    future::Future,
     ops::RangeInclusive,
+    pin::Pin,
     sync::{Arc, OnceLock},
 };
 
@@ -239,6 +245,33 @@ impl Default for Config {
     }
 }
 
+/// Executes the volume's commit futures on the owning runtime's executor.
+///
+/// Every durability request — a sync, a started sync, a batch apply, a
+/// creation, a removal — runs its commit inside a driver-spawned task,
+/// never inside the caller's future: a caller that drops (or stops
+/// polling) a sync-shaped future merely stops observing, and the commit
+/// still runs to completion. The provided spawn must schedule the future
+/// to run until done; dropping one early is a runtime-shutdown event (a
+/// task aborted mid-commit poisons the volume, exactly like a failed
+/// commit, because its half-consumed state cannot be unwound).
+#[derive(Clone)]
+pub struct Driver(Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>);
+
+impl Driver {
+    /// A driver from `spawn`.
+    pub fn new(
+        spawn: impl Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(spawn))
+    }
+
+    /// Schedule `future` onto the runtime.
+    pub(crate) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+        (self.0)(Box::pin(future));
+    }
+}
+
 /// A single-file storage backend with atomic group commit over an inner
 /// [`crate::Storage`].
 pub struct Storage<S: crate::Storage> {
@@ -257,6 +290,7 @@ struct Shared<S: crate::Storage> {
     inner: S,
     pool: BufferPool,
     cfg: Config,
+    driver: Driver,
     metrics: Arc<metrics::Metrics>,
     /// Set once recovery has completed (fast path).
     ready: OnceLock<Arc<Ready<S>>>,
@@ -265,14 +299,15 @@ struct Shared<S: crate::Storage> {
 }
 
 impl<S: crate::Storage> Storage<S> {
-    /// Create a volume over `inner`. Recovery runs lazily on the first
-    /// operation (or eagerly via [`Self::init`]).
+    /// Create a volume over `inner`, with `driver` executing its commits
+    /// (see [`Driver`]). Recovery runs lazily on the first operation (or
+    /// eagerly via [`Self::init`]).
     ///
     /// A volume created this way keeps its operational metrics
     /// unregistered; the runtime contexts construct their volumes with a
     /// registry so operators see them.
-    pub fn new(inner: S, pool: BufferPool, cfg: Config) -> Self {
-        Self::with_metrics(inner, pool, cfg, metrics::Metrics::unregistered())
+    pub fn new(inner: S, pool: BufferPool, cfg: Config, driver: Driver) -> Self {
+        Self::with_metrics(inner, pool, cfg, driver, metrics::Metrics::unregistered())
     }
 
     /// [`Self::new`] with metrics registered under `registry`.
@@ -280,17 +315,25 @@ impl<S: crate::Storage> Storage<S> {
         inner: S,
         pool: BufferPool,
         cfg: Config,
+        driver: Driver,
         registry: &mut impl crate::telemetry::metrics::Register,
     ) -> Self {
-        Self::with_metrics(inner, pool, cfg, metrics::Metrics::new(registry))
+        Self::with_metrics(inner, pool, cfg, driver, metrics::Metrics::new(registry))
     }
 
-    fn with_metrics(inner: S, pool: BufferPool, cfg: Config, metrics: metrics::Metrics) -> Self {
+    fn with_metrics(
+        inner: S,
+        pool: BufferPool,
+        cfg: Config,
+        driver: Driver,
+        metrics: metrics::Metrics,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 inner,
                 pool,
                 cfg,
+                driver,
                 metrics: Arc::new(metrics),
                 ready: OnceLock::new(),
                 ns_lock: AsyncMutex::new(()),
@@ -299,8 +342,13 @@ impl<S: crate::Storage> Storage<S> {
     }
 
     /// Create a volume and run recovery immediately.
-    pub async fn init(inner: S, pool: BufferPool, cfg: Config) -> Result<Self, Error> {
-        let storage = Self::new(inner, pool, cfg);
+    pub async fn init(
+        inner: S,
+        pool: BufferPool,
+        cfg: Config,
+        driver: Driver,
+    ) -> Result<Self, Error> {
+        let storage = Self::new(inner, pool, cfg, driver);
         storage.ensure().await?;
         Ok(storage)
     }
@@ -337,6 +385,7 @@ impl<S: crate::Storage> Storage<S> {
                 &self.shared.inner,
                 &self.shared.pool,
                 &self.shared.cfg,
+                self.shared.driver.clone(),
                 self.shared.metrics.clone(),
             )
             .await?,
@@ -585,56 +634,19 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         super::validate_partition_name(partition)?;
         let ready = self.ensure().await?;
-        let _ns = self.shared.ns_lock.lock().await;
-        // Hold the commit lock across unlink-plus-commit (exactly as staged
-        // batch removals do): an entry drop is global, so a commit racing
-        // the window between the namespace edit and the removal's own
-        // commit would resolve the removal without capturing its
-        // applied-batch group, splitting the group (never-split).
-        let _commit = ready.commit_lock.lock().await;
-        ready.check_poisoned()?;
-
-        let removed = {
-            let mut state = ready.state.lock();
-            let Some(blobs) = state.partitions.get(partition) else {
-                return Err(Error::PartitionMissing(partition.into()));
-            };
-            let ids: Vec<u64> = match name {
-                Some(name) => {
-                    let Some(&id) = blobs.get(name) else {
-                        return Err(Error::BlobMissing(partition.into(), hex(name)));
-                    };
-                    vec![id]
-                }
-                None => blobs.values().copied().collect(),
-            };
-
-            for &id in &ids {
-                unlink(&mut state, id);
-            }
-            match name {
-                Some(name) => {
-                    state
-                        .partitions
-                        .get_mut(partition)
-                        .expect("checked")
-                        .remove(name);
-                }
-                None => {
-                    state.partitions.remove(partition);
-                    state.partition_epoch += 1;
-                }
-            }
-            state.meta_dirty = true;
-            ids
-        };
-        // "An Ok result indicates the blob is durably removed." The removed
-        // ids root the commit so their applied-batch groups (if any) are
-        // captured with the removal (never-split). The removal requests
-        // durability without registering in the pending pool, so count the
-        // request here (see `metrics::Metrics::sync_requests`).
-        ready.metrics.sync_requests.inc();
-        commit::commit_locked(&ready, &removed).await
+        // The unlink and its commit run in a driver task: the caller only
+        // observes, so dropping this future never leaves a half-removal
+        // (the task runs to completion regardless).
+        let shared = self.shared.clone();
+        let partition = partition.to_string();
+        let name = name.map(<[u8]>::to_vec);
+        let ticket = commit::new_ticket();
+        let resolver = ticket.clone();
+        let driver = ready.driver.clone();
+        driver.spawn(async move {
+            resolver.resolve(remove_task(&shared, &ready, &partition, name.as_deref()).await);
+        });
+        ticket.wait().await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -647,6 +659,67 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         };
         Ok(blobs.keys().cloned().collect())
     }
+}
+
+/// The removal body, run inside a driver task: the namespace edit plus its
+/// commit under one hold of the commit lock, serialized with other
+/// namespace changes on `ns_lock`.
+async fn remove_task<S: crate::Storage>(
+    shared: &Shared<S>,
+    ready: &Arc<Ready<S>>,
+    partition: &str,
+    name: Option<&[u8]>,
+) -> Result<(), Error> {
+    let _ns = shared.ns_lock.lock().await;
+    // Hold the commit lock across unlink-plus-commit (exactly as staged
+    // batch removals do): an entry drop is global, so a commit racing
+    // the window between the namespace edit and the removal's own
+    // commit would resolve the removal without capturing its
+    // applied-batch group, splitting the group (never-split).
+    let _commit = ready.commit_lock.lock().await;
+    ready.check_poisoned()?;
+
+    let removed = {
+        let mut state = ready.state.lock();
+        let Some(blobs) = state.partitions.get(partition) else {
+            return Err(Error::PartitionMissing(partition.into()));
+        };
+        let ids: Vec<u64> = match name {
+            Some(name) => {
+                let Some(&id) = blobs.get(name) else {
+                    return Err(Error::BlobMissing(partition.into(), hex(name)));
+                };
+                vec![id]
+            }
+            None => blobs.values().copied().collect(),
+        };
+
+        for &id in &ids {
+            unlink(&mut state, id);
+        }
+        match name {
+            Some(name) => {
+                state
+                    .partitions
+                    .get_mut(partition)
+                    .expect("checked")
+                    .remove(name);
+            }
+            None => {
+                state.partitions.remove(partition);
+                state.partition_epoch += 1;
+            }
+        }
+        state.meta_dirty = true;
+        ids
+    };
+    // "An Ok result indicates the blob is durably removed." The removed
+    // ids root the commit so their applied-batch groups (if any) are
+    // captured with the removal (never-split). The removal requests
+    // durability without registering in the pending pool, so count the
+    // request here (see `metrics::Metrics::sync_requests`).
+    ready.metrics.sync_requests.inc();
+    commit::commit_locked(ready, &removed).await
 }
 
 /// Unlink one blob id: mark removed, queue every extent it references for
@@ -754,19 +827,15 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        // Register under the current ticket now: any commit that drains the
-        // pool after this point covers this blob and resolves the handle.
-        // The handle itself lead-drives a covering commit when awaited (see
-        // `commit::drive`), so its progress never depends on unrelated
-        // traffic — but it must be awaited: a never-polled handle leaves
-        // the registered root for the next commit, and a commit failure is
-        // reported only through the handle (the poison latch also fails
-        // every later operation). A handle polled at least once must be
-        // driven to completion or dropped: parked (alive, unpolled) it can
-        // hold the commit lock and block every later commit, and dropped
-        // mid-commit it poisons the volume (see `commit::CancelGuard`).
-        let ticket = commit::register(&self.ready, &[self.core.id]);
-        let ready = self.ready.clone();
-        Handle::from_future(async move { commit::drive(&ready, ticket).await })
+        // Register under the current ticket and schedule its driver task
+        // now: the commit begins immediately and progresses regardless of
+        // what happens to the returned handle (any commit that drains the
+        // pool covers this blob and resolves it). The handle only
+        // OBSERVES — awaiting it reports the covering commit's result —
+        // and dropping or parking it is always benign. A failure is
+        // reported through the handle AND the poison latch, so even an
+        // unobserved handle cannot hide one.
+        let ticket = commit::request(&self.ready, &[self.core.id]);
+        Handle::from_future(async move { ticket.wait().await })
     }
 }

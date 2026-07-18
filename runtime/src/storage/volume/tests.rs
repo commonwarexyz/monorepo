@@ -19,9 +19,21 @@ pub(super) fn test_pool() -> BufferPool {
     BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
 }
 
+/// A driver that spawns commit futures onto the ambient tokio runtime.
+pub(super) fn test_driver() -> super::Driver {
+    super::Driver::new(|fut| {
+        tokio::spawn(fut);
+    })
+}
+
 fn volume_over_memory() -> Volume<memory::Storage> {
     let pool = test_pool();
-    Volume::new(memory::Storage::new(pool.clone()), pool, Config::default())
+    Volume::new(
+        memory::Storage::new(pool.clone()),
+        pool,
+        Config::default(),
+        test_driver(),
+    )
 }
 
 #[tokio::test]
@@ -157,7 +169,12 @@ impl crate::Blob for RecordingBlob {
 async fn test_volume_read_coalescing() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let span = 16 * BLOCK as usize;
     let (big, _) = volume.open("p", b"big").await.unwrap();
@@ -194,7 +211,7 @@ async fn test_volume_growth_quantum() {
         growth_quantum: quantum,
         ..Config::default()
     };
-    let volume = Volume::new(inner.clone(), pool.clone(), cfg.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), cfg.clone(), test_driver());
 
     // One tiny write provisions a whole quantum (growth is physical: the
     // file grows with allocated extents, not logical offsets).
@@ -218,7 +235,7 @@ async fn test_volume_growth_quantum() {
 
     // Reopen: the provisioned tail is not mistaken for data, and content
     // survives.
-    let volume = Volume::new(inner, pool, cfg);
+    let volume = Volume::new(inner, pool, cfg, test_driver());
     let (blob, size) = volume.open("p", b"b").await.unwrap();
     assert_eq!(size, quantum + 1);
     let got = blob.read_at(0, 2).await.unwrap().coalesce();
@@ -232,9 +249,14 @@ async fn test_volume_growth_quantum() {
 async fn test_volume_eager_init() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let volume = Volume::init(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    )
+    .await
+    .unwrap();
     let (blob, _) = volume.open("p", b"b").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(b"hello"))
         .await
@@ -243,7 +265,9 @@ async fn test_volume_eager_init() {
     drop(blob);
     drop(volume);
 
-    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let volume = Volume::init(inner, pool, Config::default(), test_driver())
+        .await
+        .unwrap();
     let (blob, size) = volume.open("p", b"b").await.unwrap();
     assert_eq!(size, 5);
     let got = blob.read_at(0, 5).await.unwrap().coalesce();
@@ -481,7 +505,12 @@ async fn power_loss_round(seed: u64) {
     let mut rng = TestRng::new(seed);
     let pool = test_pool();
     let mut tearing = Tearing::new(pool.clone());
-    let mut volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+    let mut volume = Volume::new(
+        tearing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     // The ledger: exactly-committed content per blob name, the current
     // (possibly uncommitted) content, and applied-but-uncommitted batch
@@ -635,7 +664,12 @@ async fn power_loss_round(seed: u64) {
                 let image = tearing.crash(&mut rng);
                 drop(blobs);
                 tearing = Tearing::from_image(pool.clone(), image).await;
-                volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+                volume = Volume::new(
+                    tearing.clone(),
+                    pool.clone(),
+                    Config::default(),
+                    test_driver(),
+                );
 
                 // Reopen and verify EXACTLY the committed state.
                 blobs = BTreeMap::new();
@@ -682,7 +716,12 @@ async fn power_loss_round(seed: u64) {
 async fn test_volume_batch_crash_mid_stage() {
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
-    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        tearing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     // Commit a partial-tail baseline on `a` (staging appends into its
     // shared tail block) and an empty baseline on `b` (staging allocates a
@@ -708,7 +747,7 @@ async fn test_volume_batch_crash_mid_stage() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let (a, size) = recovered.open("p", b"a").await.unwrap();
         assert_eq!(size, 4, "seed {seed}: staged append leaked into a");
         let got = a.read_at(0, 4).await.unwrap().coalesce();
@@ -727,7 +766,12 @@ async fn test_volume_batch_never_split() {
     for commit_member in [false, true] {
         let pool = test_pool();
         let tearing = Tearing::new(pool.clone());
-        let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+        let volume = Volume::new(
+            tearing.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        );
 
         let (a, _) = volume.open("p", b"a").await.unwrap();
         let (b, _) = volume.open("p", b"b").await.unwrap();
@@ -757,7 +801,7 @@ async fn test_volume_batch_never_split() {
             let mut rng = TestRng::new(seed);
             let image = tearing.crash(&mut rng);
             let post = Tearing::from_image(pool.clone(), image).await;
-            let recovered = Volume::new(post, pool.clone(), Config::default());
+            let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
             let (a, a_size) = recovered.open("p", b"a").await.unwrap();
             let (b, b_size) = recovered.open("p", b"b").await.unwrap();
             if commit_member {
@@ -787,7 +831,12 @@ async fn test_volume_batch_never_split() {
 async fn test_volume_batch_create_atomic() {
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
-    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        tearing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     a.write_at(0, IoBuf::copy_from_slice(b"base"))
@@ -808,7 +857,7 @@ async fn test_volume_batch_create_atomic() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let names = recovered.scan("p").await.unwrap();
         assert!(
             !names.contains(&b"n".to_vec()),
@@ -829,7 +878,7 @@ async fn test_volume_batch_create_atomic() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let names = recovered.scan("p").await.unwrap();
         assert!(names.contains(&b"n".to_vec()), "seed {seed}: creation lost");
         let (a, a_size) = recovered.open("p", b"a").await.unwrap();
@@ -863,7 +912,12 @@ async fn test_volume_batch_create_atomic() {
 async fn test_volume_batch_create_only_commit_free() {
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
-    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        tearing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
 
@@ -881,7 +935,7 @@ async fn test_volume_batch_create_only_commit_free() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let names = recovered.scan("p").await.unwrap();
         assert!(
             !names.contains(&b"x".to_vec()) && !names.contains(&b"y".to_vec()),
@@ -898,7 +952,7 @@ async fn test_volume_batch_create_only_commit_free() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let names = recovered.scan("p").await.unwrap();
         assert!(
             names.contains(&b"x".to_vec()) && names.contains(&b"y".to_vec()),
@@ -922,7 +976,12 @@ async fn test_volume_batch_create_only_commit_free() {
 async fn test_volume_batch_create_only_sync_one() {
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
-    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        tearing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let mut batch = volume.batch().await.unwrap();
     let x = batch.create("p", b"x").unwrap();
@@ -941,7 +1000,7 @@ async fn test_volume_batch_create_only_sync_one() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let (x, x_size) = recovered.open("p", b"x").await.unwrap();
         assert_eq!(x_size, 6, "seed {seed}: synced blob durable exactly");
         let got = x.read_at(0, 6).await.unwrap().coalesce();
@@ -976,7 +1035,12 @@ async fn test_volume_batch_create_with_write_requires_apply_sync() {
 async fn test_volume_batch_remove_recreate_same_name() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"x").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
         .await
@@ -1001,7 +1065,7 @@ async fn test_volume_batch_remove_recreate_same_name() {
     drop(volume);
 
     // Reopen: the recreated content, never the removed blob's.
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"x").await.unwrap();
     assert_eq!(size, 50, "the removed blob's size resurrected");
     let got = blob.read_at(0, 50).await.unwrap().coalesce();
@@ -1015,7 +1079,12 @@ async fn test_volume_batch_remove_recreate_same_name() {
 async fn test_volume_batch_remove_partition_recreate() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"x").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
         .await
@@ -1032,7 +1101,7 @@ async fn test_volume_batch_remove_partition_recreate() {
     drop(fresh);
     drop(volume);
 
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     assert_eq!(volume.scan("p").await.unwrap(), vec![b"y".to_vec()]);
     let (_, size) = volume.open("p", b"y").await.unwrap();
     assert_eq!(size, 0, "the staged creation was swept by the removal");
@@ -1046,7 +1115,12 @@ async fn test_volume_batch_remove_partition_recreate() {
 async fn test_volume_batch_sync_then_grow_then_stage() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"g").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
         .await
@@ -1073,7 +1147,7 @@ async fn test_volume_batch_sync_then_grow_then_stage() {
     drop(blob);
     drop(volume);
 
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"g").await.unwrap();
     assert_eq!(size, 300);
     let got = blob.read_at(0, 300).await.unwrap().coalesce();
@@ -1087,7 +1161,12 @@ async fn test_volume_batch_sync_then_grow_then_stage() {
 async fn test_volume_selective_commit_crash() {
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
-    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        tearing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let (b, _) = volume.open("p", b"b").await.unwrap();
@@ -1103,7 +1182,7 @@ async fn test_volume_selective_commit_crash() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let (a, a_size) = recovered.open("p", b"a").await.unwrap();
         assert_eq!(a_size, 6, "seed {seed}: synced blob durable exactly");
         let got = a.read_at(0, 6).await.unwrap().coalesce();
@@ -1118,7 +1197,12 @@ async fn test_volume_selective_commit_crash() {
 async fn test_volume_committed_survives_full_tear() {
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
-    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        tearing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"wal").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(b"committed-data"))
@@ -1137,7 +1221,7 @@ async fn test_volume_committed_survives_full_tear() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let (blob, size) = recovered.open("p", b"wal").await.unwrap();
         assert_eq!(size, 14, "seed {seed}");
         let got = blob.read_at(0, 14).await.unwrap().coalesce();
@@ -1150,7 +1234,12 @@ async fn test_volume_committed_survives_full_tear() {
 async fn test_volume_detects_bit_rot() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"data").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&vec![42u8; 3 * BLOCK as usize]))
@@ -1191,7 +1280,7 @@ async fn test_volume_detects_bit_rot() {
 
     // The flip is caught either at open (hydration verifies the frontier
     // chunk and checksum extents) or at read — loud either way.
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     match volume.open("p", b"data").await {
         Err(Error::BlobCorrupt(_, _, _)) => {}
         Err(e) => panic!("unexpected open error: {e:?}"),
@@ -1249,7 +1338,12 @@ async fn test_volume_stale_verified_read_caught_on_reopen() {
         inner: memory::Storage::new(pool.clone()),
         handle: Arc::new(Mutex::new(None)),
     };
-    let volume = Volume::new(capturing.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        capturing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"data").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&vec![42u8; 3 * BLOCK as usize]))
@@ -1271,7 +1365,12 @@ async fn test_volume_stale_verified_read_caught_on_reopen() {
 
     // Reopen: every chunk starts unverified, so this process's first read
     // runs (and records) the full verification.
-    let volume = Volume::new(capturing.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        capturing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"data").await.unwrap();
     let got = blob
         .read_at(0, 3 * BLOCK as usize)
@@ -1314,7 +1413,7 @@ async fn test_volume_stale_verified_read_caught_on_reopen() {
     drop(volume);
 
     // A new process starts unverified: the corruption is loud.
-    let volume = Volume::new(capturing, pool, Config::default());
+    let volume = Volume::new(capturing, pool, Config::default(), test_driver());
     match volume.open("p", b"data").await {
         Err(Error::BlobCorrupt(_, _, _)) => {}
         Err(e) => panic!("unexpected open error: {e:?}"),
@@ -1335,7 +1434,12 @@ async fn test_volume_stale_verified_read_caught_on_reopen() {
 async fn test_volume_written_chunks_read_exact_range() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     // A partial chunk and a multi-block value.
     let (blob, _) = volume.open("p", b"b").await.unwrap();
@@ -1417,7 +1521,12 @@ async fn test_volume_aligned_block_read_single_fetch() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
     {
-        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let volume = Volume::new(
+            recording.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        );
         let (blob, _) = volume.open("p", b"b").await.unwrap();
         blob.write_at(0, IoBuf::copy_from_slice(&vec![0xabu8; 4 * BLOCK as usize]))
             .await
@@ -1429,14 +1538,24 @@ async fn test_volume_aligned_block_read_single_fetch() {
     // recovery's manifest verification would otherwise seed the
     // just-written chunks as verified, hiding the first-touch path.
     {
-        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let volume = Volume::new(
+            recording.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        );
         let (other, _) = volume.open("p", b"other").await.unwrap();
         other
             .write_at_sync(0, IoBuf::copy_from_slice(&[1u8; 64]))
             .await
             .unwrap();
     }
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"b").await.unwrap();
 
     // First touch of an unverified chunk with an aligned BLOCK-sized read:
@@ -1495,7 +1614,12 @@ async fn test_volume_aligned_block_read_single_fetch() {
 async fn test_volume_pending_rmw_serves_from_ram() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"b").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&vec![0x11u8; 2 * BLOCK as usize]))
@@ -1544,7 +1668,7 @@ async fn test_volume_pending_rmw_serves_from_ram() {
     blob.sync().await.unwrap();
     drop(blob);
     drop(volume);
-    let volume = Volume::new(recording, pool, Config::default());
+    let volume = Volume::new(recording, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"b").await.unwrap();
     assert_eq!(size, 2 * BLOCK);
     let got = blob.read_at(0, 300).await.unwrap().coalesce();
@@ -1557,7 +1681,12 @@ async fn test_volume_pending_rmw_serves_from_ram() {
 async fn test_volume_pending_cow_skips_read_back() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"b").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&vec![0x11u8; 2 * BLOCK as usize]))
@@ -1585,7 +1714,7 @@ async fn test_volume_pending_cow_skips_read_back() {
     blob.sync().await.unwrap();
     drop(blob);
     drop(volume);
-    let volume = Volume::new(recording, pool, Config::default());
+    let volume = Volume::new(recording, pool, Config::default(), test_driver());
     let (blob, _) = volume.open("p", b"b").await.unwrap();
     let got = blob.read_at(0, 300).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expect[..]);
@@ -1600,7 +1729,12 @@ async fn test_volume_overlay_eviction_finalizes() {
 
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"b").await.unwrap();
     blob.write_at(
@@ -1621,7 +1755,7 @@ async fn test_volume_overlay_eviction_finalizes() {
 
     // A fresh process verifies every chunk against the committed CRCs:
     // eviction-finalized and capture-finalized values must both be exact.
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"b").await.unwrap();
     assert_eq!(size, CHUNKS as u64 * BLOCK);
     let got = blob
@@ -1647,7 +1781,12 @@ async fn test_volume_overlay_eviction_finalizes() {
 async fn test_volume_large_append_zero_copy() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"b").await.unwrap();
 
@@ -1681,7 +1820,7 @@ async fn test_volume_large_append_zero_copy() {
     blob.sync().await.unwrap();
     drop(blob);
     drop(volume);
-    let volume = Volume::new(recording, pool, Config::default());
+    let volume = Volume::new(recording, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"b").await.unwrap();
     let total = len + 2 * BLOCK as usize;
     assert_eq!(size, total as u64);
@@ -1698,7 +1837,12 @@ async fn test_volume_large_append_zero_copy() {
 async fn test_volume_batch_stages_over_pending_chunk() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"b").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&vec![0x11u8; BLOCK as usize]))
@@ -1732,7 +1876,7 @@ async fn test_volume_batch_stages_over_pending_chunk() {
 
     drop(blob);
     drop(volume);
-    let volume = Volume::new(recording, pool, Config::default());
+    let volume = Volume::new(recording, pool, Config::default(), test_driver());
     let (blob, _) = volume.open("p", b"b").await.unwrap();
     let got = blob.read_at(0, BLOCK as usize).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expect[..]);
@@ -1923,7 +2067,12 @@ async fn test_volume_capture_freezes_racing_extents() {
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
     let gated = Gated::new(tearing.clone());
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     // `a` (lower id) and `b` form one applied-batch group, so a commit
     // rooted at `a` captures both, in id order: parking the snapshotter at
@@ -1988,7 +2137,7 @@ async fn test_volume_capture_freezes_racing_extents() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let (a, a_size) = recovered.open("p", b"a").await.unwrap();
         assert_eq!(a_size, 3, "seed {seed}: confirmed commit rolled back");
         let got = a.read_at(0, 3).await.unwrap().coalesce();
@@ -2013,7 +2162,12 @@ async fn test_volume_capture_freezes_racing_extents() {
 async fn test_volume_read_races_in_place_overwrite() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     // A fully-written, uncommitted chunk: overwrites land in place.
     let (blob, _) = volume.open("p", b"d").await.unwrap();
@@ -2054,7 +2208,12 @@ async fn test_volume_read_races_in_place_overwrite() {
 async fn test_volume_unverified_read_races_in_place_overwrite() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     // A resize-down leaves the boundary chunk unverified (recomputed from
     // an unchecked read-back) and holds no overlay entry for it.
@@ -2095,7 +2254,12 @@ async fn test_volume_unverified_read_races_in_place_overwrite() {
 async fn test_volume_unverified_read_races_pending_overwrite() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"d").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 3 * BLOCK as usize]))
@@ -2135,7 +2299,12 @@ async fn test_volume_unverified_read_races_pending_overwrite() {
 async fn test_volume_concurrent_syncs_coalesce() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let (b, _) = volume.open("p", b"b").await.unwrap();
@@ -2190,7 +2359,7 @@ async fn test_volume_concurrent_syncs_coalesce() {
     // Every sync's promise held: reopen and read back all three.
     drop((a, b, c));
     drop(volume);
-    let volume = Volume::new(gated.clone(), pool, Config::default());
+    let volume = Volume::new(gated.clone(), pool, Config::default(), test_driver());
     let (a, size) = volume.open("p", b"a").await.unwrap();
     assert_eq!(size, 100);
     assert_eq!(
@@ -2217,7 +2386,12 @@ async fn test_volume_concurrent_syncs_coalesce() {
 async fn test_volume_coalesced_commit_failure_poisons_waiters() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let (b, _) = volume.open("p", b"b").await.unwrap();
@@ -2281,7 +2455,12 @@ async fn test_volume_coalesced_commit_failure_poisons_waiters() {
 async fn test_volume_read_at_buf_retries_on_relocation() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     // COW bump: a committed chunk (verified by construction, frozen by the
     // commit) relocates on overwrite.
@@ -2368,12 +2547,15 @@ async fn test_volume_read_at_buf_retries_on_relocation() {
 /// removal's own commit are atomic under the commit lock.
 #[tokio::test]
 async fn test_volume_remove_never_splits_group() {
-    use std::future::Future as _;
-
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
     let gated = Gated::new(tearing.clone());
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     // A committed baseline on `a` distinguishes "entry dropped by a foreign
     // commit" from "entry never captured".
@@ -2418,39 +2600,42 @@ async fn test_volume_remove_never_splits_group() {
         tokio::task::yield_now().await;
     }
 
-    // Start removing `a` while that commit is in flight, and abandon the
-    // call while it waits: its namespace edit must not become observable to
-    // the in-flight commit, which captures only {c} and would otherwise
-    // drop `a`'s entry while leaving group-sibling `b` unresolved.
-    {
-        let mut remove = std::pin::pin!(volume.remove("p", Some(b"a")));
-        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        for _ in 0..16 {
-            assert!(
-                remove.as_mut().poll(&mut cx).is_pending(),
-                "remove must wait for the in-flight commit"
-            );
-        }
+    // Start removing `a` while that commit is in flight: its namespace
+    // edit must not become observable to the in-flight commit, which
+    // captures only {c} and would otherwise drop `a`'s entry while leaving
+    // group-sibling `b` unresolved. The removal runs in a driver task that
+    // queues on the commit lock, so the edit waits for the parked commit.
+    let removal = tokio::spawn({
+        let volume = volume.clone();
+        async move { volume.remove("p", Some(b"a")).await }
+    });
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
     }
+    assert!(
+        volume.scan("p").await.unwrap().contains(&b"a".to_vec()),
+        "the namespace edit must wait for the in-flight commit"
+    );
 
     gated.write_gate.release();
     c_writer.await.unwrap();
     c_sync.await.unwrap();
+    removal.await.unwrap().unwrap();
 
-    // Crash: exactly what the `c` commit made durable.
+    // Crash: the `c` commit and the removal's own commit are durable, and
+    // the removal captured its applied-batch group {a, b} with it
+    // (never-split): `b`'s batch part landed, `a` is gone.
     let mut rng = TestRng::new(0);
     let image = tearing.crash(&mut rng);
     let post = Tearing::from_image(pool.clone(), image).await;
-    let recovered = Volume::new(post, pool.clone(), Config::default());
+    let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
 
-    // The removal never resolved (`remove` never returned): `a` keeps its
-    // committed baseline, `b` stays pre-batch, and `c`'s sync is durable.
-    let (a, a_size) = recovered.open("p", b"a").await.unwrap();
-    assert_eq!(a_size, 6, "removal leaked into a foreign commit");
-    let got = a.read_at(0, 6).await.unwrap().coalesce();
-    assert_eq!(got.as_ref(), b"a-base");
-    let (_, b_size) = recovered.open("p", b"b").await.unwrap();
-    assert_eq!(b_size, 0, "applied group must resolve all-or-nothing");
+    let names = recovered.scan("p").await.unwrap();
+    assert!(!names.contains(&b"a".to_vec()), "removal must be durable");
+    let (b, b_size) = recovered.open("p", b"b").await.unwrap();
+    assert_eq!(b_size, 7, "applied group must resolve all-or-nothing");
+    let got = b.read_at(0, 7).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), b"batch-b");
     let (c, c_size) = recovered.open("p", b"c").await.unwrap();
     assert_eq!(c_size, 7);
     let got = c.read_at(0, 7).await.unwrap().coalesce();
@@ -2476,7 +2661,7 @@ async fn test_volume_growth_quantum_crash_recovery() {
             growth_quantum: quantum,
             ..Config::default()
         };
-        let volume = Volume::new(tearing.clone(), pool.clone(), cfg.clone());
+        let volume = Volume::new(tearing.clone(), pool.clone(), cfg.clone(), test_driver());
 
         // Several commits, then unsynced writes racing the crash.
         let (blob, _) = volume.open("p", b"q").await.unwrap();
@@ -2512,7 +2697,7 @@ async fn test_volume_growth_quantum_crash_recovery() {
             growth_quantum: reopen_quantum,
             ..Config::default()
         };
-        let recovered = Volume::init(post.clone(), pool.clone(), reopen_cfg)
+        let recovered = Volume::init(post.clone(), pool.clone(), reopen_cfg, test_driver())
             .await
             .unwrap_or_else(|e| panic!("seed {seed}: recovery with provisioned tail: {e}"));
         let (blob, size) = recovered.open("p", b"q").await.unwrap();
@@ -2579,7 +2764,12 @@ fn committed_refs<S: crate::Storage>(blob: &super::Blob<S>) -> Vec<(u64, u32)> {
 async fn test_volume_delta_checksum_refs() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"log").await.unwrap();
     let mut expected: Vec<u8> = Vec::new();
@@ -2598,7 +2788,12 @@ async fn test_volume_delta_checksum_refs() {
     drop(volume);
 
     // Reopen: hydration resolves chunk CRCs across all four refs.
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, size) = volume.open("p", b"log").await.unwrap();
     assert_eq!(size, expected.len() as u64);
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
@@ -2614,7 +2809,7 @@ async fn test_volume_delta_checksum_refs() {
     drop(blob);
     drop(volume);
 
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, _) = volume.open("p", b"log").await.unwrap();
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
@@ -2627,7 +2822,12 @@ async fn test_volume_delta_checksum_refs() {
 async fn test_volume_partial_frontier_needs_no_checksum_ref() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"log").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&[1u8; 100]))
@@ -2644,7 +2844,12 @@ async fn test_volume_partial_frontier_needs_no_checksum_ref() {
     drop(volume);
 
     // Reopen: the frontier chunk is served by the tail CRC alone.
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, size) = volume.open("p", b"log").await.unwrap();
     assert_eq!(size, 200);
     let got = blob.read_at(0, 200).await.unwrap().coalesce();
@@ -2667,7 +2872,12 @@ async fn test_volume_partial_frontier_needs_no_checksum_ref() {
 async fn test_volume_checksum_ref_compaction() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let bound = super::commit::MAX_CHECKSUM_REFS;
 
     let (blob, _) = volume.open("p", b"log").await.unwrap();
@@ -2693,7 +2903,7 @@ async fn test_volume_checksum_ref_compaction() {
     drop(blob);
     drop(volume);
 
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"log").await.unwrap();
     assert_eq!(size, (bound + 4) as u64 * BLOCK);
     for i in 0..(bound + 4) as u64 {
@@ -2712,7 +2922,12 @@ async fn test_volume_checksum_ref_compaction() {
 async fn test_volume_recovery_seeds_verified_chunks() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (blob, _) = volume.open("p", b"d").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&vec![7u8; 4 * BLOCK as usize]))
@@ -2724,7 +2939,12 @@ async fn test_volume_recovery_seeds_verified_chunks() {
 
     // Reopen: the adopted commit's manifest covers chunks 0-3, all of which
     // recovery just CRC-checked on disk.
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"d").await.unwrap();
     {
         let inner = blob.core.inner.lock();
@@ -2760,7 +2980,12 @@ async fn test_volume_recovery_verification_reads_lazily() {
     let recording = Recording::new(pool.clone());
     let span = 4 * BLOCK as usize;
     {
-        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let volume = Volume::new(
+            recording.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        );
         let (blob, _) = volume.open("p", b"log").await.unwrap();
         // Two append-shaped syncs: two delta refs of 4 chunks each. The
         // newest commit's manifest covers only chunks 4-7 (the second ref).
@@ -2776,7 +3001,12 @@ async fn test_volume_recovery_verification_reads_lazily() {
 
     // Reopen: recovery verifies the adopted commit's manifest.
     let reads_before = recording.reads();
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"log").await.unwrap();
     {
         let log = recording.log.lock();
@@ -2815,7 +3045,12 @@ async fn test_volume_torn_checksum_extent_outside_manifest_rejected() {
     let inner = memory::Storage::new(pool.clone());
     let old = vec![3u8; 10 * BLOCK as usize];
     {
-        let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+        let volume = Volume::new(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        );
         let (blob, _) = volume.open("p", b"s").await.unwrap();
         blob.write_at(0, IoBuf::copy_from_slice(&old))
             .await
@@ -2872,7 +3107,7 @@ async fn test_volume_torn_checksum_extent_outside_manifest_rejected() {
     // Recovery must treat the newest commit as torn and roll back to the
     // 10-chunk state: every byte reads back loudly-verified, never
     // BlobCorrupt.
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"s").await.unwrap();
     assert_eq!(size, old.len() as u64, "rolled back to the previous commit");
     let got = blob.read_at(0, old.len()).await.unwrap().coalesce();
@@ -2933,7 +3168,12 @@ async fn test_volume_read_mixed_coalesces_and_verifies() {
     let span = 8 * BLOCK as usize;
     let data: Vec<u8> = (0..span).map(|i| (i / 7) as u8).collect();
     {
-        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let volume = Volume::new(
+            recording.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        );
         let (blob, _) = volume.open("p", b"m").await.unwrap();
         blob.write_at(0, IoBuf::copy_from_slice(&data))
             .await
@@ -2947,7 +3187,12 @@ async fn test_volume_read_mixed_coalesces_and_verifies() {
         blob.sync().await.unwrap();
     }
 
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"m").await.unwrap();
     {
         let inner = blob.core.inner.lock();
@@ -3005,7 +3250,12 @@ async fn test_volume_read_widens_unverified_to_block() {
     let span = 4 * BLOCK as usize;
     let data = vec![9u8; span];
     {
-        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let volume = Volume::new(
+            recording.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        );
         let (blob, _) = volume.open("p", b"w").await.unwrap();
         blob.write_at(0, IoBuf::copy_from_slice(&data))
             .await
@@ -3017,7 +3267,12 @@ async fn test_volume_read_widens_unverified_to_block() {
         blob.sync().await.unwrap();
     }
 
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"w").await.unwrap();
 
     // First read: 100 bytes at an unaligned offset inside unverified chunk
@@ -3136,7 +3391,12 @@ async fn test_volume_hydrate_reads_only_frontier() {
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
     {
-        let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+        let volume = Volume::new(
+            recording.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        );
         let (blob, _) = volume.open("p", b"lazy").await.unwrap();
         blob.write_at(0, IoBuf::copy_from_slice(&vec![5u8; 8 * BLOCK as usize]))
             .await
@@ -3150,7 +3410,12 @@ async fn test_volume_hydrate_reads_only_frontier() {
         blob.sync().await.unwrap();
     }
 
-    let volume = Volume::new(recording.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        recording.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     // Run recovery before opening, so the pinned reads are hydration's.
     volume.scan("p").await.unwrap();
     let reads_before = recording.reads();
@@ -3204,9 +3469,14 @@ async fn test_volume_unloaded_crcs_cow_and_full_rewrite() {
     let inner = memory::Storage::new(pool.clone());
     let mut expected = vec![5u8; 8 * BLOCK as usize];
     {
-        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-            .await
-            .unwrap();
+        let volume = Volume::init(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        )
+        .await
+        .unwrap();
         let (blob, _) = volume.open("p", b"rmw").await.unwrap();
         blob.write_at(0, IoBuf::copy_from_slice(&expected))
             .await
@@ -3222,9 +3492,14 @@ async fn test_volume_unloaded_crcs_cow_and_full_rewrite() {
     // Reopen (chunks 0-7 unloaded) and overwrite inside frozen chunk 2: a
     // COW whose expected CRC is loaded from the checksum extents.
     {
-        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-            .await
-            .unwrap();
+        let volume = Volume::init(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        )
+        .await
+        .unwrap();
         let (blob, _) = volume.open("p", b"rmw").await.unwrap();
         blob.write_at(2 * BLOCK + 7, IoBuf::copy_from_slice(&[3u8; 100]))
             .await
@@ -3238,7 +3513,9 @@ async fn test_volume_unloaded_crcs_cow_and_full_rewrite() {
     }
 
     // Every chunk reads back correctly against the rewritten array.
-    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let volume = Volume::init(inner, pool, Config::default(), test_driver())
+        .await
+        .unwrap();
     let (blob, size) = volume.open("p", b"rmw").await.unwrap();
     assert_eq!(size, expected.len() as u64);
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
@@ -3255,9 +3532,14 @@ async fn test_volume_delta_append_over_unloaded_crcs() {
     let inner = memory::Storage::new(pool.clone());
     let mut expected = vec![7u8; 4 * BLOCK as usize];
     {
-        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-            .await
-            .unwrap();
+        let volume = Volume::init(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        )
+        .await
+        .unwrap();
         let (blob, _) = volume.open("p", b"delta").await.unwrap();
         blob.write_at(0, IoBuf::copy_from_slice(&expected))
             .await
@@ -3265,9 +3547,14 @@ async fn test_volume_delta_append_over_unloaded_crcs() {
         blob.sync().await.unwrap();
     }
     {
-        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-            .await
-            .unwrap();
+        let volume = Volume::init(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        )
+        .await
+        .unwrap();
         let (blob, _) = volume.open("p", b"delta").await.unwrap();
         // Append-shaped dirt: coverage extends with a new delta ref while
         // the old chunks' CRCs stay unloaded on the retained ref.
@@ -3292,7 +3579,9 @@ async fn test_volume_delta_append_over_unloaded_crcs() {
             "delta commit retains the old ref"
         );
     }
-    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let volume = Volume::init(inner, pool, Config::default(), test_driver())
+        .await
+        .unwrap();
     let (blob, _) = volume.open("p", b"delta").await.unwrap();
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
@@ -3306,18 +3595,28 @@ async fn test_volume_shrink_unloaded_then_regrow() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
     {
-        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-            .await
-            .unwrap();
+        let volume = Volume::init(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        )
+        .await
+        .unwrap();
         let (blob, _) = volume.open("p", b"shrink").await.unwrap();
         blob.write_at(0, IoBuf::copy_from_slice(&vec![4u8; 6 * BLOCK as usize]))
             .await
             .unwrap();
         blob.sync().await.unwrap();
     }
-    let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let volume = Volume::init(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    )
+    .await
+    .unwrap();
     let (blob, _) = volume.open("p", b"shrink").await.unwrap();
     blob.resize(2 * BLOCK + 10).await.unwrap();
     blob.core.inner.lock().crcs.audit();
@@ -3332,7 +3631,9 @@ async fn test_volume_shrink_unloaded_then_regrow() {
     expected.extend_from_slice(&[6u8; 100]);
     drop(blob);
     drop(volume);
-    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let volume = Volume::init(inner, pool, Config::default(), test_driver())
+        .await
+        .unwrap();
     let (blob, size) = volume.open("p", b"shrink").await.unwrap();
     assert_eq!(size, expected.len() as u64);
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
@@ -3350,9 +3651,14 @@ async fn test_volume_shrink_unloaded_frontier_then_sync() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
     {
-        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-            .await
-            .unwrap();
+        let volume = Volume::init(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        )
+        .await
+        .unwrap();
         let (blob, _) = volume.open("p", b"f").await.unwrap();
         blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
             .await
@@ -3362,9 +3668,14 @@ async fn test_volume_shrink_unloaded_frontier_then_sync() {
             .unwrap();
         blob.sync().await.unwrap();
     }
-    let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let volume = Volume::init(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    )
+    .await
+    .unwrap();
     let (blob, _) = volume.open("p", b"f").await.unwrap();
     // The surviving run is untouched since hydration (its chunk unloaded);
     // the new size lands in the hole above it.
@@ -3374,7 +3685,9 @@ async fn test_volume_shrink_unloaded_frontier_then_sync() {
 
     drop(blob);
     drop(volume);
-    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let volume = Volume::init(inner, pool, Config::default(), test_driver())
+        .await
+        .unwrap();
     let (blob, size) = volume.open("p", b"f").await.unwrap();
     assert_eq!(size, 5000);
     let got = blob.read_at(0, 5000).await.unwrap().coalesce();
@@ -3390,9 +3703,14 @@ async fn test_volume_shrink_unloaded_frontier_then_sync() {
 async fn test_volume_capture_merges_frozen_runs() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let volume = Volume::init(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    )
+    .await
+    .unwrap();
     let (blob, _) = volume.open("p", b"m").await.unwrap();
 
     // Two-block appends: fresh extents skip the single-block holes freed by
@@ -3422,7 +3740,9 @@ async fn test_volume_capture_merges_frozen_runs() {
     drop(blob);
     drop(volume);
 
-    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let volume = Volume::init(inner, pool, Config::default(), test_driver())
+        .await
+        .unwrap();
     let (blob, size) = volume.open("p", b"m").await.unwrap();
     assert_eq!(size, 8 * BLOCK);
     assert_eq!(blob.core.inner.lock().runs.len(), 1);
@@ -3531,9 +3851,14 @@ async fn test_volume_young_runs_merge_only_at_capture() {
 async fn test_volume_staged_batch_gates_merge_until_reopen() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let volume = Volume::init(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    )
+    .await
+    .unwrap();
     let (blob, _) = volume.open("p", b"g").await.unwrap();
 
     // Two-block appends: physically adjacent (see the capture-merge test).
@@ -3569,7 +3894,9 @@ async fn test_volume_staged_batch_gates_merge_until_reopen() {
     drop(volume);
 
     // Hydration coalesces the unmerged committed entry.
-    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let volume = Volume::init(inner, pool, Config::default(), test_driver())
+        .await
+        .unwrap();
     let (blob, size) = volume.open("p", b"g").await.unwrap();
     assert_eq!(size, 4 * BLOCK);
     assert_eq!(blob.core.inner.lock().runs.len(), 1, "hydration merges");
@@ -3583,7 +3910,12 @@ async fn test_volume_staged_batch_gates_merge_until_reopen() {
 async fn test_volume_apply_start_sync_durable_after_handle() {
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
-    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        tearing.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let (b, _) = volume.open("p", b"b").await.unwrap();
@@ -3610,7 +3942,7 @@ async fn test_volume_apply_start_sync_durable_after_handle() {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let (a, size) = recovered.open("p", b"a").await.unwrap();
         assert_eq!(size, 100, "seed {seed}");
         assert_eq!(
@@ -3635,7 +3967,13 @@ async fn test_volume_apply_start_sync_durable_after_handle() {
 async fn test_volume_apply_start_sync_crash_before_commit_erases() {
     let pool = test_pool();
     let tearing = Tearing::new(pool.clone());
-    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+    let gated = Gated::new(tearing.clone());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     // Committed baseline.
     let (a, _) = volume.open("p", b"a").await.unwrap();
@@ -3649,16 +3987,19 @@ async fn test_volume_apply_start_sync_crash_before_commit_erases() {
         .write_at(&a, 4, IoBuf::copy_from_slice(&[7u8; 5000]))
         .await
         .unwrap();
+    // Park the started commit before it issues any metadata write (the
+    // driver task begins immediately), then drop the handle: the batch is
+    // published, nothing of its commit is durable.
+    gated.write_gate.arm();
     let handle = batch.apply_start_sync().await.unwrap();
-
-    // Published but never driven: drop the handle without awaiting it.
+    gated.write_gate.wait_reached().await;
     drop(handle);
 
     for seed in 0..8u64 {
         let mut rng = TestRng::new(seed);
         let image = tearing.crash(&mut rng);
         let post = Tearing::from_image(pool.clone(), image).await;
-        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let recovered = Volume::new(post, pool.clone(), Config::default(), test_driver());
         let (a, size) = recovered.open("p", b"a").await.unwrap();
         assert_eq!(size, 4, "seed {seed}: started-sync batch leaked");
         assert_eq!(
@@ -3667,6 +4008,7 @@ async fn test_volume_apply_start_sync_crash_before_commit_erases() {
             "seed {seed}"
         );
     }
+    gated.write_gate.release();
 }
 
 /// The coalescing ticket IS the completion handle: a later unrelated sync
@@ -3676,7 +4018,12 @@ async fn test_volume_apply_start_sync_crash_before_commit_erases() {
 async fn test_volume_apply_start_sync_resolved_by_later_sync() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let (b, _) = volume.open("p", b"b").await.unwrap();
@@ -3707,7 +4054,12 @@ async fn test_volume_apply_start_sync_resolved_by_later_sync() {
 async fn test_volume_apply_start_sync_failure_poisons() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let mut batch = volume.batch().await.unwrap();
@@ -3715,9 +4067,10 @@ async fn test_volume_apply_start_sync_failure_poisons() {
         .write_at(&a, 0, IoBuf::copy_from_slice(&[0x1u8; 100]))
         .await
         .unwrap();
-    let handle = batch.apply_start_sync().await.unwrap();
-
+    // Armed before the start: the driver task begins the commit
+    // immediately, so the failure must be in place first.
     gated.sync_gate.arm_fail();
+    let handle = batch.apply_start_sync().await.unwrap();
     assert!(handle.await.is_err(), "commit failure surfaces in handle");
     assert!(a.sync().await.is_err(), "volume must be poisoned");
 }
@@ -3729,7 +4082,12 @@ async fn test_volume_apply_start_sync_failure_poisons() {
 async fn test_volume_blob_start_sync_coalesces() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let (b, _) = volume.open("p", b"b").await.unwrap();
@@ -3753,7 +4111,7 @@ async fn test_volume_blob_start_sync_coalesces() {
 
     drop((a, b));
     drop(volume);
-    let volume = Volume::new(gated.clone(), pool, Config::default());
+    let volume = Volume::new(gated.clone(), pool, Config::default(), test_driver());
     let (a, size) = volume.open("p", b"a").await.unwrap();
     assert_eq!(size, 100);
     assert_eq!(
@@ -3777,7 +4135,12 @@ async fn test_volume_blob_start_sync_coalesces() {
 async fn test_volume_shrink_into_hole() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"b").await.unwrap();
 
     // Backed [0, 3B+100) and [7B, 9B+100): chunks 4-6 are holes.
@@ -3804,7 +4167,7 @@ async fn test_volume_shrink_into_hole() {
     // recovery shadow splice.
     drop(blob);
     drop(volume);
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"b").await.unwrap();
     assert_eq!(size, 5 * BLOCK + 50);
     let got = blob
@@ -3825,7 +4188,12 @@ async fn test_volume_shrink_into_hole() {
 async fn test_volume_shrink_into_leading_hole() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"b").await.unwrap();
 
     // Backed only at [4B, 5B+100): chunks 0-3 are holes.
@@ -3851,7 +4219,7 @@ async fn test_volume_shrink_into_leading_hole() {
 
     drop(blob);
     drop(volume);
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"b").await.unwrap();
     assert_eq!(size, 2 * BLOCK + 50);
     let got = blob.read_at(BLOCK, 10).await.unwrap().coalesce();
@@ -3867,7 +4235,12 @@ async fn test_volume_shrink_into_leading_hole() {
 async fn test_volume_batch_shrink_into_hole() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"b").await.unwrap();
 
     blob.write_at(
@@ -3890,7 +4263,7 @@ async fn test_volume_batch_shrink_into_hole() {
 
     drop(blob);
     drop(volume);
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"b").await.unwrap();
     assert_eq!(size, 5 * BLOCK + 50);
     let got = blob
@@ -3913,7 +4286,12 @@ async fn test_volume_batch_shrink_into_hole() {
 async fn test_volume_batch_shrink_trims_capacity() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"b").await.unwrap();
 
     // Two committed blocks: the boundary run's extent spans both.
@@ -3947,7 +4325,12 @@ async fn test_volume_batch_shrink_trims_capacity() {
 async fn test_volume_batch_shrink_then_regrow_covers_hole() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
     let (blob, _) = volume.open("p", b"h").await.unwrap();
     blob.write_at(0, IoBuf::copy_from_slice(&[0x11u8; 100]))
         .await
@@ -3973,7 +4356,7 @@ async fn test_volume_batch_shrink_then_regrow_covers_hole() {
 
     drop(blob);
     drop(volume);
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, size) = volume.open("p", b"h").await.unwrap();
     assert_eq!(size, 3 * BLOCK + 100);
     let got = blob
@@ -3996,9 +4379,14 @@ async fn test_volume_resize_trim_detects_rot() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
     {
-        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-            .await
-            .unwrap();
+        let volume = Volume::init(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        )
+        .await
+        .unwrap();
         let (blob, _) = volume.open("p", b"rot").await.unwrap();
         blob.write_at(
             0,
@@ -4008,7 +4396,9 @@ async fn test_volume_resize_trim_detects_rot() {
         .unwrap();
         blob.sync().await.unwrap();
     }
-    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let volume = Volume::init(inner, pool, Config::default(), test_driver())
+        .await
+        .unwrap();
     let (blob, _) = volume.open("p", b"rot").await.unwrap();
     // Rot a committed byte of the first chunk through the volume's own
     // file handle (memory blobs are per-handle copies: the volume's handle
@@ -4034,9 +4424,14 @@ async fn test_volume_batch_resize_trim_detects_rot() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
     {
-        let volume = Volume::init(inner.clone(), pool.clone(), Config::default())
-            .await
-            .unwrap();
+        let volume = Volume::init(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        )
+        .await
+        .unwrap();
         let (blob, _) = volume.open("p", b"rot").await.unwrap();
         blob.write_at(
             0,
@@ -4046,7 +4441,9 @@ async fn test_volume_batch_resize_trim_detects_rot() {
         .unwrap();
         blob.sync().await.unwrap();
     }
-    let volume = Volume::init(inner, pool, Config::default()).await.unwrap();
+    let volume = Volume::init(inner, pool, Config::default(), test_driver())
+        .await
+        .unwrap();
     let (blob, _) = volume.open("p", b"rot").await.unwrap();
     let phys = blob.core.inner.lock().runs.get(&0).unwrap().physical;
     blob.ready
@@ -4070,7 +4467,7 @@ async fn test_volume_batch_resize_trim_detects_rot() {
 async fn test_volume_inplace_gap_write_detects_rot() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
-    let volume = Volume::new(inner, pool, Config::default());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, _) = volume.open("p", b"r").await.unwrap();
     // A young run's chunk with a written span, then a later tail so
     // neither the tail buffer nor an overlay entry covers the first chunk.
@@ -4108,7 +4505,7 @@ async fn test_volume_torn_shadow_rolls_back_one_commit() {
     let pool = test_pool();
     let inner = memory::Storage::new(pool.clone());
     let cfg = Config::default();
-    let volume = Volume::new(inner.clone(), pool.clone(), cfg.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), cfg.clone(), test_driver());
     let (blob, _) = volume.open("p", b"b").await.unwrap();
 
     // Commit 1: two full chunks plus a 100-byte partial frontier.
@@ -4161,7 +4558,7 @@ async fn test_volume_torn_shadow_rolls_back_one_commit() {
     drop(file);
 
     // Reopen: recovery must fall back to commit 1 with its content intact.
-    let volume = Volume::new(inner, pool, cfg);
+    let volume = Volume::new(inner, pool, cfg, test_driver());
     let (blob, size) = volume
         .open("p", b"b")
         .await
@@ -4175,18 +4572,29 @@ async fn test_volume_torn_shadow_rolls_back_one_commit() {
     assert_eq!(got.as_ref(), &vec![0x11u8; 2 * BLOCK as usize + 100][..]);
 }
 
-/// A leader dropped mid-commit (a cancelled sync future, or an abandoned
-/// partially-driven start_sync handle) must POISON the volume and resolve
-/// the drained ticket with the poisoning error: the snapshot has already
-/// consumed dirty state and possibly issued metadata writes, so the
-/// half-driven commit can neither complete nor unwind, and no later commit
-/// may vouch over it. Pooled waiters observe the error, later syncs fail
-/// loudly, and nothing silently reports durability.
+/// A DRIVER task aborted mid-commit (the runtime tearing down while a
+/// commit is in flight) must POISON the volume and resolve the drained
+/// ticket with the poisoning error: the snapshot has already consumed
+/// dirty state and possibly issued metadata writes, so the half-driven
+/// commit can neither complete nor unwind, and no later commit may vouch
+/// over it. Every observer sees the error, later syncs fail loudly, and
+/// nothing silently reports durability. (Caller-side futures — sync,
+/// handles — are pure observers now: dropping them is benign, pinned by
+/// the conformance cancellation injector.)
 #[tokio::test]
-async fn test_volume_cancelled_commit_poisons() {
+async fn test_volume_aborted_commit_task_poisons() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    // A driver that keeps its task handles so the test can abort a commit
+    // task parked mid-flight.
+    let tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+    let driver = {
+        let tasks = tasks.clone();
+        super::Driver::new(move |fut| {
+            tasks.lock().push(tokio::spawn(fut));
+        })
+    };
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default(), driver);
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let (b, _) = volume.open("p", b"b").await.unwrap();
@@ -4198,32 +4606,40 @@ async fn test_volume_cancelled_commit_poisons() {
         .await
         .unwrap();
 
-    // Both register under one ticket; drive `ha` into leadership, park it
-    // at the gated inner fsync, then cancel it (dropping the drive future
-    // mid-commit).
+    // Both register under one ticket; the first driver task leads and
+    // parks at the gated inner fsync. Abort every spawned task (the ones
+    // from the creations above already completed, so aborting them is a
+    // no-op; the queued follower never assumed leadership, so its abort
+    // is benign).
+    gated.sync_gate.arm();
     let ha = a.start_sync().await;
     let hb = b.start_sync().await;
-    gated.sync_gate.arm();
-    let driver = tokio::spawn(ha);
     gated.sync_gate.wait_reached().await;
-    driver.abort();
-    let _ = driver.await;
+    let parked: Vec<_> = tasks.lock().drain(..).collect();
+    for task in parked {
+        task.abort();
+        let _ = task.await;
+    }
     gated.sync_gate.release();
 
-    // The cancelled commit never completed its fsync; the volume must be
+    // The aborted commit never completed its fsync; the volume must be
     // poisoned rather than silently losing the drained roots.
     assert_eq!(
         gated.syncs(),
         after_open,
-        "cancelled commit must not complete an fsync"
+        "aborted commit must not complete an fsync"
     );
-    assert!(
-        hb.await.is_err(),
-        "pooled waiter must observe the cancellation"
-    );
+    assert!(ha.await.is_err(), "observer must see the abort");
     assert!(
         a.sync().await.is_err(),
-        "sync after a cancelled commit must fail, not silently report durability"
+        "sync after an aborted commit must fail, not silently report durability"
+    );
+    // Depending on how the registrations raced the leader's drain, `hb`
+    // shares the aborted ticket or the next one — which the failed sync
+    // above just drained and resolved: either way the poison reaches it.
+    assert!(
+        hb.await.is_err(),
+        "pooled waiter must observe the poisoning"
     );
     assert!(volume.batch().await.is_err(), "volume must be poisoned");
 }
@@ -4236,7 +4652,12 @@ async fn test_volume_cancelled_commit_poisons() {
 async fn test_volume_undriven_start_sync_drop_is_benign() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let (b, _) = volume.open("p", b"b").await.unwrap();
@@ -4275,7 +4696,7 @@ async fn test_volume_undriven_start_sync_drop_is_benign() {
     a.sync().await.unwrap();
     drop((a, b));
     drop(volume);
-    let volume = Volume::new(gated, pool, Config::default());
+    let volume = Volume::new(gated, pool, Config::default(), test_driver());
     let (a, size) = volume.open("p", b"a").await.unwrap();
     assert_eq!(size, 100);
     assert_eq!(
@@ -4298,6 +4719,7 @@ async fn test_volume_metrics() {
         gated.clone(),
         pool.clone(),
         Config::default(),
+        test_driver(),
         &mut registry,
     );
 
@@ -4351,7 +4773,12 @@ async fn test_volume_metrics() {
 async fn test_volume_demote_on_last_handle_drop() {
     let pool = test_pool();
     let gated = Gated::new(memory::Storage::new(pool.clone()));
-    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
 
     let (a, _) = volume.open("p", b"a").await.unwrap();
     let id = a.core.id;

@@ -13,7 +13,10 @@ use crate::{
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
-    storage::{metered::Storage as MeteredStorage, volume::Storage as VolumeStorage},
+    storage::{
+        metered::Storage as MeteredStorage,
+        volume::{Driver as VolumeDriver, Storage as VolumeStorage},
+    },
     telemetry::metrics::{
         add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
         Register, Registered, Registry,
@@ -447,6 +450,11 @@ impl crate::Runner for Runner {
                 inner,
                 storage_buffer_pool.clone(),
                 self.cfg.storage_volume_cfg.clone(),
+                // Commit futures run as ordinary tokio tasks (volume
+                // operations only ever execute inside the runtime).
+                VolumeDriver::new(|fut| {
+                    tokio::spawn(fut);
+                }),
                 &mut runtime_registry,
             ),
             &mut runtime_registry,

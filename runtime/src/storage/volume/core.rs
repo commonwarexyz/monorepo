@@ -1351,16 +1351,18 @@ fn assert_meta_parity(id: u64, entry: &Entry, meta: &CommittedMeta) {
 /// commit whose snapshot began after every covered registration completes,
 /// and a failed commit resolves it with the poisoning error (every pooled
 /// sync was promised durability).
-#[derive(Default)]
 pub(super) struct PendingCommit {
     pub roots: BTreeSet<u64>,
-    pub ticket: Arc<OnceLock<Result<(), Error>>>,
+    pub ticket: super::commit::Ticket,
 }
 
 /// The volume once recovery has run.
 pub(super) struct Ready<S: crate::Storage> {
     /// The single inner blob backing the volume.
     pub file: S::Blob,
+    /// Schedules commit futures onto the owning runtime (see
+    /// [`super::Driver`]).
+    pub driver: super::Driver,
     /// Operational metrics (see the `metrics` module).
     pub metrics: std::sync::Arc<super::metrics::Metrics>,
     pub state: Mutex<State>,

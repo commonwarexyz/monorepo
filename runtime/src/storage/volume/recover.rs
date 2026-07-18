@@ -397,6 +397,7 @@ pub(super) async fn recover<S: crate::Storage>(
     inner: &S,
     pool: &BufferPool,
     cfg: &Config,
+    driver: super::Driver,
     metrics: std::sync::Arc<super::metrics::Metrics>,
 ) -> Result<Ready<S>, Error> {
     let (file, mut len) = inner.open(&cfg.partition, &cfg.name).await?;
@@ -416,7 +417,7 @@ pub(super) async fn recover<S: crate::Storage>(
                 cfg.partition
             )));
         }
-        return init_fresh(inner, pool, cfg, metrics).await;
+        return init_fresh(inner, pool, cfg, driver, metrics).await;
     }
 
     // Candidate order: higher seq first.
@@ -602,6 +603,7 @@ pub(super) async fn recover<S: crate::Storage>(
 
     Ok(Ready {
         file,
+        driver,
         metrics,
         state: Mutex::new(state),
         commit_lock: AsyncMutex::new(()),
@@ -622,6 +624,7 @@ async fn init_fresh<S: crate::Storage>(
     inner: &S,
     pool: &BufferPool,
     cfg: &Config,
+    driver: super::Driver,
     metrics: std::sync::Arc<super::metrics::Metrics>,
 ) -> Result<Ready<S>, Error> {
     let (file, _) = inner.open(&cfg.partition, &cfg.name).await?;
@@ -676,6 +679,7 @@ async fn init_fresh<S: crate::Storage>(
     metrics.observe_state(&mut state);
     Ok(Ready {
         file,
+        driver,
         metrics,
         state: Mutex::new(state),
         commit_lock: AsyncMutex::new(()),

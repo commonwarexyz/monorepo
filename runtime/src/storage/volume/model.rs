@@ -141,10 +141,12 @@
 //!    CHECKED there, not assumed here. `step`, [`initial_state`], and the
 //!    state internals are exposed to that module for lockstep execution.
 //! 3. CANCELLATION INJECTION (also `conformance`) covers the class BELOW
-//!    the model: commit/apply futures dropped at every await boundary.
-//!    A dropped future keeps the process alive with half-updated RAM —
-//!    no crash action models that, so the model is structurally blind to
-//!    it. The injector pins the poison-on-cancellation contract instead.
+//!    the model: caller futures dropped at every await boundary. Commits
+//!    execute in runtime-driven tasks and callers only observe, so the
+//!    injector pins that every drop point is BENIGN (the commit lands
+//!    regardless); the one remaining cancellation hazard — a driver task
+//!    aborted mid-commit at runtime teardown — poisons, pinned by a
+//!    directed unit test.
 //!
 //! What remains uncovered by all three layers: platform I/O semantics (the
 //! block-granular tearing model and fsyncgate cache model are assumptions

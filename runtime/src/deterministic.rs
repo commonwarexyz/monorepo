@@ -51,9 +51,11 @@ use crate::{
     },
     prefixed_name,
     storage::{
-        audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
-        memory::Storage as MemStorage, metered::Storage as MeteredStorage,
-        volume::Storage as VolumeStorage,
+        audited::Storage as AuditedStorage,
+        faulty::Storage as FaultyStorage,
+        memory::Storage as MemStorage,
+        metered::Storage as MeteredStorage,
+        volume::{Driver as VolumeDriver, Storage as VolumeStorage},
     },
     telemetry::metrics::{
         add_attribute, raw, task::Label, validate_label, Counter, CounterFamily, GaugeFamily,
@@ -65,7 +67,7 @@ use crate::{
         Panicker,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf, Name,
-    Panicked, METRICS_PREFIX,
+    Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -81,8 +83,9 @@ use commonware_utils::{
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
+    channel::mpsc,
     task::{waker, ArcWake},
-    Future,
+    Future, StreamExt as _,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -571,10 +574,19 @@ impl Runner {
         Fut: Future,
     {
         // Setup context and return strong reference to executor
-        let (context, executor, panicked) = match self.state {
+        let (context, executor, panicked, mut volume_commits) = match self.state {
             State::Config(config) => Context::new(config),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
+
+        // Volume commits execute as ordinary tasks: the volume's driver
+        // forwards them here so they run under the runtime's scheduler,
+        // panic policy, and supervision (and therefore deterministically).
+        crate::Supervisor::child(&context, "volume_commit").spawn(move |context| async move {
+            while let Some(fut) = volume_commits.next().await {
+                crate::Supervisor::child(&context, "volume_commit").spawn(move |_| fut);
+            }
+        });
 
         // Pin root task to the heap
         let storage = context.storage.clone();
@@ -930,8 +942,12 @@ pub struct Context {
     execution: Execution,
 }
 
+/// Commit futures the volume's driver forwards to the executor, spawned as
+/// ordinary tasks once the runtime starts (see [crate::storage::volume::Driver]).
+type VolumeCommits = mpsc::UnboundedReceiver<Pin<Box<dyn Future<Output = ()> + Send>>>;
+
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
+    fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked, VolumeCommits) {
         // Create a new registry
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -964,10 +980,17 @@ impl Context {
             rng.clone(),
             storage_fault_config,
         );
+        let (driver_tx, volume_commits) = mpsc::unbounded();
+        let driver = VolumeDriver::new(move |fut| {
+            // A send failure means the runtime (and its forwarder) is
+            // gone; the future's observers are being torn down with it.
+            let _ = driver_tx.unbounded_send(fut);
+        });
         let volume = VolumeStorage::new_registered(
             faulty,
             storage_buffer_pool.clone(),
             cfg.storage_volume_cfg,
+            driver,
             &mut runtime_registry,
         );
         let storage = MeteredStorage::new(
@@ -1011,6 +1034,7 @@ impl Context {
             },
             executor,
             panicked,
+            volume_commits,
         )
     }
 
@@ -1025,7 +1049,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
+    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked, VolumeCommits) {
         // Rebuild metrics
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -1056,6 +1080,12 @@ impl Context {
         // allocator, unsynced write-through bytes held by its inner blob
         // handle) dies here, and its recovery protocol re-runs from the
         // durable image on first use.
+        let (driver_tx, volume_commits) = mpsc::unbounded();
+        let driver = VolumeDriver::new(move |fut| {
+            // A send failure means the runtime (and its forwarder) is
+            // gone; the future's observers are being torn down with it.
+            let _ = driver_tx.unbounded_send(fut);
+        });
         let storage = {
             let volume = checkpoint.storage.inner().inner();
             let volume_cfg = volume.config().clone();
@@ -1066,6 +1096,7 @@ impl Context {
                 faulty,
                 storage_buffer_pool.clone(),
                 volume_cfg,
+                driver,
                 &mut runtime_registry,
             );
             MeteredStorage::new(
@@ -1105,6 +1136,7 @@ impl Context {
             },
             executor,
             panicked,
+            volume_commits,
         )
     }
 
@@ -1656,8 +1688,8 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Spawner as _,
-        Storage, Supervisor as _,
+        deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Storage,
+        Supervisor as _,
     };
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
@@ -1665,8 +1697,6 @@ mod tests {
     use commonware_utils::channel::oneshot;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
-    #[cfg(not(feature = "external"))]
-    use futures::stream::StreamExt as _;
     #[cfg(feature = "external")]
     use futures::StreamExt;
     use futures::{stream::FuturesUnordered, task::noop_waker};
@@ -2326,7 +2356,7 @@ mod tests {
     fn test_storage_fault_determinism_multi_task() {
         // Run the same multi-task sequence twice with the same seed.
         // This tests that task shuffling + fault decisions interleave deterministically.
-        fn run_with_seed(seed: u64) -> Vec<u32> {
+        fn run_with_seed(seed: u64) -> (Vec<u32>, String) {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig {
@@ -2360,12 +2390,15 @@ mod tests {
                     }));
                 }
 
-                // Collect results from all tasks
+                // Collect results from all tasks, plus the auditor state:
+                // success counts can saturate (a faulted first commit
+                // poisons the volume), while the auditor hash captures the
+                // full operation/fault trace for any seed.
                 let mut results = Vec::new();
                 for handle in handles {
                     results.push(handle.await.unwrap());
                 }
-                results
+                (results, ctx.auditor().state())
             })
         }
 
@@ -2378,8 +2411,8 @@ mod tests {
 
         let results3 = run_with_seed(99999);
         assert_ne!(
-            results1, results3,
-            "different seeds should produce different patterns"
+            results1.1, results3.1,
+            "different seeds should produce different fault traces"
         );
     }
 }

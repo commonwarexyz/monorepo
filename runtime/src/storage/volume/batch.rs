@@ -64,6 +64,7 @@ use crate::{Blob as _, Error, Handle, IoBufs, DEFAULT_BLOB_VERSION};
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
 use commonware_utils::sync::{AsyncMutex, Mutex};
+use futures::channel::oneshot;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -603,17 +604,14 @@ impl<S: crate::Storage> Batch<S> {
 
     /// [`Self::apply`] plus a STARTED commit of the batch's group: the
     /// staged state publishes before this returns (the batch's root is
-    /// readable), and the returned [`Handle`] resolves once a commit
-    /// covering the group lands — a later sync's coalesced union, or the
-    /// commit the handle itself lead-drives when awaited (see
-    /// `commit::drive`). The handle must be observed: a commit failure is
-    /// reported only through it (and permanently poisons the volume), and
-    /// awaiting it is what guarantees a commit runs without depending on
-    /// unrelated traffic. A polled handle must then be driven to
-    /// completion or dropped — parked it can hold the commit lock, and
-    /// dropped mid-commit it poisons the volume (see
-    /// `commit::CancelGuard`). A crash before a covering commit discards
-    /// the published batch wholesale, exactly like a batch published with
+    /// readable), and the group's commit is scheduled on the runtime's
+    /// driver immediately — it lands on its own (or coalesced into an
+    /// earlier pooled commit), never depending on the returned [`Handle`].
+    /// The handle only OBSERVES that commit's result: a failure is
+    /// reported through it (and permanently poisons the volume, so even
+    /// an unobserved handle cannot hide one), and dropping or parking it
+    /// is always benign. A crash before the commit lands discards the
+    /// published batch wholesale, exactly like a batch published with
     /// [`Self::apply`].
     ///
     /// # Panics
@@ -644,185 +642,243 @@ impl<S: crate::Storage> Batch<S> {
 
     async fn apply_inner(&mut self, mode: ApplyMode) -> Result<Option<Handle<()>>, Error> {
         self.ready.check_poisoned()?;
-        // Namespace changes serialize on the same lock (and in the same
-        // order relative to the commit lock) as open/remove.
-        let _ns = if self.removals.is_empty() && self.creations.is_empty() {
-            None
-        } else {
-            Some(self.shared.ns_lock.lock().await)
-        };
-        let _commit = self.ready.commit_lock.lock().await;
-        self.ready.check_poisoned()?;
-
-        // Validate every staged removal and creation against a simulation of
-        // the namespace BEFORE publishing anything: an invalid batch applies
-        // nothing (Drop returns its extents). Removals simulate first, so a
-        // batch may remove a name and recreate it.
-        if !self.removals.is_empty() || !self.creations.is_empty() {
-            let state = self.ready.state.lock();
-            let mut sim: BTreeMap<&String, BTreeSet<&Vec<u8>>> = state
-                .partitions
-                .iter()
-                .map(|(partition, blobs)| (partition, blobs.keys().collect()))
-                .collect();
-            for (partition, name) in &self.removals {
-                match name {
-                    Some(name) => {
-                        let blobs = sim
-                            .get_mut(partition)
-                            .ok_or_else(|| Error::PartitionMissing(partition.clone()))?;
-                        if !blobs.remove(name) {
-                            return Err(Error::BlobMissing(partition.clone(), hex(name)));
-                        }
-                    }
-                    None => {
-                        sim.remove(partition)
-                            .ok_or_else(|| Error::PartitionMissing(partition.clone()))?;
-                    }
-                }
-            }
-            for creation in &self.creations {
-                if !sim
-                    .entry(&creation.partition)
-                    .or_default()
-                    .insert(&creation.name)
-                {
-                    return Err(Error::BlobExists(
-                        creation.partition.clone(),
-                        hex(&creation.name),
-                    ));
-                }
-            }
-        }
-
-        // Publish in the simulation's order: removals first (resolving
-        // names against the SAME pre-publish namespace the validation
-        // checked — a creation may rebind a removed name, and the removal
-        // must never unlink the recreated blob), then staged creations
-        // (their namespace entries must exist before any staged overlay
-        // against them publishes), then each blob's overlay (blob-id
-        // order; the commit lock keeps any snapshot from observing a
-        // partial publish).
-        //
-        // The publish (and, for apply_sync, its commit) is one cancellation
-        // domain: the per-blob loop awaits write locks, so the caller's
-        // future can be dropped with the batch half-published — group and
-        // dirty bookkeeping unrecorded, staged-batch counters leaked, and
-        // the staged extents neither referenced nor reclaimable. A `Drop`
-        // impl cannot finish or unwind the publish, so cancellation poisons
-        // (found by the conformance cancellation injector).
-        let guard = commit::PoisonOnCancel::arm(&self.ready);
-        let mut removed: Vec<u64> = Vec::new();
-        if !self.removals.is_empty() {
-            let mut state = self.ready.state.lock();
-            for (partition, name) in std::mem::take(&mut self.removals) {
-                let blobs = state.partitions.get(&partition).expect("validated");
-                let ids: Vec<u64> = name.as_ref().map_or_else(
-                    || blobs.values().copied().collect(),
-                    |name| vec![*blobs.get(name).expect("validated")],
-                );
-                for &id in &ids {
-                    unlink(&mut state, id);
-                }
-                removed.extend(ids);
-                match name {
-                    Some(name) => {
-                        state
-                            .partitions
-                            .get_mut(&partition)
-                            .expect("validated")
-                            .remove(&name);
-                    }
-                    None => {
-                        state.partitions.remove(&partition);
-                        state.partition_epoch += 1;
-                    }
-                }
-                state.meta_dirty = true;
-            }
-        }
+        // The publish (and, per `mode`, its commit) runs in a driver task
+        // that owns the staged state — including the cleanup when
+        // validation fails — so the caller only observes: dropping this
+        // future mid-await leaves the task to complete the apply, never a
+        // half-published batch.
+        let shared = self.shared.clone();
+        let ready = self.ready.clone();
         let staged = std::mem::take(&mut self.staged);
-        let mut roots: Vec<u64> = Vec::with_capacity(self.creations.len() + staged.len());
-        if !self.creations.is_empty() {
-            let mut state = self.ready.state.lock();
-            for creation in std::mem::take(&mut self.creations) {
-                let id = creation.core.id;
-                if !state.partitions.contains_key(&creation.partition) {
+        let removals = std::mem::take(&mut self.removals);
+        let creations = std::mem::take(&mut self.creations);
+        self.applied = true;
+        let (tx, rx) = oneshot::channel();
+        let driver = ready.driver.clone();
+        driver.spawn(async move {
+            let _ = tx.send(apply_task(shared, ready, staged, removals, creations, mode).await);
+        });
+        match rx.await.unwrap_or(Err(Error::Aborted))? {
+            Some(ticket) => Ok(Some(Handle::from_future(
+                async move { ticket.wait().await },
+            ))),
+            None => Ok(None),
+        }
+    }
+}
+
+/// The apply body, run inside a driver task: validate, publish, and (per
+/// `mode`) commit or register the group's commit, under one hold of the
+/// commit lock. Owns the staged state: a validation (or poison) failure
+/// discards it exactly as an unapplied drop would.
+async fn apply_task<S: crate::Storage>(
+    shared: Arc<Shared<S>>,
+    ready: Arc<Ready<S>>,
+    staged: BTreeMap<u64, Staged>,
+    removals: Vec<(String, Option<Vec<u8>>)>,
+    creations: Vec<Creation>,
+    mode: ApplyMode,
+) -> Result<Option<commit::Ticket>, Error> {
+    // Namespace changes serialize on the same lock (and in the same
+    // order relative to the commit lock) as open/remove.
+    let _ns = if removals.is_empty() && creations.is_empty() {
+        None
+    } else {
+        Some(shared.ns_lock.lock().await)
+    };
+    let _commit = ready.commit_lock.lock().await;
+    if let Err(e) = ready.check_poisoned() {
+        discard_staged(&ready, staged);
+        return Err(e);
+    }
+
+    // Validate every staged removal and creation against a simulation of
+    // the namespace BEFORE publishing anything: an invalid batch applies
+    // nothing (its staged extents return through the drop path). Removals
+    // simulate first, so a batch may remove a name and recreate it.
+    let validated = (|| {
+        if removals.is_empty() && creations.is_empty() {
+            return Ok(());
+        }
+        let state = ready.state.lock();
+        let mut sim: BTreeMap<&String, BTreeSet<&Vec<u8>>> = state
+            .partitions
+            .iter()
+            .map(|(partition, blobs)| (partition, blobs.keys().collect()))
+            .collect();
+        for (partition, name) in &removals {
+            match name {
+                Some(name) => {
+                    let blobs = sim
+                        .get_mut(partition)
+                        .ok_or_else(|| Error::PartitionMissing(partition.clone()))?;
+                    if !blobs.remove(name) {
+                        return Err(Error::BlobMissing(partition.clone(), hex(name)));
+                    }
+                }
+                None => {
+                    sim.remove(partition)
+                        .ok_or_else(|| Error::PartitionMissing(partition.clone()))?;
+                }
+            }
+        }
+        for creation in &creations {
+            if !sim
+                .entry(&creation.partition)
+                .or_default()
+                .insert(&creation.name)
+            {
+                return Err(Error::BlobExists(
+                    creation.partition.clone(),
+                    hex(&creation.name),
+                ));
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = validated {
+        discard_staged(&ready, staged);
+        return Err(e);
+    }
+
+    // Publish in the simulation's order: removals first (resolving
+    // names against the SAME pre-publish namespace the validation
+    // checked — a creation may rebind a removed name, and the removal
+    // must never unlink the recreated blob), then staged creations
+    // (their namespace entries must exist before any staged overlay
+    // against them publishes), then each blob's overlay (blob-id
+    // order; the commit lock keeps any snapshot from observing a
+    // partial publish).
+    //
+    // The publish (and, per `mode`, its commit) is one mutation span this
+    // task must complete: once it consumes state, an abort (runtime
+    // shutdown dropping this task mid-flight) can neither finish nor
+    // unwind it, so the guard poisons on the way down.
+    let guard = commit::PoisonOnCancel::arm(&ready);
+    let mut removed: Vec<u64> = Vec::new();
+    if !removals.is_empty() {
+        let mut state = ready.state.lock();
+        for (partition, name) in removals {
+            let blobs = state.partitions.get(&partition).expect("validated");
+            let ids: Vec<u64> = name.as_ref().map_or_else(
+                || blobs.values().copied().collect(),
+                |name| vec![*blobs.get(name).expect("validated")],
+            );
+            for &id in &ids {
+                unlink(&mut state, id);
+            }
+            removed.extend(ids);
+            match name {
+                Some(name) => {
+                    state
+                        .partitions
+                        .get_mut(&partition)
+                        .expect("validated")
+                        .remove(&name);
+                }
+                None => {
+                    state.partitions.remove(&partition);
                     state.partition_epoch += 1;
                 }
-                state
-                    .partitions
-                    .entry(creation.partition)
-                    .or_default()
-                    .insert(creation.name, id);
-                state.open.insert(id, creation.core);
-                state.meta_dirty = true;
-                roots.push(id);
             }
+            state.meta_dirty = true;
         }
-        for (id, st) in staged {
-            let _guard = st.core.write_lock.lock().await;
-            let mut state = self.ready.state.lock();
-            let seq = state.seq;
-            for extent in st.discarded {
+    }
+    let mut roots: Vec<u64> = Vec::with_capacity(creations.len() + staged.len());
+    if !creations.is_empty() {
+        let mut state = ready.state.lock();
+        for creation in creations {
+            let id = creation.core.id;
+            if !state.partitions.contains_key(&creation.partition) {
+                state.partition_epoch += 1;
+            }
+            state
+                .partitions
+                .entry(creation.partition)
+                .or_default()
+                .insert(creation.name, id);
+            state.open.insert(id, creation.core);
+            state.meta_dirty = true;
+            roots.push(id);
+        }
+    }
+    for (id, st) in staged {
+        let _guard = st.core.write_lock.lock().await;
+        let mut state = ready.state.lock();
+        let seq = state.seq;
+        for extent in st.discarded {
+            state.defer_free(extent, seq, None);
+        }
+        let mut inner = st.core.inner.lock();
+        inner.staged_batches -= 1;
+        // Removed mid-batch (a removal staged in THIS batch, or an
+        // outside removal): the overlay must not publish into a dead
+        // blob. Its fresh extents are unreferenced — the drop path's
+        // treatment — and the base extents it replaced were already
+        // freed by the unlink.
+        if inner.removed {
+            for extent in st.overlay.fresh {
                 state.defer_free(extent, seq, None);
             }
-            let mut inner = st.core.inner.lock();
-            inner.staged_batches -= 1;
-            // Removed mid-batch (a removal staged in THIS batch, or an
-            // outside removal): the overlay must not publish into a dead
-            // blob. Its fresh extents are unreferenced — the drop path's
-            // treatment — and the base extents it replaced were already
-            // freed by the unlink.
-            if inner.removed {
-                for extent in st.overlay.fresh {
-                    state.defer_free(extent, seq, None);
-                }
-                continue;
-            }
-            roots.push(id);
-            if !st.touched_only {
-                publish_overlay(&mut inner, st.overlay);
-                state.dirty.insert(id);
-            }
+            continue;
         }
-        {
-            let mut state = self.ready.state.lock();
-            state.merge_group(roots.iter().copied());
+        roots.push(id);
+        if !st.touched_only {
+            publish_overlay(&mut inner, st.overlay);
+            state.dirty.insert(id);
         }
-        self.applied = true;
+    }
+    {
+        let mut state = ready.state.lock();
+        state.merge_group(roots.iter().copied());
+    }
 
-        // Removed ids root the commit (never captured — every commit drops
-        // their entries — but their applied-batch groups must land with the
-        // removal), exactly as `Storage::remove` roots its own commit.
-        roots.extend(removed);
+    // Removed ids root the commit (never captured — every commit drops
+    // their entries — but their applied-batch groups must land with the
+    // removal), exactly as `Storage::remove` roots its own commit.
+    roots.extend(removed);
 
-        match mode {
-            ApplyMode::Publish => {
-                guard.disarm();
-                Ok(None)
-            }
-            ApplyMode::Commit => {
-                // One durability request served by the commit below (see
-                // `metrics::Metrics::sync_requests`).
-                self.ready.metrics.sync_requests.inc();
-                let result = commit::commit_locked(&self.ready, &roots).await;
-                // A failed commit latched its own poison, and a
-                // cancelled one fires the commit's inner guard.
-                guard.disarm();
-                result.map(|()| None)
-            }
-            ApplyMode::StartCommit => {
-                // Register while still holding the commit lock: the next
-                // leader to drain the pool (or the handle itself, whichever
-                // acquires the lock first) covers the group's roots.
-                let ticket = commit::register(&self.ready, &roots);
-                let ready = self.ready.clone();
-                guard.disarm();
-                Ok(Some(Handle::from_future(async move {
-                    commit::drive(&ready, ticket).await
-                })))
-            }
+    match mode {
+        ApplyMode::Publish => {
+            guard.disarm();
+            Ok(None)
+        }
+        ApplyMode::Commit => {
+            // One durability request served by the commit below (see
+            // `metrics::Metrics::sync_requests`).
+            ready.metrics.sync_requests.inc();
+            let result = commit::commit_locked(&ready, &roots).await;
+            // A failed commit latched its own poison, and an aborted
+            // one fires the commit's inner guard.
+            guard.disarm();
+            result.map(|()| None)
+        }
+        ApplyMode::StartCommit => {
+            // Register while still holding the commit lock (an unrelated
+            // commit must not interleave between the publish and the
+            // group's registration) and schedule its driver task: the
+            // commit begins now, and the returned ticket only observes.
+            let ticket = commit::register(&ready, &roots);
+            commit::spawn_drive(&ready, ticket.clone());
+            guard.disarm();
+            Ok(Some(ticket))
+        }
+    }
+}
+
+/// Return an unapplied batch's staged extents through the deferred-free
+/// path and release its run-merge gates: the drop path, also taken when
+/// the apply task fails validation (the task owns the staged state).
+fn discard_staged<S: crate::Storage>(ready: &Ready<S>, staged: BTreeMap<u64, Staged>) {
+    let mut state = ready.state.lock();
+    let seq = state.seq;
+    for st in staged.into_values() {
+        st.core.inner.lock().staged_batches -= 1;
+        for extent in st.overlay.fresh {
+            state.defer_free(extent, seq, None);
+        }
+        for extent in st.discarded {
+            state.defer_free(extent, seq, None);
         }
     }
 }

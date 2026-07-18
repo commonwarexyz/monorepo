@@ -43,20 +43,23 @@
 //! all-vanished corners plus seeded random samples — the exhaustive
 //! product is used whenever it fits (stated per workload in the stats).
 //!
-//! CANCELLATION INJECTION (the third layer): commit, sync, batch-apply,
-//! and apply-start-sync futures are dropped after every possible poll
-//! count (a pass-through storage wrapper turns each inner I/O into a poll
-//! boundary), after which the audits run, the poison contract is checked
-//! (poison exactly when commit leadership was assumed, benign before),
-//! and the workload continues or the volume is crashed and checked for
-//! trace conformance.
+//! CANCELLATION INJECTION (the third layer): sync, start-sync, remove,
+//! batch-apply, and apply-start-sync futures are dropped after every
+//! possible poll count (a pass-through storage wrapper turns each inner
+//! I/O into a poll boundary). Callers are pure observers of driver-task
+//! commits, so every drop point must be BENIGN: the operation completes
+//! regardless, nothing poisons, and the recovered state stays trace
+//! conformant. The driver-abort arm of the contract (poison on a task
+//! dropped mid-commit) is pinned by
+//! `tests::test_volume_aborted_commit_task_poisons`.
 
 use super::{
+    core::Ready,
     model::{
         initial_state, step, Action, Cell, Logical, State as ModelState, Violation, BLOBS,
         CELLS_PER_BLOCK, SPEC,
     },
-    tests::{audit_volume, test_pool, Gated, Tearing},
+    tests::{audit_volume, test_driver, test_pool, Gated, Tearing},
     Batch, Blob as VBlob, Config, Storage as Volume, BLOCK,
 };
 use crate::{Blob as _, BufferPool, Error, IoBuf, IoBufs, IoBufsMut, Storage as _};
@@ -585,7 +588,7 @@ impl Rig {
             inner: gated.clone(),
             active: yields.clone(),
         };
-        let volume = Volume::new(stack, pool.clone(), Config::default());
+        let volume = Volume::new(stack, pool.clone(), Config::default(), test_driver());
         let mut blobs = BTreeMap::new();
         for slot in 0..BLOBS {
             let (blob, size) = volume.open(PARTITION, &name(slot)).await.expect("create");
@@ -630,7 +633,7 @@ impl Rig {
             inner: gated.clone(),
             active: yields.clone(),
         };
-        let volume = Volume::new(stack, pool.clone(), Config::default());
+        let volume = Volume::new(stack, pool.clone(), Config::default(), test_driver());
         let mut blobs = BTreeMap::new();
         for slot in 0..BLOBS {
             if tracked[0].state.volume.blobs[slot as usize].live {
@@ -1089,7 +1092,7 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
         inner: gated,
         active: yields,
     };
-    let volume = Volume::new(stack, pool.clone(), Config::default());
+    let volume = Volume::new(stack, pool.clone(), Config::default(), test_driver());
     let names = match volume.scan(PARTITION).await {
         Ok(names) => names,
         Err(Error::PartitionMissing(_)) => Vec::new(),
@@ -1743,42 +1746,38 @@ async fn random_walk(seed: u64) {
 // Cancellation injection (the layer below the model)
 // ---------------------------------------------------------------------------
 
-/// Poll `fut` up to `polls` times. Returns whether it completed (with its
-/// result asserted Ok).
+/// Poll `fut` up to `polls` times, yielding between polls so the volume's
+/// driver tasks (spawned onto this test's tokio runtime) make progress.
+/// Returns whether it completed (with its result asserted Ok).
 async fn poll_n<F: Future<Output = Result<(), Error>> + Unpin>(fut: &mut F, polls: usize) -> bool {
     for _ in 0..polls {
         if let Poll::Ready(result) = futures::poll!(&mut *fut) {
-            result.expect("driven-to-completion commit succeeds");
+            result.expect("observed commit succeeds");
             return true;
         }
+        tokio::task::yield_now().await;
     }
     false
 }
 
-/// Assert the volume is poisoned: every subsequent operation fails.
-async fn assert_poisoned(rig: &Rig) {
-    for blob in rig.blobs.values() {
-        assert!(
-            blob.write_at(0, IoBuf::copy_from_slice(&[0u8; 8]))
-                .await
-                .is_err(),
-            "write on a poisoned volume must fail"
-        );
-        assert!(
-            blob.sync().await.is_err(),
-            "sync on a poisoned volume must fail"
-        );
+/// Wait for a driver task to confirm a commit past `confirmed` (driver
+/// tasks run on the ambient tokio executor, so yielding lets them finish).
+async fn quiesce_confirmed(ready: &Ready<Stack>, confirmed: u64) {
+    for _ in 0..1_000_000u32 {
+        if ready.state.lock().confirmed_seq > confirmed {
+            return;
+        }
+        tokio::task::yield_now().await;
     }
-    assert!(
-        rig.volume.batch().await.is_err(),
-        "batch on a poisoned volume must fail"
-    );
+    panic!("driver task never confirmed a commit");
 }
 
-/// Cancel a `blob.sync()` future after every possible poll count. B3's
-/// CancelGuard contract, pinned exactly: poison if and only if the future
-/// had assumed commit leadership (drained the pool ticket); benign before
-/// (the registered root stays pooled for the next commit).
+/// Drop a `blob.sync()` future after every possible poll count. Callers
+/// are pure OBSERVERS of driver-task commits: every drop point is benign —
+/// the commit still lands, nothing poisons, and the volume stays fully
+/// consistent (B3's caller-cancellation hazard dissolved by construction;
+/// the driver-abort arm of the contract is pinned by
+/// `tests::test_volume_aborted_commit_task_poisons`).
 #[tokio::test]
 async fn conformance_cancel_sync() {
     let mut polls = 1usize;
@@ -1788,7 +1787,7 @@ async fn conformance_cancel_sync() {
         rig.execute(Op::Append(1)).await;
 
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-        let ticket_before = ready.pending.lock().ticket.clone();
+        let confirmed = ready.state.lock().confirmed_seq;
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
             let mut fut = Box::pin(rig.blobs[&0].sync());
@@ -1797,88 +1796,60 @@ async fn conformance_cancel_sync() {
             completed
         };
         rig.yields.store(false, Ordering::SeqCst);
+
+        // The first poll registered and scheduled the commit: it lands
+        // whether or not the observer survived.
+        quiesce_confirmed(&ready, confirmed).await;
+        assert!(
+            ready.poisoned.get().is_none(),
+            "polls {polls}: dropping a sync observer must stay benign"
+        );
+        rig.step_model_only(&[Action::Snapshot(0b001), Action::WriteMeta, Action::FsyncOk]);
+        audit_volume(&rig.volume, true);
+        rig.check_live().await;
+        let mut stats = Stats::default();
+        rig.crash_probe(&[], 256, polls as u64, &mut stats).await;
         if completed {
-            // Enumerated every await point; the final iteration completed.
-            rig.step_model_only(&[Action::Snapshot(0b001), Action::WriteMeta, Action::FsyncOk]);
-            rig.check_live().await;
-            assert!(polls > 2, "expected several await points, got {polls}");
             println!("cancel_sync: enumerated {polls} poll boundaries");
             break;
-        }
-
-        let drained = !Arc::ptr_eq(&ready.pending.lock().ticket, &ticket_before);
-        let poisoned = ready.poisoned.get().is_some();
-        assert_eq!(
-            drained, poisoned,
-            "polls {polls}: dropped commit future must poison exactly when \
-             it assumed leadership (drained {drained}, poisoned {poisoned})"
-        );
-
-        let mut stats = Stats::default();
-        if poisoned {
-            assert_poisoned(&rig).await;
-            // Crash conformance: the cancelled commit is an attempt; the
-            // union over cancel points is the MetaWritten crash fan plus
-            // the no-metadata fan (both computed from the same lockstep).
-            rig.crash_probe(
-                &[Action::Snapshot(0b001), Action::WriteMeta],
-                256,
-                polls as u64,
-                &mut stats,
-            )
-            .await;
-        } else {
-            // Benign: the pooled root (if registered) is covered by the
-            // next commit, which the model sees as a union capture.
-            let pooled = {
-                let pending = ready.pending.lock();
-                !pending.roots.is_empty()
-            };
-            let mask = if pooled { 0b011 } else { 0b010 };
-            rig.blobs[&1].sync().await.expect("post-cancel sync");
-            rig.step_model_only(&[Action::Snapshot(mask), Action::WriteMeta, Action::FsyncOk]);
-            audit_volume(&rig.volume, true);
-            rig.check_live().await;
-            rig.crash_probe(&[], 256, polls as u64, &mut stats).await;
         }
         polls += 1;
         assert!(polls < 10_000, "cancellation enumeration diverged");
     }
 }
 
-/// Cancel a partially-driven `start_sync` handle after every poll count:
-/// the same contract as a cancelled sync future (the handle IS the drive
-/// future), plus the never-polled case staying benign.
+/// Drop a `start_sync` handle after every poll count (including never
+/// polled): the handle only observes, and registration schedules the
+/// commit eagerly, so it lands in every case and nothing poisons.
 #[tokio::test]
 async fn conformance_cancel_start_sync_handle() {
-    // Never polled: benign, root stays pooled.
+    // Never polled: the commit still lands (start = begin now).
     {
         let mut rig = Rig::new().await;
         rig.execute(Op::Append(0)).await;
+        let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let confirmed = ready.state.lock().confirmed_seq;
         let handle = rig.blobs[&0].start_sync().await;
         drop(handle);
-        let ready = rig.volume.shared.ready.get().expect("recovered");
+        quiesce_confirmed(&ready, confirmed).await;
         assert!(
             ready.poisoned.get().is_none(),
             "never-polled handle drop must stay benign"
         );
-        rig.blobs[&0]
-            .sync()
-            .await
-            .expect("later sync covers the root");
         rig.step_model_only(&[Action::Snapshot(0b001), Action::WriteMeta, Action::FsyncOk]);
+        audit_volume(&rig.volume, true);
         rig.check_live().await;
         let mut stats = Stats::default();
         rig.crash_probe(&[], 256, 0, &mut stats).await;
     }
 
-    // Partially driven at every poll boundary.
+    // Dropped at every poll boundary: identical outcome.
     let mut polls = 1usize;
     loop {
         let mut rig = Rig::new().await;
         rig.execute(Op::Append(0)).await;
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-        let ticket_before = ready.pending.lock().ticket.clone();
+        let confirmed = ready.state.lock().confirmed_seq;
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
             let mut handle = Box::pin(rig.blobs[&0].start_sync().await);
@@ -1887,27 +1858,26 @@ async fn conformance_cancel_start_sync_handle() {
             completed
         };
         rig.yields.store(false, Ordering::SeqCst);
+        quiesce_confirmed(&ready, confirmed).await;
+        assert!(
+            ready.poisoned.get().is_none(),
+            "polls {polls}: dropped handle must stay benign"
+        );
+        rig.step_model_only(&[Action::Snapshot(0b001), Action::WriteMeta, Action::FsyncOk]);
+        audit_volume(&rig.volume, true);
+        rig.check_live().await;
         if completed {
             println!("cancel_start_sync: enumerated {polls} poll boundaries");
             break;
-        }
-        let drained = !Arc::ptr_eq(&ready.pending.lock().ticket, &ticket_before);
-        let poisoned = ready.poisoned.get().is_some();
-        assert_eq!(
-            drained, poisoned,
-            "polls {polls}: dropped handle must poison exactly at leadership"
-        );
-        if poisoned {
-            assert_poisoned(&rig).await;
         }
         polls += 1;
         assert!(polls < 10_000, "cancellation enumeration diverged");
     }
 }
 
-/// Cancel a `Storage::remove` future after every poll count: the removal
-/// commit runs directly inside the caller's future (no pooled ticket), so
-/// a drop mid-commit must poison — the unlink already consumed state.
+/// Drop a `Storage::remove` future after every poll count: the unlink and
+/// its commit run in a driver task, so every drop point is benign and the
+/// removal lands durably regardless.
 #[tokio::test]
 async fn conformance_cancel_remove() {
     let mut polls = 1usize;
@@ -1916,6 +1886,7 @@ async fn conformance_cancel_remove() {
         rig.execute(Op::Append(0)).await;
         rig.execute(Op::Sync(0b001)).await;
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let confirmed = ready.state.lock().confirmed_seq;
         rig.blobs.remove(&0);
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
@@ -1926,50 +1897,36 @@ async fn conformance_cancel_remove() {
             completed
         };
         rig.yields.store(false, Ordering::SeqCst);
+
+        // The first poll scheduled the removal task: it completes (and
+        // commits) whether or not the caller kept observing.
+        quiesce_confirmed(&ready, confirmed).await;
+        assert!(
+            ready.poisoned.get().is_none(),
+            "polls {polls}: dropping a remove observer must stay benign"
+        );
+        rig.step_model_only(&[
+            Action::Remove(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+        ]);
+        audit_volume(&rig.volume, true);
+        rig.check_live().await;
+        let mut stats = Stats::default();
+        rig.crash_probe(&[], 256, polls as u64, &mut stats).await;
         if completed {
-            rig.step_model_only(&[
-                Action::Remove(0),
-                Action::Snapshot(0b001),
-                Action::WriteMeta,
-                Action::FsyncOk,
-            ]);
-            rig.check_live().await;
             println!("cancel_remove: enumerated {polls} poll boundaries");
             break;
         }
-        // The removal mutates the namespace before its commit's first
-        // await, so every cancelled prefix has consumed state: it must
-        // poison.
-        let poisoned = ready.poisoned.get().is_some();
-        assert!(
-            poisoned,
-            "polls {polls}: cancelled remove left an unlinked namespace \
-             without poisoning"
-        );
-        assert_poisoned(&rig).await;
-        // Crash conformance: the removal commit is an attempt; outcomes
-        // where its metadata vanished legally resurrect the blob.
-        let mut stats = Stats::default();
-        rig.crash_probe(
-            &[
-                Action::Remove(0),
-                Action::Snapshot(0b001),
-                Action::WriteMeta,
-            ],
-            256,
-            polls as u64,
-            &mut stats,
-        )
-        .await;
         polls += 1;
         assert!(polls < 10_000, "cancellation enumeration diverged");
     }
 }
 
-/// Cancel a `Batch::apply_sync` future after every poll count. The volume
-/// must either be poisoned (with the crash conformance of an attempted
-/// batch commit) or fully consistent with the batch never applying — a
-/// half-published batch is data loss waiting for a snapshot.
+/// Drop a `Batch::apply_sync` future after every poll count: the apply
+/// task owns the staged state, so every drop point is benign — the batch
+/// publishes AND commits regardless, atomically.
 #[tokio::test]
 async fn conformance_cancel_apply_sync() {
     let mut polls = 1usize;
@@ -1981,6 +1938,7 @@ async fn conformance_cancel_apply_sync() {
         rig.execute(Op::BatchAppend(1)).await;
 
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let confirmed = ready.state.lock().confirmed_seq;
         let batch_rig = rig.batch.take().expect("staged batch");
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
@@ -1991,78 +1949,44 @@ async fn conformance_cancel_apply_sync() {
         };
         rig.yields.store(false, Ordering::SeqCst);
         drop(batch_rig.created);
+
+        // The first poll handed the staged state to the apply task: the
+        // batch lands whole whether or not the caller kept observing.
+        quiesce_confirmed(&ready, confirmed).await;
+        assert!(
+            ready.poisoned.get().is_none(),
+            "polls {polls}: dropping an apply_sync observer must stay benign"
+        );
+        rig.step_model_only(&[Action::BatchApply, Action::Snapshot(0b011)]);
+        rig.step_model_only(&[Action::WriteMeta, Action::FsyncOk]);
+        audit_volume(&rig.volume, true);
+        rig.check_live().await;
+        let mut stats = Stats::default();
+        rig.crash_probe(&[], 256, polls as u64, &mut stats).await;
         if completed {
-            rig.step_model_only(&[Action::BatchApply, Action::Snapshot(0b011)]);
-            rig.step_model_only(&[Action::WriteMeta, Action::FsyncOk]);
-            rig.check_live().await;
             println!("cancel_apply_sync: enumerated {polls} poll boundaries");
             break;
-        }
-
-        let poisoned = ready.poisoned.get().is_some();
-        let mut stats = Stats::default();
-        if poisoned {
-            assert_poisoned(&rig).await;
-            // Crash conformance: the union over cancel points — batch
-            // never published, or published with its commit's metadata
-            // pending.
-            let space = CrashSpace::capture(&rig.tearing);
-            let mut allowed_obs: Vec<Obs> = Vec::new();
-            for actions in [
-                vec![Action::BatchDrop, Action::Crash],
-                vec![
-                    Action::BatchApply,
-                    Action::Snapshot(0b011),
-                    Action::WriteMeta,
-                    Action::Crash,
-                ],
-            ] {
-                for (parent, state) in states_after(&rig.tracked, &actions, &rig.trace) {
-                    let obs = translated(&rig.tracked[parent], &state.volume.logical());
-                    if !allowed_obs.contains(&obs) {
-                        allowed_obs.push(obs);
-                    }
-                }
-            }
-            let (cases, _) = space.enumerate(256, polls as u64);
-            for case in cases {
-                stats.cases += 1;
-                let obs = extract(&rig.pool, case.image).await.unwrap_or_else(|e| {
-                    panic!("polls {polls}: recovery failed ({}): {e}", case.desc)
-                });
-                assert!(
-                    allowed_obs.contains(&obs),
-                    "polls {polls}: recovered state not allowed after cancelled \
-                     apply_sync ({}):\n  {obs:?}\n  allowed: {allowed_obs:?}",
-                    case.desc
-                );
-            }
-        } else {
-            // Not poisoned: the batch must not have published anything.
-            // The staged content dies with the dropped future; the volume
-            // stays fully usable.
-            rig.step_model_only(&[Action::BatchDrop]);
-            audit_volume(&rig.volume, true);
-            rig.check_live().await;
-            rig.execute(Op::Append(0)).await;
-            rig.execute(Op::Sync(0b001)).await;
-            rig.crash_probe(&[], 256, polls as u64, &mut stats).await;
         }
         polls += 1;
         assert!(polls < 10_000, "cancellation enumeration diverged");
     }
 }
 
-/// Cancel a `Batch::apply_sync` future while it is still QUEUED on the
-/// commit lock (held by a parked unrelated sync): nothing was consumed, so
-/// the drop must stay benign — the staged batch dies cleanly (extents
-/// reclaimed, counters restored) and the volume keeps working.
+/// Drop a `Batch::apply_sync` future while its task is still QUEUED on
+/// the commit lock (held by a parked unrelated sync): the drop is benign
+/// and the apply proceeds once the lock frees — the batch publishes and
+/// commits after the parked commit completes.
 #[tokio::test]
 async fn conformance_cancel_apply_queued() {
     let mut rig = Rig::new().await;
     rig.execute(Op::Append(2)).await;
     rig.execute(Op::BatchAppend(0)).await;
     rig.execute(Op::BatchAppend(1)).await;
+
+    // Baseline before anything is in flight: exactly two commits land
+    // beyond it (the parked sync's, then the batch's).
+    let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+    let confirmed = ready.state.lock().confirmed_seq;
 
     // Park an unrelated sync at the inner fsync: it holds the commit lock.
     rig.gated.sync_gate.arm();
@@ -2073,8 +1997,8 @@ async fn conformance_cancel_apply_queued() {
     rig.gated.sync_gate.wait_reached().await;
     rig.step_model_only(&[Action::Snapshot(0b100), Action::WriteMeta]);
 
-    // The apply queues on the commit lock and can make no progress; drop
-    // it while queued.
+    // The apply task queues on the commit lock; drop the observer while
+    // it waits.
     let batch_rig = rig.batch.take().expect("staged batch");
     {
         let mut fut = Box::pin(batch_rig.batch.apply_sync());
@@ -2087,17 +2011,26 @@ async fn conformance_cancel_apply_queued() {
         drop(fut);
     }
     drop(batch_rig.created);
-    let ready = rig.volume.shared.ready.get().expect("recovered");
     assert!(
         ready.poisoned.get().is_none(),
         "queued apply drop must stay benign"
     );
-    rig.step_model_only(&[Action::BatchDrop]);
 
-    // Release the parked sync and confirm the volume is fully healthy.
+    // Release the parked sync; its commit confirms, then the apply task
+    // acquires the lock, publishes, and commits the batch whole.
     rig.gated.sync_gate.release();
     parked.await.expect("parked task").expect("parked sync");
     rig.step_model_only(&[Action::FsyncOk]);
+    // Each snapshot assigns the next consecutive seq, so waiting past
+    // `confirmed + 1` observes the SECOND commit (the batch's), however
+    // the scheduler interleaved it with the awaits above.
+    quiesce_confirmed(&ready, confirmed + 1).await;
+    rig.step_model_only(&[
+        Action::BatchApply,
+        Action::Snapshot(0b011),
+        Action::WriteMeta,
+        Action::FsyncOk,
+    ]);
     audit_volume(&rig.volume, true);
     rig.check_live().await;
     rig.execute(Op::Append(0)).await;
@@ -2106,19 +2039,20 @@ async fn conformance_cancel_apply_queued() {
     rig.crash_probe(&[], 256, 11, &mut stats).await;
 }
 
-/// Cancel a `Batch::apply_start_sync` future after every poll count, and
-/// then its returned handle after every poll count: the future's publish
-/// phase must be all-or-nothing (or poison), and the handle follows the
-/// CancelGuard contract.
+/// Drop a `Batch::apply_start_sync` future (and, separately, its returned
+/// handle) after every poll count: the apply task owns the staged state
+/// and the handle only observes, so every drop point is benign — the
+/// batch publishes and its registered commit lands.
 #[tokio::test]
 async fn conformance_cancel_apply_start_sync() {
-    // Phase 1: cancel the apply_start_sync future itself.
+    // Phase 1: drop the apply_start_sync future itself.
     let mut polls = 1usize;
     loop {
         let mut rig = Rig::new().await;
         rig.execute(Op::BatchAppend(0)).await;
         rig.execute(Op::BatchAppend(1)).await;
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let confirmed = ready.state.lock().confirmed_seq;
         let batch_rig = rig.batch.take().expect("staged batch");
         rig.yields.store(true, Ordering::SeqCst);
         let outcome = {
@@ -2129,68 +2063,53 @@ async fn conformance_cancel_apply_start_sync() {
                     outcome = Some(result.expect("apply_start_sync succeeds"));
                     break;
                 }
+                tokio::task::yield_now().await;
             }
             outcome
         };
         rig.yields.store(false, Ordering::SeqCst);
         drop(batch_rig.created);
-        match outcome {
-            Some(handle) => {
-                // Completed: the publish landed; resolve the handle and
-                // finish the lockstep.
-                handle.await.expect("started commit lands");
-                rig.step_model_only(&[
-                    Action::BatchApply,
-                    Action::Snapshot(0b011),
-                    Action::WriteMeta,
-                    Action::FsyncOk,
-                ]);
-                rig.check_live().await;
-                println!("cancel_apply_start_sync: enumerated {polls} poll boundaries");
-                break;
-            }
-            None => {
-                let poisoned = ready.poisoned.get().is_some();
-                if poisoned {
-                    assert_poisoned(&rig).await;
-                } else {
-                    // The publish must be all-or-nothing: either invisible
-                    // (dropped batch) or fully applied with its roots
-                    // registered for the next commit.
-                    let published = {
-                        let state = ready.state.lock();
-                        !state.groups.is_empty()
-                    };
-                    if published {
-                        rig.step_model_only(&[Action::BatchApply]);
-                    } else {
-                        rig.step_model_only(&[Action::BatchDrop]);
-                    }
-                    rig.check_live().await;
-                    if rig.enabled(Op::Sync(0b011)) {
-                        rig.execute(Op::Sync(0b011)).await;
-                    }
-                    let mut stats = Stats::default();
-                    rig.crash_probe(&[], 128, polls as u64, &mut stats).await;
-                }
-            }
+
+        // The apply task publishes and registers the group's commit
+        // regardless; the started commit then lands on its own.
+        let completed = outcome.is_some();
+        if let Some(handle) = outcome {
+            handle.await.expect("started commit lands");
+        }
+        quiesce_confirmed(&ready, confirmed).await;
+        assert!(
+            ready.poisoned.get().is_none(),
+            "polls {polls}: dropping apply_start_sync must stay benign"
+        );
+        rig.step_model_only(&[
+            Action::BatchApply,
+            Action::Snapshot(0b011),
+            Action::WriteMeta,
+            Action::FsyncOk,
+        ]);
+        audit_volume(&rig.volume, true);
+        rig.check_live().await;
+        let mut stats = Stats::default();
+        rig.crash_probe(&[], 128, polls as u64, &mut stats).await;
+        if completed {
+            println!("cancel_apply_start_sync: enumerated {polls} poll boundaries");
+            break;
         }
         polls += 1;
         assert!(polls < 10_000, "cancellation enumeration diverged");
     }
 
-    // Phase 2: cancel the returned handle mid-drive (CancelGuard).
+    // Phase 2: drop the returned handle after every poll count.
     let mut polls = 1usize;
     loop {
         let mut rig = Rig::new().await;
         rig.execute(Op::BatchAppend(0)).await;
         rig.execute(Op::BatchAppend(1)).await;
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let confirmed = ready.state.lock().confirmed_seq;
         let batch_rig = rig.batch.take().expect("staged batch");
         let handle = batch_rig.batch.apply_start_sync().await.expect("publish");
         drop(batch_rig.created);
-        rig.step_model_only(&[Action::BatchApply]);
-        let ticket_before = ready.pending.lock().ticket.clone();
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
             let mut handle = Box::pin(handle);
@@ -2199,35 +2118,22 @@ async fn conformance_cancel_apply_start_sync() {
             completed
         };
         rig.yields.store(false, Ordering::SeqCst);
+        quiesce_confirmed(&ready, confirmed).await;
+        assert!(
+            ready.poisoned.get().is_none(),
+            "polls {polls}: dropped handle must stay benign"
+        );
+        rig.step_model_only(&[
+            Action::BatchApply,
+            Action::Snapshot(0b011),
+            Action::WriteMeta,
+            Action::FsyncOk,
+        ]);
+        audit_volume(&rig.volume, true);
+        rig.check_live().await;
         if completed {
-            rig.step_model_only(&[Action::Snapshot(0b011), Action::WriteMeta, Action::FsyncOk]);
-            rig.check_live().await;
             println!("cancel_apply_start_sync handle: enumerated {polls} poll boundaries");
             break;
-        }
-        let drained = !Arc::ptr_eq(&ready.pending.lock().ticket, &ticket_before);
-        let poisoned = ready.poisoned.get().is_some();
-        assert_eq!(
-            drained, poisoned,
-            "polls {polls}: dropped apply_start_sync handle must poison \
-             exactly at leadership"
-        );
-        if poisoned {
-            assert_poisoned(&rig).await;
-            let mut stats = Stats::default();
-            rig.crash_probe(
-                &[Action::Snapshot(0b011), Action::WriteMeta],
-                128,
-                polls as u64,
-                &mut stats,
-            )
-            .await;
-        } else {
-            // Benign: the group's roots stay pooled; a later sync of an
-            // unrelated blob commits the union (never-split).
-            rig.execute(Op::Sync(0b011)).await;
-            let mut stats = Stats::default();
-            rig.crash_probe(&[], 128, polls as u64, &mut stats).await;
         }
         polls += 1;
         assert!(polls < 10_000, "cancellation enumeration diverged");
