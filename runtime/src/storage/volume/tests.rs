@@ -3725,3 +3725,80 @@ async fn test_volume_batch_shrink_into_hole() {
     let got = blob.read_at(3 * BLOCK + 100, 200).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &[0u8; 200]);
 }
+
+/// A power-loss outcome that tears exactly the newest commit's SHADOW
+/// extent while every other write of that commit lands. The torn shadow
+/// must reject the candidate at manifest verification (one unacknowledged
+/// commit rolls back), never be spliced over the committed frontier: an
+/// unverified splice would physically destroy commit 1's acknowledged
+/// bytes and fail the open.
+#[tokio::test]
+async fn test_volume_torn_shadow_rolls_back_one_commit() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let cfg = Config::default();
+    let volume = Volume::new(inner.clone(), pool.clone(), cfg.clone());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+
+    // Commit 1: two full chunks plus a 100-byte partial frontier.
+    blob.write_at(
+        0,
+        IoBuf::copy_from_slice(&vec![0x11u8; 2 * BLOCK as usize + 100]),
+    )
+    .await
+    .unwrap();
+    blob.sync().await.unwrap();
+
+    // Commit 2: a COW overwrite of chunk 0 only. Its dirt never touches the
+    // frontier, yet the capture writes a FRESH shadow extent for it.
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x22u8; 16]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+
+    // Locate the newest commit's shadow extent from the raw image and tear
+    // it: byte-identical to the power-loss outcome where every commit-2
+    // write landed except the shadow (in that world commit 2 was never
+    // acknowledged).
+    let (file, len) = inner.open(&cfg.partition, &cfg.name).await.unwrap();
+    let image = file.read_at(0, len as usize).await.unwrap().coalesce();
+    let image = image.as_ref();
+    let newest = [0u8, 1]
+        .iter()
+        .filter_map(|&slot| {
+            let at = super::layout::Superblock::slot_offset(slot) as usize;
+            super::layout::Superblock::decode(&image[at..at + super::layout::Superblock::SIZE])
+        })
+        .max_by_key(|sb| sb.seq)
+        .expect("a valid superblock");
+    let table = super::layout::Table::decode(
+        &image[newest.table_offset as usize..(newest.table_offset + newest.table_len as u64) as usize],
+    )
+    .expect("table decodes");
+    let shadow = table.blobs[0].shadow.expect("commit 2 wrote a shadow");
+    let mut torn = vec![0u8; 100];
+    for (i, b) in torn.iter_mut().enumerate() {
+        *b = image[shadow as usize + i] ^ 0x5a;
+    }
+    file.write_at(shadow, IoBuf::copy_from_slice(&torn))
+        .await
+        .unwrap();
+    file.sync().await.unwrap();
+    drop(file);
+
+    // Reopen: recovery must fall back to commit 1 with its content intact.
+    let volume = Volume::new(inner, pool, cfg);
+    let (blob, size) = volume
+        .open("p", b"b")
+        .await
+        .expect("torn shadow must roll back, not destroy the frontier");
+    assert_eq!(size, 2 * BLOCK + 100);
+    let got = blob
+        .read_at(0, 2 * BLOCK as usize + 100)
+        .await
+        .unwrap()
+        .coalesce();
+    assert_eq!(got.as_ref(), &vec![0x11u8; 2 * BLOCK as usize + 100][..]);
+}

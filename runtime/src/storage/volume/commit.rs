@@ -507,6 +507,22 @@ async fn take_snapshot<S: crate::Storage>(
             });
             meta.shadow = Some(extent);
         }
+        // A fresh shadow is a metadata write this commit may tear, and
+        // recovery's splice is a raw byte copy that cannot tell a torn
+        // shadow from a valid one: manifest the frontier chunk so
+        // verification checks the shadow's content against `tail_crc`
+        // before adoption, even when no dirt touched the frontier (see
+        // the model's `manifest_fresh_shadow` rule).
+        if entry.shadow.is_some() {
+            let frontier = entry
+                .runs
+                .last()
+                .map(|r| chunk_of(r.logical + r.len - 1))
+                .expect("shadow requires a backed chunk");
+            if dirty_chunks.binary_search(&frontier).is_err() {
+                manifest.push((id, frontier));
+            }
+        }
         for chunk in dirty_chunks {
             manifest.push((id, chunk));
         }

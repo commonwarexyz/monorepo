@@ -175,6 +175,14 @@ struct VerifyRead {
 /// are excluded — hydration re-verifies the frontier itself when it loads
 /// the tail buffer). `None` means the manifest failed to verify.
 ///
+/// A manifested frontier chunk with a shadow is checked by reading the
+/// SHADOW's bytes against `tail_crc` — and every capture that writes a
+/// fresh shadow manifests its frontier chunk, so a commit whose shadow
+/// write tore is rejected here rather than spliced (the repair splice
+/// below is a raw byte copy that cannot tell a torn shadow from a valid
+/// one). Uncaptured entries' shadows are old durable extents and always
+/// pass on crash histories.
+///
 /// Expected CRCs load lazily: only the value windows covering manifested
 /// chunks are retained (not whole checksum arrays), and the only refs
 /// read are those covering a manifested chunk plus each entry's LAST ref

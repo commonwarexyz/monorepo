@@ -166,9 +166,13 @@ pub(super) struct Table {
     /// first-class: scan of an empty partition succeeds).
     pub partitions: Vec<String>,
     pub blobs: Vec<Entry>,
-    /// Chunks whose content changed in THIS commit: (blob id, chunk index).
-    /// Recovery verifies exactly these to distinguish a fully-landed commit
-    /// from a torn one.
+    /// Chunks whose content changed in THIS commit — plus each captured
+    /// blob's frontier chunk whenever the capture wrote a fresh shadow —
+    /// as (blob id, chunk index). Recovery verifies exactly these to
+    /// distinguish a fully-landed commit from a torn one; the manifested
+    /// frontier makes it check the fresh shadow's content (recovery's
+    /// splice is a raw byte copy and must never write an unverified
+    /// shadow).
     pub manifest: Vec<(u64, u64)>,
 }
 

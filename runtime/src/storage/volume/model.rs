@@ -450,6 +450,15 @@ struct Rules {
     /// `atomic_create_commit` and splitting mixed batches exactly as
     /// described there (I6).
     commit_free_creation_gate: bool,
+    /// Include the tail block in the manifest whenever a capture writes a
+    /// FRESH shadow, so verification always checks the shadow's content
+    /// against the committed tail before adoption. Every capture with a
+    /// partial backed tail writes a fresh shadow — even when no dirt
+    /// touched the tail block — and recovery's splice is a raw byte copy
+    /// that cannot tell a torn shadow from a valid one. Disabling lets a
+    /// commit whose dirt avoids the tail block adopt with a torn shadow,
+    /// which the splice then writes over the intact committed tail (I3).
+    manifest_fresh_shadow: bool,
 }
 
 const SPEC: Rules = Rules {
@@ -464,6 +473,7 @@ const SPEC: Rules = Rules {
     capture_gated_frees: true,
     atomic_create_commit: true,
     commit_free_creation_gate: true,
+    manifest_fresh_shadow: true,
 };
 
 /// Capture mask covering every blob (group-commit behavior).
@@ -1047,10 +1057,16 @@ fn queue_repairs(disk: &mut Disk, adopted: &Adopted, rules: &Rules) {
         let (Some(&(phys, _, _)), Some(shadow)) = (entry.runs.get(&tail), entry.shadow) else {
             continue;
         };
-        let Block::Shadow(sc) = disk.read(shadow) else {
-            continue;
+        // The splice is a RAW byte copy: the implementation cannot tell a
+        // torn shadow block from a valid one at this point, so the model
+        // must not either — whatever the shadow block holds is written
+        // over the tail cell (garbage if torn/virgin/recycled). Manifest
+        // verification is what keeps an unverified shadow from ever being
+        // adopted (see `Rules::manifest_fresh_shadow`).
+        let sc = match disk.read(shadow) {
+            Block::Shadow(sc) => *sc,
+            _ => Cell::Garbage,
         };
-        let sc = *sc;
         // Positional sub-block write of the committed fragment: the sibling
         // cell keeps whatever the block held (garbage if torn/virgin).
         let high = match disk.read(phys) {
@@ -1379,6 +1395,15 @@ fn begin_snapshot(
             }
             shadows.push((sh, tail_cell));
             entry.shadow = Some(sh);
+            // The fresh shadow is a metadata write this commit may tear:
+            // manifest the tail block so verification checks the shadow
+            // content before adoption, even when no dirt touched the tail.
+            if rules.manifest_fresh_shadow {
+                let tail = size / CELLS_PER_BLOCK;
+                if !dirty_blocks.contains(&tail) {
+                    table.manifest.push((slot, tail));
+                }
+            }
         }
         for l in dirty_blocks {
             if entry.runs.contains_key(&l) {
@@ -2470,6 +2495,42 @@ mod tests {
         assert!(
             check(CORE, 9, 2, &rules).is_err(),
             "checker missed the freeze bug"
+        );
+    }
+
+    /// A commit whose dirt avoids the tail block still writes a FRESH
+    /// shadow, and recovery's splice is a raw byte copy: without the tail
+    /// block in the manifest, the crash outcome that tears exactly the
+    /// shadow (every other commit write landed) is adopted and the splice
+    /// destroys the intact committed tail (I3). Under SPEC the manifested
+    /// tail block forces shadow verification, rejecting the candidate and
+    /// rolling back the one unacknowledged commit.
+    #[test]
+    fn mutation_manifest_fresh_shadow_detected() {
+        let trace: &[Action] = &[
+            // Size 3: block 0 full, block 1 a partial (shadowed) tail.
+            Action::Append(0),
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(ALL),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            // Dirty ONLY block 0 (COW), then crash with the commit's
+            // metadata written but unsynced: one outcome lands everything
+            // except the fresh shadow, which tears.
+            Action::Overwrite(0),
+            Action::Snapshot(ALL),
+            Action::WriteMeta,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            manifest_fresh_shadow: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed the unverified shadow splice"
         );
     }
 
