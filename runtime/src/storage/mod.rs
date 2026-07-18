@@ -1253,12 +1253,7 @@ pub(crate) mod tests {
     {
         // Create a blob with version 1
         let (blob, _, version) = storage
-            .open_versioned(
-                "test_version_mismatch",
-                b"blob",
-                1..=1,
-                crate::BlobOptions::default(),
-            )
+            .open_versioned("test_version_mismatch", b"blob", 1..=1)
             .await
             .unwrap();
         assert_eq!(version, 1);
@@ -1267,24 +1262,14 @@ pub(crate) mod tests {
 
         // Reopen with a range that includes version 1
         let (_, _, version) = storage
-            .open_versioned(
-                "test_version_mismatch",
-                b"blob",
-                0..=2,
-                crate::BlobOptions::default(),
-            )
+            .open_versioned("test_version_mismatch", b"blob", 0..=2)
             .await
             .unwrap();
         assert_eq!(version, 1);
 
         // Try to open with version range that excludes version 1
         let result = storage
-            .open_versioned(
-                "test_version_mismatch",
-                b"blob",
-                2..=3,
-                crate::BlobOptions::default(),
-            )
+            .open_versioned("test_version_mismatch", b"blob", 2..=3)
             .await;
         assert!(
             matches!(

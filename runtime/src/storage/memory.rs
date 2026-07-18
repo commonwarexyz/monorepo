@@ -51,7 +51,6 @@ impl crate::Storage for Storage {
         partition: &str,
         name: &[u8],
         versions: RangeInclusive<u16>,
-        _options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), crate::Error> {
         super::validate_partition_name(partition)?;
 

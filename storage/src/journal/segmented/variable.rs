@@ -90,7 +90,7 @@ use crate::journal::{
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay, Writer},
-    Blob, BlobOptions, Buf, Handle, IoBuf, Metrics, Storage,
+    Blob, Buf, Handle, IoBuf, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -159,10 +159,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 write_buffer: cfg.write_buffer,
                 page_cache_ref: cfg.page_cache,
             },
-            // Reads miss through the page cache in page-sized probes, so
-            // the default verification group avoids group-sized
-            // amplification on first touch.
-            blob_options: BlobOptions::default(),
         };
         let manager = Manager::init(context, manager_cfg).await?;
 

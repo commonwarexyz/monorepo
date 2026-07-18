@@ -75,14 +75,9 @@ impl<E: Context> Partition<E> {
         batch: &mut E::Batch,
     ) -> Result<Writer<E::Blob>, Error> {
         let name = blob.to_be_bytes();
-        let blob = commonware_runtime::WriteBatch::create(
-            batch,
-            &self.name,
-            &name,
-            commonware_runtime::BlobOptions::default(),
-        )
-        .await
-        .map_err(Error::Runtime)?;
+        let blob = commonware_runtime::WriteBatch::create(batch, &self.name, &name)
+            .await
+            .map_err(Error::Runtime)?;
         Writer::new(blob, 0, self.write_buffer.get(), self.page_cache.clone())
             .await
             .map_err(Error::Runtime)

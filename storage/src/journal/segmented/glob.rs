@@ -21,14 +21,9 @@
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared};
-use commonware_runtime::{BlobOptions, BufferPooler, Handle, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Handle, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
-
-/// Verification-group size for glob blobs: 64 KiB (16 blocks) per checksum
-/// instead of the 4 KiB default (see the manager config below for the
-/// read-shape justification).
-const VERIFICATION_GROUP: u64 = 64 << 10;
 
 /// Configuration for blob storage.
 #[derive(Clone)]
@@ -69,15 +64,6 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
             factory: WriteFactory {
                 capacity: cfg.write_buffer,
                 pool: context.storage_buffer_pool().clone(),
-            },
-            // Glob blobs are written contiguously (buffered appends) and
-            // read as whole values, uncached, so coarse verification
-            // groups cut checksum metadata and commit-manifest size 16x.
-            // The trade-off is a one-time group-sized read to verify the
-            // first touch of each group after restart — value-sized reads
-            // amortize it, and replay-style scans pay nothing extra.
-            blob_options: BlobOptions {
-                verification_group: Some(VERIFICATION_GROUP),
             },
         };
         let manager = Manager::init(context, manager_cfg).await?;

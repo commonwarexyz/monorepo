@@ -29,35 +29,6 @@
 //! - Extent recycling through deferred frees, hole runs from resize-up, and
 //!   the sacred-slot rule for superblock writes.
 //!
-//! ## Verification groups are below this abstraction
-//!
-//! The implementation supports per-blob verification chunks WIDER than the
-//! tear granularity (`Entry::group`: one CRC per 2^g blocks). The model
-//! needs no group dimension because its "block" IS the verification unit —
-//! the unit the manifest names and recovery CRC-checks — and its cells are
-//! the sub-unit content that tearing resolves. What the protocol requires
-//! of a verification unit, whatever its width:
-//!
-//! - At most ONE tear atom mixes committed bytes with post-snapshot
-//!   in-place writes (the freeze boundary is a single offset, so only the
-//!   block containing the frontier fragment is shared — the model's
-//!   cell-pair). The shadow covers exactly that atom's committed fragment,
-//!   in the model `Shadow(c0)`, in the implementation the final partial
-//!   BLOCK of the frontier span.
-//! - Every other committed byte of a manifested unit is either stable
-//!   (durable before the candidate commit, never rewritten in place under
-//!   the freeze rule — it cannot tear) or written BY the candidate commit
-//!   (a tear anywhere in it fails the unit's fingerprint and rejects the
-//!   candidate, the intended torn-commit outcome). A wide unit only ANDs
-//!   more per-block conditions into one fingerprint: it can reject a
-//!   candidate no block-granular check would (never the reverse), and the
-//!   extra strictness never fires on the fallback slot, whose manifested
-//!   bytes are all stable or shadow-recovered.
-//!
-//! Both properties are geometry-independent, so the model's decisions
-//! carry over to any group width and no group-specific rule exists to
-//! mutation-test.
-//!
 //! # The freeze rule
 //!
 //! Every run tracks how many of its cells are FROZEN: covered by the last

@@ -86,18 +86,12 @@ impl<B: crate::WriteBatch> crate::WriteBatch for Batch<B> {
         self.inner.remove(partition, name);
     }
 
-    async fn create(
-        &mut self,
-        partition: &str,
-        name: &[u8],
-        options: crate::BlobOptions,
-    ) -> Result<Self::Blob, Error> {
+    async fn create(&mut self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.auditor.event(b"batch_create", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
-            hasher.update(options.verification_group.unwrap_or(0).to_be_bytes());
         });
-        let inner = self.inner.create(partition, name, options).await?;
+        let inner = self.inner.create(partition, name).await?;
         Ok(Blob {
             auditor: self.auditor.clone(),
             partition: partition.into(),
@@ -130,17 +124,15 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
-        options: crate::BlobOptions,
     ) -> Result<(Self::Blob, u64, u16), Error> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
             hasher.update(versions.start().to_be_bytes());
             hasher.update(versions.end().to_be_bytes());
-            hasher.update(options.verification_group.unwrap_or(0).to_be_bytes());
         });
         self.inner
-            .open_versioned(partition, name, versions, options)
+            .open_versioned(partition, name, versions)
             .await
             .map(|(blob, len, blob_version)| {
                 (

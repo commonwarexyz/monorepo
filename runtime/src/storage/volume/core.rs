@@ -56,65 +56,10 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-/// Log2 of [`BLOCK`].
-pub(super) const BLOCK_BITS: u32 = BLOCK.trailing_zeros();
-
-/// Per-blob verification-chunk geometry: a chunk — the unit of checksum
-/// coverage, read verification, and delta manifests — spans
-/// `BLOCK << group` bytes (`group` fixed at blob creation, see
-/// [`super::layout::Entry::group`]). Blocks remain the physical tear,
-/// alignment, and allocation granularity. Geometry invariant: every run's
-/// logical start is chunk-aligned and every run's capacity is a whole
-/// number of chunks, so each chunk is backed by (a contiguous slice of)
-/// exactly one run and its written span is contiguous from the chunk base.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Geometry {
-    /// Log2 of blocks per chunk (0 = the [`BLOCK`] default).
-    pub group: u8,
-}
-
-/// The largest verification group a blob may request, as log2 of blocks
-/// per chunk (2^8 blocks = 1 MiB): bounds the tail buffer, the first-touch
-/// read amplification, and COW copies.
-const MAX_GROUP: u8 = 8;
-
-impl Geometry {
-    /// Derive a blob's geometry from its creation options.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the requested verification group is not a power-of-two
-    /// multiple of [`BLOCK`] of at most `BLOCK << MAX_GROUP` (a caller
-    /// contract: the hint is a compile-time constant of the structure
-    /// configuring it).
-    pub fn from_options(options: &crate::BlobOptions) -> Self {
-        let Some(bytes) = options.verification_group else {
-            return Self::default();
-        };
-        assert!(
-            bytes.is_power_of_two() && (BLOCK..=BLOCK << MAX_GROUP).contains(&bytes),
-            "verification group must be a power-of-two multiple of {BLOCK} at most {}: {bytes}",
-            BLOCK << MAX_GROUP
-        );
-        Self {
-            group: (bytes / BLOCK).trailing_zeros() as u8,
-        }
-    }
-
-    /// The chunk size in bytes.
-    pub const fn chunk_size(self) -> u64 {
-        BLOCK << self.group
-    }
-
-    /// The chunk index containing logical byte `offset`.
-    pub const fn chunk_of(self, offset: u64) -> u64 {
-        offset >> (BLOCK_BITS + self.group as u32)
-    }
-
-    /// Round `len` up to a whole number of chunks.
-    pub const fn chunk_align(self, len: u64) -> u64 {
-        len.div_ceil(self.chunk_size()) * self.chunk_size()
-    }
+/// The chunk index containing logical byte `offset`. Chunks and blocks
+/// coincide in this format (checksum granularity == tearing granularity).
+pub(super) const fn chunk_of(offset: u64) -> u64 {
+    offset / BLOCK
 }
 
 /// A run in RAM: logical bytes `[logical, logical + len)` live at
@@ -563,12 +508,12 @@ impl ChunkMap {
 
     /// Seed dense state for every chunk covered by `runs` (hydration): all
     /// unverified, with CRCs left on disk ([`ChunkCrc::Unloaded`]).
-    pub fn seed(&mut self, runs: &BTreeMap<u64, RunMeta>, geo: Geometry) {
+    pub fn seed(&mut self, runs: &BTreeMap<u64, RunMeta>) {
         debug_assert!(self.segments.is_empty(), "seed into an empty map");
         let mut open: Option<(u64, u64)> = None;
         for (&logical, run) in runs {
-            let lo = geo.chunk_of(logical);
-            let hi = geo.chunk_of(logical + run.len - 1);
+            let lo = chunk_of(logical);
+            let hi = chunk_of(logical + run.len - 1);
             match &mut open {
                 // Runs never share a chunk, but adjacent runs may cover
                 // adjacent chunks: coalesce into one segment.
@@ -677,11 +622,9 @@ impl ChunkMap {
     }
 }
 
-/// Cap on a blob's overlay entries (chunks kept in RAM for deferred CRCs),
-/// for the default one-block chunk. Coarser chunks scale the entry cap
-/// down by their group factor so the BYTE budget is constant.
+/// Cap on a blob's overlay entries (chunks kept in RAM for deferred CRCs).
 ///
-/// Sized to cover the sub-chunk-rewrite working set of a table-like blob
+/// Sized to cover the sub-block-rewrite working set of a table-like blob
 /// (e.g. a hash-table head region) between syncs — 1024 chunks is 4 MiB —
 /// while keeping per-blob RAM bounded. Only chunks that demonstrate
 /// splice-style rewrites are ever resident, and overflow degrades
@@ -766,8 +709,6 @@ impl CrcCache {
 /// Per-blob mutable state.
 #[derive(Debug, Default)]
 pub(super) struct BlobInner {
-    /// Verification-chunk geometry, immutable and fixed at creation.
-    pub geo: Geometry,
     /// Current logical size (includes uncommitted writes).
     pub size: u64,
     /// Freeze boundary: bytes below are covered by the last confirmed table
@@ -834,12 +775,11 @@ impl BlobInner {
     }
 
     /// The backed span of `chunk`: `(physical base, span len)`, or None for
-    /// a hole. Every chunk is covered by at most one run (the geometry
-    /// invariant: run starts are chunk-aligned).
+    /// a hole. Every chunk is covered by at most one run.
     pub fn chunk_span(&self, chunk: u64) -> Option<(u64, u64)> {
-        let chunk_start = chunk * self.geo.chunk_size();
+        let chunk_start = chunk * BLOCK;
         let (logical, run) = self.covering(chunk_start)?;
-        let span = (logical + run.len - chunk_start).min(self.geo.chunk_size());
+        let span = (logical + run.len - chunk_start).min(BLOCK);
         Some((run.physical + (chunk_start - logical), span))
     }
 
@@ -854,13 +794,12 @@ impl BlobInner {
     }
 
     /// Insert or refresh `chunk`'s overlay entry, evicting (and finalizing)
-    /// the least-recently-used entry beyond the cap (a constant byte
-    /// budget: coarser chunks hold proportionally fewer entries).
+    /// the least-recently-used entry beyond the cap.
     pub fn overlay_insert(&mut self, chunk: u64, bytes: Vec<u8>) {
         self.overlay_clock += 1;
         let stamp = self.overlay_clock;
         self.overlay.insert(chunk, OverlayEntry { stamp, bytes });
-        if self.overlay.len() > (OVERLAY_CHUNKS >> self.geo.group).max(1) {
+        if self.overlay.len() > OVERLAY_CHUNKS {
             let lru = self
                 .overlay
                 .iter()
@@ -1190,9 +1129,9 @@ impl StagedBlob {
 
     /// The merged backed span of `chunk`: (physical base, span len).
     pub fn chunk_span(&self, inner: &BlobInner, chunk: u64) -> Option<(u64, u64)> {
-        let chunk_start = chunk * inner.geo.chunk_size();
+        let chunk_start = chunk * BLOCK;
         let (logical, run, _) = self.covering(inner, chunk_start)?;
-        let span = (logical + run.len - chunk_start).min(inner.geo.chunk_size());
+        let span = (logical + run.len - chunk_start).min(BLOCK);
         Some((run.physical + (chunk_start - logical), span))
     }
 }
@@ -1389,9 +1328,6 @@ async fn plan_stretch<S: crate::Storage>(
         NeedCrc(u64),
     }
 
-    // The blob's chunk geometry (immutable once created).
-    let geo = blob.inner.lock().geo;
-
     // The COW of a chunk untouched since hydration needs its committed CRC
     // (the read-back check): loaded outside the locks, memoized, and the
     // plan re-derived. The target chunk is fixed by `cursor`, so the memo
@@ -1401,8 +1337,8 @@ async fn plan_stretch<S: crate::Storage>(
         let outcome = 'plan: {
             let mut state = ready.state.lock();
             let mut inner = blob.inner.lock();
-            let chunk = geo.chunk_of(cursor);
-            let chunk_start = chunk * geo.chunk_size();
+            let chunk = chunk_of(cursor);
+            let chunk_start = chunk * BLOCK;
 
             // Merged coverage and placement: the base view for published
             // writes, the overlay-over-base view for staged writes.
@@ -1478,7 +1414,7 @@ async fn plan_stretch<S: crate::Storage>(
                                 CowSource::Disk { expected }
                             }
                         };
-                        let extent = state.alloc.allocate(geo.chunk_size());
+                        let extent = state.alloc.allocate(BLOCK);
                         Outcome::Plan(Plan::Cow {
                             span_physical,
                             span_len,
@@ -1496,7 +1432,7 @@ async fn plan_stretch<S: crate::Storage>(
                         debug_assert!(stretch_end > cursor);
                         // Overlay fast path (base mode): the write stays inside
                         // this chunk's written span and the span is resident.
-                        let chunk_end = chunk_start + geo.chunk_size();
+                        let chunk_end = chunk_start + BLOCK;
                         let span_end = chunk_end.min(backed_end);
                         if staged.is_none()
                             && end.min(chunk_end) <= span_end
@@ -1533,11 +1469,7 @@ async fn plan_stretch<S: crate::Storage>(
                         )
                         .unwrap_or(u64::MAX);
                     let stretch_end = end.min(next_backed);
-                    // A whole number of chunks: capacity ends stay
-                    // chunk-aligned so no later run starts mid-chunk (the
-                    // geometry invariant). `next_backed` is chunk-aligned,
-                    // so the rounding never overlaps it.
-                    let len = geo.chunk_align(stretch_end - chunk_start);
+                    let len = block_align(stretch_end - chunk_start);
                     let extent = state.alloc.allocate(len);
                     Outcome::Plan(Plan::Fresh {
                         stretch_end,
@@ -1571,14 +1503,13 @@ async fn plan_stretch<S: crate::Storage>(
             let d0 = (cursor - data_base) as usize;
             let d1 = (stretch_end - data_base) as usize;
             let payload = data.slice(d0..d1);
-            let chunk = geo.chunk_of(cursor);
-            let at = (cursor - chunk * geo.chunk_size()) as usize;
+            let at = (cursor % BLOCK) as usize;
             Ok(Stretch {
                 end: stretch_end,
                 physical,
                 bytes: payload.clone().into(),
                 run: (run_logical, run),
-                crcs: vec![(chunk, CrcUpdate::Splice { at, data: payload })],
+                crcs: vec![(chunk_of(cursor), CrcUpdate::Splice { at, data: payload })],
                 last_span: None,
                 replaced: None,
                 allocated: None,
@@ -1603,12 +1534,12 @@ async fn plan_stretch<S: crate::Storage>(
             // no assembly of the payload.
             let d0 = (cursor - data_base) as usize;
             let d1 = (stretch_end - data_base) as usize;
-            let first_chunk = geo.chunk_of(fill_from);
-            let last_chunk = geo.chunk_of(stretch_end - 1);
-            let base = first_chunk * geo.chunk_size();
+            let first_chunk = chunk_of(fill_from);
+            let last_chunk = chunk_of(stretch_end - 1);
+            let base = first_chunk * BLOCK;
 
             let span_end = (run_logical + run.len).max(stretch_end);
-            let chunk_cap = (last_chunk + 1) * geo.chunk_size();
+            let chunk_cap = (last_chunk + 1) * BLOCK;
             let suffix_end = span_end.min(chunk_cap);
 
             let (prefix, prefix_verified) =
@@ -1647,8 +1578,8 @@ async fn plan_stretch<S: crate::Storage>(
             let mut crcs = Vec::new();
             let mut last_span = None;
             for chunk in first_chunk..=last_chunk {
-                let lo = chunk * geo.chunk_size();
-                let hi = suffix_end.min(lo + geo.chunk_size());
+                let lo = chunk * BLOCK;
+                let hi = suffix_end.min(lo + BLOCK);
                 // A chunk assembled purely from process memory (payload, gap
                 // zeros, tail-buffer or overlay-sourced prefix/suffix) is
                 // verified by construction; a chunk that spliced in an
@@ -1723,13 +1654,13 @@ async fn plan_stretch<S: crate::Storage>(
                 (cursor, payload.as_ref()),
             ];
 
-            let first_chunk = geo.chunk_of(chunk_base);
-            let last_chunk = geo.chunk_of(stretch_end - 1);
+            let first_chunk = chunk_of(chunk_base);
+            let last_chunk = chunk_of(stretch_end - 1);
             let mut crcs = Vec::new();
             let mut last_span = None;
             for chunk in first_chunk..=last_chunk {
-                let lo = chunk * geo.chunk_size();
-                let hi = stretch_end.min(lo + geo.chunk_size());
+                let lo = chunk * BLOCK;
+                let hi = stretch_end.min(lo + BLOCK);
                 // Assembled purely from process memory (lead zeros + the
                 // payload): verified by construction. A chunk written from
                 // a sub-block lead (base mode) is a splice-rewrite
@@ -1782,9 +1713,9 @@ async fn plan_stretch<S: crate::Storage>(
             seq,
             source,
         } => {
-            let chunk = geo.chunk_of(cursor);
-            let chunk_start = chunk * geo.chunk_size();
-            let stretch_end = end.min(chunk_start + geo.chunk_size());
+            let chunk = chunk_of(cursor);
+            let chunk_start = chunk * BLOCK;
+            let stretch_end = end.min(chunk_start + BLOCK);
             let w0 = (cursor - chunk_start) as usize;
             let w1 = (stretch_end - chunk_start) as usize;
             let d0 = (cursor - data_base) as usize;
@@ -1855,12 +1786,9 @@ async fn plan_stretch<S: crate::Storage>(
                 crcs: vec![(chunk, update)],
                 last_span,
                 bytes: buf.freeze().into(),
-                // The old run's whole capacity slice for this chunk (span
-                // starts at the chunk base, and capacities are
-                // chunk-multiples, so the slice is exactly one chunk).
                 replaced: Some(Extent {
-                    offset: span_physical,
-                    len: geo.chunk_size(),
+                    offset: span_physical - (span_physical % BLOCK),
+                    len: BLOCK,
                 }),
                 allocated: Some(extent),
                 private: true,
@@ -1923,7 +1851,7 @@ async fn read_span_prefix<S: crate::Storage>(
     if prefix_len == 0 {
         return Ok((Vec::new(), true));
     }
-    let chunk = blob.inner.lock().geo.chunk_of(base);
+    let chunk = chunk_of(base);
     {
         let mut inner = blob.inner.lock();
         // The staged tail wins for chunks the batch touched; published
@@ -1971,10 +1899,9 @@ async fn read_span_suffix<S: crate::Storage>(
     stretch_end: u64,
     suffix_end: u64,
 ) -> Result<(Vec<u8>, bool), Error> {
-    let geo = blob.inner.lock().geo;
-    let chunk = geo.chunk_of(stretch_end - 1);
-    let s = (stretch_end - chunk * geo.chunk_size()) as usize;
-    let e = (suffix_end - chunk * geo.chunk_size()) as usize;
+    let chunk = chunk_of(stretch_end - 1);
+    let s = (stretch_end - chunk * BLOCK) as usize;
+    let e = (suffix_end - chunk * BLOCK) as usize;
     {
         let mut inner = blob.inner.lock();
         if let Some(st) = staged {
@@ -2134,7 +2061,7 @@ fn cow_remap_staged(inner: &BlobInner, staged: &mut StagedBlob, chunk_start: u64
         .expect("COW of unbacked chunk");
     debug_assert!(!old_private, "private chunks are written in place");
     let old_end = old_logical + old_run.len;
-    let chunk_end = chunk_start + inner.geo.chunk_size();
+    let chunk_end = chunk_start + BLOCK;
 
     // Detach the source run from the merged view.
     if staged.runs.remove(&old_logical).is_none() {
@@ -2180,7 +2107,7 @@ fn cow_remap_staged(inner: &BlobInner, staged: &mut StagedBlob, chunk_start: u64
 fn cow_remap(inner: &mut BlobInner, chunk_start: u64, fresh: RunMeta) {
     let (old_logical, old_run) = inner.covering(chunk_start).expect("COW of unbacked chunk");
     let old_end = old_logical + old_run.len;
-    let chunk_end = chunk_start + inner.geo.chunk_size();
+    let chunk_end = chunk_start + BLOCK;
 
     inner.runs.remove(&old_logical);
     if old_logical < chunk_start {
@@ -2466,8 +2393,8 @@ impl ReadGroup {
     /// some bytes are served on the strength of a prior verification and a
     /// relocation racing the read (whose extent may have been recycled)
     /// forces a retry.
-    const fn all_checked(&self, geo: Geometry) -> bool {
-        let chunks = geo.chunk_of(self.logical + self.len - 1) - geo.chunk_of(self.logical) + 1;
+    const fn all_checked(&self) -> bool {
+        let chunks = chunk_of(self.logical + self.len - 1) - chunk_of(self.logical) + 1;
         self.checks.len() as u64 == chunks
     }
 }
@@ -2477,9 +2404,6 @@ impl ReadGroup {
 /// the relocation generation the plan is valid against.
 struct ReadPlan {
     generation: u64,
-    /// The blob's chunk geometry, carried (it is immutable) so post-plan
-    /// chunk math needs no lock.
-    geo: Geometry,
     /// The first coalesced read. Held out of `rest` so the by-far-common
     /// single-read plan allocates nothing.
     head: Option<ReadGroup>,
@@ -2518,15 +2442,13 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u
     // not tax reads of verified territory. Other shapes (holes, run
     // boundaries, unverified or pending chunks in the span) take the full
     // scan.
-    let geo = inner.geo;
-    let first = geo.chunk_of(offset);
-    let last = geo.chunk_of(end - 1);
+    let first = chunk_of(offset);
+    let last = chunk_of(end - 1);
     if let Some((l, r)) = inner.covering(offset) {
         if end <= l + r.len && (inner.crcs.all_verified() || inner.crcs.span_verified(first, last))
         {
             return Planned::Plan(ReadPlan {
                 generation: inner.generation,
-                geo,
                 head: Some(ReadGroup {
                     physical: r.physical + (offset - l),
                     logical: offset,
@@ -2556,13 +2478,13 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u
         // Track the covering run alongside the chunk walk: start at the run
         // at or before the first chunk and advance as chunks pass.
         let start = all_runs
-            .range(..=first * geo.chunk_size())
+            .range(..=first * BLOCK)
             .next_back()
-            .map_or(first * geo.chunk_size(), |(&l, _)| l);
+            .map_or(first * BLOCK, |(&l, _)| l);
         let mut runs = all_runs.range(start..);
         let mut run: Option<(u64, RunMeta)> = None;
         for (chunk, state) in crcs.iter_range(first, last) {
-            let chunk_start = chunk * geo.chunk_size();
+            let chunk_start = chunk * BLOCK;
             while run.is_none_or(|(l, r)| l + r.len <= chunk_start) {
                 match runs.next() {
                     Some((&l, &r)) => run = Some((l, r)),
@@ -2576,7 +2498,7 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u
             else {
                 unreachable!("chunk state without a covering run")
             };
-            let span = (l + r.len - chunk_start).min(geo.chunk_size());
+            let span = (l + r.len - chunk_start).min(BLOCK);
             let lo = offset.max(chunk_start);
             let hi = end.min(chunk_start + span);
             if state.crc == ChunkCrc::Pending {
@@ -2654,8 +2576,8 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u
     let splices = pending
         .into_iter()
         .map(|(lo, hi)| {
-            let chunk = geo.chunk_of(lo);
-            let base = chunk * geo.chunk_size();
+            let chunk = chunk_of(lo);
+            let base = chunk * BLOCK;
             let bytes = inner
                 .overlay_get(chunk)
                 .expect("pending chunk is overlay-resident");
@@ -2667,7 +2589,6 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u
         .collect();
     Planned::Plan(ReadPlan {
         generation: inner.generation,
-        geo,
         head,
         rest,
         splices,
@@ -2790,11 +2711,11 @@ pub(super) async fn read_verified<S: crate::Storage>(
                             ok = false;
                             break;
                         }
-                        checked.push((plan.geo.chunk_of(chunk_start), crc));
+                        checked.push((chunk_of(chunk_start), crc));
                     }
                 }
                 if ok {
-                    if publish_read(blob, generation, &checked, !group.all_checked(plan.geo)) {
+                    if publish_read(blob, generation, &checked, !group.all_checked()) {
                         return Ok(bufs);
                     }
                     // The backing relocated (and may have been recycled)
@@ -2839,11 +2760,11 @@ pub(super) async fn read_verified<S: crate::Storage>(
                     &bytes.as_ref()[(r0 - group.logical) as usize..(r1 - group.logical) as usize],
                 );
             }
-            unchecked |= !group.all_checked(plan.geo);
+            unchecked |= !group.all_checked();
             for &(chunk_start, span, crc) in &group.checks {
                 let at = (chunk_start - group.logical) as usize;
                 if Crc32::checksum(&bytes.as_ref()[at..at + span as usize]) == crc {
-                    checked.push((plan.geo.chunk_of(chunk_start), crc));
+                    checked.push((chunk_of(chunk_start), crc));
                     continue;
                 }
                 {
@@ -2858,7 +2779,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 // mid-write, the expected CRC: quiesce the (single) writer
                 // and re-verify the chunk against its now-stable state
                 // before reporting corruption.
-                let chunk = plan.geo.chunk_of(chunk_start);
+                let chunk = chunk_of(chunk_start);
                 let _quiesce = blob.write_lock.lock().await;
                 /// A quiesced chunk's stable content source.
                 enum Stable {
@@ -2983,10 +2904,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
     len: u64,
 ) -> Result<(), Error> {
     ready.check_poisoned()?;
-    let (old_size, geo) = {
-        let inner = blob.inner.lock();
-        (inner.size, inner.geo)
-    };
+    let old_size = blob.inner.lock().size;
 
     if len >= old_size {
         // Zero extension: physically zero the backed portion of the
@@ -2995,11 +2913,9 @@ pub(super) async fn resize_locked<S: crate::Storage>(
         // vouch for zeros it never wrote); unbacked regions become holes.
         let zero_to = {
             let inner = blob.inner.lock();
-            let boundary = geo.chunk_of(old_size);
+            let boundary = chunk_of(old_size);
             match inner.chunk_span(boundary) {
-                Some(_) if !old_size.is_multiple_of(geo.chunk_size()) => {
-                    ((boundary + 1) * geo.chunk_size()).min(len)
-                }
+                Some(_) if !old_size.is_multiple_of(BLOCK) => ((boundary + 1) * BLOCK).min(len),
                 _ => old_size,
             }
         };
@@ -3040,10 +2956,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             let run = inner.runs.get_mut(&l).unwrap();
             if l + run.len > len {
                 run.len = len - l;
-                // Keep the capacity a whole number of chunks (the geometry
-                // invariant): a later append grows in place to the chunk
-                // boundary instead of starting a run mid-chunk.
-                let keep = geo.chunk_align(run.len);
+                let keep = block_align(run.len);
                 if run.capacity > keep {
                     let trimmed = Extent {
                         offset: run.physical + keep,
@@ -3060,7 +2973,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             inner.tail.clear();
             inner.tail_chunk = 0;
         } else {
-            let boundary = geo.chunk_of(len - 1);
+            let boundary = chunk_of(len - 1);
             inner.crcs.truncate(boundary);
             inner.dirty_chunks.retain(|&c| c <= boundary);
             inner.dirty_chunks.insert(boundary);
@@ -3072,7 +2985,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
 
     // Recompute the boundary chunk's CRC/tail from its (unchanged) bytes.
     if len > 0 {
-        let boundary = geo.chunk_of(len - 1);
+        let boundary = chunk_of(len - 1);
         let span = {
             let inner = blob.inner.lock();
             inner.chunk_span(boundary)
