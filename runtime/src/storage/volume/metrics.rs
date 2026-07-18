@@ -23,7 +23,9 @@ pub(super) struct Metrics {
     /// batch commits, namespace changes). `sync_requests / commits` is the
     /// coalescing ratio.
     pub sync_requests: Counter,
-    /// Inner fsync latency in seconds.
+    /// Inner fsync latency in seconds. Never observed on wasm32, which has
+    /// no monotonic clock.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fsync_duration: Histogram,
     /// Successful recoveries (volume opens).
     pub recoveries: Counter,
