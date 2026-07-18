@@ -513,8 +513,11 @@ impl<S: crate::Storage> Batch<S> {
     /// `commit::drive`). The handle must be observed: a commit failure is
     /// reported only through it (and permanently poisons the volume), and
     /// awaiting it is what guarantees a commit runs without depending on
-    /// unrelated traffic. A crash before a covering commit discards the
-    /// published batch wholesale, exactly like a batch published with
+    /// unrelated traffic. A polled handle must then be driven to
+    /// completion or dropped — parked it can hold the commit lock, and
+    /// dropped mid-commit it poisons the volume (see
+    /// `commit::CancelGuard`). A crash before a covering commit discards
+    /// the published batch wholesale, exactly like a batch published with
     /// [`Self::apply`].
     ///
     /// # Panics

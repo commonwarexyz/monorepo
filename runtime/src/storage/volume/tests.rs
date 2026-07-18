@@ -3802,3 +3802,112 @@ async fn test_volume_torn_shadow_rolls_back_one_commit() {
         .coalesce();
     assert_eq!(got.as_ref(), &vec![0x11u8; 2 * BLOCK as usize + 100][..]);
 }
+
+/// A leader dropped mid-commit (a cancelled sync future, or an abandoned
+/// partially-driven start_sync handle) must POISON the volume and resolve
+/// the drained ticket with the poisoning error: the snapshot has already
+/// consumed dirty state and possibly issued metadata writes, so the
+/// half-driven commit can neither complete nor unwind, and no later commit
+/// may vouch over it. Pooled waiters observe the error, later syncs fail
+/// loudly, and nothing silently reports durability.
+#[tokio::test]
+async fn test_volume_cancelled_commit_poisons() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    let after_open = gated.syncs();
+    a.write_at(0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    b.write_at(0, IoBuf::copy_from_slice(&[0x2u8; 200]))
+        .await
+        .unwrap();
+
+    // Both register under one ticket; drive `ha` into leadership, park it
+    // at the gated inner fsync, then cancel it (dropping the drive future
+    // mid-commit).
+    let ha = a.start_sync().await;
+    let hb = b.start_sync().await;
+    gated.sync_gate.arm();
+    let driver = tokio::spawn(async move { ha.await });
+    gated.sync_gate.wait_reached().await;
+    driver.abort();
+    let _ = driver.await;
+    gated.sync_gate.release();
+
+    // The cancelled commit never completed its fsync; the volume must be
+    // poisoned rather than silently losing the drained roots.
+    assert_eq!(
+        gated.syncs(),
+        after_open,
+        "cancelled commit must not complete an fsync"
+    );
+    assert!(
+        hb.await.is_err(),
+        "pooled waiter must observe the cancellation"
+    );
+    assert!(
+        a.sync().await.is_err(),
+        "sync after a cancelled commit must fail, not silently report durability"
+    );
+    assert!(volume.batch().await.is_err(), "volume must be poisoned");
+}
+
+/// Dropping a start_sync handle that never assumed commit leadership is
+/// benign: never-polled handles and handles dropped while still queued on
+/// the commit lock leave their registered root pooled for the next commit
+/// and must not poison the volume.
+#[tokio::test]
+async fn test_volume_undriven_start_sync_drop_is_benign() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    b.write_at(0, IoBuf::copy_from_slice(&[0x2u8; 200]))
+        .await
+        .unwrap();
+
+    // Never polled at all.
+    drop(a.start_sync().await);
+
+    // Polled only while ANOTHER commit held the lock: queued, then dropped
+    // before ever leading.
+    gated.sync_gate.arm();
+    let commit = {
+        let b = b.clone();
+        tokio::spawn(async move { b.sync().await })
+    };
+    gated.sync_gate.wait_reached().await;
+    let hq = Box::pin(a.start_sync().await);
+    let mut hq = hq;
+    for _ in 0..8 {
+        assert!(
+            futures::poll!(hq.as_mut()).is_pending(),
+            "queued handle cannot lead while the lock is held"
+        );
+        tokio::task::yield_now().await;
+    }
+    drop(hq);
+    gated.sync_gate.release();
+    commit.await.unwrap().unwrap();
+
+    // The volume stays healthy and a later sync covers a's root.
+    a.sync().await.unwrap();
+    drop((a, b));
+    drop(volume);
+    let volume = Volume::new(gated, pool, Config::default());
+    let (a, size) = volume.open("p", b"a").await.unwrap();
+    assert_eq!(size, 100);
+    assert_eq!(
+        a.read_at(0, 100).await.unwrap().coalesce().as_ref(),
+        &[0x1u8; 100]
+    );
+}

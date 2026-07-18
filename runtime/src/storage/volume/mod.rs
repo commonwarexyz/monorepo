@@ -661,10 +661,13 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
         // pool after this point covers this blob and resolves the handle.
         // The handle itself lead-drives a covering commit when awaited (see
         // `commit::drive`), so its progress never depends on unrelated
-        // traffic — but it must be awaited: an unpolled handle leaves the
-        // registered root for the next commit, and a commit failure is
+        // traffic — but it must be awaited: a never-polled handle leaves
+        // the registered root for the next commit, and a commit failure is
         // reported only through the handle (the poison latch also fails
-        // every later operation).
+        // every later operation). A handle polled at least once must be
+        // driven to completion or dropped: parked (alive, unpolled) it can
+        // hold the commit lock and block every later commit, and dropped
+        // mid-commit it poisons the volume (see `commit::CancelGuard`).
         let ticket = commit::register(&self.ready, &[self.core.id]);
         let ready = self.ready.clone();
         Handle::from_future(async move { commit::drive(&ready, ticket).await })

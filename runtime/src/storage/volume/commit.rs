@@ -63,6 +63,46 @@ struct Snapshot {
 /// coalesced commit that will cover the registered roots.
 pub(super) type Ticket = Arc<OnceLock<Result<(), Error>>>;
 
+/// Poisons the volume and fails the drained ticket if the leader's commit
+/// future is dropped mid-flight (a cancelled sync future, or a
+/// partially-driven [`crate::Handle`] that was dropped).
+///
+/// A leader dropped mid-commit has already swapped the pool's ticket and
+/// may have consumed snapshot state (dirty marks, deferred frees,
+/// committed-meta swaps, cached entry encodings) or issued metadata
+/// writes. The half-driven commit can neither be completed nor unwound
+/// from a `Drop` impl, and a later commit would vouch for state it cannot
+/// prove landed — so cancellation latches the same poison as a failed
+/// commit, and every pooled waiter observes the error through the ticket.
+/// Futures dropped BEFORE leadership (never polled, or still queued on the
+/// commit lock) never arm this guard and stay benign.
+struct CancelGuard<'a, S: crate::Storage> {
+    ready: &'a Ready<S>,
+    ticket: Option<Ticket>,
+}
+
+impl<S: crate::Storage> CancelGuard<'_, S> {
+    /// Disarm the guard and resolve the drained ticket with the commit's
+    /// result.
+    fn resolve(mut self, result: Result<(), Error>) {
+        let ticket = self.ticket.take().expect("guard resolves once");
+        ticket
+            .set(result)
+            .expect("only the draining leader resolves a ticket");
+    }
+}
+
+impl<S: crate::Storage> Drop for CancelGuard<'_, S> {
+    fn drop(&mut self) {
+        let Some(ticket) = self.ticket.take() else {
+            return;
+        };
+        let error = Error::Aborted;
+        let _ = self.ready.poisoned.set(error.clone());
+        let _ = ticket.set(Err(error));
+    }
+}
+
 /// Register `roots` in the pending-commit pool under the CURRENT ticket:
 /// the first leader to drain the pool after this point covers these roots
 /// and resolves the returned ticket with the union commit's result.
@@ -88,21 +128,26 @@ pub(super) async fn drive<S: crate::Storage>(
     }
     // Leader: an unresolved ticket is still the pool's current ticket (a
     // leader swaps the ticket out only while holding the commit lock and
-    // resolves it before releasing), so draining returns it.
+    // resolves it before releasing — including on cancellation, via
+    // `CancelGuard`), so draining returns it.
     let (union, ticket) = {
         let mut pending = ready.pending.lock();
         let union: Vec<u64> = std::mem::take(&mut pending.roots).into_iter().collect();
         let drained = std::mem::replace(&mut pending.ticket, Arc::new(OnceLock::new()));
-        debug_assert!(
+        assert!(
             Arc::ptr_eq(&ticket, &drained),
             "unresolved ticket must be the pool's current ticket"
         );
         (union, drained)
     };
+    // Leadership is assumed: from here, dropping this future mid-commit
+    // must poison instead of silently vanishing (see [`CancelGuard`]).
+    let guard = CancelGuard {
+        ready,
+        ticket: Some(ticket),
+    };
     let result = commit_locked(ready, &union).await;
-    ticket
-        .set(result.clone())
-        .expect("only the draining leader resolves a ticket");
+    guard.resolve(result.clone());
     result
 }
 
