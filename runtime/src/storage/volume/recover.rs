@@ -755,7 +755,10 @@ pub(super) async fn hydrate<S: crate::Storage>(
         // extent.
         let bytes = ready.file.read_at(phys, span as usize).await?.coalesce();
         if Crc32::checksum(bytes.as_ref()) != entry.tail_crc {
-            return Err(corrupt("frontier chunk checksum mismatch"));
+            ready.metrics.corruptions.inc();
+            return Err(corrupt(&format!(
+                "frontier chunk {last} checksum mismatch ({span} bytes at offset {phys})"
+            )));
         }
         // Hydration itself verified the frontier chunk (and holds its CRC).
         inner.crcs.insert(
