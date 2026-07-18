@@ -1514,7 +1514,16 @@ fn run_inner<P: Simplex>(
         } else {
             HashSet::new()
         };
-        invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
+        // Vote/fault observers also include the current post-restart reporter
+        // instances: an amnesia restart swaps BYZANTINE_IDX's reporter after
+        // `reporters` was captured, and the fresh instance may be the sole
+        // observer of evidence against correct signers (re-checking a shared
+        // instance twice is harmless). State extraction keeps the original
+        // capture only: the fresh incarnation belongs to a Byzantine node and
+        // must not feed the honest-reporter invariants.
+        let mut observers = reporters.clone();
+        observers.extend(managed.iter().map(|m| m.reporter()));
+        invariants::check_vote_invariants_with_byzantine(&byzantine, &observers);
         let states = invariants::extract(reporters, n);
         invariants::check::<P>(config.n, states);
     });

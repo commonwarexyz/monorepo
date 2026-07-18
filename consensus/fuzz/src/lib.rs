@@ -2003,7 +2003,9 @@ fn twins_resolver_view<P: simplex::Simplex>(
 /// primary engine, the honest validators, and the byzantine-aware invariants.
 /// Only the secondary half (Disrupter vs full engine) and the liveness wait
 /// shape (absolute view vs prefix-trailing count) differ; both are keyed on
-/// `role`. Invariants and liveness always run over honest reporters only.
+/// `role`. Liveness and state extraction run over honest reporters only;
+/// signer-filtered vote/fault checks also observe twin reporters (Campaign
+/// halves and the retained Mutator primary).
 ///
 /// Happens-before capture covers honest validators only: twin halves share
 /// one identity across two engines, so neither tracing attribution nor
@@ -2053,6 +2055,7 @@ fn run_twins<P: simplex::Simplex>(
 
             let relay = Arc::new(relay::Relay::new());
             let mut reporters = Vec::new();
+            let mut twin_observers = Vec::new();
             let config = input.configuration;
 
             // Sample a multi-round twins scenario from the deterministic FuzzRng. Both
@@ -2259,11 +2262,12 @@ fn run_twins<P: simplex::Simplex>(
                     (certificate_sender_primary, certificate_receiver_primary),
                     (resolver_sender_primary, resolver_receiver_primary),
                 );
-                // Push the primary reporter only in `Campaign`; `Mutator` keeps
-                // its existing semantics where invariants run only on honest
-                // reporters and twin primary is excluded by construction.
-                if matches!(role, TwinsRole::Campaign) {
-                    reporters.push(reporter.clone());
+                // `Campaign` pushes the primary into `reporters` (liveness and
+                // extraction boundary); `Mutator` retains it as a vote/fault
+                // observer only.
+                match role {
+                    TwinsRole::Campaign => reporters.push(reporter.clone()),
+                    TwinsRole::Mutator => twin_observers.push(reporter.clone()),
                 }
 
                 // Secondary: depends on role.
@@ -2493,10 +2497,10 @@ fn run_twins<P: simplex::Simplex>(
                 context.sleep(MAX_SLEEP_DURATION).await;
             }
 
-            // Invariants on honest reporters only. Twin halves (when present) are
-            // expected to disagree internally per the scenario; checking them in
-            // global-agreement / equivocation invariants would reject valid Twins
-            // configurations.
+            // State extraction (agreement invariants) uses honest reporters
+            // only: twin halves are expected to disagree internally per the
+            // scenario. Signer-filtered vote/fault checks instead observe ALL
+            // reporters, with the compromised identities excluded by signer.
             if config.is_valid() {
                 // Observe the happens-before interleaving BEFORE the invariant checks,
                 // so a run that panics in an invariant still credits the interleaving
@@ -2512,7 +2516,16 @@ fn run_twins<P: simplex::Simplex>(
                     state_cov::observe_tokens(tokens);
                 }
                 let honest_reporters = &reporters[honest_start..];
-                invariants::check_vote_invariants_with_byzantine(&compromised, honest_reporters);
+                // Vote/fault checks run over ALL reporters (twin halves and the
+                // Mutator primary included): a twin reporter can be the sole
+                // observer of evidence against a correct signer, and the
+                // compromised filter already excludes the twin identities.
+                let observers: Vec<_> = twin_observers
+                    .iter()
+                    .chain(reporters.iter())
+                    .cloned()
+                    .collect();
+                invariants::check_vote_invariants_with_byzantine(&compromised, &observers);
                 if state_coverage {
                     let reporter_states =
                         state_cov::encode_reporter_states(honest_reporters, config.n as usize);
