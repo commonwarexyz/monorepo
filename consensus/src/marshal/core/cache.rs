@@ -102,12 +102,13 @@ where
         staged
     }
 
-    /// Prune height-indexed archives to the given height.
-    async fn prune_by_height(&mut self, min_height: Height) {
+    /// Stage prunes of the height-indexed archive with `batch`. Returns whether
+    /// any removals were staged.
+    async fn prune_by_height_into(&mut self, min_height: Height, batch: &mut R::Batch) -> bool {
         self.certified_blocks
-            .prune(min_height.get())
+            .prune_into(min_height.get(), batch)
             .await
-            .expect("failed to prune certified blocks");
+            .expect("failed to prune certified blocks")
     }
 }
 
@@ -694,9 +695,23 @@ where
     }
 
     /// Prune height-indexed certified blocks below the given height.
+    ///
+    /// ONE batch stages every epoch's prunes, so all removals land in one
+    /// atomic commit.
     pub(crate) async fn prune_by_height(&mut self, height: Height) {
+        let mut batch = self.context.batch().await.expect("failed to create batch");
+        let mut staged = false;
         for cache in self.caches.values_mut() {
-            cache.prune_by_height(height).await;
+            staged |= cache.prune_by_height_into(height, &mut batch).await;
         }
+
+        if !staged {
+            return;
+        }
+        batch
+            .apply_sync()
+            .await
+            .expect("failed to apply prune batch");
+        debug!(min_height = %height, "pruned certified blocks");
     }
 }
