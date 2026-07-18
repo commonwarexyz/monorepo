@@ -589,7 +589,7 @@ where
         let handle = context
             .child("snapshot_worker")
             .with_attribute("worker", w)
-            .shared(true)
+            .dedicated()
             .spawn(move |_| {
                 build_snapshot_worker::<F, C, I::Range>(log, rx, worker_index, per_worker_cache)
             });
