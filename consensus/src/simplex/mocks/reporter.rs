@@ -249,7 +249,7 @@ where
                     nullification.round,
                     nullification
                         .view()
-                        .next_term_start(self.elector.term_length()),
+                        .next_term_start(self.elector.terms().length()),
                     &nullification.certificate,
                 );
             }

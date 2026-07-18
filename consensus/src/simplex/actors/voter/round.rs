@@ -52,7 +52,7 @@ pub struct Round<S: Scheme, D: Digest> {
     // Deadlines armed when entering a view.
     leader_deadline: Option<SystemTime>,
     certification_deadline: Option<SystemTime>,
-    finalization_deadline: Option<SystemTime>,
+    stall_deadline: Option<SystemTime>,
     retry_deadline: Option<SystemTime>,
     // First explicit timeout latched for this round (see latch_timeout).
     // Unlike retry_deadline, this is first-wins and never moves.
@@ -82,7 +82,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             proposal: ProposalSlot::new(),
             leader_deadline: None,
             certification_deadline: None,
-            finalization_deadline: None,
+            stall_deadline: None,
             retry_deadline: None,
             latched_timeout: None,
             notarization: None,
@@ -353,11 +353,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         &mut self,
         leader_deadline: SystemTime,
         certification_deadline: SystemTime,
-        finalization_deadline: SystemTime,
+        stall_deadline: Option<SystemTime>,
     ) {
         self.leader_deadline = Some(leader_deadline);
         self.certification_deadline = Some(certification_deadline);
-        self.finalization_deadline = Some(finalization_deadline);
+        self.stall_deadline = stall_deadline;
     }
 
     /// Latches the first explicit timeout for this round, pinning the moment it
@@ -367,7 +367,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// A latched timeout makes [`Self::next_timeout`] fire immediately (and
     /// stably across polls, carrying the latched reason) without touching any
-    /// deadline: in particular, the finalization deadline anchors term-level
+    /// deadline: in particular, the stall deadline anchors term-level
     /// stall protection and must not be reset by a per-view timeout.
     pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
         if self.latched_timeout.is_none() && !self.broadcast_nullify {
@@ -432,12 +432,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         None
     }
 
-    /// Returns the same-term finalization deadline while the round remains unfinalized.
-    pub const fn finalization_deadline(&self) -> Option<SystemTime> {
+    /// Returns the same-term stall deadline while the round remains unfinalized.
+    pub const fn stall_deadline(&self) -> Option<SystemTime> {
         if self.finalization.is_some() {
             return None;
         }
-        self.finalization_deadline
+        self.stall_deadline
     }
 
     /// Adds a proposal recovered from a certificate (notarization or finalization).

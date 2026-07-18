@@ -352,7 +352,9 @@ where
                         //
                         // Activity is a best-effort, wall-clock signal: leader messages
                         // still queued inbound are not yet recorded, so a spurious
-                        // fast-timeout here is possible and tolerated.
+                        // fast-timeout here is possible and tolerated. That is safe and
+                        // bounded: safety is unaffected, and nodes that already observed
+                        // the leader's activity will not time out.
                         let timeout_reason = match Self::leader_nullified(&current, &work) {
                             // Leader already buffered a nullify for this now-current view
                             // (allowed because we accept votes at or below `current`, at

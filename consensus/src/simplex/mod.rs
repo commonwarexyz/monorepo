@@ -122,9 +122,11 @@
 //! * With stable leaders (`term_length > 1`), a prior same-term `nullify` vote blocks later `finalize` votes until
 //!   a covering finalization is observed; notarize votes are never withheld (see
 //!   [Same-Term Vote Safety](#same-term-vote-safety)).
-//! * If an entered view remains unfinalized for `finalization_timeout` and we are still in the same term,
-//!   we locally time out the current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we
-//!   have entered in the current term.
+//! * If an entered view remains unfinalized for the stall timeout (configured alongside the term
+//!   length, see [`elector::Terms`]) and we are still in the same term, we locally time out the
+//!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
+//!   entered in the current term. With `term_length = 1` there is no stall timeout: leader
+//!   rotation itself bounds a finality stall to a single view.
 //! * Votes for views at or below the highest finalized view are ignored on arrival: they produce no
 //!   activity reports, and equivocation at or below the finalized tip is not detected or reported.
 //!   Downstream systems consuming per-vote activity (rewards, slashing) only observe votes for views
@@ -184,9 +186,9 @@
 //! rest of the term. In a healthy network this takes one view: peers broadcast `finalize(v)` when
 //! they certify `v`, so the finalization for `v` typically arrives shortly after entering `v+1`.
 //!
-//! Healing is not retroactive: a `finalize` vote is only constructed when a view's certification
-//! completes, so a view certified while the gate was blocked never receives this participant's
-//! `finalize` vote. If more than `f` participants were blocked at the time, that view may never
+//! Healing does not proactively revisit earlier views: a `finalize` vote for a view certified
+//! while the gate was blocked is only emitted if a later message (such as a redelivered
+//! notarization) touches that view again. If more than `f` participants were blocked, that view may never
 //! gather its own finalization certificate, and neither may any later view in the term (healing
 //! itself requires a same-term finalization, which cannot assemble while more than `f`
 //! participants withhold `finalize`). Such a view is either finalized transitively by the
@@ -504,7 +506,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU64, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
+        Faults, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -854,7 +856,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1013,13 +1014,11 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        non_genesis_floor_joiner_catches_tip_with_term::<S, F, L>(TermLength::ONE, fixture);
+        non_genesis_floor_joiner_catches_tip_with_term::<S, F, L>(L::default(), fixture);
     }
 
-    fn non_genesis_floor_joiner_catches_tip_with_term<S, F, L>(
-        term_length: TermLength,
-        mut fixture: F,
-    ) where
+    fn non_genesis_floor_joiner_catches_tip_with_term<S, F, L>(elector: L, mut fixture: F)
+    where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
@@ -1055,7 +1054,11 @@ mod tests {
             };
             link_validators(&mut oracle, active, Action::Link(link.clone()), None).await;
 
-            let elector = L::default().with_term_length(term_length);
+            let term_length = elector
+                .clone()
+                .build(schemes[0].participants())
+                .terms()
+                .length();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1112,7 +1115,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(
@@ -1234,7 +1236,6 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
-                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1270,7 +1271,7 @@ mod tests {
     #[test_traced]
     fn test_non_genesis_floor_joiner_catches_tip_stable_leader() {
         non_genesis_floor_joiner_catches_tip_with_term::<_, _, RoundRobin>(
-            TermLength::new(NZU64!(3)),
+            RoundRobin::default().with_term_length(NZU32!(3), Duration::from_secs(12)),
             scheme_mocks::fixture,
         );
     }
@@ -1379,7 +1380,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1542,7 +1542,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1699,7 +1698,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1876,7 +1874,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1999,7 +1996,6 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
-                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2033,10 +2029,10 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        one_offline_with_term::<S, F, L>(TermLength::ONE, fixture);
+        one_offline_with_term::<S, F, L>(L::default(), fixture);
     }
 
-    fn one_offline_with_term<S, F, L>(term_length: TermLength, mut fixture: F)
+    fn one_offline_with_term<S, F, L>(elector: L, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2078,7 +2074,6 @@ mod tests {
             .await;
 
             // Create engines
-            let elector = L::default().with_term_length(term_length);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -2138,7 +2133,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2269,7 +2263,7 @@ mod tests {
     #[test_traced]
     fn test_one_offline_stable_leader() {
         one_offline_with_term::<_, _, RoundRobin>(
-            TermLength::new(NZU64!(3)),
+            RoundRobin::default().with_term_length(NZU32!(3), Duration::from_secs(12)),
             scheme_mocks::fixture,
         );
     }
@@ -2375,7 +2369,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2538,7 +2531,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2733,7 +2725,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2852,7 +2843,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2973,7 +2963,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3162,7 +3151,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3359,7 +3347,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3529,7 +3516,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3695,7 +3681,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3883,7 +3868,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(4),
-                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4006,7 +3990,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4161,7 +4144,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4256,7 +4238,6 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
-                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4410,7 +4391,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4557,7 +4537,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4721,7 +4700,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4851,7 +4829,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4975,7 +4952,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(4),
                 skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(4),
-                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5152,7 +5128,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5490,7 +5465,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5697,7 +5671,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5754,7 +5727,7 @@ mod tests {
         seed: u64,
         shutdowns: usize,
         interval: ViewDelta,
-        term_length: TermLength,
+        elector: L,
         mut fixture: F,
     ) -> String
     where
@@ -5790,7 +5763,6 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default().with_term_length(term_length);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = BTreeMap::new();
             let mut engine_handlers = BTreeMap::new();
@@ -5845,7 +5817,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5948,7 +5919,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6075,8 +6045,8 @@ mod tests {
         L: elector::Config<S>,
     {
         assert_eq!(
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), TermLength::ONE, fixture),
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), TermLength::ONE, fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), L::default(), fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), L::default(), fixture),
         );
     }
 
@@ -6090,14 +6060,14 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
-                TermLength::new(NZU64!(3)),
+                RoundRobin::default().with_term_length(NZU32!(3), Duration::from_secs(12)),
                 ed25519::fixture
             ),
             run_hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
-                TermLength::new(NZU64!(3)),
+                RoundRobin::default().with_term_length(NZU32!(3), Duration::from_secs(12)),
                 ed25519::fixture
             )
         );
@@ -6156,6 +6126,7 @@ mod tests {
     fn twins_campaign<S, F, L>(
         rng: &mut impl CryptoRng,
         campaign: TwinsCampaign,
+        elector: L,
         link: Link,
         mut fixture: F,
     ) where
@@ -6194,6 +6165,7 @@ mod tests {
             let namespace = b"consensus".to_vec();
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;
+            let elector = elector.clone();
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
             let cfg = deterministic::Config::new().with_rng(Box::new(StdRng::from_rng(&mut *rng)));
@@ -6215,7 +6187,7 @@ mod tests {
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
                 let elector = TwinsElector::new(
-                    L::default().with_term_length(term_length),
+                    elector.clone(),
                     &scenario,
                     n as usize,
                 );
@@ -6364,7 +6336,6 @@ mod tests {
                             activity_timeout,
                             skip_timeout,
                             fetch_concurrent: NZUsize!(4),
-                            finalization_timeout: Duration::from_secs(12),
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6435,7 +6406,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6596,6 +6566,11 @@ mod tests {
 
     /// Runs `campaign` over a fast link and the slow [TWINS_LINK].
     fn twins_campaign_all_links(campaign: TwinsCampaign) {
+        let elector = match campaign.term_length.get() {
+            1 => <RoundRobin>::default(),
+            _ => <RoundRobin>::default()
+                .with_term_length(campaign.term_length, Duration::from_secs(12)),
+        };
         for link in [
             Link {
                 latency: Duration::from_millis(10),
@@ -6607,6 +6582,7 @@ mod tests {
             twins_campaign::<_, _, RoundRobin>(
                 &mut test_rng(),
                 campaign,
+                elector.clone(),
                 link,
                 scheme_mocks::fixture,
             );
@@ -6648,6 +6624,7 @@ mod tests {
         twins_campaign::<_, _, RoundRobin>(
             &mut test_rng(),
             campaign,
+            RoundRobin::default(),
             TWINS_LINK,
             scheme_mocks::fixture,
         );
@@ -6665,6 +6642,7 @@ mod tests {
         twins_campaign::<_, _, RoundRobin>(
             &mut test_rng(),
             campaign,
+            RoundRobin::default(),
             TWINS_LINK,
             scheme_mocks::fixture,
         );
@@ -6676,7 +6654,13 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        twins_campaign::<_, _, L>(&mut test_rng(), TWINS_CAMPAIGN, TWINS_LINK, fixture);
+        twins_campaign::<_, _, L>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            L::default(),
+            TWINS_LINK,
+            fixture,
+        );
     }
 
     test_for_all_fixtures!(twins, level = "INFO");

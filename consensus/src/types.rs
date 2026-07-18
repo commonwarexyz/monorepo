@@ -46,7 +46,7 @@ use commonware_utils::sequence::U64;
 use core::{
     fmt::{self, Display, Formatter},
     marker::PhantomData,
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     ops::RangeInclusive,
 };
 
@@ -596,6 +596,14 @@ impl TermLength {
 impl Default for TermLength {
     fn default() -> Self {
         Self::ONE
+    }
+}
+
+impl From<NonZeroU32> for TermLength {
+    /// Total conversion: every non-zero `u32` is a valid term length (see
+    /// [`TermLength::MAX`]).
+    fn from(length: NonZeroU32) -> Self {
+        Self::new(NonZeroU64::from(length))
     }
 }
 

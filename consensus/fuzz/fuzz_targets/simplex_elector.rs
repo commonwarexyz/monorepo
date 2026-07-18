@@ -17,6 +17,7 @@ use commonware_cryptography::{
 use commonware_math::algebra::Random as _;
 use commonware_utils::{TestRng, TryCollect, ordered::Set};
 use libfuzzer_sys::fuzz_target;
+use std::time::Duration;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Arbitrary, Debug)]
@@ -32,17 +33,13 @@ struct FuzzInput {
     participants_count: u8,
     round: Round,
     elector: FuzzElector,
-    /// Fuzzed term length for round-robin electors. Clamped to 1 for Random
-    /// (which does not support stable leaders).
+    /// Fuzzed term length for round-robin electors. Ignored for Random (which
+    /// has no term-length configuration).
     term_length: TermLength,
 }
 
-fn fuzz<S, L>(
-    input: &FuzzInput,
-    elector_config: L,
-    term_length: TermLength,
-    certificate: Option<&S::Certificate>,
-) where
+fn fuzz<S, L>(input: &FuzzInput, elector_config: L, certificate: Option<&S::Certificate>)
+where
     S: Scheme<PublicKey = PublicKey>,
     L: elector::Config<S>,
 {
@@ -61,9 +58,7 @@ fn fuzz<S, L>(
         return;
     }
 
-    let elector = elector_config
-        .with_term_length(term_length)
-        .build(&participants);
+    let elector = elector_config.build(&participants);
 
     // For view 1 certificate should be None, for other views use provided certificate
     if input.round.view() == View::new(1) {
@@ -78,36 +73,26 @@ fn fuzz<S, L>(
 fuzz_target!(|input: FuzzInput| {
     match &input.elector {
         FuzzElector::RoundRobin => {
-            fuzz::<ed25519::Scheme, _>(
-                &input,
-                RoundRobin::<Sha256>::default(),
-                input.term_length,
-                None,
-            );
+            let elector = match input.term_length.get() {
+                1 => RoundRobin::<Sha256>::default(),
+                _ => RoundRobin::<Sha256>::default()
+                    .with_term_length(input.term_length, Duration::from_secs(12)),
+            };
+            fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }
         FuzzElector::RoundRobinShuffled(seed) => {
-            fuzz::<ed25519::Scheme, _>(
-                &input,
-                RoundRobin::<Sha256>::shuffled(seed),
-                input.term_length,
-                None,
-            );
+            let elector = match input.term_length.get() {
+                1 => RoundRobin::<Sha256>::shuffled(seed),
+                _ => RoundRobin::<Sha256>::shuffled(seed)
+                    .with_term_length(input.term_length, Duration::from_secs(12)),
+            };
+            fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }
         FuzzElector::RandomMinPk(certificate) => {
-            fuzz::<bls12381_threshold_vrf::Scheme<_, MinPk>, _>(
-                &input,
-                Random,
-                TermLength::ONE,
-                Some(certificate),
-            );
+            fuzz::<bls12381_threshold_vrf::Scheme<_, MinPk>, _>(&input, Random, Some(certificate));
         }
         FuzzElector::RandomMinSig(certificate) => {
-            fuzz::<bls12381_threshold_vrf::Scheme<_, MinSig>, _>(
-                &input,
-                Random,
-                TermLength::ONE,
-                Some(certificate),
-            );
+            fuzz::<bls12381_threshold_vrf::Scheme<_, MinSig>, _>(&input, Random, Some(certificate));
         }
     }
 });

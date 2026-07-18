@@ -19,7 +19,7 @@ pub enum TimeoutReason {
     IgnoredProposal,
     InvalidProposal,
     FailedCertification,
-    FinalizationTimeout,
+    StallTimeout,
 }
 
 impl TimeoutReason {
@@ -38,7 +38,7 @@ impl TimeoutReason {
             Self::IgnoredProposal => "IgnoredProposal",
             Self::InvalidProposal => "InvalidProposal",
             Self::FailedCertification => "FailedCertification",
-            Self::FinalizationTimeout => "FinalizationTimeout",
+            Self::StallTimeout => "StallTimeout",
         }
     }
 }

@@ -240,13 +240,15 @@ impl<S: Scheme, D: Digest> State<S, D> {
     ///
     /// Scans the cursor view (never below the floor, and mid-term after a
     /// floor-raise pull-back), then subsequent term anchors, advancing the
-    /// cursor past every view scanned so each is requested at most once.
-    /// Requests stay pending in the resolver until
+    /// cursor past every view scanned so later calls do not re-request
+    /// them. Requests stay pending in the resolver until
     /// answered or retained out (we must eventually receive a nullification
-    /// at the anchor or a notarization/finalization at a higher view); the
+    /// at the anchor or a notarization/finalization at a higher view). The
     /// one case where a scanned term can lose its request — a floor raise
     /// landing mid-term — pulls the cursor back (see [Self::prune]) so a
-    /// later scan re-requests the term tail.
+    /// later scan re-requests the term tail. That rescan can also re-issue
+    /// anchors whose requests are still pending, which the resolver engine
+    /// deduplicates.
     fn fetch_missing(&mut self, cause: View) -> Vec<Effect> {
         let mut effects = Vec::with_capacity(self.fetch_concurrent);
         let mut cursor = self.fetch_floor.max(self.floor_view().next());
