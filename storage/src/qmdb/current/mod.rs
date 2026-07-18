@@ -383,10 +383,7 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// Number of tasks that build the init-time snapshot, including the init task itself
     /// (which replays and routes the log); `1` builds entirely on the init task. Only certain
-    /// index types (such as the ordered-partitioned index) build in parallel. Counts past a few
-    /// waste tasks without speeding up the build, and each additional task is spawned as
-    /// blocking-friendly shared work, so on runtimes with a bounded blocking pool keep counts
-    /// well below that pool's size.
+    /// index types (such as the ordered-partitioned index) build in parallel.
     pub init_concurrency: NonZeroUsize,
 }
 

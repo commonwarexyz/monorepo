@@ -93,9 +93,6 @@ pub mod partitioned {
     > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
-        /// The configured [`Strategy`] is used to parallelize merkleization, and
-        /// `config.init_concurrency` bounds how many tasks the snapshot build splits across during
-        /// init.
         pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }

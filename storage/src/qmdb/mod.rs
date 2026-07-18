@@ -338,10 +338,26 @@ where
     R::Item: Operation<F>,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
-    let Some(mut cursor) = snapshot.get_mut(key) else {
+    let Some(cursor) = snapshot.get_mut(key) else {
         return Ok(None);
     };
+    delete_at_cursor::<F, _, _>(cursor, reader, key, cache).await
+}
 
+/// Delete `key` at `cursor` (obtained from a `get_mut` lookup of `key`), returning its location if
+/// it was present among the cursor's conflicts.
+async fn delete_at_cursor<F, C, R>(
+    mut cursor: C,
+    reader: &R,
+    key: &<R::Item as Operation<F>>::Key,
+    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+) -> Result<Option<Location<F>>, Error<F>>
+where
+    F: Family,
+    C: Cursor<Value = Location<F>>,
+    R: Contiguous,
+    R::Item: Operation<F>,
+{
     // Find the matching key among all conflicts, then delete it.
     let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? else {
         return Ok(None);
@@ -367,10 +383,28 @@ where
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
-    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+    let Some(cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
         return Ok(None);
     };
+    update_at_cursor::<F, _, _>(cursor, reader, key, new_loc, cache).await
+}
 
+/// Update `key` to `new_loc` at `cursor` (obtained from a `get_mut_or_insert` lookup of `key`),
+/// returning its old location if it was present among the cursor's conflicts; otherwise `new_loc`
+/// is inserted at the cursor.
+async fn update_at_cursor<F, C, R>(
+    mut cursor: C,
+    reader: &R,
+    key: &<R::Item as Operation<F>>::Key,
+    new_loc: Location<F>,
+    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+) -> Result<Option<Location<F>>, Error<F>>
+where
+    F: Family,
+    C: Cursor<Value = Location<F>>,
+    R: Contiguous,
+    R::Item: Operation<F>,
+{
     // Find the matching key among all conflicts, then update its location.
     if let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? {
         assert!(new_loc > loc);
@@ -435,9 +469,9 @@ type RoutedBatch<K> = Vec<(K, u64, bool)>;
 async fn build_snapshot_worker<F, C, T, const P: usize>(
     log: Arc<C>,
     mut rx: mpsc::Receiver<RoutedBatch<<C::Item as Operation<F>>::Key>>,
-    mut index: crate::index::partitioned::ordered::Index<T, Location<F>, P>,
+    mut index: crate::index::partitioned::ordered::RangeIndex<T, Location<F>, P>,
     cache_size: Option<NonZeroUsize>,
-) -> Result<crate::index::partitioned::ordered::Index<T, Location<F>, P>, Error<F>>
+) -> Result<crate::index::partitioned::ordered::RangeIndex<T, Location<F>, P>, Error<F>>
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
@@ -447,13 +481,18 @@ where
     while let Some(batch) = rx.recv().await {
         for (key, loc, is_delete) in batch {
             if is_delete {
-                delete_key::<F, _, _>(&mut index, &*log, &key, cache.as_mut()).await?;
+                if let Some(cursor) = index.get_mut(&key) {
+                    delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
+                }
             } else {
                 let new_loc = Location::new(loc);
-                update_key::<F, _, _>(&mut index, &*log, &key, new_loc, cache.as_mut()).await?;
+                if let Some(cursor) = index.get_mut_or_insert(&key, new_loc) {
+                    update_at_cursor::<F, _, _>(cursor, &*log, &key, new_loc, cache.as_mut())
+                        .await?;
+                }
 
                 // This update op is now a `find_update_op` candidate for later ops of its key.
-                // `key` is owned by this batch and unused after `update_key`, so move it in.
+                // `key` is owned by this batch and unused after the update, so move it in.
                 if let Some(cache) = cache.as_mut() {
                     cache.put(loc, key);
                 }
@@ -676,10 +715,10 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
 
         // Install each worker's partition range into self. Each worker carries its own
         // partition offset, so installation needs no range arguments.
-        let mut total_items = 0i64;
+        let mut total_items = 0;
         for handle in joined {
-            let mut worker_index = handle??;
-            total_items += self.install_range(&mut worker_index);
+            let worker_index = handle??;
+            total_items += self.install_range(worker_index);
         }
 
         // Reconstruct the activity bitmap in location order: a location is active iff it is the
@@ -693,7 +732,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             active.set(last_commit - floor, true);
         }
 
-        Ok((total_items as usize, active))
+        Ok((total_items, active))
     }
 }
 
