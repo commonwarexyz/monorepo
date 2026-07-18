@@ -379,17 +379,26 @@ async fn take_snapshot<S: crate::Storage>(
         // value snapshot, and the freeze boundary protects it thereafter).
         let write_guard = blob.write_lock.lock().await;
 
-        // A full-rewrite capture re-encodes every covered chunk's CRC, and
-        // chunks untouched this process hold theirs only on disk: preload
-        // those values from the OLD extents (a read-modify-write of the
-        // checksum array). The inputs of the delta decision recomputed in
-        // the capture below — runs coverage, the committed refs, the first
-        // dirty chunk — are all stable under the write lock and the commit
-        // lock, and the old extents cannot be recycled underneath the read
-        // (their frees are queued by this capture at the earliest and
-        // applied only once this commit confirms).
-        let preloaded = {
-            let plan = {
+        // Decide the checksum-ref shape ONCE, and preload what a full
+        // rewrite needs. Append-shaped dirt leaves every previously
+        // covered chunk's CRC valid: extend coverage with one NEW delta
+        // ref and keep the prior refs (and their extents) untouched, so a
+        // bulk-load sync stops rewriting the blob's whole array. Anything
+        // else — dirt below the covered frontier (overwrite, COW, shrink),
+        // coverage shrinking (rewind), or a full ref list — rewrites the
+        // array as a single ref, which also keeps refs disjoint and
+        // contiguous from chunk 0 (compaction). A full rewrite re-encodes
+        // every covered chunk's CRC, and chunks untouched this process
+        // hold theirs only on disk: preload those values from the OLD
+        // extents (a read-modify-write of the checksum array). The
+        // capture below reuses this decision — its inputs (runs coverage,
+        // the committed refs, the dirty set) are stable under the write
+        // lock and the commit lock, capture-time run merging preserves
+        // chunk coverage exactly, and the old extents cannot be recycled
+        // underneath the read (their frees are queued by this capture at
+        // the earliest and applied only once this commit confirms).
+        let (plan, preloaded) = {
+            let decision = {
                 let inner = blob.inner.lock();
                 if inner.removed {
                     None
@@ -409,15 +418,22 @@ async fn take_snapshot<S: crate::Storage>(
                             .iter()
                             .next()
                             .is_none_or(|&c| c >= prev_end);
-                    (!delta && inner.crcs.has_unloaded(covered_end.min(prev_end)))
-                        .then(|| prev_refs.to_vec())
+                    let load = (!delta && inner.crcs.has_unloaded(covered_end.min(prev_end)))
+                        .then(|| prev_refs.to_vec());
+                    Some((delta, prev_end, load))
                 }
             };
-            match plan {
-                // Boxed: the cold streaming loader would otherwise deepen
-                // every commit future's layout.
-                Some(refs) => Box::pin(load_committed_refs(ready, &blob, &refs)).await?,
-                None => Vec::new(),
+            match decision {
+                Some((delta, prev_end, load)) => {
+                    let preloaded = match load {
+                        // Boxed: the cold streaming loader would otherwise
+                        // deepen every commit future's layout.
+                        Some(refs) => Box::pin(load_committed_refs(ready, &blob, &refs)).await?,
+                        None => Vec::new(),
+                    };
+                    (Some((delta, prev_end)), preloaded)
+                }
+                None => (None, Vec::new()),
             }
         };
 
@@ -485,24 +501,14 @@ async fn take_snapshot<S: crate::Storage>(
             // preserves chunk coverage exactly.
             let covered_end = covered_end(&inner);
 
-            // Append-shaped dirt leaves every previously covered chunk's
-            // CRC valid: extend coverage with one NEW delta ref and keep
-            // the prior refs (and their extents) untouched, so a bulk-load
-            // sync stops rewriting the blob's whole array. Anything else —
-            // dirt below the covered frontier (overwrite, COW, shrink),
-            // coverage shrinking (rewind), or a full ref list — rewrites
-            // the array as a single ref, which also keeps refs disjoint
-            // and contiguous from chunk 0 (compaction).
+            // The ref shape decided at preload (inputs stable, see above).
+            // A removal between the two sections is caught by the removed
+            // check above, so a live capture always carries a plan.
+            let (delta, prev_end) = plan.expect("live blob carries a ref plan");
             let prev_refs = inner
                 .committed_entry
                 .as_ref()
                 .map_or(&[][..], |e| &e.checksums[..]);
-            let prev_end = prev_refs
-                .last()
-                .map_or(0, |r| r.first_chunk + r.count as u64);
-            let delta = covered_end >= prev_end
-                && prev_refs.len() < MAX_CHECKSUM_REFS
-                && dirty_chunks.first().is_none_or(|&c| c >= prev_end);
             let (array_start, checksums) = if delta {
                 (prev_end, prev_refs.to_vec())
             } else {
@@ -712,17 +718,10 @@ async fn take_snapshot<S: crate::Storage>(
             if inner.removed {
                 continue;
             }
-            let mut entry = inner.committed_entry.clone().unwrap_or_else(|| Entry {
-                id: core.id,
-                partition: 0,
-                name: core.name.clone(),
-                version: core.version,
-                size: 0,
-                runs: Vec::new(),
-                checksums: Vec::new(),
-                tail_crc: 0,
-                shadow: None,
-            });
+            let mut entry = inner
+                .committed_entry
+                .clone()
+                .unwrap_or_else(|| Entry::empty(core.id, core.name.clone(), core.version));
             entry.partition = pindex(&core.partition);
             missing.push((id, Bytes::from(entry.encode())));
         }
@@ -839,5 +838,5 @@ fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
     for id in captured_ids.into_iter().chain(resolved_members) {
         state.maybe_demote(id);
     }
-    ready.metrics.observe_state(&state);
+    ready.metrics.observe_state(&mut state);
 }

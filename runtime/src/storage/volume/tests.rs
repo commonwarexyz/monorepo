@@ -4088,7 +4088,9 @@ async fn test_volume_inplace_gap_write_detects_rot() {
         .unwrap();
     // The gap write's prefix [0, 100) comes from disk: the whole-span
     // check must catch the rot.
-    let err = blob.write_at(200, IoBuf::copy_from_slice(&[0x33u8; 100])).await;
+    let err = blob
+        .write_at(200, IoBuf::copy_from_slice(&[0x33u8; 100]))
+        .await;
     assert!(
         matches!(err, Err(Error::BlobCorrupt(..))),
         "gap write must detect rot: {err:?}"

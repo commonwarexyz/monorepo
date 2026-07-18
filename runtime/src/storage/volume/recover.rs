@@ -222,13 +222,19 @@ async fn verify_manifest<B: crate::Blob>(
     manifest.sort_unstable();
     manifest.dedup();
 
+    // Table entries are written in id order, but decode does not enforce
+    // it: index by id once so the per-group lookup below stays cheap after
+    // a large coalesced commit (a scan per group is O(manifested blobs x
+    // total blobs) on the open path).
+    let entries: BTreeMap<u64, &Entry> = table.blobs.iter().map(|e| (e.id, e)).collect();
+
     // Plan the verification reads per blob: resolve every manifested chunk
     // to its backed span and expected CRC, coalescing physically contiguous
     // spans into single reads.
     let mut reads: Vec<VerifyRead> = Vec::new();
     for group in manifest.chunk_by(|a, b| a.0 == b.0) {
         let id = group[0].0;
-        let Some(entry) = table.blobs.iter().find(|e| e.id == id) else {
+        let Some(&entry) = entries.get(&id) else {
             continue; // blob removed by this commit
         };
         // An extent that reaches past the file end never landed (arithmetic
@@ -249,8 +255,13 @@ async fn verify_manifest<B: crate::Blob>(
             let Some((phys, span)) = entry_chunk_span(entry, chunk) else {
                 continue; // became a hole
             };
+            // Backing past the file end never landed: reject. For a
+            // manifested frontier chunk with a shadow this is deliberately
+            // stricter than the abstract model, which adopts (the shadow
+            // is authoritative for a missing tail block). Rejecting rolls
+            // back one unacknowledged commit, which is always legal.
             if phys + span > len {
-                return Ok(None); // backing never landed
+                return Ok(None);
             }
             let frontier = last_chunk == Some(chunk) && span < BLOCK;
             if !frontier {
@@ -560,7 +571,7 @@ pub(super) async fn recover<S: crate::Storage>(
         fell_back = losing_slot.is_some(),
         "volume recovered"
     );
-    let state = State {
+    let mut state = State {
         partitions,
         open: BTreeMap::new(),
         handles: BTreeMap::new(),
@@ -585,8 +596,9 @@ pub(super) async fn recover<S: crate::Storage>(
         partition_epoch: 0,
         encoded_epoch: 0,
         provisioned: len,
+        file_high_water: 0,
     };
-    metrics.observe_state(&state);
+    metrics.observe_state(&mut state);
 
     Ok(Ready {
         file,
@@ -596,7 +608,8 @@ pub(super) async fn recover<S: crate::Storage>(
         pending: Default::default(),
         poisoned: Default::default(),
         pool: pool.clone(),
-        growth_quantum: cfg.growth_quantum,
+        // Config promises a growth step of whole blocks.
+        growth_quantum: block_align(cfg.growth_quantum),
         provision_lock: AsyncMutex::new(()),
     })
 }
@@ -635,7 +648,7 @@ async fn init_fresh<S: crate::Storage>(
         offset: table_offset,
         len: block_align(bytes.len() as u64),
     };
-    let state = State {
+    let mut state = State {
         partitions: BTreeMap::new(),
         open: BTreeMap::new(),
         handles: BTreeMap::new(),
@@ -657,9 +670,10 @@ async fn init_fresh<S: crate::Storage>(
         partition_epoch: 0,
         encoded_epoch: 0,
         provisioned: 2 * BLOCK + block_align(bytes.len() as u64),
+        file_high_water: 0,
     };
     metrics.recoveries.inc();
-    metrics.observe_state(&state);
+    metrics.observe_state(&mut state);
     Ok(Ready {
         file,
         metrics,
@@ -668,7 +682,8 @@ async fn init_fresh<S: crate::Storage>(
         pending: Default::default(),
         poisoned: Default::default(),
         pool: pool.clone(),
-        growth_quantum: cfg.growth_quantum,
+        // Config promises a growth step of whole blocks.
+        growth_quantum: block_align(cfg.growth_quantum),
         provision_lock: AsyncMutex::new(()),
     })
 }

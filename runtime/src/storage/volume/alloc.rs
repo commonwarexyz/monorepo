@@ -138,9 +138,9 @@ impl Allocator {
             }
         }
 
-        // A range touching the high-water mark shrinks the file instead of
-        // lingering in the index. The coalesced neighbors leave the free
-        // total with it.
+        // A range touching the high-water mark lowers the mark instead of
+        // lingering in the index (the file itself is never shrunk). The
+        // coalesced neighbors leave the free total with it.
         if offset + len == self.end {
             self.end = offset;
             self.free_bytes -= len - extent.len;
@@ -230,7 +230,8 @@ mod tests {
         let c = alloc.allocate(BLOCK);
         alloc.free(a);
         alloc.free(c);
-        // c touched the end, so the file shrank; a is the only free range.
+        // c touched the end and lowered the high-water mark, leaving a as
+        // the only free range.
         assert_eq!(alloc.end(), b.offset + b.len);
         assert_eq!(alloc.allocate(BLOCK), a);
         // No free space left; extend.

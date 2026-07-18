@@ -803,6 +803,9 @@ impl<S: crate::Storage> Batch<S> {
                 Ok(None)
             }
             ApplyMode::Commit => {
+                // One durability request served by the commit below (see
+                // `metrics::Metrics::sync_requests`).
+                self.ready.metrics.sync_requests.inc();
                 let result = commit::commit_locked(&self.ready, &roots).await;
                 // A failed commit latched its own poison, and a
                 // cancelled one fires the commit's inner guard.

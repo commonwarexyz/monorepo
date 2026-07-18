@@ -239,11 +239,15 @@ pub struct Config {
     /// Defaults to no faults being injected.
     storage_fault_cfg: FaultConfig,
 
-    /// Configuration for the the storage volume that serves all
+    /// Configuration for the storage volume that serves all
     /// storage (over the in-memory backend). Fault injection applies to the
     /// volume's inner file operations, and simulated crashes reconstruct
-    /// the volume so its recovery protocol runs exactly as it would in
-    /// production.
+    /// the volume so its recovery protocol re-runs from the durable image.
+    /// The in-memory backend publishes writes only at sync, so a simulated
+    /// crash exercises the volume's crash contract (recovery to the last
+    /// commit's image) but not the crash-outcome fan of torn or partially
+    /// landed commits, which the volume's own conformance and power-loss
+    /// suites cover.
     storage_volume_cfg: VolumeConfig,
 
     /// Buffer pool configuration for network I/O.

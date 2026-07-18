@@ -1019,6 +1019,10 @@ pub(super) struct State {
     pub encoded_epoch: u64,
     /// Bytes of the volume file known to exist (growth high-water mark).
     pub provisioned: u64,
+    /// High-water mark of the allocated span, as observed by the metrics
+    /// (monotonic: freeing an extent at the span's end lowers the
+    /// allocator's end, never this).
+    pub file_high_water: u64,
 }
 
 impl State {
@@ -1090,17 +1094,10 @@ impl State {
         );
         // A clean blob never captured with content serves an empty entry
         // (the same fallback commit assembly uses).
-        let entry = inner.committed_entry.clone().unwrap_or_else(|| Entry {
-            id,
-            partition: 0,
-            name: core.name.clone(),
-            version: core.version,
-            size: 0,
-            runs: Vec::new(),
-            checksums: Vec::new(),
-            tail_crc: 0,
-            shadow: None,
-        });
+        let entry = inner
+            .committed_entry
+            .clone()
+            .unwrap_or_else(|| Entry::empty(id, core.name.clone(), core.version));
         let partition = core.partition.clone();
         drop(inner);
         self.open.remove(&id);
@@ -3526,7 +3523,11 @@ pub(super) async fn resize_locked<S: crate::Storage>(
         /// and the shrink trims it mid-chunk: slice the surviving prefix
         /// from process memory and recompute its CRC (no I/O, no
         /// re-check).
-        Trim { chunk: u64, span: u64, verified: bool },
+        Trim {
+            chunk: u64,
+            span: u64,
+            verified: bool,
+        },
         /// Read the frontier chunk's CURRENT span (`old_span`) back from
         /// disk and check it against `expected` — rot in the span
         /// surfaces loudly here, never laundered under the recomputed
@@ -3574,7 +3575,11 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                 if span == old_span {
                     break Frontier::Keep { chunk };
                 }
-                let verified = inner.crcs.get(chunk).expect("backed chunk has crc").verified;
+                let verified = inner
+                    .crcs
+                    .get(chunk)
+                    .expect("backed chunk has crc")
+                    .verified;
                 break Frontier::Trim {
                     chunk,
                     span,

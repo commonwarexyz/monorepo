@@ -177,6 +177,24 @@ pub(super) struct Table {
 }
 
 impl Entry {
+    /// The entry of a live blob that no commit has captured with content:
+    /// empty, unresolved partition index. Table assembly and demotion must
+    /// produce the identical entry for such a blob (assembly emits one for
+    /// EVERY live blob, and a demoted blob's entry is served verbatim).
+    pub const fn empty(id: u64, name: Vec<u8>, version: u16) -> Self {
+        Self {
+            id,
+            partition: 0,
+            name,
+            version,
+            size: 0,
+            runs: Vec::new(),
+            checksums: Vec::new(),
+            tail_crc: 0,
+            shadow: None,
+        }
+    }
+
     /// Encode this entry's byte run within a table.
     ///
     /// Entries encode independently so commits can reuse cached encodings

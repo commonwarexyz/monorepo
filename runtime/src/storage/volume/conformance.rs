@@ -424,8 +424,11 @@ async fn pause(active: &Arc<AtomicBool>) {
 /// A pass-through storage wrapper that (while `active`) yields once before
 /// every inner operation, turning each inner I/O into a poll boundary:
 /// dropping a commit future after N polls enumerates cancellation between
-/// any two inner operations — the await-point analogue of
-/// crash-at-every-write.
+/// any two sequentially issued inner operations — the await-point analogue
+/// of crash-at-every-write. Concurrently joined I/O shares one poll
+/// boundary (the commit's metadata writes all yield in one parent poll of
+/// their `try_join_all` and issue in the next), which costs nothing for
+/// the checked contracts because the joined writes commute.
 #[derive(Clone)]
 struct Yielding<S> {
     inner: S,
@@ -1404,8 +1407,9 @@ async fn conformance_core() {
 }
 
 /// Recycling workload: overwrite/rewind/hole-growth/remove/recreate with
-/// per-blob commits. The counterpart of the model's RECYCLE + REWIND
-/// workloads (extent reuse, deferred frees, shrink shapes).
+/// per-blob commits, plus resizes interleaved into a parked commit's
+/// window. The counterpart of the model's RECYCLE + REWIND workloads
+/// (extent reuse, deferred frees, shrink shapes).
 #[tokio::test]
 async fn conformance_recycle() {
     let stats = explore(&Workload {
@@ -1420,8 +1424,8 @@ async fn conformance_recycle() {
         ],
         depth: 3,
         window_masks: &[0b001],
-        window_menu: &[],
-        window_depth: 0,
+        window_menu: &[Op::ResizeDown(0), Op::ResizeUp(0)],
+        window_depth: 1,
         window_max_prefix: 3,
         fail_max_prefix: 0,
         cap: 1024,
@@ -1431,8 +1435,10 @@ async fn conformance_recycle() {
 }
 
 /// Batch workload: cross-blob staging, publish, drop, selective commits
-/// that must respect the applied group (never-split). The counterpart of
-/// the model's BATCH/BATCH_COW workloads.
+/// that must respect the applied group (never-split), plus staging
+/// interleaved into a parked commit's window (the model's stage_invisible
+/// rule: staged content stays out of the in-flight commit's crash fan).
+/// The counterpart of the model's BATCH/BATCH_COW workloads.
 #[tokio::test]
 async fn conformance_batch() {
     let stats = explore(&Workload {
@@ -1446,9 +1452,9 @@ async fn conformance_batch() {
             Op::Sync(0b001),
         ],
         depth: 4,
-        window_masks: &[0b010],
-        window_menu: &[],
-        window_depth: 0,
+        window_masks: &[0b001, 0b010],
+        window_menu: &[Op::BatchAppend(0), Op::BatchOverwrite(0)],
+        window_depth: 1,
         window_max_prefix: 2,
         fail_max_prefix: 0,
         cap: 512,
@@ -1567,6 +1573,43 @@ async fn conformance_directed_torn_shadow() {
         "torn-shadow probe must enumerate exhaustively: {stats:?}"
     );
     assert!(stats.cases > 200, "suspiciously few cases: {stats:?}");
+}
+
+/// The capture-gated content-free directed family: a committed full block
+/// on blob 0 is dropped into pending frees by a COW overwrite, then blob 1
+/// commits twice WITHOUT capturing blob 0 (no default workload commits
+/// while excluding a blob that holds pending content frees). Releasing
+/// blob 0's content free at the first uncapturing commit would let the
+/// second commit's table write recycle the block while the confirmed
+/// table still references it — detected here as blob 0 recovering to
+/// garbage or a stale token.
+#[tokio::test]
+async fn conformance_directed_capture_gated_frees() {
+    let mut stats = Stats::default();
+    let trace: &[Op] = &[
+        Op::Append(0),
+        Op::Append(0),
+        Op::Sync(0b001),
+        Op::Overwrite(0),
+        Op::Append(1),
+        Op::Sync(0b010),
+        Op::Append(1),
+        Op::Sync(0b010),
+    ];
+    let mut rig = Rig::new().await;
+    for (i, &op) in trace.iter().enumerate() {
+        assert!(
+            rig.enabled(op),
+            "capture-gated trace: {op:?} disabled at {i}"
+        );
+        rig.execute(op).await;
+        rig.crash_probe(&[], 2048, i as u64, &mut stats).await;
+    }
+    println!("directed capture-gated-free stats: {stats:?}");
+    assert!(
+        stats.exhaustive_points == stats.crash_points && stats.cases > 20,
+        "suspiciously thin coverage: {stats:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

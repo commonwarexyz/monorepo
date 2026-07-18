@@ -17,18 +17,25 @@
 //! > applying batch's blobs, expanded across applied-batch groups so an
 //! > applied [`Batch`] is never split across commits. Reads are
 //! > CRC32C-verified: each chunk
-//! > is checked once per process lifetime — on its first read, by
-//! > construction for chunks written this process, or by recovery's own
-//! > manifest verification — and a mismatch is loud corruption, never
-//! > silent truncation.
+//! > is checked once per hydration — on its first read, by construction
+//! > for chunks written since the blob hydrated, or by recovery's own
+//! > manifest verification on the first hydration after open — and a
+//! > mismatch is loud corruption, never silent truncation. (Verified bits
+//! > do not survive demotion to dormant, so a demoted and re-opened blob
+//! > re-verifies on first read.)
 //!
 //! Every runtime serves ALL storage through a volume over its platform
 //! backend, so this is the crash contract of every runtime context.
 //! Storage structures can therefore delete their own torn-write detection,
 //! recovery machinery, and cross-blob sync-ordering discipline: torn
 //! tails, partial frames, and (through [`Batch`]) cross-blob skew are
-//! impossible by construction, and the deterministic runtime's crash model
-//! is the production model.
+//! impossible by construction. A simulated crash on the deterministic
+//! runtime exercises this crash CONTRACT — its in-memory backend publishes
+//! writes only at sync, so recovery always sees the last commit's image —
+//! while the crash-outcome FAN (each pending write independently landing,
+//! vanishing, or tearing) and the recovery paths it drives (roll-forward,
+//! torn-candidate fallback, losing-slot zeroing) are exercised by the
+//! volume's own conformance and power-loss suites.
 //!
 //! Corruption loudness has ONE bounded exception: media corruption (bit
 //! rot) that lands inside the NEWEST commit's table or in the extents its
@@ -370,7 +377,7 @@ impl<S: crate::Storage> Drop for HandleTracker<S> {
                 state.maybe_demote(self.id);
             }
             state.apply_frees();
-            self.ready.metrics.observe_state(&state);
+            self.ready.metrics.observe_state(&mut state);
         }
     }
 }
@@ -623,7 +630,10 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         };
         // "An Ok result indicates the blob is durably removed." The removed
         // ids root the commit so their applied-batch groups (if any) are
-        // captured with the removal (never-split).
+        // captured with the removal (never-split). The removal requests
+        // durability without registering in the pending pool, so count the
+        // request here (see `metrics::Metrics::sync_requests`).
+        ready.metrics.sync_requests.inc();
         commit::commit_locked(&ready, &removed).await
     }
 

@@ -19,9 +19,9 @@ use crate::telemetry::metrics::{
 pub(super) struct Metrics {
     /// Confirmed commits (each ends in one inner fsync).
     pub commits: Counter,
-    /// Sync requests pooled for commit coalescing (syncs, started syncs,
-    /// batch commits, namespace changes). `sync_requests / commits` is the
-    /// coalescing ratio.
+    /// Durability requests served by commits: syncs, started syncs, batch
+    /// commits (immediate and started), blob creations, and removals.
+    /// `sync_requests / commits` is the coalescing ratio.
     pub sync_requests: Counter,
     /// Inner fsync latency in seconds. Never observed on wasm32, which has
     /// no monotonic clock.
@@ -39,7 +39,10 @@ pub(super) struct Metrics {
     pub corruptions: Counter,
     /// Bytes rewritten through copy-on-write relocation (the freeze rule).
     pub cow_bytes: Counter,
-    /// Volume-file high-water mark in bytes (the file never shrinks).
+    /// High-water mark of the volume file's allocated span in bytes.
+    /// Monotonic while the volume is open: freeing an extent at the span's
+    /// end lowers the allocator's end, never this gauge or the file itself
+    /// (recovery rebaselines it from the adopted table).
     pub file_end_bytes: Gauge,
     /// Free bytes below the high-water mark (reusable for new extents).
     pub free_bytes: Gauge,
@@ -68,7 +71,7 @@ impl Metrics {
             ),
             sync_requests: registry.register(
                 "sync_requests",
-                "Sync requests pooled for commit coalescing",
+                "Durability requests served by volume commits",
                 raw::Counter::default(),
             ),
             fsync_duration: registry.register(
@@ -103,7 +106,7 @@ impl Metrics {
             ),
             file_end_bytes: registry.register(
                 "file_end_bytes",
-                "Volume file high-water mark in bytes (never shrinks)",
+                "High-water mark of the volume file's allocated span in bytes",
                 raw::Gauge::default(),
             ),
             free_bytes: registry.register(
@@ -162,9 +165,12 @@ impl Metrics {
     }
 
     /// Refresh the space and namespace gauges from `state` (called at
-    /// commit finalize, deferred-free application, and recovery).
-    pub fn observe_state(&self, state: &State) {
-        let _ = self.file_end_bytes.try_set(state.alloc.end());
+    /// commit finalize, deferred-free application, and recovery), raising
+    /// its file high-water mark first so the gauge never decreases while
+    /// the volume is open.
+    pub fn observe_state(&self, state: &mut State) {
+        state.file_high_water = state.file_high_water.max(state.alloc.end());
+        let _ = self.file_end_bytes.try_set(state.file_high_water);
         let _ = self.free_bytes.try_set(state.alloc.free_bytes());
         let pending: u64 = state.pending_free.iter().map(|(e, _, _)| e.len).sum();
         let _ = self.pending_free_bytes.try_set(pending);
