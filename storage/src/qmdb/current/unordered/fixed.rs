@@ -135,6 +135,79 @@ pub mod test {
         CurrentTest::init(context, cfg).await.unwrap()
     }
 
+    /// `start_sync` stages the log AND the pruning metadata into one gated
+    /// commit: the handle resolves only when the gate releases, and the db
+    /// keeps accepting batches while it is pending.
+    #[test_traced]
+    pub fn test_current_unordered_fixed_start_sync_gated() {
+        use commonware_runtime::mocks::{release_pending_syncs, DelayedSyncContext, PendingSyncs};
+
+        type GatedCurrent = Db<
+            mmr::Family,
+            DelayedSyncContext<deterministic::Context>,
+            Digest,
+            Digest,
+            Sha256,
+            TwoCap,
+            32,
+            commonware_parallel::Sequential,
+        >;
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let ctx = DelayedSyncContext {
+                inner: ctx,
+                pending: pending.clone(),
+            };
+            let cfg = fixed_config::<TwoCap>("start-sync", &ctx);
+            let mut db = GatedCurrent::init(ctx, cfg).await.unwrap();
+
+            let key = Sha256::fill(1u8);
+            let value = Sha256::fill(2u8);
+            let batch = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(batch).await.unwrap();
+            let root = db.root();
+
+            let handle = db.start_sync().await.unwrap();
+            assert_eq!(
+                db.root(),
+                root,
+                "start_sync must not move the published root"
+            );
+            assert!(
+                !pending.lock().is_empty(),
+                "the started sync must be parked at the gate"
+            );
+
+            // The db accepts and publishes the next batch while the handle
+            // is pending.
+            let key2 = Sha256::fill(3u8);
+            let batch = db
+                .new_batch()
+                .write(key2, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(&key2).await.unwrap(), Some(value));
+
+            futures::pin_mut!(handle);
+            assert!(
+                futures::poll!(handle.as_mut()).is_pending(),
+                "handle must wait for the gated commit"
+            );
+            release_pending_syncs(&pending);
+            handle.await.unwrap();
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("INFO")]
     pub fn test_current_unordered_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {

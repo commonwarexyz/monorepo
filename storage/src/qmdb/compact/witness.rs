@@ -27,7 +27,7 @@ use crate::{
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::WriteBatch as _;
+use commonware_runtime::{Handle, WriteBatch as _};
 use commonware_utils::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -195,6 +195,49 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         merkle.prune_to_frontier();
         self.replace(verified);
         Ok(())
+    }
+
+    /// Start [`Self::sync`]: stage the witness entry (if one is needed) and begin the commit
+    /// that makes it durable. Awaiting the returned handle waits for the same durability
+    /// guarantee as [`Self::sync`].
+    ///
+    /// The cache, the Merkle frontier, and the import flag swing at publish time (not at
+    /// durability): a crash before the started commit lands discards the in-RAM state and the
+    /// unsynced entry together (reopen recovers the previous durable witness), and a failed
+    /// commit permanently poisons the backing storage, so the swung cache never outlives a db
+    /// that could serve reads without the entry. A pending import's journal replacement still
+    /// completes inline (inside `stage`), exactly as under [`Self::sync`].
+    ///
+    /// Returns a handle even when no new entry is needed: the cache swings before durability,
+    /// so "no new entry" does not imply the tip entry's commit has landed. The handle then
+    /// covers whatever journal state is still pending.
+    pub(crate) async fn start_sync<H, S>(
+        &mut self,
+        merkle: &compact::Merkle<F, D, S>,
+        inactivity_floor_loc: Location<F>,
+        last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
+    ) -> Result<Handle<()>, Error<F>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
+        let staged = self
+            .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
+            .await?;
+        if let Some(verified) = staged {
+            self.journal.append(&verified.witness).await?;
+            self.import_pending.store(false, Ordering::Relaxed);
+            merkle.prune_to_frontier();
+            self.replace(verified);
+        }
+        let mut batch = self
+            .journal
+            .context()
+            .batch()
+            .await
+            .map_err(JError::Runtime)?;
+        self.journal.sync_into(&mut batch).await?;
+        Ok(batch.apply_start_sync().await.map_err(JError::Runtime)?)
     }
 
     /// Decide what a persist must write, clearing the journal first when an import is pending.

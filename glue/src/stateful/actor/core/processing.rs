@@ -16,14 +16,14 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{channel::fallible::OneshotExt, Acknowledgement};
+use commonware_runtime::{Clock, ContextCell, Error as RuntimeError, Handle, Metrics, Spawner};
+use commonware_utils::{acknowledgement::Exact, channel::fallible::OneshotExt, Acknowledgement};
 use futures::{
-    future::{ready, Either},
+    future::{pending, ready, Either},
     FutureExt,
 };
 use rand_core::Rng;
-use std::sync::mpsc::TryRecvError;
+use std::sync::{mpsc::TryRecvError, Arc};
 use tracing::{debug, info_span, Instrument as _};
 
 /// A single unit of work for the processing loop: either a mailbox message to
@@ -31,6 +31,28 @@ use tracing::{debug, info_span, Instrument as _};
 enum Step<M, P> {
     Message(M),
     Prune(P),
+}
+
+/// A finalized block whose database sync is in flight: the external effects
+/// that gate on durability — the application's finalized notification and
+/// the marshal acknowledgement — held until the sync's handle resolves.
+struct InflightFinalize<B> {
+    /// Durability handle returned by [`Processor::finalize`].
+    durability: Handle<()>,
+    /// The finalized block, kept for the deferred notification.
+    block: Arc<B>,
+    /// Marshal acknowledgement, sent only once the applied state is durable.
+    acknowledgement: Exact,
+}
+
+/// Wait for the in-flight finalize's durability handle, pending forever when
+/// none is in flight. Cancel-safe: losing a select race neither consumes the
+/// entry nor loses the handle's progress.
+async fn wait_durable<B>(inflight: &mut Option<InflightFinalize<B>>) -> Result<(), RuntimeError> {
+    match inflight {
+        Some(entry) => (&mut entry.durability).await,
+        None => pending().await,
+    }
 }
 
 pub(super) struct Processing<E, A, S, V>
@@ -70,6 +92,10 @@ where
 {
     pub async fn start(mut self) {
         let mut pending_prune = None;
+        // At most ONE finalized block's database sync is in flight: its
+        // deferred effects live here until the durability arm (or the next
+        // finalize) settles it.
+        let mut inflight: Option<InflightFinalize<A::Block>> = None;
         select_loop! {
             self.context,
             on_start => {
@@ -93,6 +119,13 @@ where
             },
             on_stopped => {
                 debug!("shutdown signal received, stopping processing");
+            },
+            // The in-flight finalize's sync completed: release the effects
+            // that were gated on durability. Awaiting the handle here is
+            // also what drives the sync when no other commit covers it.
+            result = wait_durable(&mut inflight) => {
+                let entry = inflight.take().expect("durability arm requires an in-flight finalize");
+                self.settle(entry, result).await;
             },
             Some(step) = next else {
                 debug!("mailbox closed, stopping processing");
@@ -149,14 +182,40 @@ where
                             acknowledgement.acknowledge();
                             return None;
                         }
-                        let (status, prune) = self
+                        // Execute and publish the block, STARTING its
+                        // database sync: the previous block's fsync (if one
+                        // is in flight) overlaps this work.
+                        let (status, prune, durability) = self
                             .processor
                             .finalize(&self.context, block.as_ref())
                             .await;
-                        if let FinalizeStatus::Persisted { height } = status {
-                            debug!(height = height.get(), "persisted finalized database batch");
+                        // Settle the previous in-flight finalize before
+                        // tracking (or acknowledging) this one: effects stay
+                        // in block order, and the pipeline is bounded at one
+                        // in-flight sync.
+                        if let Some(mut previous) = inflight.take() {
+                            let result = (&mut previous.durability).await;
+                            self.settle(previous, result).await;
                         }
-                        acknowledgement.acknowledge();
+                        match (status, durability) {
+                            (FinalizeStatus::Persisted { height }, Some(durability)) => {
+                                debug!(height = height.get(), "started finalized database sync");
+                                inflight = Some(InflightFinalize {
+                                    durability,
+                                    block,
+                                    acknowledgement,
+                                });
+                            }
+                            (FinalizeStatus::Duplicate, _) => {
+                                // Already reflected in durable state (any
+                                // in-flight sync for it was settled above):
+                                // nothing gates the acknowledgement.
+                                acknowledgement.acknowledge();
+                            }
+                            (FinalizeStatus::Persisted { .. }, None) => {
+                                unreachable!("persisted finalize must return its durability handle")
+                            }
+                        }
                         prune
                     }
                     .instrument(process)
@@ -175,6 +234,29 @@ where
                 }
             },
         }
+    }
+
+    /// Release a resolved in-flight finalize's deferred effects: once the
+    /// applied state is durable, deliver the finalized notification and the
+    /// marshal acknowledgement. A real sync failure is fatal (panic). A
+    /// shutdown result releases nothing, so a restart re-delivers the block.
+    async fn settle(
+        &mut self,
+        entry: InflightFinalize<A::Block>,
+        result: Result<(), RuntimeError>,
+    ) {
+        if !crate::stateful::db::finalize_durable(result) {
+            debug!("runtime shutdown before finalized database sync completed");
+            return;
+        }
+        debug!(
+            height = entry.block.height().get(),
+            "persisted finalized database batch"
+        );
+        self.processor
+            .notify_finalized(self.context.as_present(), entry.block.as_ref())
+            .await;
+        entry.acknowledgement.acknowledge();
     }
 }
 

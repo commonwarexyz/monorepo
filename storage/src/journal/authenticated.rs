@@ -24,7 +24,7 @@ use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::WriteBatch as _;
+use commonware_runtime::{Handle, WriteBatch as _};
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -380,6 +380,26 @@ where
             .map_err(Error::Journal)?;
         self.merkle.sync_into(batch).await.map_err(Error::Merkle)?;
         Ok(())
+    }
+
+    /// Start [Self::sync]: stage the journal's items and the Merkle structure's state into
+    /// ONE batch and begin its commit. Awaiting the returned [Handle] waits for the same
+    /// durability guarantee as [Self::sync]. Until it resolves the synced state is readable
+    /// but a crash may discard it (exactly like unsynced state). The handle must be
+    /// observed: the commit's failure is reported only through it, and awaiting it is what
+    /// drives the commit when no other sync arrives.
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error<F>> {
+        let mut batch = self
+            .journal
+            .context()
+            .batch()
+            .await
+            .map_err(|err| Error::Journal(JournalError::Runtime(err)))?;
+        self.sync_into(&mut batch).await?;
+        batch
+            .apply_start_sync()
+            .await
+            .map_err(|err| Error::Journal(JournalError::Runtime(err)))
     }
 
     /// Prune both the Merkle structure and journal to the given location.

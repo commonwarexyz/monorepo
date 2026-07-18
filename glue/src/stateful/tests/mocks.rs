@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     ed25519, sha256::Digest as Sha256Digest, Digest as _, Digestible, Signer as _,
 };
-use commonware_runtime::{deterministic, Buf, BufMut};
+use commonware_runtime::{deterministic, Buf, BufMut, Handle};
 use commonware_utils::sync::TracedAsyncRwLock;
 use futures::Stream;
 use std::{convert::Infallible, sync::Arc};
@@ -75,8 +75,8 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-        Ok(())
+    async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<Handle<()>, Self::Error> {
+        Ok(Handle::ready(Ok(())))
     }
 
     fn sync_target(&self) -> Self::SyncTarget {

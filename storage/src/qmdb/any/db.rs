@@ -21,6 +21,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -851,6 +852,22 @@ where
         self.metrics.sync_calls.inc();
         self.log.sync_into(batch).await?;
         Ok(())
+    }
+
+    /// Start [Self::sync]: begin durably persisting the journal state published by prior
+    /// [`Db::apply_batch`] calls. Awaiting the returned [Handle] waits for the same
+    /// durability guarantee as [Self::sync].
+    ///
+    /// The caller may keep applying batches while the handle is pending, but must not
+    /// externally acknowledge the db's root until the handle resolves: a crash before the
+    /// started sync's commit lands discards the synced state exactly as if this call had
+    /// never been made. The handle must be observed — a sync failure (fatal to the db, like
+    /// every mutable storage failure) is reported only through it, and awaiting it is what
+    /// drives the commit when no other sync arrives.
+    #[tracing::instrument(name = "qmdb.any.db.start_sync", level = "info", skip_all)]
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, crate::qmdb::Error<F>> {
+        self.metrics.sync_calls.inc();
+        Ok(self.log.start_sync().await?)
     }
 
     /// Destroy the db, removing all data from disk.

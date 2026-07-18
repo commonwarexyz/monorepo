@@ -11,6 +11,7 @@ use crate::stateful::db::{
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
@@ -226,9 +227,9 @@ where
         batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<Handle<()>, Error<F>> {
         self.apply_batch(batch.inner)?;
-        self.sync().await
+        self.start_sync().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
@@ -292,9 +293,9 @@ where
         batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<Handle<()>, Error<F>> {
         self.apply_batch(batch.inner)?;
-        self.sync().await
+        self.start_sync().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {

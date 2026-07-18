@@ -59,15 +59,62 @@ struct Snapshot {
     old_table: Option<Extent>,
 }
 
+/// A registration in the pending-commit pool: the shared result of the
+/// coalesced commit that will cover the registered roots.
+pub(super) type Ticket = Arc<OnceLock<Result<(), Error>>>;
+
+/// Register `roots` in the pending-commit pool under the CURRENT ticket:
+/// the first leader to drain the pool after this point covers these roots
+/// and resolves the returned ticket with the union commit's result.
+pub(super) fn register<S: crate::Storage>(ready: &Ready<S>, roots: &[u64]) -> Ticket {
+    let mut pending = ready.pending.lock();
+    pending.roots.extend(roots.iter().copied());
+    pending.ticket.clone()
+}
+
+/// Resolve a registration: lead-or-observe. Queues on the commit lock and,
+/// if a leader's commit already resolved `ticket` while queued, returns its
+/// result. Otherwise this caller is the leader: it drains the pool (the
+/// registered roots plus everything registered since the previous drain)
+/// and commits the UNION, so one fsync acknowledges every pooled caller.
+pub(super) async fn drive<S: crate::Storage>(
+    ready: &Ready<S>,
+    ticket: Ticket,
+) -> Result<(), Error> {
+    let _commit = ready.commit_lock.lock().await;
+    // Resolved while queued: a leader's commit already covered our roots.
+    if let Some(result) = ticket.get() {
+        return result.clone();
+    }
+    // Leader: an unresolved ticket is still the pool's current ticket (a
+    // leader swaps the ticket out only while holding the commit lock and
+    // resolves it before releasing), so draining returns it.
+    let (union, ticket) = {
+        let mut pending = ready.pending.lock();
+        let union: Vec<u64> = std::mem::take(&mut pending.roots).into_iter().collect();
+        let drained = std::mem::replace(&mut pending.ticket, Arc::new(OnceLock::new()));
+        debug_assert!(
+            Arc::ptr_eq(&ticket, &drained),
+            "unresolved ticket must be the pool's current ticket"
+        );
+        (union, drained)
+    };
+    let result = commit_locked(ready, &union).await;
+    ticket
+        .set(result.clone())
+        .expect("only the draining leader resolves a ticket");
+    result
+}
+
 /// Commit the dirty state of the blobs rooted at `roots` (expanded across
 /// applied-batch groups), coalescing with concurrent syncs: callers pool
-/// their roots, and whichever queued caller acquires the commit lock first
-/// drains the pool and commits the UNION, so one fsync acknowledges every
-/// pooled caller. Each caller's durability promise is met exactly — the
-/// union's snapshot begins after every pooled registration — and a failed
-/// union commit fails every pooled caller (they were promised durability,
-/// and the poison latch stands for everyone). Returns without I/O when the
-/// captured state is clean.
+/// their roots ([`register`]), and whichever queued caller acquires the
+/// commit lock first drains the pool and commits the UNION ([`drive`]), so
+/// one fsync acknowledges every pooled caller. Each caller's durability
+/// promise is met exactly — the union's snapshot begins after every pooled
+/// registration — and a failed union commit fails every pooled caller (they
+/// were promised durability, and the poison latch stands for everyone).
+/// Returns without I/O when the captured state is clean.
 ///
 /// Coalescing is keyed off the commit-lock queue alone (no timers): under
 /// the deterministic runtime, identical schedules produce identical commit
@@ -76,31 +123,8 @@ pub(super) async fn commit<S: crate::Storage>(
     ready: &Ready<S>,
     roots: &[u64],
 ) -> Result<(), Error> {
-    // Register under the CURRENT ticket before queueing: the first leader
-    // to drain the pool after this point covers these roots.
-    let ticket = {
-        let mut pending = ready.pending.lock();
-        pending.roots.extend(roots.iter().copied());
-        pending.ticket.clone()
-    };
-    let _commit = ready.commit_lock.lock().await;
-    // Resolved while queued: a leader's commit already covered our roots.
-    if let Some(result) = ticket.get() {
-        return result.clone();
-    }
-    // Leader: drain the pool (these roots plus everything registered since
-    // the previous drain) and commit the union.
-    let (union, ticket) = {
-        let mut pending = ready.pending.lock();
-        let union: Vec<u64> = std::mem::take(&mut pending.roots).into_iter().collect();
-        let ticket = std::mem::replace(&mut pending.ticket, Arc::new(OnceLock::new()));
-        (union, ticket)
-    };
-    let result = commit_locked(ready, &union).await;
-    ticket
-        .set(result.clone())
-        .expect("only the draining leader resolves a ticket");
-    result
+    let ticket = register(ready, roots);
+    drive(ready, ticket).await
 }
 
 /// [`commit`] with `Ready::commit_lock` already held by the caller.

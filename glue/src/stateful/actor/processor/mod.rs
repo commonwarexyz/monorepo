@@ -40,7 +40,7 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
 use commonware_runtime::{
     telemetry::{metrics::GaugeExt, traces::TracedExt as _},
-    Clock, Metrics, Spawner,
+    Clock, Handle, Metrics, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::{stream, Stream, StreamExt};
@@ -696,12 +696,23 @@ where
         Ok(())
     }
 
-    /// Persist finalized state and prune dead in-memory forks.
+    /// Apply finalized state, START durably committing it, and prune dead
+    /// in-memory forks.
+    ///
+    /// On [`FinalizeStatus::Persisted`], the returned [`Handle`] resolves
+    /// once the applied state is durable (see [`DatabaseSet::finalize`]).
+    /// The caller owns the effects that gate on durability: it must not
+    /// acknowledge the block externally, and must not call
+    /// [`Self::notify_finalized`] for it, before the handle resolves.
     pub(super) async fn finalize(
         &mut self,
         context: &E,
         block: &A::Block,
-    ) -> (FinalizeStatus, DeferredPrune<PendingSyncTargets<A, E>>) {
+    ) -> (
+        FinalizeStatus,
+        DeferredPrune<PendingSyncTargets<A, E>>,
+        Option<Handle<()>>,
+    ) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -715,7 +726,7 @@ where
                 digest, self.last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
-            return (FinalizeStatus::Duplicate, None);
+            return (FinalizeStatus::Duplicate, None, None);
         }
 
         let timer = self.metrics.finalize_duration.timer(context);
@@ -748,8 +759,7 @@ where
             }
         };
 
-        self.databases.finalize(batch).await;
-        self.notify_finalized(context, block).await;
+        let durability = self.databases.finalize(batch).await;
         let prune = self
             .pruning
             .as_mut()
@@ -762,7 +772,11 @@ where
         };
         timer.observe(context);
 
-        (FinalizeStatus::Persisted { height }, prune)
+        (
+            FinalizeStatus::Persisted { height },
+            prune,
+            Some(durability),
+        )
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -1489,11 +1503,24 @@ mod tests {
             false
         }
 
+        /// Finalize a block with the pre-overlap blocking semantics: await
+        /// the durability handle and deliver the finalized notification
+        /// before returning.
         async fn finalize(&mut self, block: Block) -> FinalizeStatus {
-            self.processor
+            let (status, _, durability) = self
+                .processor
                 .finalize(self.context_cell.as_present(), &block)
-                .await
-                .0
+                .await;
+            if let Some(durability) = durability {
+                assert!(
+                    crate::stateful::db::durable(durability).await,
+                    "finalize durability handle must resolve",
+                );
+                self.processor
+                    .notify_finalized(self.context_cell.as_present(), &block)
+                    .await;
+            }
+            status
         }
 
         async fn finalize_with_prune(
@@ -1509,9 +1536,20 @@ mod tests {
                 >,
             >,
         ){
-            self.processor
+            let (status, prune, durability) = self
+                .processor
                 .finalize(self.context_cell.as_present(), &block)
-                .await
+                .await;
+            if let Some(durability) = durability {
+                assert!(
+                    crate::stateful::db::durable(durability).await,
+                    "finalize durability handle must resolve",
+                );
+                self.processor
+                    .notify_finalized(self.context_cell.as_present(), &block)
+                    .await;
+            }
+            (status, prune)
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {

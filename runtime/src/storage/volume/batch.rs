@@ -60,7 +60,7 @@ use super::{
     },
     unlink, Blob, HandleTracker, Shared,
 };
-use crate::{Blob as _, Error, IoBuf, IoBufs, DEFAULT_BLOB_VERSION};
+use crate::{Blob as _, Error, Handle, IoBuf, IoBufs, DEFAULT_BLOB_VERSION};
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
 use commonware_utils::sync::{AsyncMutex, Mutex};
@@ -348,6 +348,48 @@ impl<S: crate::Storage> Batch<S> {
     /// Panics if removals were staged, or if creations were staged
     /// alongside any other operation (both require [`Self::apply_sync`]).
     pub async fn apply(mut self) -> Result<(), Error> {
+        self.assert_publishable();
+        let handle = self.apply_inner(ApplyMode::Publish).await?;
+        debug_assert!(handle.is_none(), "publish returns no handle");
+        Ok(())
+    }
+
+    /// [`Self::apply`] plus an immediate commit of the batch's group (one
+    /// selective commit covering exactly the touched blobs and removals).
+    pub async fn apply_sync(mut self) -> Result<(), Error> {
+        let handle = self.apply_inner(ApplyMode::Commit).await?;
+        debug_assert!(handle.is_none(), "a blocking commit returns no handle");
+        Ok(())
+    }
+
+    /// [`Self::apply`] plus a STARTED commit of the batch's group: the
+    /// staged state publishes before this returns (the batch's root is
+    /// readable), and the returned [`Handle`] resolves once a commit
+    /// covering the group lands — a later sync's coalesced union, or the
+    /// commit the handle itself lead-drives when awaited (see
+    /// `commit::drive`). The handle must be observed: a commit failure is
+    /// reported only through it (and permanently poisons the volume), and
+    /// awaiting it is what guarantees a commit runs without depending on
+    /// unrelated traffic. A crash before a covering commit discards the
+    /// published batch wholesale, exactly like a batch published with
+    /// [`Self::apply`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if removals were staged, or if creations were staged
+    /// alongside any other operation (both require [`Self::apply_sync`]:
+    /// entry drops and creations land globally with ANY commit, so an
+    /// unrelated commit interleaving before the group's own commit would
+    /// split the batch).
+    pub async fn apply_start_sync(mut self) -> Result<Handle<()>, Error> {
+        self.assert_publishable();
+        let handle = self.apply_inner(ApplyMode::StartCommit).await?;
+        Ok(handle.expect("a started commit returns its handle"))
+    }
+
+    /// Assert the constraints shared by the publish-without-immediate-commit
+    /// paths ([`Self::apply`] and [`Self::apply_start_sync`]).
+    fn assert_publishable(&self) {
         assert!(
             self.removals.is_empty(),
             "staged removals require apply_sync"
@@ -356,16 +398,9 @@ impl<S: crate::Storage> Batch<S> {
             self.creations.is_empty() || self.staged.is_empty(),
             "creations staged alongside writes require apply_sync"
         );
-        self.apply_inner(false).await
     }
 
-    /// [`Self::apply`] plus an immediate commit of the batch's group (one
-    /// selective commit covering exactly the touched blobs and removals).
-    pub async fn apply_sync(mut self) -> Result<(), Error> {
-        self.apply_inner(true).await
-    }
-
-    async fn apply_inner(&mut self, sync: bool) -> Result<(), Error> {
+    async fn apply_inner(&mut self, mode: ApplyMode) -> Result<Option<Handle<()>>, Error> {
         self.ready.check_poisoned()?;
         // Namespace changes serialize on the same lock (and in the same
         // order relative to the commit lock) as open/remove.
@@ -492,12 +527,35 @@ impl<S: crate::Storage> Batch<S> {
             }
         }
 
-        if sync {
-            commit::commit_locked(&self.ready, &roots).await
-        } else {
-            Ok(())
+        match mode {
+            ApplyMode::Publish => Ok(None),
+            ApplyMode::Commit => commit::commit_locked(&self.ready, &roots)
+                .await
+                .map(|()| None),
+            ApplyMode::StartCommit => {
+                // Register while still holding the commit lock: the next
+                // leader to drain the pool (or the handle itself, whichever
+                // acquires the lock first) covers the group's roots.
+                let ticket = commit::register(&self.ready, &roots);
+                let ready = self.ready.clone();
+                Ok(Some(Handle::from_future(async move {
+                    commit::drive(&ready, ticket).await
+                })))
+            }
         }
     }
+}
+
+/// How [`Batch::apply_inner`] resolves the published group's durability.
+enum ApplyMode {
+    /// Publish only: durability comes from whatever commit next captures a
+    /// group member.
+    Publish,
+    /// Publish and commit the group under the same hold of the commit lock.
+    Commit,
+    /// Publish and register the group in the pending-commit pool, returning
+    /// a handle that lead-drives (or observes) the covering commit.
+    StartCommit,
 }
 
 /// Swing a blob's published state to the staged overlay. Caller holds the

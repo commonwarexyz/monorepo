@@ -6,6 +6,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
+use commonware_runtime::Handle;
 use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
 
@@ -106,6 +107,12 @@ pub trait DbAny<F: Family>:
     /// Durably persist the database, guaranteeing the current state will survive a crash.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error<F>>> + Send;
 
+    /// Start [`Self::sync`]: begin durably persisting the database. Awaiting the returned
+    /// [`Handle`] waits for the same durability guarantee as [`Self::sync`]. The handle must
+    /// be observed: a sync failure is reported only through it, and awaiting it is what
+    /// drives the sync when no other sync arrives.
+    fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Error<F>>> + Send;
+
     /// Destroy the database, removing all data from disk.
     fn destroy(self) -> impl Future<Output = Result<(), Error<F>>> + Send
     where
@@ -203,6 +210,15 @@ macro_rules! impl_db_any {
 
             async fn sync(&mut self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
                 <$ty>::sync(self).await
+            }
+
+            async fn start_sync(
+                &mut self,
+            ) -> ::core::result::Result<
+                ::commonware_runtime::Handle<()>,
+                $crate::qmdb::Error<$fam>,
+            > {
+                <$ty>::start_sync(self).await
             }
 
             async fn destroy(self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {

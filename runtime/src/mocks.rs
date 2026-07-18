@@ -586,6 +586,38 @@ impl<S: Storage + Clone> crate::WriteBatch for SequentialBatch<S> {
     async fn apply_sync(self) -> Result<(), Error> {
         self.apply_inner(true).await
     }
+
+    async fn apply_start_sync(mut self) -> Result<Handle<()>, Error> {
+        assert!(self.removals == 0, "staged removals require apply_sync");
+        // Replay writes and resizes in staging order (the publish phase, so
+        // failures surface eagerly before durability begins).
+        for op in &mut self.ops {
+            match op {
+                SequentialOp::Write(blob, offset, bufs) => {
+                    blob.write_at(*offset, mem::take(bufs)).await?;
+                }
+                SequentialOp::Resize(blob, len) => blob.resize(*len).await?,
+                SequentialOp::Sync(_) | SequentialOp::Remove(..) => {}
+            }
+        }
+        // Durability pass through the wrapper blobs, deferred into the
+        // handle so interception (gating, fault injection) applies to the
+        // started sync and failures are reported only through the handle.
+        let ops = self.ops;
+        Ok(Handle::from_future(async move {
+            for op in &ops {
+                match op {
+                    SequentialOp::Write(blob, ..)
+                    | SequentialOp::Resize(blob, _)
+                    | SequentialOp::Sync(blob) => {
+                        blob.sync().await?;
+                    }
+                    SequentialOp::Remove(..) => {}
+                }
+            }
+            Ok(())
+        }))
+    }
 }
 
 /// Context wrapper whose blobs defer [Blob::start_sync] and can gate blocking syncs in tests.
@@ -744,6 +776,48 @@ impl<E: Batchable + Send + Sync + 'static> crate::WriteBatch for DelayedSyncBatc
         }
         // Namespace ops last, matching [SequentialBatch].
         self.inner.apply_sync().await
+    }
+
+    async fn apply_start_sync(mut self) -> Result<Handle<()>, Error> {
+        assert!(self.removals == 0, "staged removals require apply_sync");
+        assert!(
+            self.creations == 0 || self.ops.is_empty(),
+            "creations staged alongside writes require apply_sync"
+        );
+        // Publish phase: replay writes and resizes, then the inner batch
+        // (creations only, per the assert above).
+        for op in &mut self.ops {
+            match op {
+                SequentialOp::Write(blob, offset, bufs) => {
+                    blob.write_at(*offset, mem::take(bufs)).await?;
+                }
+                SequentialOp::Resize(blob, len) => blob.resize(*len).await?,
+                SequentialOp::Sync(_) | SequentialOp::Remove(..) => {}
+            }
+        }
+        self.inner.apply().await?;
+        // Park the whole batch's durability behind ONE gate entry (mirrors
+        // [DelayedSyncBlob::start_sync]), then sync the staged blobs through
+        // their inner blobs so the pass consumes no further gate entries.
+        let waiter = self
+            .pending
+            .observe()
+            .unwrap_or_else(|| self.pending.defer());
+        let ops = self.ops;
+        Ok(Handle::from_future(async move {
+            waiter.wait().await?;
+            for op in &ops {
+                match op {
+                    SequentialOp::Write(blob, ..)
+                    | SequentialOp::Resize(blob, _)
+                    | SequentialOp::Sync(blob) => {
+                        blob.inner.sync().await?;
+                    }
+                    SequentialOp::Remove(..) => {}
+                }
+            }
+            Ok(())
+        }))
     }
 }
 

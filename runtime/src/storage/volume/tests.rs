@@ -3642,3 +3642,195 @@ async fn test_volume_group_block_aligned_frontier_needs_no_shadow() {
     );
     assert_eq!(&got.as_ref()[2 * BLOCK as usize..], &[6u8; 100][..]);
 }
+
+/// `apply_start_sync` publishes before durability begins: the staged state
+/// is readable when it returns, the handle resolves once the covering
+/// commit lands, and the state survives a crash thereafter.
+#[tokio::test]
+async fn test_volume_apply_start_sync_durable_after_handle() {
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&a, 0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    batch
+        .write_at(&b, 0, IoBuf::copy_from_slice(&[0x2u8; 200]))
+        .await
+        .unwrap();
+    let handle = batch.apply_start_sync().await.unwrap();
+
+    // Published: readable through the blobs before the handle resolves.
+    let got = a.read_at(0, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[0x1u8; 100]);
+
+    // The handle lead-drives the covering commit and resolves Ok.
+    handle.await.unwrap();
+
+    // Durable: every crash outcome recovers the batch.
+    for seed in 0..4u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let (a, size) = recovered.open("p", b"a").await.unwrap();
+        assert_eq!(size, 100, "seed {seed}");
+        assert_eq!(
+            a.read_at(0, 100).await.unwrap().coalesce().as_ref(),
+            &[0x1u8; 100],
+            "seed {seed}"
+        );
+        let (b, size) = recovered.open("p", b"b").await.unwrap();
+        assert_eq!(size, 200, "seed {seed}");
+        assert_eq!(
+            b.read_at(0, 200).await.unwrap().coalesce().as_ref(),
+            &[0x2u8; 200],
+            "seed {seed}"
+        );
+    }
+}
+
+/// A crash before any covering commit erases a started-sync batch exactly
+/// like a batch published with plain `apply`: the handle was never awaited,
+/// no commit ran, and recovery serves the pre-batch state.
+#[tokio::test]
+async fn test_volume_apply_start_sync_crash_before_commit_erases() {
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let volume = Volume::new(tearing.clone(), pool.clone(), Config::default());
+
+    // Committed baseline.
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(b"base"))
+        .await
+        .unwrap();
+    a.sync().await.unwrap();
+
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&a, 4, IoBuf::copy_from_slice(&[7u8; 5000]))
+        .await
+        .unwrap();
+    let handle = batch.apply_start_sync().await.unwrap();
+
+    // Published but never driven: drop the handle without awaiting it.
+    drop(handle);
+
+    for seed in 0..8u64 {
+        let mut rng = TestRng::new(seed);
+        let image = tearing.crash(&mut rng);
+        let post = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(post, pool.clone(), Config::default());
+        let (a, size) = recovered.open("p", b"a").await.unwrap();
+        assert_eq!(size, 4, "seed {seed}: started-sync batch leaked");
+        assert_eq!(
+            a.read_at(0, 4).await.unwrap().coalesce().as_ref(),
+            b"base",
+            "seed {seed}"
+        );
+    }
+}
+
+/// The coalescing ticket IS the completion handle: a later unrelated sync
+/// drains the pending pool and its commit covers the started batch, so the
+/// handle resolves without leading a commit of its own.
+#[tokio::test]
+async fn test_volume_apply_start_sync_resolved_by_later_sync() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&a, 0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    let handle = batch.apply_start_sync().await.unwrap();
+
+    // An unrelated blob's sync leads: it drains the pool (the batch's roots
+    // were registered before it queued) and commits the union.
+    let before = gated.syncs();
+    b.write_at(0, IoBuf::copy_from_slice(&[0x2u8; 50]))
+        .await
+        .unwrap();
+    b.sync().await.unwrap();
+    assert_eq!(gated.syncs() - before, 1);
+
+    // The handle observes the covering commit's ticket: no second fsync.
+    handle.await.unwrap();
+    assert_eq!(gated.syncs() - before, 1, "handle must not lead a commit");
+}
+
+/// A started sync's commit failure is reported through the handle and
+/// poisons the volume, exactly like a blocking commit failure.
+#[tokio::test]
+async fn test_volume_apply_start_sync_failure_poisons() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let mut batch = volume.batch().await.unwrap();
+    batch
+        .write_at(&a, 0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    let handle = batch.apply_start_sync().await.unwrap();
+
+    gated.sync_gate.arm_fail();
+    assert!(handle.await.is_err(), "commit failure surfaces in handle");
+    assert!(a.sync().await.is_err(), "volume must be poisoned");
+}
+
+/// `Blob::start_sync` registers eagerly and lead-drives when awaited: two
+/// started syncs of different blobs coalesce into ONE commit, and both
+/// handles resolve with its result.
+#[tokio::test]
+async fn test_volume_blob_start_sync_coalesces() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let (b, _) = volume.open("p", b"b").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    b.write_at(0, IoBuf::copy_from_slice(&[0x2u8; 200]))
+        .await
+        .unwrap();
+
+    let before = gated.syncs();
+    let ha = a.start_sync().await;
+    let hb = b.start_sync().await;
+    ha.await.unwrap();
+    hb.await.unwrap();
+    assert_eq!(
+        gated.syncs() - before,
+        1,
+        "started syncs must share one commit"
+    );
+
+    drop((a, b));
+    drop(volume);
+    let volume = Volume::new(gated.clone(), pool, Config::default());
+    let (a, size) = volume.open("p", b"a").await.unwrap();
+    assert_eq!(size, 100);
+    assert_eq!(
+        a.read_at(0, 100).await.unwrap().coalesce().as_ref(),
+        &[0x1u8; 100]
+    );
+    let (b, size) = volume.open("p", b"b").await.unwrap();
+    assert_eq!(size, 200);
+    assert_eq!(
+        b.read_at(0, 200).await.unwrap().coalesce().as_ref(),
+        &[0x2u8; 200]
+    );
+}

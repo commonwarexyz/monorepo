@@ -357,6 +357,10 @@ impl<S: crate::Storage> crate::WriteBatch for Batch<S> {
     async fn apply_sync(self) -> Result<(), Error> {
         Self::apply_sync(self).await
     }
+
+    async fn apply_start_sync(self) -> Result<Handle<()>, Error> {
+        Self::apply_start_sync(self).await
+    }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {
@@ -667,6 +671,16 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        Handle::ready(self.sync().await)
+        // Register under the current ticket now: any commit that drains the
+        // pool after this point covers this blob and resolves the handle.
+        // The handle itself lead-drives a covering commit when awaited (see
+        // `commit::drive`), so its progress never depends on unrelated
+        // traffic — but it must be awaited: an unpolled handle leaves the
+        // registered root for the next commit, and a commit failure is
+        // reported only through the handle (the poison latch also fails
+        // every later operation).
+        let ticket = commit::register(&self.ready, &[self.core.id]);
+        let ready = self.ready.clone();
+        Handle::from_future(async move { commit::drive(&ready, ticket).await })
     }
 }

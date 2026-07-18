@@ -151,6 +151,11 @@ impl<B: crate::WriteBatch> crate::WriteBatch for Batch<B> {
         self.metrics.storage_syncs.inc();
         self.inner.apply_sync().await
     }
+
+    async fn apply_start_sync(self) -> Result<Handle<()>, Error> {
+        self.metrics.storage_syncs.inc();
+        self.inner.apply_start_sync().await
+    }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {

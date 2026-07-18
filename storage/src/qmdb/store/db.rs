@@ -95,7 +95,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
-use commonware_runtime::WriteBatch as _;
+use commonware_runtime::{Handle, WriteBatch as _};
 use commonware_utils::Array;
 use core::{num::NonZeroUsize, ops::Range};
 use std::collections::BTreeMap;
@@ -406,6 +406,22 @@ where
     /// Durably persist the journal state published by prior [`Db::apply_batch`] calls.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
+    }
+
+    /// Start [Self::sync]: begin durably persisting the journal state published by prior
+    /// [`Db::apply_batch`] calls. Awaiting the returned [Handle] waits for the same
+    /// durability guarantee as [Self::sync].
+    ///
+    /// The caller may keep applying batches while the handle is pending, but must not
+    /// externally acknowledge the synced state until the handle resolves: a crash before the
+    /// started sync's commit lands discards the synced state exactly as if this call had
+    /// never been made. The handle must be observed — a sync failure (fatal to the db, like
+    /// every mutable storage failure) is reported only through it, and awaiting it is what
+    /// drives the commit when no other sync arrives.
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        let mut batch = self.log.context().batch().await?;
+        self.log.sync_into(&mut batch).await?;
+        Ok(batch.apply_start_sync().await?)
     }
 
     /// Destroy the db, removing all data from disk.

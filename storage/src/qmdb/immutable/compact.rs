@@ -44,6 +44,7 @@ use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use core::marker::PhantomData;
 use std::{
     collections::BTreeMap,
@@ -518,6 +519,28 @@ where
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
         self.witness
             .sync::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
+                Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
+            })
+            .await
+    }
+
+    /// Start [Self::sync]: begin durably persisting the current db state. Awaiting the
+    /// returned [Handle] waits for the same durability guarantee as [Self::sync].
+    ///
+    /// The caller may keep applying batches while the handle is pending, but must not
+    /// externally acknowledge the db's root until the handle resolves: a crash before the
+    /// started sync's commit lands discards the synced state exactly as if this call had
+    /// never been made. The handle must be observed — a sync failure (fatal to the db, like
+    /// every mutable storage failure) is reported only through it, and awaiting it is what
+    /// drives the commit when no other sync arrives.
+    #[tracing::instrument(
+        name = "qmdb.immutable.compact.db.start_sync",
+        level = "info",
+        skip_all
+    )]
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error<F>> {
+        self.witness
+            .start_sync::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
                 Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
             })
             .await

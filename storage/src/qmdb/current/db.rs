@@ -35,7 +35,7 @@ use commonware_runtime::{
         histogram::{ScopedTimer, Timed},
         Counter, Gauge, GaugeExt as _, MetricsExt as _,
     },
-    WriteBatch as _,
+    Handle, WriteBatch as _,
 };
 use commonware_utils::{
     bitmap::{self, Readable as _},
@@ -777,6 +777,35 @@ where
 
         self.update_metrics();
         Ok(())
+    }
+
+    /// Start [Self::sync]: begin durably persisting the journal state published by prior
+    /// [`Db::apply_batch`] calls, along with the pruning metadata. Awaiting the returned
+    /// [Handle] waits for the same durability guarantee as [Self::sync].
+    ///
+    /// The caller may keep applying batches while the handle is pending, but must not
+    /// externally acknowledge the db's root until the handle resolves: a crash before the
+    /// started sync's commit lands discards the synced state exactly as if this call had
+    /// never been made. The handle must be observed — a sync failure (fatal to the db, like
+    /// every mutable storage failure) is reported only through it, and awaiting it is what
+    /// drives the commit when no other sync arrives.
+    #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error<F>> {
+        self.metrics.sync_calls.inc();
+
+        // Write the bitmap pruning boundary alongside the log so that next startup doesn't
+        // have to re-Merkleize the inactive portion up to the inactivity floor.
+        self.rebuild_metadata()?;
+
+        // ONE batch stages the log's durability and the pruning metadata that describes
+        // the persisted bitmap boundary: the started commit covers both together.
+        let mut batch = self.any.log.context().batch().await?;
+        self.any.sync_into(&mut batch).await?;
+        self.metadata.sync_into(&mut batch).await?;
+        let handle = batch.apply_start_sync().await?;
+
+        self.update_metrics();
+        Ok(handle)
     }
 
     /// Destroy the db, removing all data from disk: every partition removal (the pruning

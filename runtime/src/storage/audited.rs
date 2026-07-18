@@ -115,6 +115,11 @@ impl<B: crate::WriteBatch> crate::WriteBatch for Batch<B> {
         self.auditor.event(b"batch_apply_sync", |_| {});
         self.inner.apply_sync().await
     }
+
+    async fn apply_start_sync(self) -> Result<Handle<()>, Error> {
+        self.auditor.event(b"batch_apply_start_sync", |_| {});
+        self.inner.apply_start_sync().await
+    }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {

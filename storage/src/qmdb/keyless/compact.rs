@@ -43,6 +43,7 @@ use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use std::sync::{Arc, Weak};
 
 /// Configuration for a compact keyless authenticated db.
@@ -504,6 +505,24 @@ where
             .await
     }
 
+    /// Start [Self::sync]: begin durably persisting the current db state. Awaiting the
+    /// returned [Handle] waits for the same durability guarantee as [Self::sync].
+    ///
+    /// The caller may keep applying batches while the handle is pending, but must not
+    /// externally acknowledge the db's root until the handle resolves: a crash before the
+    /// started sync's commit lands discards the synced state exactly as if this call had
+    /// never been made. The handle must be observed — a sync failure (fatal to the db, like
+    /// every mutable storage failure) is reported only through it, and awaiting it is what
+    /// drives the commit when no other sync arrives.
+    #[tracing::instrument(name = "qmdb.keyless.compact.db.start_sync", level = "info", skip_all)]
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error<F>> {
+        self.witness
+            .start_sync::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
+                Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
+            })
+            .await
+    }
+
     /// Rewind the db to the synced commit with exactly `target` operations, discarding any
     /// uncommitted batches and any later commits. The rewind is made durable before this
     /// method returns.
@@ -611,6 +630,78 @@ mod tests {
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
         let cfg = witness_config(partition, &context);
         variable::Journal::init(context, cfg).await.unwrap()
+    }
+
+    /// `start_sync` stages the witness entry and gates its durability on
+    /// the backend's commit: the cache swings at publish (the root is live
+    /// immediately), the handle resolves only when the gate releases, and
+    /// the db keeps accepting batches while it is pending.
+    #[test_traced]
+    fn test_compact_start_sync_gated() {
+        use commonware_runtime::mocks::{release_pending_syncs, DelayedSyncContext, PendingSyncs};
+
+        type GatedDb = Db<
+            mmr::Family,
+            DelayedSyncContext<deterministic::Context>,
+            FixedEncoding<U64>,
+            Sha256,
+            (),
+            Sequential,
+        >;
+
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let witness_cfg = witness_config("keyless-start-sync", &context);
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let mut db =
+                GatedDb::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
+                    .await
+                    .unwrap();
+
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            db.apply_batch(batch).unwrap();
+            let root = db.root();
+
+            let handle = db.start_sync().await.unwrap();
+            assert_eq!(
+                db.root(),
+                root,
+                "start_sync must not move the published root"
+            );
+            assert!(
+                !pending.lock().is_empty(),
+                "the started sync must be parked at the gate"
+            );
+
+            // The db accepts and publishes the next batch while the handle
+            // is pending.
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(2))
+                .merkleize(&db, Some(U64::new(22)), floor)
+                .await;
+            db.apply_batch(batch).unwrap();
+
+            futures::pin_mut!(handle);
+            assert!(
+                futures::poll!(handle.as_mut()).is_pending(),
+                "handle must wait for the gated commit"
+            );
+            release_pending_syncs(&pending);
+            handle.await.unwrap();
+
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced("INFO")]

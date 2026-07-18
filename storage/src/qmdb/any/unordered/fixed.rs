@@ -1128,6 +1128,118 @@ pub(crate) mod test {
         is_send(db.get_with_loc(&key));
     }
 
+    // -- start_sync tests --
+
+    /// `start_sync` publishes nothing new and blocks nothing: the returned
+    /// handle is gated on the backend's commit, the db keeps accepting (and
+    /// publishing) batches while it is pending, and the handle resolves once
+    /// the commit lands.
+    #[test_traced]
+    fn test_unordered_fixed_start_sync_overlaps_next_batch() {
+        use commonware_runtime::mocks::{release_pending_syncs, DelayedSyncContext, PendingSyncs};
+
+        type GatedAny = Db<
+            mmr::Family,
+            DelayedSyncContext<Context>,
+            Digest,
+            Digest,
+            Sha256,
+            TwoCap,
+            Sequential,
+        >;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = fixed_db_config::<TwoCap>("start-sync-overlap", &context);
+            let mut db = GatedAny::init(context, cfg).await.unwrap();
+
+            let mut rng = TestRng::new(1);
+            let (key, value) = (Digest::random(&mut rng), Digest::random(&mut rng));
+            let batch = db.new_batch().write(key, Some(value));
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let root = db.root();
+
+            let handle = db.start_sync().await.unwrap();
+            assert_eq!(
+                db.root(),
+                root,
+                "start_sync must not move the published root"
+            );
+            assert!(
+                !pending.lock().is_empty(),
+                "the started sync must be parked at the gate"
+            );
+
+            // The db accepts and publishes the next batch while the handle
+            // is pending.
+            let (key2, value2) = (Digest::random(&mut rng), Digest::random(&mut rng));
+            let batch = db.new_batch().write(key2, Some(value2));
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
+
+            // Still gated: the handle must not resolve before the release.
+            futures::pin_mut!(handle);
+            assert!(
+                futures::poll!(handle.as_mut()).is_pending(),
+                "handle must wait for the gated commit"
+            );
+
+            release_pending_syncs(&pending);
+            handle.await.unwrap();
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A started sync's failure is reported only through the handle:
+    /// `start_sync` itself returns Ok, and awaiting the handle surfaces the
+    /// injected commit failure.
+    #[test_traced]
+    fn test_unordered_fixed_start_sync_failure_in_handle() {
+        use commonware_runtime::mocks::{fail_pending_syncs, DelayedSyncContext, PendingSyncs};
+
+        type GatedAny = Db<
+            mmr::Family,
+            DelayedSyncContext<Context>,
+            Digest,
+            Digest,
+            Sha256,
+            TwoCap,
+            Sequential,
+        >;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = fixed_db_config::<TwoCap>("start-sync-failure", &context);
+            let mut db = GatedAny::init(context, cfg).await.unwrap();
+
+            let mut rng = TestRng::new(2);
+            let (key, value) = (Digest::random(&mut rng), Digest::random(&mut rng));
+            let batch = db.new_batch().write(key, Some(value));
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+
+            let handle = db.start_sync().await.expect("start itself must succeed");
+            fail_pending_syncs(&pending);
+            assert!(
+                handle.await.is_err(),
+                "the injected commit failure must surface through the handle"
+            );
+        });
+    }
+
     // FromSyncTestable implementation for from_sync_result tests
     mod from_sync_testable {
         use super::*;

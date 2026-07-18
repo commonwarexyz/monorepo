@@ -294,29 +294,39 @@ mod tests {
     use super::{Config, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
-        tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
+        db::{AttachableResolver, ManagedDb, Shared as SharedDb, StateSyncDb, SyncEngineConfig},
+        tests::mocks::{
+            TestApp, TestBlock, TestDb, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant,
+        },
+        Application, Proposed,
     };
     use commonware_consensus::{
-        marshal::{self, ancestry, core::Actor as MarshalActor},
+        marshal::{self, ancestry, core::Actor as MarshalActor, Update},
         simplex::{
             mocks::scheme as scheme_mocks,
-            types::{Finalization, Finalize, Proposal},
+            types::{Context as SimplexContext, Finalization, Finalize, Proposal},
         },
         types::{Epoch, FixedEpocher, Round, View, ViewDelta},
-        Application as _, CertifiableBlock as _,
+        Application as _, CertifiableBlock as _, Heightable as _, Reporter as _,
     };
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider},
+        ed25519,
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, reschedule, Clock as _, Error as RuntimeError,
+        Handle, Runner as _, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
+    use commonware_utils::{
+        channel::{mpsc, oneshot},
+        sync::{Mutex, TracedAsyncRwLock},
+        Acknowledgement as _, NZUsize, NZU16, NZU64,
+    };
+    use futures::Stream;
     use std::{convert::Infallible, sync::Arc, time::Duration};
 
     #[derive(Clone)]
@@ -467,6 +477,386 @@ mod tests {
             }
 
             handle.abort();
+        });
+    }
+    /// Pending finalize syncs, oldest first: each entry releases (or fails)
+    /// one [`GatedFinalizeDb::finalize`] durability handle.
+    type FinalizeGate = Arc<Mutex<Vec<oneshot::Sender<Result<(), RuntimeError>>>>>;
+
+    /// A database whose finalize durability handles are released by the test.
+    struct GatedFinalizeDb {
+        gate: FinalizeGate,
+    }
+
+    impl<E: Send> ManagedDb<E> for GatedFinalizeDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = FinalizeGate;
+        type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
+
+        async fn init(_context: E, gate: Self::Config) -> Result<Self, Self::Error> {
+            Ok(Self { gate })
+        }
+
+        async fn new_batch(_db: &SharedDb<Self>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<Handle<()>, Self::Error> {
+            let (sender, receiver) = oneshot::channel();
+            self.gate.lock().push(sender);
+            Ok(Handle::from_receiver(receiver))
+        }
+
+        fn sync_target(&self) -> Self::SyncTarget {
+            0
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl StateSyncDb<deterministic::Context, NoopResolver> for GatedFinalizeDb {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            _context: deterministic::Context,
+            _config: Self::Config,
+            _resolver: NoopResolver,
+            _target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            unreachable!("this test never runs peer state sync")
+        }
+    }
+
+    impl AttachableResolver<GatedFinalizeDb> for NoopResolver {
+        async fn attach_database(&self, _db: SharedDb<GatedFinalizeDb>) {}
+    }
+
+    /// An application recording the heights delivered to `finalized`.
+    #[derive(Clone)]
+    struct GatedApp {
+        finalized: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl Application<deterministic::Context> for GatedApp {
+        type SigningScheme = TestScheme;
+        type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
+        type Block = TestBlock;
+        type Databases = SharedDb<GatedFinalizeDb>;
+        type InputProvider = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            TestBlock::new(0, 0)
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
+            _batches: TestUnmerkleized,
+            _input: &mut Self::InputProvider,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
+            _batches: TestUnmerkleized,
+        ) -> Option<TestMerkleized> {
+            None
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: TestUnmerkleized,
+        ) -> TestMerkleized {
+            TestMerkleized
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _databases: &Self::Databases,
+        ) {
+            self.finalized.lock().push(block.height().get());
+        }
+    }
+
+    /// Acknowledge-everything reporter for the marshal actor: this harness
+    /// bypasses marshal dispatch (updates are reported straight into the
+    /// stateful mailbox), so marshal's own reporter sees nothing relevant.
+    #[derive(Clone)]
+    struct NoopReporter;
+
+    impl commonware_consensus::Reporter for NoopReporter {
+        type Activity = Update<TestBlock>;
+
+        fn report(&mut self, activity: Self::Activity) -> commonware_actor::Feedback {
+            if let Update::Block(_, ack) = activity {
+                ack.acknowledge();
+            }
+            commonware_actor::Feedback::Ok
+        }
+    }
+
+    /// A resolver that records nothing and fetches nothing: this harness
+    /// never needs marshal to backfill.
+    #[derive(Clone)]
+    struct NullResolver;
+
+    impl commonware_resolver::Resolver for NullResolver {
+        type Key = marshal::resolver::handler::Key<Sha256Digest>;
+        type Subscriber = marshal::resolver::handler::Annotation;
+
+        fn fetch<F>(&mut self, _fetch: F) -> commonware_actor::Feedback
+        where
+            F: Into<commonware_resolver::Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            commonware_actor::Feedback::Ok
+        }
+
+        fn fetch_all<F>(&mut self, _fetches: Vec<F>) -> commonware_actor::Feedback
+        where
+            F: Into<commonware_resolver::Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            commonware_actor::Feedback::Ok
+        }
+
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> commonware_actor::Feedback {
+            commonware_actor::Feedback::Ok
+        }
+    }
+
+    impl commonware_resolver::TargetedResolver for NullResolver {
+        type PublicKey = ed25519::PublicKey;
+
+        fn fetch_targeted(
+            &mut self,
+            _fetch: impl Into<commonware_resolver::Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: commonware_utils::vec::NonEmptyVec<Self::PublicKey>,
+        ) -> commonware_actor::Feedback {
+            commonware_actor::Feedback::Ok
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            _fetches: Vec<(F, commonware_utils::vec::NonEmptyVec<Self::PublicKey>)>,
+        ) -> commonware_actor::Feedback
+        where
+            F: Into<commonware_resolver::Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            commonware_actor::Feedback::Ok
+        }
+    }
+
+    /// Marshal + Stateful harness over [`GatedApp`], started without a state
+    /// sync floor (startup recovers from marshal's genesis).
+    async fn start_gated_stateful(
+        context: &deterministic::Context,
+        prefix: &str,
+    ) -> (
+        super::Mailbox<deterministic::Context, GatedApp>,
+        FinalizeGate,
+        Arc<Mutex<Vec<u64>>>,
+        Handle<()>,
+        marshal::resolver::handler::Handler<Sha256Digest>,
+    ) {
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(&mut signing_context, prefix.as_bytes(), 1);
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+
+        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        let finalizations_by_height = immutable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(page_cache.clone(), &format!("{prefix}-finalizations")),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(page_cache.clone(), &format!("{prefix}-blocks")),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+
+        let (marshal_actor, marshal, _height) =
+            MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                    start: marshal::Start::Genesis(TestBlock::new(0, 0)),
+                    partition_prefix: format!("{prefix}-marshal"),
+                    mailbox_size: NZUsize!(8),
+                    view_retention_timeout: ViewDelta::new(1),
+                    prunable_items_per_section: NZU64!(4),
+                    page_cache,
+                    replay_buffer: NZUsize!(64),
+                    key_write_buffer: NZUsize!(64),
+                    value_write_buffer: NZUsize!(64),
+                    block_codec_config: (),
+                    max_repair: NZUsize!(1),
+                    max_pending_acks: NZUsize!(4),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+        // The marshal actor must run: startup anchors the databases by
+        // querying it for the genesis floor block.
+        // The handler half must stay alive for the whole test: the marshal
+        // actor shuts down when it closes.
+        let (resolver_rx, resolver_handler) =
+            marshal::resolver::handler::init(context.child("resolver_handler"), NZUsize!(8));
+        let _marshal_handle =
+            marshal_actor.start_unbuffered(NoopReporter, (resolver_rx, NullResolver));
+
+        let gate: FinalizeGate = Arc::new(Mutex::new(Vec::new()));
+        let finalized = Arc::new(Mutex::new(Vec::new()));
+        let plan = SyncPlan::init(context, format!("{prefix}-stateful")).await;
+        let (stateful, mailbox) = Stateful::init(
+            context.child("stateful"),
+            Config {
+                application: GatedApp {
+                    finalized: finalized.clone(),
+                },
+                db_config: gate.clone(),
+                input_provider: (),
+                marshal,
+                mailbox_size: NZUsize!(8),
+                plan,
+                resolvers: NoopResolver,
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: 1,
+                    max_outstanding_requests: 1,
+                    update_channel_size: NZUsize!(1),
+                    max_retained_roots: 1,
+                },
+                prune_config: None,
+            },
+        );
+        let handle = stateful.start();
+        (mailbox, gate, finalized, handle, resolver_handler)
+    }
+
+    /// Wait until `gate` holds exactly `count` pending finalize syncs.
+    async fn wait_for_pending(gate: &FinalizeGate, count: usize) {
+        while gate.lock().len() != count {
+            reschedule().await;
+        }
+    }
+
+    /// The external effects of a finalized block — the application's
+    /// `finalized` notification and the marshal acknowledgement — gate on
+    /// the database sync's durability handle, while the actor keeps serving
+    /// the mailbox (and even the NEXT finalized block's execution) during
+    /// the in-flight sync. Effects release strictly in block order.
+    #[test]
+    fn finalized_effects_gate_on_durability() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            let (mut mailbox, gate, finalized, handle, _resolver_handler) =
+                start_gated_stateful(&context, "ack-order").await;
+
+            // Startup complete once the database set is attached.
+            let _ = mailbox.subscribe_databases().await;
+
+            // Deliver block 1: its sync parks on the gate, so neither the
+            // acknowledgement nor the finalized notification may fire.
+            let (ack1, waiter1) = commonware_utils::acknowledgement::Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(TestBlock::new(1, 1)), ack1));
+            wait_for_pending(&gate, 1).await;
+            futures::pin_mut!(waiter1);
+            assert!(
+                futures::poll!(waiter1.as_mut()).is_pending(),
+                "acknowledgement must wait for durability"
+            );
+            assert!(
+                finalized.lock().is_empty(),
+                "notification must wait for durability"
+            );
+
+            // The actor keeps serving the mailbox while the sync is parked.
+            let _ = mailbox.subscribe_databases().await;
+
+            // Deliver block 2: the actor executes it and starts its sync
+            // (two parked syncs), with block 1's effects still gated.
+            let (ack2, waiter2) = commonware_utils::acknowledgement::Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(TestBlock::new(2, 2)), ack2));
+            wait_for_pending(&gate, 2).await;
+            futures::pin_mut!(waiter2);
+            assert!(futures::poll!(waiter1.as_mut()).is_pending());
+            assert!(futures::poll!(waiter2.as_mut()).is_pending());
+            assert!(finalized.lock().is_empty());
+
+            // Release block 1's sync: exactly its effects fire, in order.
+            let release1 = gate.lock().remove(0);
+            release1.send(Ok(())).unwrap();
+            waiter1.await.expect("block 1 must be acknowledged");
+            assert_eq!(*finalized.lock(), vec![1]);
+            assert!(
+                futures::poll!(waiter2.as_mut()).is_pending(),
+                "block 2 must stay gated on its own sync"
+            );
+
+            // Release block 2's sync: its effects follow.
+            let release2 = gate.lock().remove(0);
+            release2.send(Ok(())).unwrap();
+            waiter2.await.expect("block 2 must be acknowledged");
+            assert_eq!(*finalized.lock(), vec![1, 2]);
+
+            handle.abort();
+        });
+    }
+
+    /// A finalize sync failure is fatal: the actor panics rather than
+    /// acknowledging (or reporting) state that was never made durable.
+    #[test]
+    #[should_panic(expected = "database finalize sync failed")]
+    fn finalized_sync_failure_is_fatal() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            let (mut mailbox, gate, _finalized, _handle, _resolver_handler) =
+                start_gated_stateful(&context, "ack-fail").await;
+
+            let _ = mailbox.subscribe_databases().await;
+            let (ack1, waiter1) = commonware_utils::acknowledgement::Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(TestBlock::new(1, 1)), ack1));
+            wait_for_pending(&gate, 1).await;
+
+            let release = gate.lock().remove(0);
+            release.send(Err(RuntimeError::WriteFailed)).unwrap();
+            // The actor's panic unwinds through the runner before this waiter
+            // can resolve.
+            let _ = waiter1.await;
+            unreachable!("the failed sync must abort the actor");
         });
     }
 }

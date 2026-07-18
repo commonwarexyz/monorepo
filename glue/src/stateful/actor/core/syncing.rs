@@ -267,9 +267,22 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let (status, prune) = processor
+                    let (status, prune, durability) = processor
                         .finalize(self.context.as_present(), block.as_ref())
                         .await;
+                    // Nothing overlaps this one-shot handoff, so resolve the
+                    // durability immediately: the notification and the
+                    // acknowledgement gate on it, exactly as in the
+                    // processing loop.
+                    if let Some(durability) = durability {
+                        if !crate::stateful::db::durable(durability).await {
+                            debug!("runtime shutdown before handoff database sync completed");
+                            return;
+                        }
+                        processor
+                            .notify_finalized(self.context.as_present(), block.as_ref())
+                            .await;
+                    }
                     if let Some(prune) = prune {
                         prune.run(processor.databases_mut(), &self.marshal).await;
                     }

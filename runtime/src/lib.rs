@@ -970,6 +970,29 @@ stability_scope!(BETA {
         /// Implementations outside the runtime contexts may weaken the
         /// atomicity (see [crate::mocks::SequentialBatch]).
         fn apply_sync(self) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Apply the staged operations atomically and START making them
+        /// durable: the staged state is readable when this returns, and
+        /// awaiting the returned [Handle] waits for the same durability
+        /// guarantee as [Self::apply_sync]. The caller may keep mutating
+        /// the touched blobs (and stage further batches) while the handle
+        /// is pending, but must not externally acknowledge the applied
+        /// state until the handle resolves: a crash before the covering
+        /// commit discards the applied batch exactly like [Self::apply],
+        /// and a failed handle is fatal to the backend's storage.
+        ///
+        /// The handle must be observed: durability failures are reported
+        /// only through it, and on runtime contexts awaiting it is what
+        /// drives the commit when no other sync arrives.
+        ///
+        /// Implementations outside the runtime contexts may weaken the
+        /// atomicity (see [crate::mocks::SequentialBatch]).
+        ///
+        /// # Panics
+        ///
+        /// Panics if removals were staged, or if creations were staged
+        /// alongside any other operation (both require [Self::apply_sync]).
+        fn apply_start_sync(self) -> impl Future<Output = Result<Handle<()>, Error>> + Send;
     }
 });
 stability_scope!(BETA, cfg(feature = "external") {

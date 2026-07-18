@@ -5,17 +5,18 @@
 
 use crate::common::{
     define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value, make_var_value,
-    open_keyless_db, Digest,
+    open_keyless_db, Digest, DELETE_FREQUENCY,
 };
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
-    Supervisor as _,
+    Spawner as _, Supervisor as _,
 };
 use commonware_storage::{
     merkle::{mmb, mmr, Family},
-    qmdb::any::traits::DbAny,
+    qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
 };
 use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
@@ -57,6 +58,76 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     elapsed
 }
 
+/// [`bench_db`] with OVERLAPPED periodic syncs: each periodic commit starts
+/// its sync (`DbAny::start_sync`) and hands the handle to a spawned waiter
+/// that drives it while the main task merkleizes and applies the next chunk,
+/// bounded at one in-flight sync (the glue actor's pipeline shape). The
+/// operation stream is identical to [`bench_db`]'s (same seeded RNG), so the
+/// two measure the same work with sequential vs overlapped durability.
+#[boxed]
+async fn bench_db_overlapped<F: Family, C: DbAny<F, Key = Digest>>(
+    ctx: Context,
+    mut db: C,
+    elements: u64,
+    operations: u64,
+    commit_frequency: u32,
+    make_value: impl Fn(&mut TestRng) -> C::Value,
+) -> Duration {
+    let start = Instant::now();
+    let mut rng = TestRng::new(42);
+
+    // Seed phase: one batch, blocking sync (matching `gen_random_kv` with
+    // `seed_batch: None`).
+    let mut batch = db.new_batch();
+    for i in 0u64..elements {
+        let key = Sha256::hash(&i.to_be_bytes());
+        batch = batch.write(key, Some(make_value(&mut rng)));
+    }
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    db.apply_batch(merkleized).await.unwrap();
+    db.sync().await.unwrap();
+
+    // Operations phase: periodic commits start their sync instead of
+    // blocking on it. A spawned waiter polls the handle (driving the
+    // backend's commit) concurrently with the next chunk's merkleize+apply;
+    // the next commit joins it first, so at most one sync is in flight.
+    let mut inflight: Option<commonware_runtime::Handle<()>> = None;
+    let mut batch = db.new_batch();
+    for _ in 0u64..operations {
+        let idx = rng.next_u64() % elements;
+        let rand_key = Sha256::hash(&idx.to_be_bytes());
+        if rng.next_u32().is_multiple_of(DELETE_FREQUENCY) {
+            batch = batch.write(rand_key, None);
+            continue;
+        }
+        batch = batch.write(rand_key, Some(make_value(&mut rng)));
+        if rng.next_u32().is_multiple_of(commit_frequency) {
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            if let Some(previous) = inflight.take() {
+                previous.await.unwrap();
+            }
+            let sync = db.start_sync().await.unwrap();
+            inflight = Some(
+                ctx.child("sync_waiter")
+                    .spawn(move |_| async move { sync.await.unwrap() }),
+            );
+            batch = db.new_batch();
+        }
+    }
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    db.apply_batch(merkleized).await.unwrap();
+    if let Some(previous) = inflight.take() {
+        previous.await.unwrap();
+    }
+
+    db.prune(db.sync_boundary()).await.unwrap();
+    db.sync().await.unwrap();
+    let elapsed = start.elapsed();
+    db.destroy().await.unwrap();
+    elapsed
+}
+
 // -- Fixed-value variants (16 = 8 db shapes x 2 merkle families) --
 
 define_fixed_variants! {
@@ -85,6 +156,42 @@ fn bench_fixed_value_generate(c: &mut Criterion) {
                             total += dispatch_fixed!(ctx.child("storage"), variant, |db| {
                                 bench_db(db, elements, operations, commit_freq, make_fixed_value)
                                     .await
+                            });
+                        }
+                        total
+                    });
+                },
+            );
+        }
+    }
+}
+
+fn bench_fixed_value_generate_overlapped(c: &mut Criterion) {
+    let runner = tokio::Runner::new(Config::default());
+    for (elements, operations) in CASES {
+        for &variant in FIXED_VARIANTS {
+            c.bench_function(
+                &format!(
+                    "{}/variant={} sync=overlapped elements={elements} operations={operations}",
+                    module_path!(),
+                    variant.name(),
+                ),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            total += dispatch_fixed!(ctx.child("storage"), variant, |db| {
+                                bench_db_overlapped(
+                                    ctx.child("driver"),
+                                    db,
+                                    elements,
+                                    operations,
+                                    commit_freq,
+                                    make_fixed_value,
+                                )
+                                .await
                             });
                         }
                         total
@@ -239,5 +346,6 @@ fn bench_keyless_generate(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_fixed_value_generate, bench_var_value_generate, bench_keyless_generate
+    targets = bench_fixed_value_generate, bench_fixed_value_generate_overlapped,
+        bench_var_value_generate, bench_keyless_generate
 }
