@@ -151,6 +151,28 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
     }
 
+    // Invariant: chain_consistency
+    // A certificate at view v with parent p implies every view in (p, v) was
+    // nullified, so none of them may be finalized.
+    let finalized_ordered: BTreeSet<u64> = finalized_views.keys().copied().collect();
+    for (idx, (notarizations, _, finalizations)) in replicas.iter().enumerate() {
+        let links = notarizations
+            .iter()
+            .map(|(&v, d)| (v, d.parent, "notarization"))
+            .chain(finalizations.iter().map(|(&v, d)| (v, d.parent, "finalization")));
+        for (view, parent, kind) in links {
+            assert!(
+                parent < view,
+                "Invariant violation: replica {idx} has {kind} in view {view} with parent {parent}"
+            );
+            if let Some(skipped) = finalized_ordered.range(parent + 1..view).next() {
+                panic!(
+                    "Invariant violation: replica {idx} has {kind} in view {view} with parent {parent} skipping finalized view {skipped}"
+                );
+            }
+        }
+    }
+
     // Enforce per-replica invariants
     for (notarizations, nullifications, finalizations) in replicas.iter() {
         // Invariant: certificates_are_valid
@@ -433,6 +455,7 @@ where
                         view.get(),
                         Notarization {
                             payload: cert.proposal.payload,
+                            parent: cert.proposal.parent.get(),
                             signature_count: get_signature_count::<S>(
                                 &cert.certificate,
                                 max_participants,
@@ -466,6 +489,7 @@ where
                         view.get(),
                         Finalization {
                             payload: cert.proposal.payload,
+                            parent: cert.proposal.parent.get(),
                             signature_count: get_signature_count::<S>(
                                 &cert.certificate,
                                 max_participants,
