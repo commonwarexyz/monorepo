@@ -51,12 +51,12 @@ impl<const N: usize> Shared<N> {
     /// (the test oracle): set bits in the committed prefix are returned in order via one
     /// `ones_iter_from`, then locations at or beyond the committed boundary are returned
     /// sequentially.
-    pub(crate) fn fill_candidates(
+    pub(crate) fn fill_candidates<T: From<u64>>(
         &self,
         scan_from: u64,
         tip: u64,
         limit: usize,
-        out: &mut Vec<u64>,
+        out: &mut Vec<T>,
     ) -> u64 {
         fill_from(&*self.read(), scan_from, tip, limit, out)
     }
@@ -75,17 +75,17 @@ impl<const N: usize> Shared<N> {
 }
 
 /// Core floor-raise scan over any [`bitmap::Readable`]: set bits in `[scan_from, min(len, tip))`
-/// ascending via one `ones_iter_from`, then locations in `[len, tip)` sequentially. Fills `out`
-/// with up to `limit` candidates and returns the next `scan_from`.
+/// ascending via one `ones_iter_from`, then locations in `[max(scan_from, len), tip)`
+/// sequentially. Fills `out` with up to `limit` candidates and returns the next `scan_from`.
 ///
 /// The bitmap is read once per chunk (through the iterator), so a `B` whose reads go through
 /// interior mutability must not be mutated for the duration of the call.
-pub(crate) fn fill_from<B: bitmap::Readable<N>, const N: usize>(
+pub(crate) fn fill_from<B: bitmap::Readable<N>, T: From<u64>, const N: usize>(
     bitmap: &B,
     scan_from: u64,
     tip: u64,
     limit: usize,
-    out: &mut Vec<u64>,
+    out: &mut Vec<T>,
 ) -> u64 {
     let bitmap_len = bitmap.len();
     let committed_end = bitmap_len.min(tip);
@@ -96,7 +96,7 @@ pub(crate) fn fill_from<B: bitmap::Readable<N>, const N: usize>(
         while out.len() < limit {
             match ones.next() {
                 Some(idx) if idx < committed_end => {
-                    out.push(idx);
+                    out.push(idx.into());
                     scan = idx + 1;
                 }
                 _ => break,
@@ -113,7 +113,7 @@ pub(crate) fn fill_from<B: bitmap::Readable<N>, const N: usize>(
             scan = scan.max(committed_end);
             break;
         }
-        out.push(candidate);
+        out.push(candidate.into());
         scan = candidate + 1;
     }
     scan

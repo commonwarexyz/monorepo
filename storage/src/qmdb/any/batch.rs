@@ -741,10 +741,7 @@ fn fill_candidates<F: Family, const N: usize>(
     limit: usize,
     out: &mut Vec<Location<F>>,
 ) -> Location<F> {
-    let mut raw: Vec<u64> = Vec::with_capacity(limit);
-    let next = bitmap.fill_candidates(*floor, tip, limit, &mut raw);
-    out.extend(raw.into_iter().map(Location::new));
-    Location::new(next)
+    Location::new(bitmap.fill_candidates(*floor, tip, limit, out))
 }
 
 /// Resolve `loc` to an op within the in-memory ancestor region

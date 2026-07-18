@@ -126,10 +126,7 @@ pub(crate) fn fill_candidates<F: Graftable, const N: usize>(
     limit: usize,
     out: &mut Vec<Location<F>>,
 ) -> Location<F> {
-    let mut raw: Vec<u64> = Vec::with_capacity(limit);
-    let next = fill_from(bitmap, *floor, tip, limit, &mut raw);
-    out.extend(raw.into_iter().map(Location::new));
-    Location::new(next)
+    Location::new(fill_from(bitmap, *floor, tip, limit, out))
 }
 
 /// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
@@ -1453,8 +1450,8 @@ mod tests {
     // ---- next_candidate tests ----
 
     /// Single-step oracle for [`fill_candidates`]: return the next floor-raise candidate in
-    /// `[floor, tip)` over a flat committed bitmap. `fill_candidates_matches_oracle` proves
-    /// the production scan produces exactly this sequence.
+    /// `[floor, tip)` over any [`bitmap::Readable`]. `fill_candidates_matches_oracle` proves
+    /// the production scan produces exactly this sequence over every chain shape.
     fn next_candidate<B: bitmap::Readable<N2>, const N2: usize>(
         bitmap: &B,
         floor: Location,
@@ -1554,25 +1551,117 @@ mod tests {
 
     #[test]
     fn fill_candidates_matches_oracle() {
-        let bits = [true, false, true, true, false, false, true, false];
-        let shared = Arc::new(Shared::new(make_bitmap(&bits)));
-        let chain = BitmapBatch::Base(Arc::clone(&shared));
-        let oracle_bm = make_bitmap(&bits);
-        let tip = 12; // extends past the committed bitmap
-        for floor in 0..=tip {
-            let mut want = Vec::new();
-            let mut scan = Location::new(floor);
-            while let Some(c) = next_candidate(&oracle_bm, scan, tip) {
-                want.push(c);
-                scan = Location::new(*c + 1);
+        // Sequence parity plus split-resume for one (chain, tip): the scan matches
+        // single-stepping the oracle over the same chain, and any split point resumes
+        // seamlessly via the returned continuation.
+        fn assert_matches(name: &str, chain: &BitmapBatch<N>, tip: u64) {
+            for floor in 0..=tip {
+                let mut want = Vec::new();
+                let mut scan = Location::new(floor);
+                while let Some(c) = next_candidate(chain, scan, tip) {
+                    want.push(c);
+                    scan = Location::new(*c + 1);
+                }
+                for split in 0..=want.len() {
+                    let mut got = Vec::new();
+                    let next = fill_candidates(chain, Location::new(floor), tip, split, &mut got);
+                    fill_candidates(chain, next, tip, want.len() + 1, &mut got);
+                    assert_eq!(got, want, "{name} floor={floor} split={split}");
+                }
             }
-            // Any split point yields the same overall sequence: the continuation returned by
-            // the first call seamlessly resumes the second.
-            for split in 0..=want.len() {
+        }
+
+        let bits = [true, false, true, true, false, false, true, false];
+        let base = make_bitmap(&bits);
+
+        // Flat committed base.
+        let flat = BitmapBatch::Base(Arc::new(Shared::new(make_bitmap(&bits))));
+
+        // One layer: clears committed bits 3 and 6, appends 8..12 (only 9 set).
+        let shared = Arc::new(Shared::new(make_bitmap(&bits)));
+        let mut overlay = ChunkOverlay::new(12, 1);
+        overlay.clear_bit(&base, 0, 3);
+        overlay.clear_bit(&base, 0, 6);
+        overlay.set_bit(&base, 9);
+        let one_layer = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+            parent: BitmapBatch::Base(Arc::clone(&shared)),
+            overlay: Arc::new(overlay),
+            shared,
+        }));
+
+        // Two layers, mirroring `fill_candidates_filters_ancestor_clears`.
+        let shared = Arc::new(Shared::new(make_bitmap(&bits)));
+        let mut overlay1 = ChunkOverlay::new(12, 2);
+        overlay1.clear_bit(&base, 0, 3);
+        overlay1.set_bit(&base, 9);
+        let chain1 = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+            parent: BitmapBatch::Base(Arc::clone(&shared)),
+            overlay: Arc::new(overlay1),
+            shared: Arc::clone(&shared),
+        }));
+        let mut overlay2 = ChunkOverlay::new(14, 2);
+        overlay2.clear_bit(&chain1, 0, 6);
+        overlay2.clear_bit(&chain1, 0, 9);
+        overlay2.set_bit(&chain1, 13);
+        let two_layer = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+            parent: chain1,
+            overlay: Arc::new(overlay2),
+            shared,
+        }));
+
+        // Pruned base: 40 bits with chunk 0 pruned (33 and 38 set beyond the pruned
+        // boundary), plus a layer clearing 38 and appending 40..46 (41 and 44 set).
+        let make_pruned = || {
+            let mut bits = [false; 40];
+            bits[33] = true;
+            bits[38] = true;
+            let mut bm = make_bitmap(&bits);
+            bm.prune_to_bit(32);
+            bm
+        };
+        let pruned_base = make_pruned();
+        let shared = Arc::new(Shared::new(make_pruned()));
+        let mut overlay = ChunkOverlay::new(46, 1);
+        overlay.clear_bit(&pruned_base, 1, 38);
+        overlay.set_bit(&pruned_base, 41);
+        overlay.set_bit(&pruned_base, 44);
+        let pruned = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+            parent: BitmapBatch::Base(Arc::clone(&shared)),
+            overlay: Arc::new(overlay),
+            shared,
+        }));
+
+        for (name, chain, committed) in [
+            ("flat", flat, 8),
+            ("one-layer", one_layer, 8),
+            ("two-layer", two_layer, 8),
+            ("pruned-base", pruned, 40),
+        ] {
+            let len = bitmap::Readable::<N>::len(&chain);
+            for tip in [committed, len, len + 3] {
+                assert_matches(name, &chain, tip);
+            }
+
+            // Prefetch-then-live handoff: the prefetch is clamped to the committed
+            // boundary and the live scan resumes from the continuation with the
+            // post-batch tip. Nothing the raise must revalidate may be lost across the
+            // handoff (false negatives are forbidden): every set bit in `[floor, len)`
+            // and every location in `[len, tip)`.
+            let tip = len + 3;
+            let cap = tip as usize;
+            let pruned_bits = bitmap::Readable::<N>::pruned_bits(&chain);
+            for floor in pruned_bits..=committed {
                 let mut got = Vec::new();
-                let next = fill_candidates(&chain, Location::new(floor), tip, split, &mut got);
-                fill_candidates(&chain, next, tip, want.len() + 1, &mut got);
-                assert_eq!(got, want, "floor={floor} split={split}");
+                let next = fill_candidates(&chain, Location::new(floor), committed, cap, &mut got);
+                fill_candidates(&chain, next, tip, cap, &mut got);
+                assert!(got.is_sorted_by(|a, b| a < b), "{name} floor={floor}");
+                for loc in floor..tip {
+                    let must_emit = loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc);
+                    assert!(
+                        !must_emit || got.contains(&Location::new(loc)),
+                        "{name} floor={floor} lost {loc}"
+                    );
+                }
             }
         }
     }
@@ -1648,38 +1737,6 @@ mod tests {
         fill_candidates(&chain, Location::new(0), 44, 16, &mut got);
         let want: Vec<Location> = [1, 30, 33, 38, 41].into_iter().map(Location::new).collect();
         assert_eq!(got, want);
-    }
-
-    #[test]
-    fn fill_candidates_continuation_stops_at_committed_boundary() {
-        // Committed bitmap: 8 bits with only bit 1 set. An uncommitted layer appends bits
-        // 8..14 with 9 and 13 active.
-        let mut bits = [false; 8];
-        bits[1] = true;
-        let base = make_bitmap(&bits);
-        let shared = Arc::new(Shared::new(make_bitmap(&bits)));
-        let mut overlay = ChunkOverlay::new(14, 1);
-        overlay.set_bit(&base, 9);
-        overlay.set_bit(&base, 13);
-        let chain = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
-            parent: BitmapBatch::Base(Arc::clone(&shared)),
-            overlay: Arc::new(overlay),
-            shared,
-        }));
-
-        // Prefetch-shaped call: `tip` is the committed boundary, below the layered length,
-        // and the committed set bits exhaust before the limit.
-        let mut got = Vec::new();
-        let next = fill_candidates(&chain, Location::new(0), 8, 16, &mut got);
-        assert_eq!(got, vec![Location::new(1)]);
-
-        // The live scan resumes from the continuation with the post-batch tip. The layer's
-        // active bits at 9 and 13 must still be emitted (false negatives are forbidden), so
-        // the continuation must not jump past the committed boundary.
-        let mut resumed = Vec::new();
-        fill_candidates(&chain, next, 16, 16, &mut resumed);
-        let want: Vec<Location> = [9, 13, 14, 15].into_iter().map(Location::new).collect();
-        assert_eq!(resumed, want);
     }
 
     // ---- trim_committed tests ----
