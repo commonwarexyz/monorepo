@@ -2393,8 +2393,17 @@ async fn read_span_prefix<S: crate::Storage>(
     }
     let span_end = (run_logical + run.len).min(base + BLOCK);
     let phys = run.physical + (base - run_logical);
-    let (mut span, verified) =
-        read_span_checked(ready, blob, staged, chunk, phys, (span_end - base) as usize).await?;
+    // Boxed: the cold checked read-back would otherwise deepen every
+    // write future's layout (see the loader in `plan_stretch`).
+    let (mut span, verified) = Box::pin(read_span_checked(
+        ready,
+        blob,
+        staged,
+        chunk,
+        phys,
+        (span_end - base) as usize,
+    ))
+    .await?;
     span.truncate(prefix_len);
     Ok((span, verified))
 }
@@ -2441,7 +2450,8 @@ async fn read_span_suffix<S: crate::Storage>(
     // A suffix exists only when the run extends past the write, so the
     // chunk's span ends exactly at `suffix_end`.
     let phys = run.physical + (chunk_start - run_logical);
-    let (span, verified) = read_span_checked(ready, blob, staged, chunk, phys, e).await?;
+    // Boxed, as in `read_span_prefix`.
+    let (span, verified) = Box::pin(read_span_checked(ready, blob, staged, chunk, phys, e)).await?;
     Ok((span[s..e].to_vec(), verified))
 }
 
