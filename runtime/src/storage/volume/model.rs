@@ -172,7 +172,11 @@
 //! superblock-bound table, so the implementation's separately stored
 //! commit-written checksum extents — the whole-extent guard CRCs,
 //! recovery's unconditional last-ref load, and the `MAX_CHECKSUM_REFS`
-//! compaction commit — sit outside all exhaustive checking.
+//! compaction commit — sit outside all exhaustive checking. The scale
+//! soak in `tests` drives that lifecycle at size (ref compaction, overlay
+//! eviction, and committed-CRC paging) under materialized power loss
+//! against a history oracle, but it samples seeded histories rather than
+//! enumerating them.
 //!
 //! # Deliberately out of scope
 //!
