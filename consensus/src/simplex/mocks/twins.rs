@@ -2275,15 +2275,14 @@ mod tests {
         let term_length = NZU32!(3);
         let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
             Elector::new(
-                RoundRobin::<Sha256>::default()
-                    .with_term_length(term_length, Duration::from_secs(10)),
+                RoundRobin::<Sha256>::default().with_term(term_length, Duration::from_secs(10)),
                 &scenario,
                 3,
             ),
             &participants,
         );
         let fallback = <RoundRobin<Sha256> as elector::Config<ed25519::Scheme>>::build(
-            RoundRobin::<Sha256>::default().with_term_length(term_length, Duration::from_secs(10)),
+            RoundRobin::<Sha256>::default().with_term(term_length, Duration::from_secs(10)),
             &participants,
         );
 

@@ -1271,7 +1271,7 @@ mod tests {
     #[test_traced]
     fn test_non_genesis_floor_joiner_catches_tip_stable_leader() {
         non_genesis_floor_joiner_catches_tip_with_term::<_, _, RoundRobin>(
-            RoundRobin::default().with_term_length(NZU32!(3), Duration::from_secs(12)),
+            RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
             scheme_mocks::fixture,
         );
     }
@@ -2263,7 +2263,7 @@ mod tests {
     #[test_traced]
     fn test_one_offline_stable_leader() {
         one_offline_with_term::<_, _, RoundRobin>(
-            RoundRobin::default().with_term_length(NZU32!(3), Duration::from_secs(12)),
+            RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
             scheme_mocks::fixture,
         );
     }
@@ -6060,14 +6060,14 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
-                RoundRobin::default().with_term_length(NZU32!(3), Duration::from_secs(12)),
+                RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
                 ed25519::fixture
             ),
             run_hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
-                RoundRobin::default().with_term_length(NZU32!(3), Duration::from_secs(12)),
+                RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
                 ed25519::fixture
             )
         );
@@ -6568,8 +6568,7 @@ mod tests {
     fn twins_campaign_all_links(campaign: TwinsCampaign) {
         let elector = match campaign.term_length.get() {
             1 => <RoundRobin>::default(),
-            _ => <RoundRobin>::default()
-                .with_term_length(campaign.term_length, Duration::from_secs(12)),
+            _ => <RoundRobin>::default().with_term(campaign.term_length, Duration::from_secs(12)),
         };
         for link in [
             Link {

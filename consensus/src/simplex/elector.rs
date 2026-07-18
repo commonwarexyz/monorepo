@@ -51,7 +51,7 @@ use std::{marker::PhantomData, time::Duration};
 /// # Term Structure
 ///
 /// Term configuration is not part of this trait. Electors that support
-/// stable leaders expose their own setter (like [`RoundRobin::with_term_length`]),
+/// stable leaders expose their own setter (like [`RoundRobin::with_term`]),
 /// and consensus reads the configured structure back from the built
 /// [`Elector::terms`].
 pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
@@ -148,7 +148,7 @@ impl Terms {
 /// unlock the round; this is why [`Random`] does not support `term_length > 1`,
 /// where certificates from different views carry different randomness.
 pub trait Elector<S: Scheme>: Clone + Send + 'static {
-    /// Returns the term length this elector was built with.
+    /// Returns the leadership term structure this elector was built with.
     ///
     /// Callers that need term arithmetic should use this value so leader
     /// election and protocol term handling stay aligned.
@@ -207,7 +207,7 @@ impl<H: Hasher> RoundRobin<H> {
     ///
     /// Panics if `term_length` is 1 (single-view terms need no timeout and are
     /// the default).
-    pub fn with_term_length(
+    pub fn with_term(
         mut self,
         term_length: impl Into<TermLength>,
         stall_timeout: Duration,
@@ -448,7 +448,7 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term_length(NZU32!(5), Duration::from_secs(10))
+            .with_term(NZU32!(5), Duration::from_secs(10))
             .build(&participants);
 
         let round = Round::new(Epoch::new(u64::MAX - 1), View::new(6));
@@ -467,7 +467,7 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term_length(NZU32!(3), Duration::from_secs(10))
+            .with_term(NZU32!(3), Duration::from_secs(10))
             .build(&participants);
         let epoch = Epoch::new(0);
 
@@ -491,7 +491,7 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term_length(NZU32!(3), Duration::from_secs(10))
+            .with_term(NZU32!(3), Duration::from_secs(10))
             .build(&participants);
 
         let leader_epoch_0 = elector.elect(Round::new(Epoch::new(0), View::new(1)), None);
@@ -566,6 +566,12 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "stable leaders require a term length greater than 1")]
+    fn round_robin_with_term_panics_on_term_length_one() {
+        let _ = <RoundRobin>::default().with_term(NZU32!(1), Duration::from_secs(10));
     }
 
     #[test]

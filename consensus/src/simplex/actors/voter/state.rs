@@ -373,7 +373,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return round_timeout;
         }
 
-        // The finalization anchor only overrides a round timeout that has not
+        // The stall anchor only overrides a round timeout that has not
         // itself expired: when both are due, the round's reason (e.g. a latched
         // LeaderNullify or InvalidProposal) is the more diagnostic label for
         // the nullify metric.
@@ -388,9 +388,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     ///
     /// Returns `None` when no stall timeout is configured (rounds never
     /// arm a deadline). At `term_length` 1 the scan reduces to the current
-    /// view's own deadline, which [`Self::next_timeout`] defers behind the
-    /// leader and certification deadlines, so it can only surface as an extra
-    /// nullify rebroadcast after the view has already timed out.
+    /// view's own deadline, which expires strictly after the certification
+    /// deadline (asserted at engine start), so it can only surface as an
+    /// extra nullify rebroadcast for a view that has already timed out.
     fn next_stall_timeout(&mut self) -> Option<SystemTime> {
         let term_start = self.view.term_start(self.term_length());
         let unfinalized_view = self.last_finalized.next().max(term_start);
@@ -1073,7 +1073,7 @@ mod tests {
         stall_timeout: Duration,
     ) -> RoundRobinElector<S> {
         <RoundRobin>::default()
-            .with_term_length(term_length, stall_timeout)
+            .with_term(term_length, stall_timeout)
             .build(scheme.participants())
     }
 
@@ -1839,7 +1839,7 @@ mod tests {
             state.set_genesis(test_genesis());
             let entered = context.current();
 
-            // Without a configured timeout no round arms a finalization
+            // Without a configured stall timeout no round arms a stall
             // deadline, and only the per-view timeouts drive next_timeout.
             assert_eq!(state.next_stall_timeout(), None);
             assert_eq!(

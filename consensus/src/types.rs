@@ -1137,6 +1137,7 @@ mod tests {
     use commonware_coding::Config as CodingConfig;
     use commonware_math::algebra::Random;
     use commonware_utils::{Array, NZU16, NZU64, Span, test_rng};
+    use core::num::NonZeroU32;
     use std::ops::Deref;
 
     #[test]
@@ -1581,6 +1582,20 @@ mod tests {
                 "a={a}, b={b}, term_length={term_length}"
             );
         }
+    }
+
+    #[test]
+    fn test_term_length_from_non_zero_u32() {
+        assert_eq!(
+            TermLength::from(NonZeroU32::MIN),
+            TermLength::ONE,
+            "smallest non-zero u32 is the unit term length"
+        );
+        assert_eq!(
+            TermLength::from(NonZeroU32::MAX),
+            TermLength::MAX,
+            "the conversion is total up to the bound"
+        );
     }
 
     #[test]

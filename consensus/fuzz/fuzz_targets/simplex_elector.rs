@@ -76,7 +76,7 @@ fuzz_target!(|input: FuzzInput| {
             let elector = match input.term_length.get() {
                 1 => RoundRobin::<Sha256>::default(),
                 _ => RoundRobin::<Sha256>::default()
-                    .with_term_length(input.term_length, Duration::from_secs(12)),
+                    .with_term(input.term_length, Duration::from_secs(12)),
             };
             fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }
@@ -84,7 +84,7 @@ fuzz_target!(|input: FuzzInput| {
             let elector = match input.term_length.get() {
                 1 => RoundRobin::<Sha256>::shuffled(seed),
                 _ => RoundRobin::<Sha256>::shuffled(seed)
-                    .with_term_length(input.term_length, Duration::from_secs(12)),
+                    .with_term(input.term_length, Duration::from_secs(12)),
             };
             fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }

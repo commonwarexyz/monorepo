@@ -23,7 +23,7 @@ fn round_robin(term_length: TermLength) -> RoundRobin {
     if term_length.get() == 1 {
         RoundRobin::default()
     } else {
-        RoundRobin::default().with_term_length(term_length, Duration::from_secs(12))
+        RoundRobin::default().with_term(term_length, Duration::from_secs(12))
     }
 }
 

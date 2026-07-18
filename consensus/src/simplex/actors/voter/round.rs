@@ -347,7 +347,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Arms the round's deadlines when its view is entered.
     ///
     /// Rounds created for bookkeeping (views never entered) deliberately have
-    /// no deadlines; the finalization anchor in `State` relies on this to
+    /// no deadlines; the stall anchor in `State` relies on this to
     /// skip them.
     pub const fn set_deadlines(
         &mut self,

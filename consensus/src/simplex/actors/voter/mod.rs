@@ -2496,7 +2496,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let elector =
-                RoundRobin::<Sha256>::default().with_term_length(NZU32!(2), Duration::from_secs(5));
+                RoundRobin::<Sha256>::default().with_term(NZU32!(2), Duration::from_secs(5));
             let first_round = Round::new(Epoch::new(333), View::new(1));
             let built_elector: RoundRobinElector<S> =
                 elector.clone().build(schemes[0].participants());
@@ -2606,7 +2606,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let elector =
-                RoundRobin::<Sha256>::default().with_term_length(NZU32!(3), Duration::from_secs(20));
+                RoundRobin::<Sha256>::default().with_term(NZU32!(3), Duration::from_secs(20));
             let (mut mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
                 &mut context,
                 &oracle,
