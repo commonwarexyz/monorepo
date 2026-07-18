@@ -1650,6 +1650,38 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    #[test]
+    fn fill_candidates_continuation_stops_at_committed_boundary() {
+        // Committed bitmap: 8 bits with only bit 1 set. An uncommitted layer appends bits
+        // 8..14 with 9 and 13 active.
+        let mut bits = [false; 8];
+        bits[1] = true;
+        let base = make_bitmap(&bits);
+        let shared = Arc::new(Shared::new(make_bitmap(&bits)));
+        let mut overlay = ChunkOverlay::new(14, 1);
+        overlay.set_bit(&base, 9);
+        overlay.set_bit(&base, 13);
+        let chain = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+            parent: BitmapBatch::Base(Arc::clone(&shared)),
+            overlay: Arc::new(overlay),
+            shared,
+        }));
+
+        // Prefetch-shaped call: `tip` is the committed boundary, below the layered length,
+        // and the committed set bits exhaust before the limit.
+        let mut got = Vec::new();
+        let next = fill_candidates(&chain, Location::new(0), 8, 16, &mut got);
+        assert_eq!(got, vec![Location::new(1)]);
+
+        // The live scan resumes from the continuation with the post-batch tip. The layer's
+        // active bits at 9 and 13 must still be emitted (false negatives are forbidden), so
+        // the continuation must not jump past the committed boundary.
+        let mut resumed = Vec::new();
+        fill_candidates(&chain, next, 16, 16, &mut resumed);
+        let want: Vec<Location> = [9, 13, 14, 15].into_iter().map(Location::new).collect();
+        assert_eq!(resumed, want);
+    }
+
     // ---- trim_committed tests ----
     //
     // `trim_committed` is called from `MerkleizedBatch::new_batch` to strip any `Layer`s whose

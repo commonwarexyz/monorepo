@@ -8,12 +8,12 @@
 //! Reads through an invalidated `MerkleizedBatch` (see its "Branch validity" docs) return
 //! inconsistent bytes; callers must drop invalid batches.
 
+#[cfg(test)]
+use commonware_utils::bitmap::Readable as _;
 use commonware_utils::{
     bitmap,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
-#[cfg(test)]
-use commonware_utils::bitmap::Readable as _;
 
 pub(crate) struct Shared<const N: usize> {
     inner: RwLock<bitmap::Prunable<N>>,
@@ -106,7 +106,11 @@ pub(crate) fn fill_from<B: bitmap::Readable<N>, const N: usize>(
     while out.len() < limit {
         let candidate = scan.max(bitmap_len);
         if candidate >= tip {
-            scan = candidate;
+            // Advance only through the span the ones scan verified clear. When `tip < len`
+            // (a layered bitmap scanned with a committed-boundary tip), bits in
+            // `[committed_end, len)` were never examined and a later call with a larger
+            // `tip` must still see them.
+            scan = scan.max(committed_end);
             break;
         }
         out.push(candidate);
