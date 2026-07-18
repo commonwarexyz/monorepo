@@ -129,18 +129,20 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
+        journal::{Error as JournalError, contiguous::Contiguous},
         merkle::{
             Location as GenericLocation,
             mmr::{self, Location},
         },
         qmdb::{
+            SnapshotBuild as _,
             any::{
-                test::{fixed_db_config, fixed_db_config_with_strategy},
+                test::{colliding_digest, fixed_db_config, fixed_db_config_with_strategy},
                 unordered::{Update, fixed::Operation},
             },
             verify_proof,
         },
-        translator::TwoCap,
+        translator::{OneCap, TwoCap},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
@@ -152,9 +154,14 @@ pub(crate) mod test {
     };
     use commonware_utils::{NZU64, NZUsize, TestRng};
     use core::num::NonZeroUsize;
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, Stream};
     use rand::Rng;
-    use std::{collections::HashMap, time::Duration};
+    use std::{
+        collections::HashMap,
+        future::{Future, ready},
+        sync::Arc,
+        time::Duration,
+    };
 
     /// A generic type alias for an Any database parameterized by merkle family.
     type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
@@ -451,7 +458,6 @@ pub(crate) mod test {
         partition: &'static str,
         concurrency_sweep: &[usize],
     ) {
-        use crate::translator::OneCap;
         type PartDb<const P: usize, S> =
             partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, P, S>;
 
@@ -574,7 +580,6 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_unordered_partitioned_fresh_db_parallel_init() {
         deterministic::Runner::default().start(|context| async move {
-            use crate::translator::OneCap;
             type FreshDb<S> =
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
@@ -600,11 +605,6 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_unordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
-            use crate::{
-                journal::contiguous::Contiguous as _, qmdb::SnapshotBuild as _, translator::OneCap,
-            };
-            use std::sync::Arc;
-
             type FailDb<S> =
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
@@ -656,6 +656,113 @@ pub(crate) mod test {
             assert_eq!(Arc::strong_count(&log), 1);
 
             context.storage_fault_config().write().read_rate = None;
+        });
+    }
+
+    /// A read-only log view whose random-access reads always fail. During a parallel build only
+    /// the workers read the log directly (collision resolution, with the init cache disabled), so
+    /// this fails a worker's read while the router's replay stream succeeds.
+    struct FailingReads<C>(C);
+
+    impl<C: Contiguous> Contiguous for FailingReads<C> {
+        type Item = C::Item;
+
+        fn bounds(&self) -> std::ops::Range<u64> {
+            self.0.bounds()
+        }
+
+        fn read(
+            &self,
+            position: u64,
+        ) -> impl Future<Output = Result<Self::Item, JournalError>> + Send + Sync {
+            ready(Err(JournalError::ItemPruned(position)))
+        }
+
+        fn read_many(
+            &self,
+            positions: &[u64],
+        ) -> impl Future<Output = Result<Vec<Self::Item>, JournalError>> + Send {
+            ready(Err(JournalError::ItemPruned(
+                positions.first().copied().unwrap_or_default(),
+            )))
+        }
+
+        fn try_read_sync(&self, _position: u64) -> Option<Self::Item> {
+            None
+        }
+
+        fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
+            positions.iter().map(|_| None).collect()
+        }
+
+        fn replay(
+            &self,
+            start_pos: u64,
+            buffer: NonZeroUsize,
+        ) -> impl Future<
+            Output = Result<
+                impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
+                JournalError,
+            >,
+        > + Send {
+            self.0.replay(start_pos, buffer)
+        }
+    }
+
+    /// A worker failure during a parallel build must surface through the worker join and leave
+    /// no worker retaining the log: the failing worker's channel closes, routing stops, and the
+    /// join returns the worker's error. This is the counterpart of the replay-failure test,
+    /// which fails the router's stream before any worker reads.
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_parallel_init_worker_failure_drains_workers() {
+        deterministic::Runner::default().start(|context| async move {
+            type FailDb<S> =
+                partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
+
+            // Populate with two keys that share a partition and translated sub-key, so the
+            // second key's replay resolves a collision by reading the first key's operation
+            // from the log.
+            let cfg = fixed_db_config::<OneCap>("unordered_parallel_worker_fail", &context);
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+                .await
+                .unwrap();
+            let merkleized = db
+                .new_batch()
+                .write(colliding_digest(0x10, 1), Some(Sha256::hash(b"v1")))
+                .write(colliding_digest(0x10, 2), Some(Sha256::hash(b"v2")))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen the op log behind a wrapper that fails every random-access read, and build
+            // with the cache disabled so collision resolution must read the log.
+            let cfg = fixed_db_config::<OneCap>("unordered_parallel_worker_fail", &context);
+            let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                context.child("log"),
+                cfg.journal_config,
+            )
+            .await
+            .unwrap();
+            let floor = Location::new(log.bounds().start);
+            let log = Arc::new(FailingReads(log));
+            let mut index = crate::index::partitioned::unordered::Index::<OneCap, Location, 1>::new(
+                context.child("index"),
+                OneCap,
+            );
+            let result = index
+                .build_snapshot(context.child("build"), floor, &log, NZUsize!(4), None)
+                .await;
+            assert!(
+                matches!(result, Err(Error::Journal(JournalError::ItemPruned(_)))),
+                "worker read failure must surface through the join, got {result:?}"
+            );
+
+            // Every worker was joined before the error surfaced: nothing else may retain the log.
+            assert_eq!(Arc::strong_count(&log), 1);
         });
     }
 

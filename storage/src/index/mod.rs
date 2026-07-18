@@ -14,6 +14,8 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 use crate::translator::Translator;
+#[commonware_macros::stability(ALPHA)]
+use commonware_runtime::telemetry::metrics::{Registered, Registration};
 use commonware_runtime::Metrics;
 
 mod storage;
@@ -21,6 +23,14 @@ mod storage;
 pub mod ordered;
 pub mod partitioned;
 pub mod unordered;
+
+/// Create a metric handle that is detached (never registered). Parallel snapshot-build workers
+/// use detached handles to accumulate counts that fold into an index's registered handles at
+/// install.
+#[commonware_macros::stability(ALPHA)]
+pub(crate) fn detached_metric<M: Default>() -> Registered<M> {
+    Registered::with_registration(M::default(), Registration::from(()))
+}
 
 /// A mutable iterator over the values associated with a translated key, allowing in-place
 /// modifications.

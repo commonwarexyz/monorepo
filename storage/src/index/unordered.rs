@@ -10,7 +10,7 @@ use crate::{
     translator::Translator,
 };
 #[commonware_macros::stability(ALPHA)]
-use commonware_runtime::telemetry::metrics::{Registered, Registration};
+use crate::index::detached_metric;
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
@@ -88,16 +88,13 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// nothing.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn detached(&self) -> Self {
-        fn detached<M: Default>() -> Registered<M> {
-            Registered::with_registration(M::default(), Registration::from(()))
-        }
         Self {
             translator: self.translator.clone(),
             overflow: HashMap::with_hasher(self.translator.clone()),
             map: HashMap::with_hasher(self.translator.clone()),
-            keys: detached(),
-            items: detached(),
-            pruned: detached(),
+            keys: detached_metric(),
+            items: detached_metric(),
+            pruned: detached_metric(),
         }
     }
 

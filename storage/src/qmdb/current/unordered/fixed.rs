@@ -109,10 +109,11 @@ pub mod test {
     use crate::{
         mmr,
         qmdb::current::{tests::fixed_config, unordered::tests as shared},
-        translator::TwoCap,
+        translator::{OneCap, TwoCap},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Metrics, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::TestRng;
     use rand::Rng as _;
@@ -427,8 +428,6 @@ pub mod test {
         partition: &'static str,
         concurrency_sweep: &[usize],
     ) {
-        use crate::translator::OneCap;
-        use commonware_parallel::Sequential;
         type PartDb<const P: usize, S> = partitioned::Db<
             mmr::Family,
             deterministic::Context,

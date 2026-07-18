@@ -42,7 +42,7 @@ pub(crate) trait Partitioned: Unordered {
     /// A worker's restricted view over the contiguous partition range it owns.
     type Range: PartitionRange<Value = Self::Value> + Send + 'static;
 
-    /// The number of partitions (`2^(8*P)`).
+    /// The number of partitions in the index.
     fn partition_count(&self) -> usize;
 
     /// The partition index that holds `key`.

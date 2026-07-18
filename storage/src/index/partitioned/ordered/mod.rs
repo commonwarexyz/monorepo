@@ -44,7 +44,10 @@ mod partition;
 pub use self::cursor::Cursor;
 use self::partition::Partition;
 #[commonware_macros::stability(ALPHA)]
-use crate::index::partitioned::{PartitionRange, Partitioned};
+use crate::index::{
+    detached_metric,
+    partitioned::{PartitionRange, Partitioned},
+};
 use crate::{
     index::{
         Cursor as CursorTrait, Factory, Ordered, Unordered,
@@ -52,8 +55,6 @@ use crate::{
     },
     translator::Translator,
 };
-#[commonware_macros::stability(ALPHA)]
-use commonware_runtime::telemetry::metrics::{Registered, Registration};
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
@@ -339,9 +340,6 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
     /// partition slots, so per-worker memory is the range, not the full `2^(8*P)` -- which is
     /// what makes a large `P` affordable.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
-        fn detached<M: Default>() -> Registered<M> {
-            Registered::with_registration(M::default(), Registration::from(()))
-        }
         let partitions = (0..count)
             .map(|_| Partition::default())
             .collect::<Vec<_>>()
@@ -352,10 +350,10 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
                 partitions,
                 spilled: HashMap::new(),
                 threshold: self.threshold,
-                keys: detached(),
-                items: detached(),
-                pruned: detached(),
-                spills: detached(),
+                keys: detached_metric(),
+                items: detached_metric(),
+                pruned: detached_metric(),
+                spills: detached_metric(),
             },
             offset,
         }
