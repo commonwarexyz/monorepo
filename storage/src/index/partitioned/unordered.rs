@@ -1,7 +1,7 @@
 //! The unordered variant of a partitioned index.
 
 #[commonware_macros::stability(ALPHA)]
-use crate::index::partitioned::{BuildRange, ParallelBuild};
+use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
         Unordered as UnorderedTrait, partitioned::partition_index_and_sub_key,
@@ -51,7 +51,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<T: Translator, V: Send + Sync + 'static, const P: usize> ParallelBuild for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for Index<T, V, P> {
     type Range = RangeIndex<T, V, P>;
 
     fn partition_count(&self) -> usize {
@@ -107,7 +107,7 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<T: Translator, V: Send + Sync, const P: usize> BuildRange for RangeIndex<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = <UnorderedIndex<T, V> as UnorderedTrait>::Cursor<'a>

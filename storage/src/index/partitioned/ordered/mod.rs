@@ -44,7 +44,7 @@ mod partition;
 pub use self::cursor::Cursor;
 use self::partition::Partition;
 #[commonware_macros::stability(ALPHA)]
-use crate::index::partitioned::{BuildRange, ParallelBuild};
+use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
         Cursor as CursorTrait, Factory, Ordered, Unordered,
@@ -324,7 +324,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<T: Translator, V: Send + Sync + 'static, const P: usize> ParallelBuild for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for Index<T, V, P> {
     type Range = RangeIndex<T, V, P>;
 
     fn partition_count(&self) -> usize {
@@ -420,7 +420,7 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<T: Translator, V: Send + Sync, const P: usize> BuildRange for RangeIndex<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>

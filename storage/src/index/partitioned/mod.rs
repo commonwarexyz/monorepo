@@ -36,12 +36,11 @@ const INDEX_INT_SIZE: usize = 4;
 /// An index whose snapshot build can be split across parallel workers, each owning a contiguous
 /// range of its partitions. A worker's [Self::Range] is created empty by [Self::new_range],
 /// populated through its cursor operations, and folded back into the full index by
-/// [Self::install_range]. Both partitioned variants implement this, letting
-/// `qmdb`'s parallel snapshot build drive either through one interface.
+/// [Self::install_range].
 #[commonware_macros::stability(ALPHA)]
-pub(crate) trait ParallelBuild: Unordered {
+pub(crate) trait Partitioned: Unordered {
     /// A worker's restricted view over the contiguous partition range it owns.
-    type Range: BuildRange<Value = Self::Value> + Send + 'static;
+    type Range: PartitionRange<Value = Self::Value> + Send + 'static;
 
     /// The number of partitions (`2^(8*P)`).
     fn partition_count(&self) -> usize;
@@ -62,11 +61,11 @@ pub(crate) trait ParallelBuild: Unordered {
     fn for_each_value(&self, f: impl FnMut(&Self::Value));
 }
 
-/// One [ParallelBuild] worker's restricted view of its partition range: only the cursor
+/// One [Partitioned] worker's restricted view of its partition range: only the cursor
 /// operations (addressed by full key), so the globally-addressed [Unordered] methods cannot be
 /// miscalled on a worker.
 #[commonware_macros::stability(ALPHA)]
-pub(crate) trait BuildRange: Sized {
+pub(crate) trait PartitionRange: Sized {
     /// The value type held by the range.
     type Value: Send + Sync;
 

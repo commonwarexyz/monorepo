@@ -52,7 +52,7 @@
 use crate::{
     index::{
         Cursor, Unordered as Index,
-        partitioned::{BuildRange, ParallelBuild},
+        partitioned::{PartitionRange, Partitioned},
     },
     journal::{
         Error as JournalError,
@@ -478,7 +478,7 @@ async fn build_snapshot_worker<F, C, R>(
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
-    R: BuildRange<Value = Location<F>>,
+    R: PartitionRange<Value = Location<F>>,
 {
     let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
     while let Some(batch) = rx.recv().await {
@@ -540,7 +540,7 @@ where
 }
 
 /// Build a snapshot by splitting the log replay across parallel workers, each owning a contiguous
-/// range of the index's partitions (see [ParallelBuild]). Returns the number of active keys and
+/// range of the index's partitions (see [Partitioned]). Returns the number of active keys and
 /// the activity bitmap (see [SnapshotBuild::build_snapshot]).
 async fn build_snapshot_parallel<F, E, C, I>(
     snapshot: &mut I,
@@ -554,7 +554,7 @@ where
     F: Family,
     E: Spawner,
     C: Contiguous<Item: Operation<F>> + 'static,
-    I: ParallelBuild + Index<Value = Location<F>>,
+    I: Partitioned + Index<Value = Location<F>>,
 {
     let count = snapshot.partition_count();
     let workers = (init_concurrency.get() - 1).min(count);
