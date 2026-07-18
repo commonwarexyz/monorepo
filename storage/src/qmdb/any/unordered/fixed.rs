@@ -664,7 +664,7 @@ pub(crate) mod test {
     /// this fails a worker's read while the router's replay stream succeeds.
     struct FailingReads<C>(C);
 
-    impl<C: Contiguous> Contiguous for FailingReads<C> {
+    impl<C: Contiguous<Item: Sync>> Contiguous for FailingReads<C> {
         type Item = C::Item;
 
         fn bounds(&self) -> std::ops::Range<u64> {

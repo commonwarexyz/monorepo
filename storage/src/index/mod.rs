@@ -14,9 +14,9 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 use crate::translator::Translator;
+use commonware_runtime::Metrics;
 #[commonware_macros::stability(ALPHA)]
 use commonware_runtime::telemetry::metrics::{Registered, Registration};
-use commonware_runtime::Metrics;
 
 mod storage;
 

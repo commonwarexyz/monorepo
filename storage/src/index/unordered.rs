@@ -2,6 +2,8 @@
 //! arbitrary values. If you require ordering over the map's keys, consider
 //! [crate::index::ordered::Index] instead.
 
+#[commonware_macros::stability(ALPHA)]
+use crate::index::detached_metric;
 use crate::{
     index::{
         Cursor as CursorTrait, Unordered,
@@ -9,8 +11,6 @@ use crate::{
     },
     translator::Translator,
 };
-#[commonware_macros::stability(ALPHA)]
-use crate::index::detached_metric;
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
