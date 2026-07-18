@@ -14,14 +14,20 @@
 //!   losing slot is zeroed so a later crash cannot resurrect it. On crash
 //!   histories the rejected candidate is always an unacknowledged torn
 //!   commit (model I1-I3). Media corruption (bit rot) inside the NEWEST
-//!   commit's table, its delta-manifested chunks, or the checksum extents
-//!   its manifest verification loads is
-//!   indistinguishable from such tearing, so recovery silently rolls back
-//!   that one commit instead of failing loudly — a warn-level event is the
-//!   only signal, emitted before zeroing destroys the evidence. Corruption
-//!   in any OLDER commit's state — including checksum extents the manifest
-//!   does not consult — has no such window: it surfaces as a loud
-//!   [`crate::Error::BlobCorrupt`] at hydration or read.
+//!   commit's table or the extents its manifest verification reads — the
+//!   manifested chunks, their shadow and checksum extents, plus each
+//!   manifested entry's LAST checksum ref, which is loaded unconditionally
+//!   even when it predates the candidate — is indistinguishable from such
+//!   tearing, so recovery silently rolls back that one commit instead of
+//!   failing loudly — a warn-level event is the only signal, emitted
+//!   before zeroing destroys the evidence. The fallback itself needs the
+//!   older slot's table extent unrecycled (it is freed when superseded, so
+//!   a post-confirmation data write may legally reuse it): otherwise rot
+//!   in the newest table surfaces as a loud
+//!   [`crate::Error::PartitionCorrupt`]. Corruption in any OLDER commit's
+//!   state that the manifest does not consult has no such window: it
+//!   surfaces as a loud [`crate::Error::BlobCorrupt`] at hydration or
+//!   read.
 //! - Repairs (shadow splices + slot zeroing) are idempotent and re-run on a
 //!   crash during recovery.
 
@@ -76,13 +82,19 @@ async fn read_table<B: crate::Blob>(
 }
 
 /// Locate the backed span of `chunk` in a table entry.
+///
+/// Runs are disjoint and sorted by logical start, so the only candidate is
+/// the last run at or below the chunk. Binary search: manifest
+/// verification resolves every manifested chunk through this, and a
+/// hole-heavy blob (one run per isolated block) would otherwise make
+/// startup O(runs x manifested chunks).
 fn entry_chunk_span(entry: &Entry, chunk: u64) -> Option<(u64, u64)> {
     let chunk_start = chunk * BLOCK;
-    let run = entry
-        .runs
-        .iter()
-        .rev()
-        .find(|r| r.logical <= chunk_start && chunk_start < r.logical + r.len)?;
+    let i = entry.runs.partition_point(|r| r.logical <= chunk_start);
+    let run = &entry.runs[i.checked_sub(1)?];
+    if chunk_start >= run.logical + run.len {
+        return None;
+    }
     let span = (run.logical + run.len - chunk_start).min(BLOCK);
     Some((run.physical + (chunk_start - run.logical), span))
 }
@@ -191,9 +203,14 @@ struct VerifyRead {
 /// commit, whose fsync made it durable — tearing strikes only blocks the
 /// candidate commit wrote — so skipping its guard check trades nothing on
 /// crash histories (bit rot in it surfaces loudly at first read instead
-/// of rolling back the newest commit, see the module docs). Adjacent
-/// manifested chunks coalesce into single reads, issued with bounded
-/// concurrency so CRC work overlaps I/O.
+/// of rolling back the newest commit, see the module docs). The LAST ref
+/// can itself predate the candidate (a capture whose dirt is confined to
+/// the partial frontier appends no ref): its guard check cannot fail on
+/// crash histories either, but rot in it rolls the candidate back — the
+/// documented exception covers each manifested entry's last ref even when
+/// an older commit wrote it. Adjacent manifested chunks coalesce into
+/// single reads, issued with bounded concurrency so CRC work overlaps
+/// I/O.
 async fn verify_manifest<B: crate::Blob>(
     file: &B,
     len: u64,

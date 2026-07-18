@@ -7,15 +7,8 @@
 //! completes (see the commit protocol in the module docs), which is what makes
 //! rollback to the previous commit safe.
 
+use super::BLOCK;
 use std::collections::BTreeMap;
-
-/// Alignment unit for all extents.
-///
-/// This is the assumed physical tearing granularity of the inner blob: an
-/// uncommitted write never lands in a block that holds committed bytes of a
-/// DIFFERENT extent, so a torn write can only damage data that the adopted
-/// table does not reference.
-pub(super) const BLOCK: u64 = 4096;
 
 /// A contiguous physical byte range in the volume file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

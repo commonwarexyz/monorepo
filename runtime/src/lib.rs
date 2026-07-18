@@ -778,7 +778,8 @@ stability_scope!(BETA {
         /// Resize the blob to the given length.
         ///
         /// If the length is greater than the current length, the blob is extended with zeros.
-        /// If the length is less than the current length, the blob is resized.
+        /// If the length is less than the current length, the blob is truncated: bytes at and
+        /// beyond `len` are discarded, and reads past the new length fail.
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Ensure all pending data is durably persisted.
@@ -801,6 +802,23 @@ stability_scope!(BETA {
         /// it (keeping it alive unpolled) can block every later commit, and dropping
         /// it mid-commit aborts that commit — which, like any commit failure here,
         /// poisons ALL storage until restart (see the [Storage] crash contract).
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_runtime::{deterministic, Blob, Runner, Storage};
+        ///
+        /// let executor = deterministic::Runner::default();
+        /// executor.start(|context| async move {
+        ///     let (blob, _) = context.open("p", b"wal").await.unwrap();
+        ///     blob.write_at(0, &b"record"[..]).await.unwrap();
+        ///
+        ///     // Enqueue the sync, overlap other work, then observe the
+        ///     // handle: a failure is reported only through it.
+        ///     let handle = blob.start_sync().await;
+        ///     handle.await.expect("record is durable");
+        /// });
+        /// ```
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 
@@ -828,6 +846,27 @@ stability_scope!(BETA {
     /// [crate::mocks] satisfy this trait with [crate::mocks::SequentialBatch]
     /// (or a wrapper-specific equivalent), which replays staged operations
     /// in order WITHOUT cross-blob atomicity (see its docs).
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_runtime::{deterministic, Batchable, Blob, Runner, Storage, WriteBatch};
+    ///
+    /// let executor = deterministic::Runner::default();
+    /// executor.start(|context| async move {
+    ///     let (a, _) = context.open("p", b"a").await.unwrap();
+    ///     let (b, _) = context.open("p", b"b").await.unwrap();
+    ///
+    ///     // Stage writes across BOTH blobs, then land them as one atomic
+    ///     // commit: after a crash either both are visible or neither is.
+    ///     let mut batch = context.batch().await.unwrap();
+    ///     batch.write_at(&a, 0, &b"alpha"[..]).await.unwrap();
+    ///     batch.write_at(&b, 0, &b"beta"[..]).await.unwrap();
+    ///     batch.apply_sync().await.unwrap();
+    ///
+    ///     let read = a.read_at(0, 5).await.unwrap();
+    ///     assert_eq!(read.coalesce().as_ref(), b"alpha");
+    /// });
+    /// ```
     pub trait Batchable: Storage {
         /// The staged-batch type.
         type Batch: WriteBatch<Blob = Self::Blob>;
@@ -858,7 +897,11 @@ stability_scope!(BETA {
         ///
         /// Staged bytes may reach storage immediately (the volume writes
         /// through), but they are never observable through the blob before
-        /// [Self::apply] and never durable before [Self::apply_sync].
+        /// [Self::apply], and never durable before the applied batch's
+        /// covering commit: [Self::apply_sync] performs one immediately,
+        /// while after a plain [Self::apply] ANY commit capturing a batch
+        /// member (a later [`Blob::sync`], an overlapping batch's commit)
+        /// commits the whole batch.
         fn write_at(
             &mut self,
             blob: &Self::Blob,
@@ -900,6 +943,11 @@ stability_scope!(BETA {
         /// [Self::apply]: every commit emits every member's entry, so the
         /// creations become durable together at the backend's next commit
         /// (possibly earlier), or a crash before one erases them together.
+        ///
+        /// The created blob carries [DEFAULT_BLOB_VERSION]: reopening it
+        /// with [Storage::open_versioned] requires a range containing that
+        /// version (unlike the non-batch create path, which assigns the
+        /// range's upper bound).
         ///
         /// The returned handle must not be read, written, or staged against
         /// until the batch is applied.

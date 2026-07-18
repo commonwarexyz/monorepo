@@ -438,7 +438,9 @@ impl<S: crate::Storage> Batch<S> {
     /// atomically with the rest of the batch (and, under
     /// [`Self::apply_sync`], commits with it). Until then the blob is
     /// invisible to opens, scans, and commits, and the returned handle must
-    /// not be used.
+    /// not be used. The created blob carries
+    /// [`crate::DEFAULT_BLOB_VERSION`]: a versioned reopen must include
+    /// that version in its range.
     pub fn create(&mut self, partition: &str, name: &[u8]) -> Result<Blob<S>, Error> {
         super::super::validate_partition_name(partition)?;
         self.ready.check_poisoned()?;

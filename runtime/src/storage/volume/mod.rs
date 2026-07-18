@@ -8,8 +8,10 @@
 //! > state captured by one commit: the last confirmed commit (whose sync
 //! > returned), or a newer fully-landed one (legal roll-forward). A commit
 //! > happens on any [`crate::Blob::sync`] / [`crate::Blob::write_at_sync`],
-//! > on [`crate::Storage`] blob creation/removal, and on
-//! > [`Batch::apply_sync`]. It atomically
+//! > on [`crate::Storage`] blob creation/removal, on
+//! > [`Batch::apply_sync`], and when a commit registered by
+//! > [`crate::Blob::start_sync`] / [`Batch::apply_start_sync`] lands
+//! > (driven by its handle, or coalesced into any later commit). It atomically
 //! > covers the CAPTURED blobs: the synced blob (pooled with every
 //! > concurrently queued sync's blob, see Concurrency below) or the
 //! > applying batch's blobs, expanded across applied-batch groups so an
@@ -29,16 +31,22 @@
 //! is the production model.
 //!
 //! Corruption loudness has ONE bounded exception: media corruption (bit
-//! rot) that lands inside the NEWEST commit's table, its delta-manifested
-//! chunks, or the checksum extents its manifest verification loads (those
-//! covering manifested chunks) is indistinguishable from a torn commit at
-//! recovery, which then falls back to the previous confirmed commit and
-//! emits a warn-level event instead of returning an error (see `recover`).
-//! Corruption anywhere else — committed data, any older commit's metadata,
-//! checksum extents the manifest does not consult —
-//! is always a loud [`crate::Error::BlobCorrupt`]. The crash contract
-//! itself is model-checked under crash and power loss, not under media
-//! corruption.
+//! rot) that lands inside the NEWEST commit's table or in the extents its
+//! manifest verification reads — the delta-manifested chunks, the shadow
+//! extents of manifested frontier chunks, the checksum extents covering
+//! manifested chunks, plus each manifested blob's LAST checksum extent
+//! (loaded unconditionally, even when an older commit wrote it) — is
+//! indistinguishable from a torn commit at recovery, which then falls back
+//! to the previous confirmed commit and emits a warn-level event instead
+//! of returning an error (see `recover`). The silent fallback additionally
+//! requires the previous table's extent to be unrecycled (it is freed at
+//! confirmation, so a post-confirmation write may legally reuse it): rot
+//! in the newest table can otherwise surface as a loud
+//! [`crate::Error::PartitionCorrupt`] instead of the one-commit rollback.
+//! Corruption anywhere else — committed data, metadata the manifest does
+//! not consult — is always a loud [`crate::Error::BlobCorrupt`]. The crash
+//! contract itself is model-checked under crash and power loss, not under
+//! media corruption.
 //!
 //! A commit may make MORE data durable than a caller explicitly synced (the
 //! single inner fsync covers every pending write of the volume file, which
@@ -112,6 +120,38 @@
 //! extra slots would buy nothing until the physics change (a backend with
 //! sub-file fsync domains, where same-file flushes could overlap).
 //!
+//! # Scale envelope
+//!
+//! Costs that grow with namespace or blob size (the `storage_volume`
+//! metrics expose the live values):
+//!
+//! - Every commit writes the ENTIRE blob table to a fresh extent. At
+//!   ~55-111 bytes per small blob, 10k blobs cost ~1 MiB and 100k blobs
+//!   ~5-11 MiB of table write + CRC per commit (several ms against the
+//!   fsync budget), and creating N blobs one at a time commits N tables —
+//!   use [`Batch::create`] for bulk creation. Table assembly also rescans
+//!   the namespace for encode-cache misses on each commit (~0.2 ms at 10k
+//!   blobs, under the state mutex).
+//! - A capture whose dirt falls below the covered frontier (any overwrite,
+//!   COW, or shrink — and every 16th append-shaped commit, see
+//!   `MAX_CHECKSUM_REFS`) rewrites the blob's whole checksum array:
+//!   O(size/1024) bytes read and written per such commit (~10 MiB for a
+//!   10 GiB blob, ~1 GiB for 1 TiB), with the array re-encode running
+//!   under the volume-wide state mutex.
+//! - Uncommitted dirt costs ~20 B/chunk of RAM and 16 B/chunk of manifest
+//!   in the next table, and recovery re-reads every manifested byte before
+//!   the volume serves its first operation — on every open until a later
+//!   commit supersedes that manifest. A 100 GiB write burst before one
+//!   sync holds ~0.5 GB of dirty-chunk RAM, writes a ~420 MB manifest, and
+//!   costs a 100 GiB verification read at the next open: sync bulk loads
+//!   incrementally.
+//! - Allocation is first-fit over the in-memory free list: O(free ranges)
+//!   under the state mutex per allocation (~70 us at 100k fragments — the
+//!   `free_bytes` gauge plus monotonic `file_end_bytes` growth signal
+//!   fragmentation). Splice-rewrite working sets beyond 1024 chunks per
+//!   blob pay an O(1024) overlay-eviction scan per further insert
+//!   (~0.8 us under the blob lock).
+//!
 //! # Formal model
 //!
 //! The commit protocol (freeze-rule copy-on-write, capture-gated deferred
@@ -146,9 +186,12 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-/// Alignment unit and checksum granularity: writes tear at (at most) this
-/// granularity, and reads are verified per this granularity (once per chunk
-/// per process lifetime).
+/// Alignment unit for all extents, checksum granularity, and the assumed
+/// physical tearing granularity of the inner blob: writes tear at (at
+/// most) this granularity, reads are verified per this granularity (once
+/// per chunk per process lifetime), and an uncommitted write never lands
+/// in a block that holds committed bytes of a DIFFERENT extent — so a torn
+/// write can only damage data that the adopted table does not reference.
 pub(crate) const BLOCK: u64 = 4096;
 
 /// Location and growth policy of the volume file within the inner storage.
@@ -303,13 +346,16 @@ impl<S: crate::Storage> Drop for HandleTracker<S> {
         if *count == 0 {
             state.handles.remove(&self.id);
             // Drop the blob entirely if it was removed (no name references
-            // it and no handle can reach it anymore).
+            // it and no handle can reach it anymore); otherwise demote a
+            // clean blob's hydrated state back to dormant.
             let removed = state
                 .open
                 .get(&self.id)
                 .is_some_and(|b| b.inner.lock().removed);
             if removed {
                 state.open.remove(&self.id);
+            } else {
+                state.maybe_demote(self.id);
             }
             state.apply_frees();
             self.ready.metrics.observe_state(&state);

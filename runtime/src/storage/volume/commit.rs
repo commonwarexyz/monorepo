@@ -98,9 +98,7 @@ impl<S: crate::Storage> Drop for CancelGuard<'_, S> {
             return;
         };
         let error = Error::Aborted;
-        tracing::error!(
-            "volume commit future dropped mid-commit; storage poisoned until restart"
-        );
+        tracing::error!("volume commit future dropped mid-commit; storage poisoned until restart");
         let _ = self.ready.poisoned.set(error.clone());
         let _ = self.ready.metrics.poisoned.try_set(1);
         let _ = ticket.set(Err(error));
@@ -389,6 +387,10 @@ async fn take_snapshot<S: crate::Storage>(
             // rewritten in place until it is confirmed (or rolled back).
             inner.freeze_size = inner.freeze_size.max(inner.size);
 
+            // Block demotion until finalize publishes the new entry: the
+            // dormant map must never hold an entry this commit supersedes.
+            inner.capturing = true;
+
             // Finalize deferred chunk CRCs from their overlay entries (the
             // write lock quiesces the writer): the checksum array, tail
             // CRC, and delta manifest below must carry exact values.
@@ -480,7 +482,11 @@ async fn take_snapshot<S: crate::Storage>(
                 let (_, span) = inner.chunk_span(last).expect("backed chunk");
                 (span < BLOCK).then(|| {
                     assert_eq!(inner.tail_chunk, last, "tail buffer desynced from runs");
-                    assert_eq!(inner.tail.len() as u64, span, "tail span desynced from runs");
+                    assert_eq!(
+                        inner.tail.len() as u64,
+                        span,
+                        "tail span desynced from runs"
+                    );
                     inner.tail.clone()
                 })
             });
@@ -622,16 +628,19 @@ async fn take_snapshot<S: crate::Storage>(
         }
 
         let partitions: Vec<String> = state.partitions.keys().cloned().collect();
-        let pindex = |p: &str, partitions: &[String]| {
-            partitions
-                .iter()
-                .position(|x| x == p)
-                .expect("known partition") as u32
-        };
+        // Indexed lookups: an epoch change re-encodes EVERY entry, so a
+        // linear scan per blob would make that commit O(blobs x
+        // partitions).
+        let pindex: std::collections::BTreeMap<&str, u32> = partitions
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.as_str(), i as u32))
+            .collect();
+        let pindex = |p: &str| *pindex.get(p).expect("known partition");
 
         // Fresh encodings for captured blobs.
         for (blob, entry) in &mut committed {
-            entry.partition = pindex(&blob.partition, &partitions);
+            entry.partition = pindex(&blob.partition);
             state.encoded.insert(entry.id, Bytes::from(entry.encode()));
         }
         // Cache misses among served blobs (first commit after recovery or
@@ -642,7 +651,7 @@ async fn take_snapshot<S: crate::Storage>(
                 continue;
             }
             let mut entry = entry.clone();
-            entry.partition = pindex(partition, &partitions);
+            entry.partition = pindex(partition);
             missing.push((id, Bytes::from(entry.encode())));
         }
         for (&id, core) in &state.open {
@@ -668,7 +677,7 @@ async fn take_snapshot<S: crate::Storage>(
                 tail_crc: 0,
                 shadow: None,
             });
-            entry.partition = pindex(&core.partition, &partitions);
+            entry.partition = pindex(&core.partition);
             missing.push((id, Bytes::from(entry.encode())));
         }
         for (id, bytes) in missing {
@@ -723,8 +732,10 @@ fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
     // committed-CRC loads validate their ref against the entry after
     // reading (see `load_committed_page`), so an extent must never become
     // reusable while an entry referencing it is still visible.
+    let captured_ids: Vec<u64> = snapshot.committed.iter().map(|(blob, _)| blob.id).collect();
     for (blob, entry) in snapshot.committed {
         let mut inner = blob.inner.lock();
+        inner.capturing = false;
         // The confirmed size is now the exact freeze boundary (a rewind
         // below the old boundary takes effect here).
         inner.freeze_size = entry.size;
@@ -770,5 +781,10 @@ fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
         !covered
     });
     state.apply_frees();
+    // Captured blobs whose last handle dropped mid-commit could not demote
+    // then (their next entry lived only in this snapshot): demote them now.
+    for id in captured_ids {
+        state.maybe_demote(id);
+    }
     ready.metrics.observe_state(&state);
 }

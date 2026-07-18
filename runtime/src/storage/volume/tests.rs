@@ -3774,7 +3774,8 @@ async fn test_volume_torn_shadow_rolls_back_one_commit() {
         .max_by_key(|sb| sb.seq)
         .expect("a valid superblock");
     let table = super::layout::Table::decode(
-        &image[newest.table_offset as usize..(newest.table_offset + newest.table_len as u64) as usize],
+        &image[newest.table_offset as usize
+            ..(newest.table_offset + newest.table_len as u64) as usize],
     )
     .expect("table decodes");
     let shadow = table.blobs[0].shadow.expect("commit 2 wrote a shadow");
@@ -3832,7 +3833,7 @@ async fn test_volume_cancelled_commit_poisons() {
     let ha = a.start_sync().await;
     let hb = b.start_sync().await;
     gated.sync_gate.arm();
-    let driver = tokio::spawn(async move { ha.await });
+    let driver = tokio::spawn(ha);
     gated.sync_gate.wait_reached().await;
     driver.abort();
     let _ = driver.await;
@@ -3937,9 +3938,21 @@ async fn test_volume_metrics() {
 
     let encoded = registry.encode();
     // One recovery, two commits (creation + sync), two pooled requests.
-    assert!(has_metric_value(&encoded, "storage_volume_recoveries_total", 1));
-    assert!(has_metric_value(&encoded, "storage_volume_commits_total", 2));
-    assert!(has_metric_value(&encoded, "storage_volume_sync_requests_total", 2));
+    assert!(has_metric_value(
+        &encoded,
+        "storage_volume_recoveries_total",
+        1
+    ));
+    assert!(has_metric_value(
+        &encoded,
+        "storage_volume_commits_total",
+        2
+    ));
+    assert!(has_metric_value(
+        &encoded,
+        "storage_volume_sync_requests_total",
+        2
+    ));
     assert!(has_metric_value(&encoded, "storage_volume_poisoned", 0));
     assert!(has_metric_value(&encoded, "storage_volume_open_blobs", 1));
     // The file has grown past the superblock region.
@@ -3956,4 +3969,80 @@ async fn test_volume_metrics() {
     assert!(a.sync().await.is_err());
     let encoded = registry.encode();
     assert!(has_metric_value(&encoded, "storage_volume_poisoned", 1));
+}
+
+/// A clean blob's hydrated state returns to dormant when its last handle
+/// drops (a transient scan of many blobs must not pin their hydrated
+/// state until restart). A handle dropped while the blob is CAPTURED by an
+/// in-flight commit demotes at finalize instead: the dormant entry must be
+/// the committed one, never a stale pre-capture entry.
+#[tokio::test]
+async fn test_volume_demote_on_last_handle_drop() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new(gated.clone(), pool.clone(), Config::default());
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    let id = a.core.id;
+    a.write_at(0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    a.sync().await.unwrap();
+    drop(a);
+    {
+        let ready = volume.shared.ready.get().unwrap();
+        let state = ready.state.lock();
+        assert!(
+            !state.open.contains_key(&id),
+            "clean blob must demote on last handle drop"
+        );
+        assert!(state.dormant.contains_key(&id), "demoted blob is dormant");
+    }
+
+    // Re-open re-hydrates with intact content.
+    let (a, size) = volume.open("p", b"a").await.unwrap();
+    assert_eq!(size, 100);
+    assert_eq!(
+        a.read_at(0, 100).await.unwrap().coalesce().as_ref(),
+        &[0x1u8; 100]
+    );
+
+    // Drop the last handle while the blob is captured by an in-flight
+    // commit (parked at the gated fsync): demotion must wait for finalize.
+    a.write_at(0, IoBuf::copy_from_slice(&[0x2u8; 200]))
+        .await
+        .unwrap();
+    gated.sync_gate.arm();
+    let commit = {
+        let a2 = a.clone();
+        tokio::spawn(async move { a2.sync().await })
+    };
+    gated.sync_gate.wait_reached().await;
+    drop(a);
+    {
+        let ready = volume.shared.ready.get().unwrap();
+        let state = ready.state.lock();
+        assert!(
+            state.open.contains_key(&id),
+            "captured blob must stay hydrated until finalize"
+        );
+    }
+    gated.sync_gate.release();
+    commit.await.unwrap().unwrap();
+    {
+        let ready = volume.shared.ready.get().unwrap();
+        let state = ready.state.lock();
+        assert!(
+            !state.open.contains_key(&id),
+            "finalize demotes the handle-less captured blob"
+        );
+    }
+
+    // The demoted entry is the COMMITTED one.
+    let (a, size) = volume.open("p", b"a").await.unwrap();
+    assert_eq!(size, 200);
+    assert_eq!(
+        a.read_at(0, 200).await.unwrap().coalesce().as_ref(),
+        &[0x2u8; 200]
+    );
 }

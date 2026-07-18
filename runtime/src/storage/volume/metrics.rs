@@ -10,8 +10,8 @@
 
 use super::core::State;
 use crate::telemetry::metrics::{
-    histogram::Buckets, raw, Counter, Gauge, GaugeExt as _, Histogram, Register, Registration,
-    Registered,
+    histogram::Buckets, raw, Counter, Gauge, GaugeExt as _, Histogram, Register, Registered,
+    Registration,
 };
 
 /// Registered volume metrics (or inert unregistered handles when the

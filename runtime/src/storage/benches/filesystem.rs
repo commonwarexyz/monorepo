@@ -5,8 +5,6 @@ use crate::{
     error::{Error, Result},
 };
 use bytes::Bytes;
-#[cfg(target_os = "linux")]
-use commonware_formatting::hex;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
 use rand::Rng;
 use std::{
@@ -58,31 +56,50 @@ pub fn cleanup_root(root: &Path) -> Result<()> {
     }
 }
 
+/// Walk every regular file under `dir` (covers both per-blob layouts and
+/// the single-file volume layout, whose blob names do not map to paths).
+#[cfg(target_os = "linux")]
+fn walk_files(dir: &Path, f: &dyn Fn(&Path) -> io::Result<()>) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            walk_files(&path, f)?;
+        } else {
+            f(&path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Force physical allocation for a blob that already has the desired size.
 ///
 /// Overwrite workloads call this so they measure the steady-state write path
 /// rather than first-write allocation behavior.
 #[cfg(target_os = "linux")]
-fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
-    let path = root.join(partition).join(hex(name));
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
-    let length = file.metadata()?.len();
+fn preallocate_blob(root: &Path, _partition: &str, _name: &[u8]) -> io::Result<()> {
+    walk_files(root, &|path| {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        let length = file.metadata()?.len();
+        if length == 0 {
+            return Ok(());
+        }
 
-    // SAFETY: The file descriptor is valid for the duration of the call, and
-    // the length comes from the current file metadata.
-    let result = unsafe {
-        libc::posix_fallocate(
-            file.as_raw_fd(),
-            0,
-            length
-                .try_into()
-                .map_err(|_| io::Error::other("blob too large for posix_fallocate"))?,
-        )
-    };
-    if result != 0 {
-        return Err(io::Error::from_raw_os_error(result));
-    }
-    Ok(())
+        // SAFETY: The file descriptor is valid for the duration of the call,
+        // and the length comes from the current file metadata.
+        let result = unsafe {
+            libc::posix_fallocate(
+                file.as_raw_fd(),
+                0,
+                length
+                    .try_into()
+                    .map_err(|_| io::Error::other("blob too large for posix_fallocate"))?,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result));
+        }
+        Ok(())
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -96,16 +113,18 @@ const fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::
 /// for the file. The effect is per-inode, not per-fd, so reopening the file
 /// later does not undo it.
 #[cfg(target_os = "linux")]
-pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
-    let path = root.join(partition).join(hex(name));
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
+pub fn drop_page_cache(root: &Path, _partition: &str, _name: &[u8]) -> io::Result<()> {
+    walk_files(root, &|path| {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
 
-    // SAFETY: The file descriptor is valid for the duration of the call.
-    let result = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
-    if result != 0 {
-        return Err(io::Error::from_raw_os_error(result));
-    }
-    Ok(())
+        // SAFETY: The file descriptor is valid for the duration of the call.
+        let result =
+            unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result));
+        }
+        Ok(())
+    })
 }
 
 /// On macOS there is no fadvise: map each file under the benchmark root and

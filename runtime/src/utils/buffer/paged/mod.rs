@@ -13,6 +13,16 @@
 //! crash-atomicity are the storage backend's responsibility (see the storage volume),
 //! so this layer performs no checksumming and never rewrites previously written bytes: appends
 //! reach the blob as physically append-only writes.
+//!
+//! # Layering
+//!
+//! The page cache sits ABOVE the storage volume by design. The volume verifies each chunk once
+//! per process lifetime and thereafter serves exact, uncached reads, so hot-read caching must
+//! live above it — a cache inside the volume would double-buffer against this layer's page
+//! granularity. Page-cache keys are LOGICAL offsets, which stay stable while the volume
+//! relocates physical extents underneath (copy-on-write under its freeze rule), so cached
+//! pages never need invalidation on relocation. Pushing caching down into the volume, or
+//! adding checksums back into this layer, would duplicate work the other layer already owns.
 
 use crate::Error;
 

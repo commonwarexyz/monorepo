@@ -760,6 +760,10 @@ pub(super) struct BlobInner {
     /// snapshot capture must not merge this blob's runs: staged overlays
     /// (see [`StagedBlob`]) reference base runs by key.
     pub staged_batches: usize,
+    /// Captured by an in-flight commit whose finalize has not run yet: the
+    /// blob's next committed entry exists only in the snapshot, so it must
+    /// not be demoted against the stale one (see [`State::maybe_demote`]).
+    pub capturing: bool,
     /// Unlinked from the namespace (handles may still read).
     pub removed: bool,
 }
@@ -964,6 +968,56 @@ impl State {
             }
         });
         self.groups.push(merged);
+    }
+
+    /// Demote blob `id` back to dormant if eligible: no handles, no
+    /// uncommitted content, no staged batch, not referenced by an
+    /// applied-batch group, and not captured by an in-flight commit.
+    ///
+    /// A demoted blob's hydrated state (runs, chunk map, tail buffer,
+    /// overlay, CRC caches, verified bits) is dropped and rebuilt from the
+    /// committed entry on the next open, so a process that opens many blobs
+    /// transiently does not hold their hydrated state until restart. First
+    /// reads after a re-open re-verify chunks (the verified bits do not
+    /// survive demotion).
+    pub fn maybe_demote(&mut self, id: u64) {
+        if self.handles.get(&id).copied().unwrap_or(0) > 0 || self.dirty.contains(&id) {
+            return;
+        }
+        // Group members stay hydrated until a commit resolves the group
+        // (bounded: every group is cleared by its covering commit).
+        if self.groups.iter().any(|group| group.contains(&id)) {
+            return;
+        }
+        let Some(core) = self.open.get(&id) else {
+            return;
+        };
+        let inner = core.inner.lock();
+        if inner.removed || inner.staged_batches != 0 || inner.capturing {
+            return;
+        }
+        // Clean blobs carry no unsynced bookkeeping (capture drains both).
+        debug_assert!(
+            inner.dirty_chunks.is_empty() && inner.pending_frees.is_empty(),
+            "clean blob with unsynced bookkeeping"
+        );
+        // A clean blob never captured with content serves an empty entry
+        // (the same fallback commit assembly uses).
+        let entry = inner.committed_entry.clone().unwrap_or_else(|| Entry {
+            id,
+            partition: 0,
+            name: core.name.clone(),
+            version: core.version,
+            size: 0,
+            runs: Vec::new(),
+            checksums: Vec::new(),
+            tail_crc: 0,
+            shadow: None,
+        });
+        let partition = core.partition.clone();
+        drop(inner);
+        self.open.remove(&id);
+        self.dormant.insert(id, (partition, entry));
     }
 
     /// Apply deferred frees eligible under the current confirmed seq.
@@ -1205,11 +1259,19 @@ pub(super) async fn write_locked<S: crate::Storage>(
         if stretch.replaced.is_some() {
             ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
         }
-        ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
-        ready
-            .file
-            .write_at(stretch.physical, stretch.bytes.clone())
-            .await?;
+        let written = async {
+            ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
+            ready
+                .file
+                .write_at(stretch.physical, stretch.bytes.clone())
+                .await
+        };
+        if let Err(e) = written.await {
+            // The unpublished stretch's fresh extent would otherwise strand
+            // until restart: return it through the deferred-free path.
+            free_unpublished(ready, stretch.allocated);
+            return Err(e);
+        }
         cursor = stretch.end;
         publish_stretch(ready, blob, stretch);
     }
@@ -1249,11 +1311,19 @@ pub(super) async fn stage_write<S: crate::Storage>(
         if stretch.replaced.is_some() {
             ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
         }
-        ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
-        ready
-            .file
-            .write_at(stretch.physical, stretch.bytes.clone())
-            .await?;
+        let written = async {
+            ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
+            ready
+                .file
+                .write_at(stretch.physical, stretch.bytes.clone())
+                .await
+        };
+        if let Err(e) = written.await {
+            // Not yet recorded in the staged overlay, so the batch's drop
+            // path cannot reclaim it either: free it here.
+            free_unpublished(ready, stretch.allocated);
+            return Err(e);
+        }
         cursor = stretch.end;
         let inner = blob.inner.lock();
         publish_staged(&inner, staged, stretch);
@@ -1742,20 +1812,29 @@ async fn plan_stretch<S: crate::Storage>(
                 // and it keeps the relocated chunk verified by
                 // construction.
                 CowSource::Disk { expected } => {
-                    let old = ready
-                        .file
-                        .read_at(span_physical, span_len as usize)
-                        .await?
-                        .coalesce();
-                    if Crc32::checksum(old.as_ref()) != expected {
-                        ready.metrics.corruptions.inc();
-                        return Err(Error::BlobCorrupt(
-                            blob.partition.clone(),
-                            hex(&blob.name),
-                            format!("chunk {chunk} checksum mismatch"),
-                        ));
+                    let checked = async {
+                        let old = ready
+                            .file
+                            .read_at(span_physical, span_len as usize)
+                            .await?
+                            .coalesce();
+                        if Crc32::checksum(old.as_ref()) != expected {
+                            ready.metrics.corruptions.inc();
+                            return Err(Error::BlobCorrupt(
+                                blob.partition.clone(),
+                                hex(&blob.name),
+                                format!("chunk {chunk} checksum mismatch"),
+                            ));
+                        }
+                        Ok(old)
+                    };
+                    match checked.await {
+                        Ok(old) => buf.put_slice(old.as_ref()),
+                        Err(e) => {
+                            free_unpublished(ready, Some(extent));
+                            return Err(e);
+                        }
                     }
-                    buf.put_slice(old.as_ref());
                 }
             }
             buf.put_bytes(0, exact - span_len as usize);
@@ -1804,6 +1883,17 @@ async fn plan_stretch<S: crate::Storage>(
             })
         }
     }
+}
+
+/// Return a freshly allocated but never-published extent through the
+/// deferred-free path (a failed stretch or COW read-back: nothing
+/// references it, but only restart would otherwise rebuild it into the
+/// allocator).
+fn free_unpublished<S: crate::Storage>(ready: &Ready<S>, extent: Option<Extent>) {
+    let Some(extent) = extent else { return };
+    let mut state = ready.state.lock();
+    let seq = state.seq;
+    state.defer_free(extent, seq, None);
 }
 
 /// CRC32C over `[start, end)` of a logical range assembled from `pieces`:
@@ -2454,7 +2544,18 @@ enum Planned {
 /// their pages from the checksum extents before re-planning. Segments
 /// coalesce into one read whenever physically and logically contiguous —
 /// verified and unverified alike — bounded by [`MAX_READ_SPAN`].
-fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u32>)]) -> Planned {
+///
+/// With `paranoid` set, verified chunks are planned like unverified ones
+/// (whole span, CRC-checked): a fully checked read stands regardless of
+/// concurrent relocations, so this bounds the generation-retry loop (see
+/// [`read_verified`]).
+fn plan_read(
+    inner: &mut BlobInner,
+    offset: u64,
+    end: u64,
+    loaded: &[(u64, Vec<u32>)],
+    paranoid: bool,
+) -> Planned {
     // Steady-state fast path: a request covered by one run whose every
     // chunk is verified with a ready CRC is a single exact read — no
     // chunk-state walk at all. Proven volume-wide in O(1) when every
@@ -2466,7 +2567,9 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u
     let first = chunk_of(offset);
     let last = chunk_of(end - 1);
     if let Some((l, r)) = inner.covering(offset) {
-        if end <= l + r.len && (inner.crcs.all_verified() || inner.crcs.span_verified(first, last))
+        if !paranoid
+            && end <= l + r.len
+            && (inner.crcs.all_verified() || inner.crcs.span_verified(first, last))
         {
             return Planned::Plan(ReadPlan {
                 generation: inner.generation,
@@ -2532,7 +2635,7 @@ fn plan_read(inner: &mut BlobInner, offset: u64, end: u64, loaded: &[(u64, Vec<u
                 }
                 continue;
             }
-            let (seg_lo, seg_hi, check) = if state.verified {
+            let (seg_lo, seg_hi, check) = if state.verified && !paranoid {
                 // Bytes past the span within the chunk are holes (zeros
                 // already in place). The request may fall entirely in them.
                 if hi <= lo {
@@ -2667,7 +2770,15 @@ pub(super) async fn read_verified<S: crate::Storage>(
     // retries: an unloaded chunk's committed value is immutable, so the
     // windows stay valid whatever the retry re-plans.
     let mut loaded: Vec<(u64, Vec<u32>)> = Vec::new();
+    // Retries caused by concurrent relocations (generation moves under
+    // bytes served unchecked). Sustained relocation churn could otherwise
+    // starve the reader indefinitely: past the limit, the plan CRC-checks
+    // every chunk it reads, which stands regardless of the generation and
+    // ends the loop in one extra verification pass.
+    const GENERATION_RETRY_LIMIT: u32 = 3;
+    let mut invalidated: u32 = 0;
     'retry: loop {
+        let paranoid = invalidated >= GENERATION_RETRY_LIMIT;
         let planned = {
             let mut inner = blob.inner.lock();
             if end > inner.size {
@@ -2680,7 +2791,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                     bufs
                 }));
             }
-            plan_read(&mut inner, offset, end, &loaded)
+            plan_read(&mut inner, offset, end, &loaded, paranoid)
         };
         let plan = match planned {
             Planned::Plan(plan) => plan,
@@ -2744,6 +2855,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                     // new backing may no longer qualify for this path).
                     // Re-issuing into the same caller buffers is fine: only
                     // the returned state matters.
+                    invalidated += 1;
                     if from_caller {
                         caller = Some(bufs);
                     }
@@ -2791,6 +2903,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 {
                     let inner = blob.inner.lock();
                     if inner.generation != generation {
+                        invalidated += 1;
                         continue 'retry;
                     }
                 }
@@ -2811,6 +2924,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                     let need_load = {
                         let mut inner = blob.inner.lock();
                         if inner.generation != generation {
+                            invalidated += 1;
                             continue 'retry;
                         }
                         match inner.chunk_span(chunk) {
@@ -2854,7 +2968,10 @@ pub(super) async fn read_verified<S: crate::Storage>(
                     }
                 };
                 let stable: IoBuf = match source {
-                    None => continue 'retry,
+                    None => {
+                        invalidated += 1;
+                        continue 'retry;
+                    }
                     Some(Stable::Disk {
                         phys,
                         span: stable_span,
@@ -2905,6 +3022,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
         }
 
         if !publish_read(blob, generation, &checked, unchecked) {
+            invalidated += 1;
             continue 'retry;
         }
         return Ok(match caller.take() {
@@ -3083,14 +3201,18 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                 }
             }
             let recompute = expected.is_none();
-            Some((chunk, bytes.as_ref().to_vec(), recompute.then(|| {
-                // Recomputed from an unchecked read-back: the frontier
-                // chunk goes unverified (see [`ChunkState`]).
-                ChunkState {
-                    crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
-                    verified: false,
-                }
-            })))
+            Some((
+                chunk,
+                bytes.as_ref().to_vec(),
+                recompute.then(|| {
+                    // Recomputed from an unchecked read-back: the frontier
+                    // chunk goes unverified (see [`ChunkState`]).
+                    ChunkState {
+                        crc: ChunkCrc::Ready(Crc32::checksum(bytes.as_ref())),
+                        verified: false,
+                    }
+                }),
+            ))
         }
     };
 
