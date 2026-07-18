@@ -484,7 +484,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
+        types::{Epoch, Participant, Round, View, ViewDelta},
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -506,7 +506,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -6109,10 +6109,6 @@ mod tests {
     ///   considered successful. This is the liveness assertion -- it ensures
     ///   the protocol actually commits blocks under synchrony, not just
     ///   reaches a high view via nullifications.
-    ///
-    /// - `term_length`: Number of consecutive views each elected leader
-    ///   serves. Values above 1 exercise the stable-leader finalize gate
-    ///   under equivocation.
     #[derive(Clone, Copy, Debug)]
     struct TwinsCampaign {
         n: u32,
@@ -6120,7 +6116,6 @@ mod tests {
         mode: twins::Mode,
         max_cases: usize,
         trailing_finalizations: usize,
-        term_length: TermLength,
     }
 
     fn twins_campaign<S, F, L>(
@@ -6161,7 +6156,6 @@ mod tests {
 
             let activity_timeout = ViewDelta::new(10);
             let skip_timeout = Duration::from_secs(11);
-            let term_length = campaign.term_length;
             let namespace = b"consensus".to_vec();
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;
@@ -6186,15 +6180,14 @@ mod tests {
                 let mut registrations = register_validators(&mut oracle, &participants).await;
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
-                // Twin routing partitions by campaign.term_length while the
-                // engines follow the elector's term structure: a mismatch
-                // would silently misalign the adversarial scenario with real
-                // leader terms.
-                assert_eq!(
-                    elector.clone().build(schemes[0].participants()).terms().length(),
-                    term_length,
-                    "campaign term length must match the elector's term structure"
-                );
+                // The elector is the single source of the term structure:
+                // twin routing derives its term length from the built elector,
+                // the same way the engine does.
+                let term_length = elector
+                    .clone()
+                    .build(schemes[0].participants())
+                    .terms()
+                    .length();
                 let elector = TwinsElector::new(
                     elector.clone(),
                     &scenario,
@@ -6564,7 +6557,6 @@ mod tests {
         mode: twins::Mode::Sampled,
         max_cases: 20,
         trailing_finalizations: 10,
-        term_length: TermLength::ONE,
     };
 
     const TWINS_LINK: Link = Link {
@@ -6573,12 +6565,8 @@ mod tests {
         success_rate: 1.0,
     };
 
-    /// Runs `campaign` over a fast link and the slow [TWINS_LINK].
-    fn twins_campaign_all_links(campaign: TwinsCampaign) {
-        let elector = match campaign.term_length.get() {
-            1 => <RoundRobin>::default(),
-            _ => <RoundRobin>::default().with_term(campaign.term_length, Duration::from_secs(12)),
-        };
+    /// Runs `campaign` with `elector` over a fast link and the slow [TWINS_LINK].
+    fn twins_campaign_all_links(campaign: TwinsCampaign, elector: RoundRobin) {
         for link in [
             Link {
                 latency: Duration::from_millis(10),
@@ -6600,25 +6588,28 @@ mod tests {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_twins_sampled() {
-        twins_campaign_all_links(TWINS_CAMPAIGN);
+        twins_campaign_all_links(TWINS_CAMPAIGN, RoundRobin::default());
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_twins_sustained() {
-        twins_campaign_all_links(TwinsCampaign {
-            mode: twins::Mode::Sustained,
-            ..TWINS_CAMPAIGN
-        });
+        twins_campaign_all_links(
+            TwinsCampaign {
+                mode: twins::Mode::Sustained,
+                ..TWINS_CAMPAIGN
+            },
+            RoundRobin::default(),
+        );
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_twins_stable_leader() {
-        twins_campaign_all_links(TwinsCampaign {
-            term_length: TermLength::new(NZU64!(3)),
-            ..TWINS_CAMPAIGN
-        });
+        twins_campaign_all_links(
+            TWINS_CAMPAIGN,
+            RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
+        );
     }
 
     #[test_group("slow")]
