@@ -960,8 +960,12 @@ impl Context {
             rng.clone(),
             storage_fault_config,
         );
-        let volume =
-            VolumeStorage::new(faulty, storage_buffer_pool.clone(), cfg.storage_volume_cfg);
+        let volume = VolumeStorage::new_registered(
+            faulty,
+            storage_buffer_pool.clone(),
+            cfg.storage_volume_cfg,
+            &mut runtime_registry,
+        );
         let storage = MeteredStorage::new(
             AuditedStorage::new(volume, auditor.clone()),
             &mut runtime_registry,
@@ -1054,7 +1058,12 @@ impl Context {
             let fault_cfg = volume.inner().config();
             let mem = volume.inner().inner().clone();
             let faulty = FaultyStorage::new(mem, checkpoint.rng.clone(), fault_cfg);
-            let volume = VolumeStorage::new(faulty, storage_buffer_pool.clone(), volume_cfg);
+            let volume = VolumeStorage::new_registered(
+                faulty,
+                storage_buffer_pool.clone(),
+                volume_cfg,
+                &mut runtime_registry,
+            );
             MeteredStorage::new(
                 AuditedStorage::new(volume, checkpoint.auditor.clone()),
                 &mut runtime_registry,

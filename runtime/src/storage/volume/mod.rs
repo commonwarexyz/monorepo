@@ -128,6 +128,7 @@ mod batch;
 mod commit;
 mod core;
 mod layout;
+mod metrics;
 #[cfg(test)]
 mod model;
 mod recover;
@@ -198,6 +199,7 @@ struct Shared<S: crate::Storage> {
     inner: S,
     pool: BufferPool,
     cfg: Config,
+    metrics: Arc<metrics::Metrics>,
     /// Set once recovery has completed (fast path).
     ready: OnceLock<Arc<Ready<S>>>,
     /// Serializes recovery (single-flight) and namespace changes.
@@ -207,12 +209,31 @@ struct Shared<S: crate::Storage> {
 impl<S: crate::Storage> Storage<S> {
     /// Create a volume over `inner`. Recovery runs lazily on the first
     /// operation (or eagerly via [`Self::init`]).
+    ///
+    /// A volume created this way keeps its operational metrics
+    /// unregistered; the runtime contexts construct their volumes with a
+    /// registry so operators see them.
     pub fn new(inner: S, pool: BufferPool, cfg: Config) -> Self {
+        Self::with_metrics(inner, pool, cfg, metrics::Metrics::unregistered())
+    }
+
+    /// [`Self::new`] with metrics registered under `registry`.
+    pub(crate) fn new_registered(
+        inner: S,
+        pool: BufferPool,
+        cfg: Config,
+        registry: &mut impl crate::telemetry::metrics::Register,
+    ) -> Self {
+        Self::with_metrics(inner, pool, cfg, metrics::Metrics::new(registry))
+    }
+
+    fn with_metrics(inner: S, pool: BufferPool, cfg: Config, metrics: metrics::Metrics) -> Self {
         Self {
             shared: Arc::new(Shared {
                 inner,
                 pool,
                 cfg,
+                metrics: Arc::new(metrics),
                 ready: OnceLock::new(),
                 ns_lock: AsyncMutex::new(()),
             }),
@@ -254,7 +275,13 @@ impl<S: crate::Storage> Storage<S> {
             return Ok(ready.clone());
         }
         let ready = Arc::new(
-            recover::recover(&self.shared.inner, &self.shared.pool, &self.shared.cfg).await?,
+            recover::recover(
+                &self.shared.inner,
+                &self.shared.pool,
+                &self.shared.cfg,
+                self.shared.metrics.clone(),
+            )
+            .await?,
         );
         let _ = self.shared.ready.set(ready.clone());
         Ok(ready)
@@ -285,6 +312,7 @@ impl<S: crate::Storage> Drop for HandleTracker<S> {
                 state.open.remove(&self.id);
             }
             state.apply_frees();
+            self.ready.metrics.observe_state(&state);
         }
     }
 }

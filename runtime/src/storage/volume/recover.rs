@@ -34,7 +34,7 @@ use super::{
     layout::{ChecksumRef, Entry, Superblock, Table},
     Config, BLOCK,
 };
-use crate::{Blob as _, BufferPool, Error, IoBuf};
+use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error, IoBuf};
 use commonware_cryptography::{Crc32, Hasher as _};
 use commonware_utils::sync::{AsyncMutex, Mutex};
 use futures::{stream, StreamExt as _};
@@ -369,6 +369,7 @@ pub(super) async fn recover<S: crate::Storage>(
     inner: &S,
     pool: &BufferPool,
     cfg: &Config,
+    metrics: std::sync::Arc<super::metrics::Metrics>,
 ) -> Result<Ready<S>, Error> {
     let (file, mut len) = inner.open(&cfg.partition, &cfg.name).await?;
 
@@ -387,7 +388,7 @@ pub(super) async fn recover<S: crate::Storage>(
                 cfg.partition
             )));
         }
-        return init_fresh(inner, pool, cfg).await;
+        return init_fresh(inner, pool, cfg, metrics).await;
     }
 
     // Candidate order: higher seq first.
@@ -440,12 +441,15 @@ pub(super) async fn recover<S: crate::Storage>(
     // Repairs: zero the losing slot, splice every partial frontier chunk
     // from its shadow. Idempotent; one sync.
     let mut repaired = false;
+    let mut spliced_shadows = 0usize;
     if let Some((losing, losing_seq)) = losing_slot {
         // The one signal an operator gets that the newest commit was
         // discarded: an unacknowledged torn commit is the normal case, but
         // bit rot in the newest commit's metadata looks identical and is
         // rolled back the same way (see the module docs). Zeroing the slot
         // below destroys the on-disk evidence.
+        metrics.recovery_fallbacks.inc();
+        let _ = metrics.rolled_back_seq.try_set(losing_seq);
         tracing::warn!(
             partition = cfg.partition,
             rejected_seq = losing_seq,
@@ -473,6 +477,7 @@ pub(super) async fn recover<S: crate::Storage>(
         let bytes = file.read_at(shadow, span as usize).await?.coalesce();
         file.write_at(phys, bytes).await?;
         repaired = true;
+        spliced_shadows += 1;
         len = len.max(phys + span);
     }
     if repaired {
@@ -528,6 +533,16 @@ pub(super) async fn recover<S: crate::Storage>(
         dormant.insert(entry.id, (partition.clone(), entry.clone()));
     }
 
+    metrics.recoveries.inc();
+    tracing::info!(
+        partition = cfg.partition,
+        adopted_seq = sb.seq,
+        blobs = table.blobs.len(),
+        verified_chunks = recovery_verified.values().map(Vec::len).sum::<usize>(),
+        spliced_shadows,
+        fell_back = losing_slot.is_some(),
+        "volume recovered"
+    );
     let state = State {
         partitions,
         open: BTreeMap::new(),
@@ -554,9 +569,11 @@ pub(super) async fn recover<S: crate::Storage>(
         encoded_epoch: 0,
         provisioned: len,
     };
+    metrics.observe_state(&state);
 
     Ok(Ready {
         file,
+        metrics,
         state: Mutex::new(state),
         commit_lock: AsyncMutex::new(()),
         pending: Default::default(),
@@ -575,6 +592,7 @@ async fn init_fresh<S: crate::Storage>(
     inner: &S,
     pool: &BufferPool,
     cfg: &Config,
+    metrics: std::sync::Arc<super::metrics::Metrics>,
 ) -> Result<Ready<S>, Error> {
     let (file, _) = inner.open(&cfg.partition, &cfg.name).await?;
     let table = Table::default();
@@ -623,8 +641,11 @@ async fn init_fresh<S: crate::Storage>(
         encoded_epoch: 0,
         provisioned: 2 * BLOCK + block_align(bytes.len() as u64),
     };
+    metrics.recoveries.inc();
+    metrics.observe_state(&state);
     Ok(Ready {
         file,
+        metrics,
         state: Mutex::new(state),
         commit_lock: AsyncMutex::new(()),
         pending: Default::default(),

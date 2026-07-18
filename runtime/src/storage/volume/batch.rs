@@ -325,6 +325,7 @@ impl<S: crate::Storage> Batch<S> {
                     // The span is unchanged by the shrink, so its bytes
                     // must still match the chunk's CRC.
                     if Crc32::checksum(bytes.as_ref()) != expected {
+                        ready.metrics.corruptions.inc();
                         return Err(Error::BlobCorrupt(
                             core.partition.clone(),
                             hex(&core.name),

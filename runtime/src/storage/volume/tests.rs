@@ -3911,3 +3911,49 @@ async fn test_volume_undriven_start_sync_drop_is_benign() {
         &[0x1u8; 100]
     );
 }
+
+/// The volume's operational metrics: commits and pooled sync requests
+/// count (the coalescing ratio's two legs), recovery is recorded, space
+/// gauges are populated, and the poison latch flips the poisoned gauge.
+#[tokio::test]
+async fn test_volume_metrics() {
+    use crate::telemetry::metrics::has_metric_value;
+
+    let mut registry = Registry::default();
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let volume = Volume::new_registered(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        &mut registry,
+    );
+
+    let (a, _) = volume.open("p", b"a").await.unwrap();
+    a.write_at(0, IoBuf::copy_from_slice(&[0x1u8; 100]))
+        .await
+        .unwrap();
+    a.sync().await.unwrap();
+
+    let encoded = registry.encode();
+    // One recovery, two commits (creation + sync), two pooled requests.
+    assert!(has_metric_value(&encoded, "storage_volume_recoveries_total", 1));
+    assert!(has_metric_value(&encoded, "storage_volume_commits_total", 2));
+    assert!(has_metric_value(&encoded, "storage_volume_sync_requests_total", 2));
+    assert!(has_metric_value(&encoded, "storage_volume_poisoned", 0));
+    assert!(has_metric_value(&encoded, "storage_volume_open_blobs", 1));
+    // The file has grown past the superblock region.
+    assert!(
+        !has_metric_value(&encoded, "storage_volume_file_end_bytes", 0),
+        "file end gauge must be populated"
+    );
+
+    // A failed fsync poisons the volume and flips the gauge.
+    a.write_at(0, IoBuf::copy_from_slice(&[0x2u8; 100]))
+        .await
+        .unwrap();
+    gated.sync_gate.arm_fail();
+    assert!(a.sync().await.is_err());
+    let encoded = registry.encode();
+    assert!(has_metric_value(&encoded, "storage_volume_poisoned", 1));
+}

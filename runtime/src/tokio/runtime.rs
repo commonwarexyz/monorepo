@@ -443,10 +443,11 @@ impl crate::Runner for Runner {
             }
         }
         let storage = MeteredStorage::new(
-            VolumeStorage::new(
+            VolumeStorage::new_registered(
                 inner,
                 storage_buffer_pool.clone(),
                 self.cfg.storage_volume_cfg.clone(),
+                &mut runtime_registry,
             ),
             &mut runtime_registry,
         );

@@ -1005,6 +1005,8 @@ pub(super) struct PendingCommit {
 pub(super) struct Ready<S: crate::Storage> {
     /// The single inner blob backing the volume.
     pub file: S::Blob,
+    /// Operational metrics (see the `metrics` module).
+    pub metrics: std::sync::Arc<super::metrics::Metrics>,
     pub state: Mutex<State>,
     /// Serializes commits.
     pub commit_lock: AsyncMutex<()>,
@@ -1200,6 +1202,9 @@ pub(super) async fn write_locked<S: crate::Storage>(
     let mut cursor = offset;
     while cursor < end {
         let stretch = plan_stretch(ready, blob, None, cursor, end, &data, offset).await?;
+        if stretch.replaced.is_some() {
+            ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
+        }
         ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
         ready
             .file
@@ -1241,6 +1246,9 @@ pub(super) async fn stage_write<S: crate::Storage>(
     let mut cursor = offset;
     while cursor < end {
         let stretch = plan_stretch(ready, blob, Some(staged), cursor, end, &data, offset).await?;
+        if stretch.replaced.is_some() {
+            ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
+        }
         ensure_provisioned(ready, stretch.physical + stretch.bytes.len() as u64).await?;
         ready
             .file
@@ -1740,6 +1748,7 @@ async fn plan_stretch<S: crate::Storage>(
                         .await?
                         .coalesce();
                     if Crc32::checksum(old.as_ref()) != expected {
+                        ready.metrics.corruptions.inc();
                         return Err(Error::BlobCorrupt(
                             blob.partition.clone(),
                             hex(&blob.name),
@@ -2302,10 +2311,16 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
             }
             if let Some(guard) = guard {
                 if guard != r.crc {
+                    ready.metrics.corruptions.inc();
                     return Err(Error::BlobCorrupt(
                         blob.partition.clone(),
                         hex(&blob.name),
-                        "checksum extent mismatch".into(),
+                        format!(
+                            "checksum extent mismatch (chunks {}..{} at offset {})",
+                            r.first_chunk,
+                            r.first_chunk + r.count as u64,
+                            r.offset
+                        ),
                     ));
                 }
                 if !inner.crc_guarded.contains(&r) {
@@ -2334,10 +2349,16 @@ pub(super) async fn load_committed_refs<S: crate::Storage>(
     for r in refs {
         let (values, guard) = read_ref_window(ready, r, 0, r.count as u64, true).await?;
         if guard.expect("full reads verify") != r.crc {
+            ready.metrics.corruptions.inc();
             return Err(Error::BlobCorrupt(
                 blob.partition.clone(),
                 hex(&blob.name),
-                "checksum extent mismatch".into(),
+                format!(
+                    "checksum extent mismatch (chunks {}..{} at offset {})",
+                    r.first_chunk,
+                    r.first_chunk + r.count as u64,
+                    r.offset
+                ),
             ));
         }
         let mut inner = blob.inner.lock();
@@ -2846,6 +2867,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                             .coalesce()
                             .freeze();
                         if Crc32::checksum(reread.as_ref()) != stable_crc {
+                            ready.metrics.corruptions.inc();
                             return Err(Error::BlobCorrupt(
                                 blob.partition.clone(),
                                 hex(&blob.name),
@@ -3052,6 +3074,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                 // The span is unchanged by the shrink, so its bytes must
                 // still match the chunk's CRC.
                 if Crc32::checksum(bytes.as_ref()) != expected {
+                    ready.metrics.corruptions.inc();
                     return Err(Error::BlobCorrupt(
                         blob.partition.clone(),
                         hex(&blob.name),
@@ -3128,10 +3151,4 @@ pub(super) async fn resize_locked<S: crate::Storage>(
         state.dirty.insert(blob.id);
     }
     Ok(())
-}
-
-/// Convenience: total pending-free bytes (metrics/tests).
-#[allow(dead_code)]
-pub(super) fn pending_free_bytes(state: &State) -> u64 {
-    state.pending_free.iter().map(|(e, _, _)| e.len).sum()
 }

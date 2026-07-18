@@ -25,7 +25,7 @@ use super::{
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
     BLOCK,
 };
-use crate::{Blob as _, Error, IoBuf};
+use crate::{telemetry::metrics::GaugeExt as _, Blob as _, Error, IoBuf};
 use bytes::Bytes;
 use commonware_cryptography::Crc32;
 use std::{
@@ -98,7 +98,11 @@ impl<S: crate::Storage> Drop for CancelGuard<'_, S> {
             return;
         };
         let error = Error::Aborted;
+        tracing::error!(
+            "volume commit future dropped mid-commit; storage poisoned until restart"
+        );
         let _ = self.ready.poisoned.set(error.clone());
+        let _ = self.ready.metrics.poisoned.try_set(1);
         let _ = ticket.set(Err(error));
     }
 }
@@ -107,6 +111,7 @@ impl<S: crate::Storage> Drop for CancelGuard<'_, S> {
 /// the first leader to drain the pool after this point covers these roots
 /// and resolves the returned ticket with the union commit's result.
 pub(super) fn register<S: crate::Storage>(ready: &Ready<S>, roots: &[u64]) -> Ticket {
+    ready.metrics.sync_requests.inc();
     let mut pending = ready.pending.lock();
     pending.roots.extend(roots.iter().copied());
     pending.ticket.clone()
@@ -195,7 +200,12 @@ pub(super) async fn commit_locked<S: crate::Storage>(
             // failure mid-way leaves the volume inconsistent with its
             // bookkeeping. Poison (consistent with the workspace rule that
             // mutable storage-op failures are fatal).
+            tracing::error!(
+                error = %e,
+                "volume commit snapshot failed; storage poisoned until restart"
+            );
             let _ = ready.poisoned.set(e.clone());
+            let _ = ready.metrics.poisoned.try_set(1);
             return Err(e);
         }
     };
@@ -221,14 +231,30 @@ pub(super) async fn commit_locked<S: crate::Storage>(
                 .map(|write| ready.file.write_at(write.physical, write.bytes.clone())),
         )
         .await?;
-        ready.file.sync().await
+        // Wall-clock fsync timing (metrics only; wasm32 has no monotonic
+        // clock).
+        #[cfg(not(target_arch = "wasm32"))]
+        let start = std::time::Instant::now();
+        ready.file.sync().await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        ready
+            .metrics
+            .fsync_duration
+            .observe(start.elapsed().as_secs_f64());
+        Ok::<(), Error>(())
     };
     if let Err(e) = written.await {
+        tracing::error!(
+            error = %e,
+            "volume commit write/fsync failed; storage poisoned until restart"
+        );
         let _ = ready.poisoned.set(e.clone());
+        let _ = ready.metrics.poisoned.try_set(1);
         return Err(e);
     }
 
     finalize(ready, snapshot);
+    ready.metrics.commits.inc();
     Ok(())
 }
 
@@ -744,4 +770,5 @@ fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
         !covered
     });
     state.apply_frees();
+    ready.metrics.observe_state(&state);
 }

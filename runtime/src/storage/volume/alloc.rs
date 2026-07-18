@@ -35,6 +35,8 @@ pub(super) struct Allocator {
     free: BTreeMap<u64, u64>,
     /// High-water mark: everything at and beyond this offset is free.
     end: u64,
+    /// Running total of the bytes in `free` (kept exact by every mutation).
+    free_bytes: u64,
 }
 
 /// Round `len` up to a whole number of blocks.
@@ -53,6 +55,7 @@ impl Allocator {
         extents.sort_by_key(|e| e.offset);
 
         let mut free = BTreeMap::new();
+        let mut free_bytes = 0;
         let mut cursor = reserved;
         for extent in extents {
             assert!(
@@ -67,11 +70,16 @@ impl Allocator {
             );
             if extent.offset > cursor {
                 free.insert(cursor, extent.offset - cursor);
+                free_bytes += extent.offset - cursor;
             }
             cursor = extent.offset + extent.len;
         }
 
-        Self { free, end: cursor }
+        Self {
+            free,
+            end: cursor,
+            free_bytes,
+        }
     }
 
     /// Allocate a block-aligned extent of at least `len` bytes (first-fit).
@@ -90,6 +98,7 @@ impl Allocator {
             if flen > len {
                 self.free.insert(offset + len, flen - len);
             }
+            self.free_bytes -= len;
             return Extent { offset, len };
         }
 
@@ -137,18 +146,26 @@ impl Allocator {
         }
 
         // A range touching the high-water mark shrinks the file instead of
-        // lingering in the index.
+        // lingering in the index. The coalesced neighbors leave the free
+        // total with it.
         if offset + len == self.end {
             self.end = offset;
+            self.free_bytes -= len - extent.len;
         } else {
             self.free.insert(offset, len);
+            self.free_bytes += extent.len;
         }
     }
 
-    /// Offset one past the last allocated byte.
-    #[cfg(test)]
+    /// Offset one past the last allocated byte (the file's high-water mark).
     pub(super) const fn end(&self) -> u64 {
         self.end
+    }
+
+    /// Total bytes currently in the free index (excludes everything at and
+    /// beyond [`Self::end`]).
+    pub(super) const fn free_bytes(&self) -> u64 {
+        self.free_bytes
     }
 }
 
