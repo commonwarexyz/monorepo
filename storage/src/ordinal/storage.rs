@@ -102,6 +102,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// but no [BitMap] is populated, all records in that section are considered available.
     ///
     /// Passing `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
+    /// The removal is durable before `init` returns.
     pub async fn init(
         context: E,
         config: Config,
@@ -112,6 +113,11 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let items_per_blob = config.items_per_blob.get();
         let mut blobs = BTreeMap::new();
         let stored_blobs = if bits.is_none() {
+            // The durable wipe is this path's only commit and no adjacent
+            // durable operation exists to batch it with. Deferring it to ride
+            // a later commit would let a crash resurrect the removed sections,
+            // and a future init with bits naming them would replay their stale
+            // records as committed.
             match context.remove(&config.partition, None).await {
                 Ok(()) | Err(RError::PartitionMissing(_)) => Vec::new(),
                 Err(err) => return Err(Error::Runtime(err)),

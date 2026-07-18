@@ -65,7 +65,7 @@
 //! required records fail initialization. The storage backend guarantees per-blob atomic sync, so
 //! torn writes cannot survive a crash: a section size that is not a record multiple fails
 //! initialization with [Error::Corruption]. Passing `Some(BTreeMap::new())` or `None` removes all
-//! stored sections and starts empty.
+//! stored sections and starts empty. The removal is durable before [Ordinal::init] returns.
 //!
 //! # Example
 //!
