@@ -6186,6 +6186,15 @@ mod tests {
                 let mut registrations = register_validators(&mut oracle, &participants).await;
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
+                // Twin routing partitions by campaign.term_length while the
+                // engines follow the elector's term structure: a mismatch
+                // would silently misalign the adversarial scenario with real
+                // leader terms.
+                assert_eq!(
+                    elector.clone().build(schemes[0].participants()).terms().length(),
+                    term_length,
+                    "campaign term length must match the elector's term structure"
+                );
                 let elector = TwinsElector::new(
                     elector.clone(),
                     &scenario,
