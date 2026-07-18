@@ -151,7 +151,15 @@
 //! about the OS and device, not checked facts), wall-clock effects,
 //! reader/writer async interleavings (see below), and staged batch resize
 //! (`Batch::resize` has no model action — its shrink-into-hole regressions
-//! are pinned by unit tests in `tests`).
+//! are pinned by unit tests in `tests`). The checksum-extent lifecycle is
+//! also uncovered: the model inlines expected chunk content into the
+//! superblock-bound table, so the implementation's separately stored
+//! commit-written checksum extents — the whole-extent guard CRCs,
+//! recovery's unconditional last-ref load, and the `MAX_CHECKSUM_REFS`
+//! compaction commit — sit outside all exhaustive checking. So is
+//! `Batch::sync` (touched-only group membership): a directly written blob
+//! joining a batch's never-split group without staged content has no
+//! model action.
 //!
 //! # Deliberately out of scope
 //!
@@ -1303,23 +1311,28 @@ fn begin_snapshot(
     }
 
     // I6 (never-split): each applied batch must resolve entirely or
-    // not at all. A slot is resolved if this commit captures it, an
-    // earlier commit did (committed_pubseq), a removal made its part
-    // unobservable, or its part is a CREATION — always empty in this
-    // model — whose entry table assembly emits for every live blob, so
-    // any commit makes the creation durable regardless of capture.
+    // not at all. A part is resolved if this commit captures its slot,
+    // an earlier commit did (committed_pubseq), or it is a CREATION —
+    // always empty in this model — whose entry table assembly emits
+    // for every live blob, so any commit makes the creation durable
+    // regardless of capture. Removal-nulled parts (None) count on
+    // NEITHER side: the removal already resolved them and only their
+    // siblings' capture state matters, so counting a nulled part as
+    // included would flag a remove-then-recreate history as a split
+    // batch while a live sibling stays legitimately uncaptured (see
+    // `removed_then_recreated_part_not_counted`).
     for pb in &s.volume.pending_batches {
-        let resolved = |slot: u8, bp: &Option<(u64, bool)>| match bp {
-            None => true,
-            Some((bp, created)) => {
-                *created
-                    || captured.contains(&slot)
-                    || !s.volume.blobs[slot as usize].live
-                    || s.volume.blobs[slot as usize].committed_pubseq >= *bp
-            }
+        let resolved = |slot: u8, (bp, created): (u64, bool)| {
+            created
+                || captured.contains(&slot)
+                || s.volume.blobs[slot as usize].committed_pubseq >= bp
         };
-        let included = pb.iter().filter(|(&sl, bp)| resolved(sl, bp)).count();
-        if included > 0 && included < pb.len() {
+        let parts: Vec<(u8, (u64, bool))> = pb
+            .iter()
+            .filter_map(|(&sl, bp)| bp.map(|p| (sl, p)))
+            .collect();
+        let included = parts.iter().filter(|&&(sl, p)| resolved(sl, p)).count();
+        if included > 0 && included < parts.len() {
             return Err(Violation {
                 trace: trace.to_vec(),
                 reason: format!(
@@ -1586,6 +1599,22 @@ pub(super) fn step(
             if mutations_blocked || !s.volume.blobs[slot as usize].live {
                 return Ok(None);
             }
+            // The implementation holds the commit lock across
+            // unlink-plus-commit (`Storage::remove`, and staged removals
+            // under `apply_sync`), so a removal never interleaves with an
+            // in-flight commit's phases. The gate is load-bearing: an
+            // ungated mid-flight removal plus recreation would let
+            // confirmation stamp the in-flight table's dead-generation
+            // entry onto the recreated blob as its committed entry, which
+            // a later selective commit then serves verbatim — resurrecting
+            // removed content. Recreate needs no gate of its own: with
+            // removals gated, a mid-flight recreation can only follow a
+            // pre-snapshot removal, which already dropped the entry from
+            // the in-flight table, so confirmation stamps None (the
+            // fresh-blob state) rather than a dead entry.
+            if s.volume.in_flight.is_some() {
+                return Ok(None);
+            }
             s.volume.blobs[slot as usize].live = false;
             s.volume.blobs[slot as usize].dirty = true;
             s.volume.blobs[slot as usize].pubseq += 1;
@@ -1759,15 +1788,26 @@ pub(super) fn step(
             for (&block, versions) in &s.disk.pending {
                 let newest = versions.last().unwrap().clone();
                 // (a) still dirty, (b) landed durably, (c) marked clean
-                // without reaching disk (read-visible residue).
-                let mut next = Vec::with_capacity(outcomes.len() * 3);
+                // without reaching disk (read-visible residue). The kept
+                // and lost arms bind the NEWEST version — the cache page
+                // holds the newest write — but background writeback may
+                // have persisted any older pending version before the
+                // failed fsync, so the landed arm fans over every distinct
+                // pending version (an older version landing means the
+                // newest was marked clean and evicted).
+                let mut landed_versions = versions.clone();
+                landed_versions.sort();
+                landed_versions.dedup();
+                let mut next = Vec::with_capacity(outcomes.len() * (2 + landed_versions.len()));
                 for outcome in &outcomes {
                     let mut keep = outcome.clone();
                     keep.pending.insert(block, vec![newest.clone()]);
                     next.push(keep);
-                    let mut landed = outcome.clone();
-                    landed.durable[block] = newest.clone();
-                    next.push(landed);
+                    for version in &landed_versions {
+                        let mut landed = outcome.clone();
+                        landed.durable[block] = version.clone();
+                        next.push(landed);
+                    }
                     let mut lost = outcome.clone();
                     lost.stale_cache.insert(block, newest.clone());
                     next.push(lost);
@@ -2441,6 +2481,31 @@ mod tests {
         assert!(
             check(BATCH, 8, 2, &rules).is_err(),
             "checker missed a split batch"
+        );
+    }
+
+    /// A removal resolves its own part of an applied batch, and a later
+    /// recreation of the slot must not resurrect that part for never-split
+    /// counting: an unrelated selective commit that captures no surviving
+    /// member leaves the batch entirely unresolved, which is legal.
+    /// Counting the removal-nulled part as included would flag this
+    /// history as a split batch (a spurious I6 violation).
+    #[test]
+    fn removed_then_recreated_part_not_counted() {
+        let trace: &[Action] = &[
+            Action::BatchAppend(0),
+            Action::BatchAppend(1),
+            Action::BatchApply,
+            Action::Remove(0),
+            Action::Recreate(0),
+            Action::Append(2),
+            Action::Snapshot(0b100),
+            Action::WriteMeta,
+            Action::FsyncOk,
+        ];
+        assert!(
+            run_trace(trace, &SPEC).is_ok(),
+            "spec must allow an unrelated commit after remove and recreate"
         );
     }
 
