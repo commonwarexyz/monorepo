@@ -846,6 +846,93 @@ impl BlobInner {
     fn finalize_chunk(&mut self, chunk: u64, bytes: &[u8]) {
         self.crcs.finalize(chunk, || Crc32::checksum(bytes));
     }
+
+    /// Assert this blob's structural invariants (tests only): run geometry,
+    /// tail-buffer coherence with the last backed chunk (the invariant whose
+    /// silent violation produced the stale-shadow data loss), chunk-state
+    /// coverage, counter exactness, and overlay residency.
+    #[cfg(test)]
+    pub fn audit(&self) {
+        // Run geometry: aligned starts, non-overlapping, exact capacity.
+        let mut prev_end = 0;
+        for (&logical, run) in &self.runs {
+            assert!(
+                logical.is_multiple_of(BLOCK) && run.physical.is_multiple_of(BLOCK),
+                "unaligned run at {logical}"
+            );
+            assert!(run.len > 0, "empty run at {logical}");
+            // Exact capacity is load-bearing: the COW remaps free only the
+            // replaced chunk's block and flow the rest of the extent into
+            // the split runs, so slack beyond the aligned length would be
+            // orphaned (the staged-shrink leak this audit found).
+            assert_eq!(
+                run.capacity,
+                block_align(run.len),
+                "capacity slack at {logical}"
+            );
+            assert!(logical >= prev_end, "overlapping runs at {logical}");
+            prev_end = logical + run.len;
+        }
+
+        // Tail coherence: the buffer always describes the last BACKED
+        // chunk's exact span (or is empty when nothing is backed).
+        match self.runs.iter().next_back() {
+            None => assert!(self.tail.is_empty(), "tail buffer without backing"),
+            Some((&logical, run)) => {
+                let last = chunk_of(logical + run.len - 1);
+                let (_, span) = self.chunk_span(last).expect("last chunk is backed");
+                assert_eq!(self.tail_chunk, last, "tail buffer desynced from runs");
+                assert_eq!(self.tail.len() as u64, span, "tail span desynced from runs");
+            }
+        }
+
+        // Chunk-state coverage matches the backed chunks exactly, and the
+        // running unverified/pending counters match a recount.
+        self.crcs.audit();
+        let max = self
+            .runs
+            .iter()
+            .next_back()
+            .map_or(0, |(&l, r)| chunk_of(l + r.len - 1) + 1);
+        for chunk in 0..=max {
+            assert_eq!(
+                self.crcs.get(chunk).is_some(),
+                self.chunk_span(chunk).is_some(),
+                "chunk state coverage drifted at chunk {chunk}"
+            );
+        }
+
+        // Every pending CRC is overlay-resident with its full span, and
+        // every overlay entry describes a backed chunk.
+        for (&chunk, entry) in &self.overlay {
+            let (_, span) = self
+                .chunk_span(chunk)
+                .unwrap_or_else(|| panic!("overlay entry for unbacked chunk {chunk}"));
+            if self
+                .crcs
+                .get(chunk)
+                .is_some_and(|s| s.crc == ChunkCrc::Pending)
+            {
+                assert_eq!(
+                    entry.bytes.len() as u64,
+                    span,
+                    "pending overlay span desynced at chunk {chunk}"
+                );
+            }
+        }
+        for chunk in 0..max {
+            if self
+                .crcs
+                .get(chunk)
+                .is_some_and(|s| s.crc == ChunkCrc::Pending)
+            {
+                assert!(
+                    self.overlay.contains_key(&chunk),
+                    "pending chunk {chunk} without overlay entry"
+                );
+            }
+        }
+    }
 }
 
 /// Metadata extents referenced by a blob's last confirmed table entry:
@@ -1020,6 +1107,196 @@ impl State {
         self.dormant.insert(id, (partition, entry));
     }
 
+    /// Assert the volume-wide bookkeeping invariants (tests only).
+    ///
+    /// Always checked: free-index integrity, namespace/dirty/group/handle
+    /// consistency, per-blob structural invariants (see
+    /// [`BlobInner::audit`]), and extent accounting — every referenced
+    /// extent is block-aligned, pairwise disjoint, and disjoint from free
+    /// space. With `quiesced` (no in-flight commit and no unapplied batch,
+    /// both of which hold freshly allocated extents outside this state),
+    /// additionally: committed-metadata parity with the committed entries,
+    /// and the exact partition — referenced extents plus the free index
+    /// cover the allocatable file with nothing left over (no leaks).
+    #[cfg(test)]
+    pub fn audit(&self, quiesced: bool) {
+        self.alloc.audit();
+
+        // Namespace: every named id resolves to an open or dormant blob.
+        for blobs in self.partitions.values() {
+            for id in blobs.values() {
+                assert!(
+                    self.open.contains_key(id) || self.dormant.contains_key(id),
+                    "named blob {id} neither open nor dormant"
+                );
+            }
+        }
+
+        // Dirty ids are live open blobs.
+        for id in &self.dirty {
+            let core = self
+                .open
+                .get(id)
+                .unwrap_or_else(|| panic!("dirty blob {id} not open"));
+            assert!(!core.inner.lock().removed, "dirty blob {id} is removed");
+        }
+
+        // Applied-batch groups are pairwise disjoint and (quiesced) hold
+        // only open blobs: members stay hydrated until a commit resolves
+        // the group.
+        let mut grouped = BTreeSet::new();
+        for group in &self.groups {
+            for id in group {
+                assert!(grouped.insert(*id), "blob {id} in two applied-batch groups");
+                if quiesced {
+                    assert!(self.open.contains_key(id), "group member {id} not open");
+                }
+            }
+        }
+
+        // Handle counts reference open blobs (an unapplied batch may hold
+        // handles for staged creations not yet published).
+        if quiesced {
+            for (id, count) in &self.handles {
+                assert!(
+                    *count == 0 || self.open.contains_key(id),
+                    "handles for {id} without an open blob"
+                );
+            }
+        }
+
+        // Recovery-verified seeds are consumed at hydration.
+        for id in self.recovery_verified.keys() {
+            assert!(
+                self.dormant.contains_key(id),
+                "recovery-verified chunks for hydrated blob {id}"
+            );
+        }
+
+        // Collect every extent the state references, running per-blob
+        // audits along the way. Removed-with-handles blobs are skipped:
+        // unlink moved their extents to `pending_free` (counted there).
+        let mut referenced: Vec<(Extent, String)> = Vec::new();
+        if let Some(extent) = self.table_extent {
+            referenced.push((extent, "table".into()));
+        }
+        for (extent, _, _) in &self.pending_free {
+            referenced.push((*extent, "pending free".into()));
+        }
+        for (&id, (_, entry)) in &self.dormant {
+            for r in &entry.runs {
+                referenced.push((
+                    Extent {
+                        offset: r.physical,
+                        len: block_align(r.len),
+                    },
+                    format!("dormant {id} run"),
+                ));
+            }
+        }
+        for (&id, meta) in &self.committed_meta {
+            for (i, extent) in meta.checksums.iter().enumerate() {
+                referenced.push((*extent, format!("blob {id} checksum ref {i}")));
+            }
+            if let Some(extent) = meta.shadow {
+                referenced.push((extent, format!("blob {id} shadow")));
+            }
+        }
+        for (&id, core) in &self.open {
+            let inner = core.inner.lock();
+            if inner.removed {
+                continue;
+            }
+            inner.audit();
+            for run in inner.runs.values() {
+                referenced.push((
+                    Extent {
+                        offset: run.physical,
+                        len: run.capacity,
+                    },
+                    format!("open {id} run"),
+                ));
+            }
+            for extent in &inner.pending_frees {
+                referenced.push((*extent, format!("open {id} pending free")));
+            }
+
+            // Committed-metadata parity: the tracked meta extents are
+            // exactly the extents the committed entry references. Skipped
+            // mid-commit, where the snapshot has already swapped the meta
+            // while the entry swings only at finalize.
+            if quiesced {
+                assert_eq!(
+                    inner.staged_batches, 0,
+                    "blob {id}: staged batch counter leaked"
+                );
+                match (&inner.committed_entry, self.committed_meta.get(&id)) {
+                    (Some(entry), Some(meta)) => assert_meta_parity(id, entry, meta),
+                    (Some(_), None) => panic!("blob {id}: committed entry without meta"),
+                    (None, Some(_)) => panic!("blob {id}: committed meta without entry"),
+                    (None, None) => {}
+                }
+            }
+        }
+        if quiesced {
+            for (&id, (_, entry)) in &self.dormant {
+                let meta = self
+                    .committed_meta
+                    .get(&id)
+                    .unwrap_or_else(|| panic!("dormant blob {id} without committed meta"));
+                assert_meta_parity(id, entry, meta);
+            }
+        }
+
+        // Accounting: aligned, pairwise disjoint, never overlapping free
+        // space, and (quiesced) exactly partitioning the allocatable file
+        // with the free index.
+        let mut total = 0;
+        referenced.sort_by_key(|(extent, _)| extent.offset);
+        let mut prev: Option<&(Extent, String)> = None;
+        for entry in &referenced {
+            let (extent, what) = entry;
+            assert!(
+                extent.offset.is_multiple_of(BLOCK)
+                    && extent.len.is_multiple_of(BLOCK)
+                    && extent.len > 0,
+                "unaligned referenced extent: {what} {extent:?}"
+            );
+            if let Some((pe, pw)) = prev {
+                assert!(
+                    pe.offset + pe.len <= extent.offset,
+                    "referenced extents overlap: {pw} {pe:?} and {what} {extent:?}"
+                );
+            }
+            assert!(
+                !self.alloc.overlaps_free(*extent),
+                "referenced extent overlaps free space: {what} {extent:?}"
+            );
+            total += extent.len;
+            prev = Some(entry);
+        }
+        if quiesced && total + self.alloc.free_bytes() != self.alloc.end() - 2 * BLOCK {
+            let mut dump = String::new();
+            for (extent, what) in &referenced {
+                dump.push_str(&format!(
+                    "  ref {}..{} {what}\n",
+                    extent.offset,
+                    extent.offset + extent.len
+                ));
+            }
+            for (offset, len) in self.alloc.free_ranges() {
+                dump.push_str(&format!("  free {}..{}\n", offset, offset + len));
+            }
+            panic!(
+                "extent leak: referenced {} + free {} != allocatable {} (end {})\n{dump}",
+                total,
+                self.alloc.free_bytes(),
+                self.alloc.end() - 2 * BLOCK,
+                self.alloc.end()
+            );
+        }
+    }
+
     /// Apply deferred frees eligible under the current confirmed seq.
     pub fn apply_frees(&mut self) {
         let confirmed = self.confirmed_seq;
@@ -1036,6 +1313,34 @@ impl State {
             }
         }
         self.pending_free = kept;
+    }
+}
+
+/// Assert `meta` tracks exactly the extents `entry` references (tests only).
+#[cfg(test)]
+fn assert_meta_parity(id: u64, entry: &Entry, meta: &CommittedMeta) {
+    assert_eq!(
+        meta.checksums.len(),
+        entry.checksums.len(),
+        "blob {id}: checksum meta count desynced"
+    );
+    for (extent, r) in meta.checksums.iter().zip(&entry.checksums) {
+        assert_eq!(
+            extent.offset, r.offset,
+            "blob {id}: checksum meta offset desynced"
+        );
+        assert_eq!(
+            extent.len,
+            block_align(r.count as u64 * 4),
+            "blob {id}: checksum meta length desynced"
+        );
+    }
+    match (meta.shadow, entry.shadow) {
+        (Some(extent), Some(offset)) => {
+            assert_eq!(extent.offset, offset, "blob {id}: shadow meta desynced");
+        }
+        (None, None) => {}
+        _ => panic!("blob {id}: shadow meta presence desynced"),
     }
 }
 

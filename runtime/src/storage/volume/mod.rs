@@ -159,13 +159,21 @@
 //! tables, poison latch, selective capture, coalesced union capture, and
 //! batch staging/publish with
 //! the never-split rule) is specified and exhaustively model-checked under
-//! crash and power loss in the `model` module (compiled with tests); the implementation follows the
-//! model's decisions exactly. Read the model docs before changing anything
-//! here.
+//! crash and power loss in the `model` module (compiled with tests), and
+//! the `conformance` module CHECKS that this implementation refines it:
+//! bounded workloads run against the real volume in lockstep with the
+//! model, power loss is materialized at every step (each pending write
+//! independently lands, vanishes, or tears) with the recovered state
+//! required to be one the model allows for that history, and commit
+//! futures are cancelled at every await point (the class below the
+//! model). See the model docs' trust story. Read the model docs before
+//! changing anything here.
 
 mod alloc;
 mod batch;
 mod commit;
+#[cfg(test)]
+mod conformance;
 mod core;
 mod layout;
 mod metrics;

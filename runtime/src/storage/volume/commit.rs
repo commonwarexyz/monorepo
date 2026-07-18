@@ -105,6 +105,46 @@ impl<S: crate::Storage> Drop for CancelGuard<'_, S> {
     }
 }
 
+/// Poisons the volume if dropped while armed: guards a commit's mutation
+/// span against CANCELLATION (the caller's future dropped mid-flight).
+///
+/// [`commit_locked`] is driven directly inside caller futures on the
+/// `Batch::apply_sync` and `Storage::remove` paths (no pooled ticket, so
+/// [`CancelGuard`] never sees them). Once the snapshot starts consuming
+/// state — dirty marks, committed-meta swaps, deferred frees, cached
+/// encodings — a dropped future can neither complete the commit nor
+/// unwind it, and the next confirming commit would publish the
+/// half-snapshot (a durable table referencing never-written extents):
+/// found by the conformance cancellation injector. `Batch::apply_inner`
+/// arms one across its publish for the same reason (a half-published
+/// batch splits the group).
+pub(super) struct PoisonOnCancel<'a, S: crate::Storage> {
+    ready: &'a Ready<S>,
+    armed: bool,
+}
+
+impl<'a, S: crate::Storage> PoisonOnCancel<'a, S> {
+    pub const fn arm(ready: &'a Ready<S>) -> Self {
+        Self { ready, armed: true }
+    }
+
+    /// The guarded span completed (or failed and latched its own poison).
+    pub fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl<S: crate::Storage> Drop for PoisonOnCancel<'_, S> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        tracing::error!("volume commit future dropped mid-flight; storage poisoned until restart");
+        let _ = self.ready.poisoned.set(Error::Aborted);
+        let _ = self.ready.metrics.poisoned.try_set(1);
+    }
+}
+
 /// Register `roots` in the pending-commit pool under the CURRENT ticket:
 /// the first leader to drain the pool after this point covers these roots
 /// and resolves the returned ticket with the union commit's result.
@@ -191,6 +231,9 @@ pub(super) async fn commit_locked<S: crate::Storage>(
         capture
     };
 
+    // From here the commit consumes state, so cancellation must poison
+    // (see [`PoisonOnCancel`]).
+    let guard = PoisonOnCancel::arm(ready);
     let snapshot = match take_snapshot(ready, capture).await {
         Ok(s) => s,
         Err(e) => {
@@ -204,6 +247,7 @@ pub(super) async fn commit_locked<S: crate::Storage>(
             );
             let _ = ready.poisoned.set(e.clone());
             let _ = ready.metrics.poisoned.try_set(1);
+            guard.disarm();
             return Err(e);
         }
     };
@@ -248,10 +292,12 @@ pub(super) async fn commit_locked<S: crate::Storage>(
         );
         let _ = ready.poisoned.set(e.clone());
         let _ = ready.metrics.poisoned.try_set(1);
+        guard.disarm();
         return Err(e);
     }
 
     finalize(ready, snapshot);
+    guard.disarm();
     ready.metrics.commits.inc();
     Ok(())
 }

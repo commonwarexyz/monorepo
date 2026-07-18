@@ -1,0 +1,2192 @@
+//! Trace conformance: the exhaustive `model` as an oracle over the REAL
+//! volume implementation.
+//!
+//! The model proves the commit PROTOCOL; this module checks that the
+//! implementation REFINES it (the middle layer of the trust story in the
+//! model docs). Every workload here executes real volume operations in
+//! lockstep with the model's transition function:
+//!
+//! - EXECUTOR: each [`Op`] maps to real API calls (a model cell is half a
+//!   [`BLOCK`], filled with a unique repeating token per write) and to a
+//!   model action sequence. Operations the implementation fuses — `remove`
+//!   and creation commit internally — map to composite sequences
+//!   (`[Remove, Snapshot, WriteMeta, FsyncOk]`).
+//! - CRASHES: at every point of interest the harness materializes power
+//!   loss at the model's granularity — each pending inner write resolves
+//!   per block to any queued version, the durable content, or a torn
+//!   block — and re-opens the real volume over each outcome. Crash points
+//!   inside a commit are pinned by parking the leader at the inner fsync
+//!   (all metadata writes issued, nothing durable), which covers both of
+//!   the model's in-flight phases: the disk state after `Snapshot` alone
+//!   is a subset of the `MetaWritten` outcomes (every metadata block
+//!   resolving to "vanished").
+//! - EXTRACTOR: the recovered volume is read back through the public API
+//!   (scan, open, full reads) and decoded to a model observable — per
+//!   slot: absent, or the sequence of cell tokens. The observable must
+//!   equal one the model allows for exactly that history (the crash fan
+//!   of the lockstep state), translated through the per-state map from
+//!   model cell values to written tokens. Cell tokens are globally unique
+//!   (they never repeat across a replayed history), so any resurrection
+//!   of stale bytes that the model would excuse as replay-identical is
+//!   caught here rather than masked.
+//!
+//! Nondeterminism delta against the model, stated precisely: the model
+//! resolves fsyncgate residue (`FsyncFail`) into per-block
+//! kept/landed/lost cache states; the harness collapses that step because
+//! the union of crash outcomes over every residue state equals the crash
+//! outcomes of the pre-fail state (kept and lost both resolve to
+//! {durable, any version, torn} minus nothing), and the implementation's
+//! poison latch makes residue unobservable except through a crash. The
+//! latch itself is asserted directly (every post-fail operation errors).
+//! Where a crash point's outcome product exceeds the enumeration cap, the
+//! harness checks every single-block deviation from the all-landed and
+//! all-vanished corners plus seeded random samples — the exhaustive
+//! product is used whenever it fits (stated per workload in the stats).
+//!
+//! CANCELLATION INJECTION (the third layer): commit, sync, batch-apply,
+//! and apply-start-sync futures are dropped after every possible poll
+//! count (a pass-through storage wrapper turns each inner I/O into a poll
+//! boundary), after which the audits run, the poison contract is checked
+//! (poison exactly when commit leadership was assumed, benign before),
+//! and the workload continues or the volume is crashed and checked for
+//! trace conformance.
+
+use super::{
+    model::{
+        initial_state, step, Action, Cell, Logical, State as ModelState, Violation, BLOBS,
+        CELLS_PER_BLOCK, SPEC,
+    },
+    tests::{audit_volume, test_pool, Gated, Tearing},
+    Batch, Blob as VBlob, Config, Storage as Volume, BLOCK,
+};
+use crate::{Blob as _, BufferPool, Error, IoBuf, IoBufs, IoBufsMut, Storage as _};
+use commonware_utils::TestRng;
+use futures::FutureExt as _;
+use rand::RngExt as _;
+use std::{
+    collections::{BTreeMap, HashSet},
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
+};
+
+/// Bytes per model cell (the model packs two cells per block).
+const CELL: u64 = BLOCK / CELLS_PER_BLOCK as u64;
+
+/// Partition holding the workload blobs.
+const PARTITION: &str = "p";
+
+/// Blob name for a model slot.
+fn name(slot: u8) -> Vec<u8> {
+    vec![b'a' + slot]
+}
+
+/// The cell content written for token `ctr`: the token's bytes repeated
+/// across the whole cell (never all-zero; `ctr` starts at 1).
+fn pattern(ctr: u64) -> Vec<u8> {
+    let tok = ctr.to_be_bytes();
+    let mut out = vec![0u8; CELL as usize];
+    for chunk in out.chunks_mut(8) {
+        chunk.copy_from_slice(&tok);
+    }
+    out
+}
+
+/// What one recovered cell reads back as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum CellObs {
+    Zero,
+    Token(u64),
+    /// Neither zeros nor a uniform token: never legal in committed space.
+    Garbage,
+}
+
+/// A recovered volume's observable state: per slot, absent or the cell
+/// sequence.
+type Obs = Vec<Option<Vec<CellObs>>>;
+
+/// Decode a blob's content into cells.
+fn decode_cells(bytes: &[u8]) -> Vec<CellObs> {
+    bytes
+        .chunks(CELL as usize)
+        .map(|cell| {
+            if cell.len() != CELL as usize {
+                return CellObs::Garbage;
+            }
+            if cell.iter().all(|&b| b == 0) {
+                return CellObs::Zero;
+            }
+            let tok = u64::from_be_bytes(cell[..8].try_into().expect("cell holds a token"));
+            if tok != 0 && cell.chunks(8).all(|c| c == tok.to_be_bytes()) {
+                CellObs::Token(tok)
+            } else {
+                CellObs::Garbage
+            }
+        })
+        .collect()
+}
+
+/// One lockstep correspondence: a model state plus the map from its cell
+/// values to the tokens the harness actually wrote for them.
+#[derive(Clone)]
+struct Tracked {
+    state: ModelState,
+    translate: BTreeMap<Cell, u64>,
+}
+
+/// The value the model will generate for the next write of `cell` on
+/// `slot` (mirrors the model's `next_val` without stepping).
+fn peek_val(state: &ModelState, slot: u8, cell: u8) -> Cell {
+    let b = &state.volume.blobs[slot as usize];
+    Cell::Val {
+        slot,
+        gen: b.gen,
+        cell,
+        ver: b.vers.get(&cell).copied().unwrap_or(0) + 1,
+    }
+}
+
+/// Render a model violation with its trace.
+fn render(v: &Violation) -> String {
+    let mut out = format!("model violation: {}\n  model trace:\n", v.reason);
+    for (i, a) in v.trace.iter().enumerate() {
+        out.push_str(&format!("    {i}: {a:?}\n"));
+    }
+    out
+}
+
+/// Translate a model logical view through a tracked state's token map.
+fn translated(t: &Tracked, logical: &Logical) -> Obs {
+    logical
+        .blobs
+        .iter()
+        .map(|blob| {
+            blob.as_ref().map(|(_gen, cells)| {
+                cells
+                    .iter()
+                    .map(|cell| match cell {
+                        Cell::Zero => CellObs::Zero,
+                        Cell::Val { .. } => CellObs::Token(
+                            *t.translate
+                                .get(cell)
+                                .unwrap_or_else(|| panic!("untranslated model value {cell:?}")),
+                        ),
+                        Cell::Garbage => panic!("model logical exposes garbage"),
+                    })
+                    .collect()
+            })
+        })
+        .collect()
+}
+
+/// Step `tracked` through `actions`, returning every reachable state with
+/// its parent index. Non-final actions must be deterministic; the final
+/// action may fan out (a crash).
+fn states_after(
+    tracked: &[Tracked],
+    actions: &[Action],
+    trace: &[Action],
+) -> Vec<(usize, ModelState)> {
+    let mut out = Vec::new();
+    let mut full = trace.to_vec();
+    full.extend_from_slice(actions);
+    for (parent, t) in tracked.iter().enumerate() {
+        let mut states = vec![t.state.clone()];
+        for action in actions {
+            let mut next = Vec::new();
+            for s in &states {
+                let successors = step(s, *action, &SPEC, &full)
+                    .unwrap_or_else(|v| panic!("{}", render(&v)))
+                    .unwrap_or_else(|| panic!("model action {action:?} disabled mid-sequence"));
+                next.extend(successors);
+            }
+            states = next;
+        }
+        out.extend(states.into_iter().map(|s| (parent, s)));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Crash-space enumeration
+// ---------------------------------------------------------------------------
+
+/// Deterministic garbage for a torn block (never a valid token pattern or
+/// checksummed structure).
+fn torn_block(block: u64) -> Vec<u8> {
+    let mut state = block.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut out = Vec::with_capacity(BLOCK as usize);
+    while out.len() < BLOCK as usize {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.extend_from_slice(&state.to_be_bytes());
+    }
+    out
+}
+
+/// The power-loss outcome space of a volume file: durable content plus,
+/// per dirtied block, the queue of pending versions. Mirrors the model's
+/// `Disk::crash_outcomes` granularity exactly: each dirtied block resolves
+/// independently to the durable content, any pending version, or a torn
+/// block.
+struct CrashSpace {
+    durable: Vec<u8>,
+    /// (block index, pending versions oldest-first, each a full block).
+    blocks: Vec<(u64, Vec<Vec<u8>>)>,
+    /// Padded image length (covers every pending write).
+    len: usize,
+}
+
+/// One materialized outcome.
+struct CrashCase {
+    desc: String,
+    image: Vec<u8>,
+}
+
+impl CrashSpace {
+    /// Snapshot the outcome space from a tearing wrapper's recorded state.
+    fn capture(tearing: &Tearing) -> Self {
+        let durable = tearing.durable.lock().clone();
+        let writes = tearing.unsynced.lock().clone();
+        let mut len = durable.len();
+        for (offset, bytes) in &writes {
+            len =
+                len.max((*offset as usize + bytes.len()).div_ceil(BLOCK as usize) * BLOCK as usize);
+        }
+        let block_at = |durable: &[u8], block: u64| -> Vec<u8> {
+            let start = (block * BLOCK) as usize;
+            let mut out = vec![0u8; BLOCK as usize];
+            if start < durable.len() {
+                let end = (start + BLOCK as usize).min(durable.len());
+                out[..end - start].copy_from_slice(&durable[start..end]);
+            }
+            out
+        };
+        let mut map: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
+        for (offset, bytes) in &writes {
+            let mut cursor = 0usize;
+            while cursor < bytes.len() {
+                let at = *offset as usize + cursor;
+                let block = at as u64 / BLOCK;
+                let piece_end = bytes
+                    .len()
+                    .min(((block + 1) * BLOCK) as usize - *offset as usize);
+                let versions = map.entry(block).or_default();
+                let mut base = versions
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| block_at(&durable, block));
+                let rel = at - (block * BLOCK) as usize;
+                base[rel..rel + piece_end - cursor].copy_from_slice(&bytes[cursor..piece_end]);
+                // Dedupe identical consecutive versions (a rewrite of the
+                // same bytes adds no outcome).
+                if versions.last() != Some(&base) {
+                    versions.push(base);
+                }
+                cursor = piece_end;
+            }
+        }
+        map.retain(|_, versions| !versions.is_empty());
+        Self {
+            durable,
+            blocks: map.into_iter().collect(),
+            len,
+        }
+    }
+
+    /// Total outcomes (saturating).
+    fn count(&self) -> usize {
+        let mut total: usize = 1;
+        for (_, versions) in &self.blocks {
+            total = total.saturating_mul(versions.len() + 2);
+        }
+        total
+    }
+
+    /// Build one outcome. `choices[i]`: 0 = durable, 1..=k = version,
+    /// k + 1 = torn.
+    fn case(&self, choices: &[usize]) -> CrashCase {
+        let mut image = self.durable.clone();
+        image.resize(self.len, 0);
+        let mut desc = String::new();
+        for ((block, versions), &choice) in self.blocks.iter().zip(choices) {
+            let at = (*block * BLOCK) as usize;
+            let what = if choice == 0 {
+                "durable"
+            } else if choice <= versions.len() {
+                image[at..at + BLOCK as usize].copy_from_slice(&versions[choice - 1]);
+                "landed"
+            } else {
+                image[at..at + BLOCK as usize].copy_from_slice(&torn_block(*block));
+                "torn"
+            };
+            desc.push_str(&format!("b{block}={what}({choice}) "));
+        }
+        CrashCase { desc, image }
+    }
+
+    /// Enumerate outcomes: the exhaustive product when it fits in `cap`,
+    /// otherwise the corner set (all-durable, all-newest, and every
+    /// single-block deviation from all-newest) plus seeded random samples
+    /// up to `cap`.
+    fn enumerate(&self, cap: usize, seed: u64) -> (Vec<CrashCase>, bool) {
+        let n = self.blocks.len();
+        if n == 0 {
+            return (vec![self.case(&[])], true);
+        }
+        let radices: Vec<usize> = self.blocks.iter().map(|(_, v)| v.len() + 2).collect();
+        if self.count() <= cap {
+            let mut cases = Vec::with_capacity(self.count());
+            let mut choices = vec![0usize; n];
+            loop {
+                cases.push(self.case(&choices));
+                let mut i = 0;
+                loop {
+                    if i == n {
+                        return (cases, true);
+                    }
+                    choices[i] += 1;
+                    if choices[i] < radices[i] {
+                        break;
+                    }
+                    choices[i] = 0;
+                    i += 1;
+                }
+            }
+        }
+        // Corners + samples.
+        let mut seen: HashSet<Vec<usize>> = HashSet::new();
+        let mut cases = Vec::new();
+        let newest: Vec<usize> = self.blocks.iter().map(|(_, v)| v.len()).collect();
+        let mut push = |space: &Self, choices: Vec<usize>, cases: &mut Vec<CrashCase>| {
+            if seen.insert(choices.clone()) {
+                cases.push(space.case(&choices));
+            }
+        };
+        push(self, vec![0; n], &mut cases);
+        push(self, newest.clone(), &mut cases);
+        for i in 0..n {
+            for choice in 0..radices[i] {
+                let mut choices = newest.clone();
+                choices[i] = choice;
+                push(self, choices, &mut cases);
+            }
+            // The all-vanished neighborhood too: one block resolving while
+            // everything else vanished.
+            for choice in 0..radices[i] {
+                let mut choices = vec![0; n];
+                choices[i] = choice;
+                push(self, choices, &mut cases);
+            }
+        }
+        let mut rng = TestRng::new(seed);
+        while cases.len() < cap {
+            let choices: Vec<usize> = radices.iter().map(|&r| rng.random_range(0..r)).collect();
+            push(self, choices, &mut cases);
+        }
+        (cases, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Yielding wrapper (poll boundaries for cancellation injection)
+// ---------------------------------------------------------------------------
+
+/// Pending exactly once, then ready.
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.0 {
+            Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+/// While active, yield once before the next inner operation.
+async fn pause(active: &Arc<AtomicBool>) {
+    if active.load(Ordering::SeqCst) {
+        YieldOnce(false).await;
+    }
+}
+
+/// A pass-through storage wrapper that (while `active`) yields once before
+/// every inner operation, turning each inner I/O into a poll boundary:
+/// dropping a commit future after N polls enumerates cancellation between
+/// any two inner operations — the await-point analogue of
+/// crash-at-every-write.
+#[derive(Clone)]
+struct Yielding<S> {
+    inner: S,
+    active: Arc<AtomicBool>,
+}
+
+impl<S: crate::Storage> crate::Storage for Yielding<S> {
+    type Blob = YieldingBlob<S::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (blob, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            YieldingBlob {
+                inner: blob,
+                active: self.active.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+#[derive(Clone)]
+struct YieldingBlob<B> {
+    inner: B,
+    active: Arc<AtomicBool>,
+}
+
+impl<B: crate::Blob> crate::Blob for YieldingBlob<B> {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        pause(&self.active).await;
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        pause(&self.active).await;
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        pause(&self.active).await;
+        self.inner.write_at(offset, bufs).await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at(offset, bufs).await?;
+        self.sync().await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        pause(&self.active).await;
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        pause(&self.active).await;
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> crate::Handle<()> {
+        crate::Handle::ready(self.sync().await)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The rig: a real volume in lockstep with the model
+// ---------------------------------------------------------------------------
+
+type Stack = Yielding<Gated<Tearing>>;
+
+/// Harness operations: the model's action vocabulary at the real API's
+/// granularity (commits are fused, `remove`/`open` carry their internal
+/// commit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Op {
+    Append(u8),
+    Overwrite(u8),
+    ResizeDown(u8),
+    ResizeUp(u8),
+    Remove(u8),
+    Recreate(u8),
+    /// Sync every live blob in the mask as ONE commit (multi-bit masks
+    /// register every root, then drive one handle: the pooled union).
+    Sync(u8),
+    BatchAppend(u8),
+    BatchOverwrite(u8),
+    BatchCreate(u8),
+    BatchApply,
+    BatchDrop,
+}
+
+struct BatchRig {
+    batch: Batch<Stack>,
+    /// Handles returned by staged creations, published at apply.
+    created: BTreeMap<u8, VBlob<Stack>>,
+}
+
+/// Coverage counters for a workload run.
+#[derive(Default, Debug)]
+struct Stats {
+    nodes: usize,
+    crash_points: usize,
+    cases: usize,
+    /// Crash points whose full outcome product fit under the cap.
+    exhaustive_points: usize,
+}
+
+struct Rig {
+    pool: BufferPool,
+    tearing: Tearing,
+    gated: Gated<Tearing>,
+    yields: Arc<AtomicBool>,
+    volume: Volume<Stack>,
+    blobs: BTreeMap<u8, VBlob<Stack>>,
+    batch: Option<BatchRig>,
+    tracked: Vec<Tracked>,
+    trace: Vec<Action>,
+    ops: Vec<Op>,
+    next_ctr: u64,
+    /// A parked (gated) commit is outstanding: bookkeeping audits skip the
+    /// quiesced-only exactness checks.
+    in_flight: bool,
+}
+
+impl Rig {
+    async fn new() -> Self {
+        let pool = test_pool();
+        let tearing = Tearing::new(pool.clone());
+        let gated = Gated::new(tearing.clone());
+        let yields = Arc::new(AtomicBool::new(false));
+        let stack = Yielding {
+            inner: gated.clone(),
+            active: yields.clone(),
+        };
+        let volume = Volume::new(stack, pool.clone(), Config::default());
+        let mut blobs = BTreeMap::new();
+        for slot in 0..BLOBS {
+            let (blob, size) = volume.open(PARTITION, &name(slot)).await.expect("create");
+            assert_eq!(size, 0, "fresh blob");
+            blobs.insert(slot, blob);
+        }
+        Self {
+            pool,
+            tearing,
+            gated,
+            yields,
+            volume,
+            blobs,
+            batch: None,
+            // Budgets sized for every workload here (the model decrements
+            // per action).
+            tracked: vec![Tracked {
+                state: initial_state(120, 6),
+                translate: BTreeMap::new(),
+            }],
+            trace: Vec::new(),
+            ops: Vec::new(),
+            next_ctr: 0,
+            in_flight: false,
+        }
+    }
+
+    /// Reopen a rig over a crashed image, resuming the lockstep with the
+    /// already-filtered tracked states (deep mode).
+    async fn resume(
+        pool: BufferPool,
+        image: Vec<u8>,
+        tracked: Vec<Tracked>,
+        next_ctr: u64,
+        ops: Vec<Op>,
+        trace: Vec<Action>,
+    ) -> Self {
+        let tearing = Tearing::from_image(pool.clone(), image).await;
+        let gated = Gated::new(tearing.clone());
+        let yields = Arc::new(AtomicBool::new(false));
+        let stack = Yielding {
+            inner: gated.clone(),
+            active: yields.clone(),
+        };
+        let volume = Volume::new(stack, pool.clone(), Config::default());
+        let mut blobs = BTreeMap::new();
+        for slot in 0..BLOBS {
+            if tracked[0].state.volume.blobs[slot as usize].live {
+                let (blob, _) = volume.open(PARTITION, &name(slot)).await.expect("reopen");
+                blobs.insert(slot, blob);
+            }
+        }
+        Self {
+            pool,
+            tearing,
+            gated,
+            yields,
+            volume,
+            blobs,
+            batch: None,
+            tracked,
+            trace,
+            ops,
+            next_ctr,
+            in_flight: false,
+        }
+    }
+
+    fn ctx(&self) -> String {
+        format!("ops {:?}", self.ops)
+    }
+
+    fn size_cells(&self, slot: u8) -> u8 {
+        self.tracked[0].state.volume.blobs[slot as usize].size
+    }
+
+    fn live(&self, slot: u8) -> bool {
+        self.tracked[0].state.volume.blobs[slot as usize].live
+    }
+
+    /// The staged size the next batch write on `slot` appends at (the
+    /// model's staged overlay, falling back to the published size).
+    fn staged_cells(&self, slot: u8) -> u8 {
+        self.tracked[0]
+            .state
+            .volume
+            .batch
+            .as_ref()
+            .and_then(|batch| batch.get(&slot))
+            .map_or(self.size_cells(slot), |staged| staged.size)
+    }
+
+    /// The model action sequence for `op` in the CURRENT state (batch
+    /// apply depends on what is staged).
+    fn model_actions(&self, op: Op) -> Vec<Action> {
+        match op {
+            Op::Append(s) => vec![Action::Append(s)],
+            Op::Overwrite(s) => vec![Action::Overwrite(s)],
+            Op::ResizeDown(s) => vec![Action::ResizeDown(s)],
+            Op::ResizeUp(s) => vec![Action::ResizeUp(s)],
+            Op::Remove(s) => vec![
+                Action::Remove(s),
+                Action::Snapshot(1 << s),
+                Action::WriteMeta,
+                Action::FsyncOk,
+            ],
+            Op::Recreate(s) => vec![
+                Action::Recreate(s),
+                Action::Snapshot(1 << s),
+                Action::WriteMeta,
+                Action::FsyncOk,
+            ],
+            Op::Sync(mask) => vec![Action::Snapshot(mask), Action::WriteMeta, Action::FsyncOk],
+            Op::BatchAppend(s) => vec![Action::BatchAppend(s)],
+            Op::BatchOverwrite(s) => vec![Action::BatchOverwrite(s)],
+            Op::BatchCreate(s) => vec![Action::BatchCreate(s)],
+            Op::BatchApply => {
+                let (has_creation, creation_only) = self.tracked[0]
+                    .state
+                    .volume
+                    .batch
+                    .as_ref()
+                    .map_or((false, false), |batch| {
+                        (
+                            batch.values().any(|staged| staged.created),
+                            batch.values().all(|staged| staged.created),
+                        )
+                    });
+                if has_creation && !creation_only {
+                    // The implementation requires apply_sync here: publish
+                    // and the group's commit under one commit-lock hold.
+                    vec![Action::BatchApply, Action::WriteMeta, Action::FsyncOk]
+                } else {
+                    vec![Action::BatchApply]
+                }
+            }
+            Op::BatchDrop => vec![Action::BatchDrop],
+        }
+    }
+
+    /// Whether `op` is enabled: the model's transition relation is the
+    /// authority, and every tracked state must agree.
+    fn enabled(&self, op: Op) -> bool {
+        let actions = self.model_actions(op);
+        let mut verdict: Option<bool> = None;
+        for t in &self.tracked {
+            let mut states = vec![t.state.clone()];
+            let mut ok = true;
+            'seq: for action in &actions {
+                let mut next = Vec::new();
+                for s in &states {
+                    match step(s, *action, &SPEC, &self.trace) {
+                        Ok(Some(successors)) => next.extend(successors),
+                        Ok(None) => {
+                            ok = false;
+                            break 'seq;
+                        }
+                        Err(v) => panic!("{}: {}", self.ctx(), render(&v)),
+                    }
+                }
+                states = next;
+            }
+            match verdict {
+                None => verdict = Some(ok),
+                Some(prev) => assert_eq!(
+                    prev,
+                    ok,
+                    "{}: tracked states disagree on enabledness of {op:?}",
+                    self.ctx()
+                ),
+            }
+        }
+        verdict.unwrap_or(false)
+    }
+
+    /// The (slot, cell) a value-writing op targets, if any.
+    fn value_target(&self, op: Op) -> Option<(u8, u8)> {
+        match op {
+            Op::Append(s) => Some((s, self.size_cells(s))),
+            Op::Overwrite(s) => Some((s, 0)),
+            Op::BatchAppend(s) => Some((s, self.staged_cells(s))),
+            Op::BatchOverwrite(s) => Some((s, 0)),
+            _ => None,
+        }
+    }
+
+    /// Step every tracked state through `actions`, recording `val ->
+    /// token` translations. Deduplicates identical correspondences.
+    fn step_tracked(&mut self, actions: &[Action], vals: Vec<Option<(Cell, u64)>>) {
+        let mut full = self.trace.clone();
+        full.extend_from_slice(actions);
+        let mut next: Vec<Tracked> = Vec::new();
+        let mut seen: HashSet<(ModelState, Vec<(Cell, u64)>)> = HashSet::new();
+        for (t, val) in self.tracked.iter().zip(vals) {
+            let mut states = vec![t.state.clone()];
+            for action in actions {
+                let mut successors = Vec::new();
+                for s in &states {
+                    successors.extend(
+                        step(s, *action, &SPEC, &full)
+                            .unwrap_or_else(|v| panic!("{}: {}", self.ctx(), render(&v)))
+                            .unwrap_or_else(|| {
+                                panic!("{}: model action {action:?} disabled", self.ctx())
+                            }),
+                    );
+                }
+                states = successors;
+            }
+            let mut translate = t.translate.clone();
+            if let Some((cell, ctr)) = val {
+                translate.insert(cell, ctr);
+            }
+            for s in states {
+                let key = (
+                    s.clone(),
+                    translate.iter().map(|(c, v)| (*c, *v)).collect::<Vec<_>>(),
+                );
+                if seen.insert(key) {
+                    next.push(Tracked {
+                        state: s,
+                        translate: translate.clone(),
+                    });
+                }
+            }
+        }
+        assert!(
+            !next.is_empty(),
+            "{}: lockstep lost every state",
+            self.ctx()
+        );
+        self.tracked = next;
+        self.trace = full;
+    }
+
+    /// Step the model only (the real side already moved through other
+    /// means, e.g. a parked commit's snapshot).
+    fn step_model_only(&mut self, actions: &[Action]) {
+        let vals = vec![None; self.tracked.len()];
+        self.step_tracked(actions, vals);
+    }
+
+    /// Execute one op against the real volume and the model, then run the
+    /// always-on checks.
+    async fn execute(&mut self, op: Op) {
+        assert!(self.enabled(op), "{}: op {op:?} not enabled", self.ctx());
+        let actions = self.model_actions(op);
+        let target = self.value_target(op);
+        let ctr = target.map(|_| {
+            self.next_ctr += 1;
+            self.next_ctr
+        });
+        let vals: Vec<Option<(Cell, u64)>> = self
+            .tracked
+            .iter()
+            .map(|t| target.map(|(s, c)| (peek_val(&t.state, s, c), ctr.expect("token allocated"))))
+            .collect();
+
+        self.run_real(op, ctr).await;
+        self.step_tracked(&actions, vals);
+        self.ops.push(op);
+
+        audit_volume(&self.volume, !self.in_flight && self.batch.is_none());
+        self.check_live().await;
+    }
+
+    /// Drive the real API for `op`.
+    async fn run_real(&mut self, op: Op, ctr: Option<u64>) {
+        match op {
+            Op::Append(s) => {
+                let offset = self.size_cells(s) as u64 * CELL;
+                let data = pattern(ctr.expect("append writes a value"));
+                self.blobs[&s]
+                    .write_at(offset, IoBuf::copy_from_slice(&data))
+                    .await
+                    .unwrap_or_else(|e| panic!("{}: append: {e}", self.ctx()));
+            }
+            Op::Overwrite(s) => {
+                let data = pattern(ctr.expect("overwrite writes a value"));
+                self.blobs[&s]
+                    .write_at(0, IoBuf::copy_from_slice(&data))
+                    .await
+                    .unwrap_or_else(|e| panic!("{}: overwrite: {e}", self.ctx()));
+            }
+            Op::ResizeDown(s) => {
+                let len = (self.size_cells(s) as u64 - 1) * CELL;
+                self.blobs[&s]
+                    .resize(len)
+                    .await
+                    .unwrap_or_else(|e| panic!("{}: resize down: {e}", self.ctx()));
+            }
+            Op::ResizeUp(s) => {
+                let len = (self.size_cells(s) as u64 + 2) * CELL;
+                self.blobs[&s]
+                    .resize(len)
+                    .await
+                    .unwrap_or_else(|e| panic!("{}: resize up: {e}", self.ctx()));
+            }
+            Op::Remove(s) => {
+                self.blobs.remove(&s);
+                self.volume
+                    .remove(PARTITION, Some(&name(s)))
+                    .await
+                    .unwrap_or_else(|e| panic!("{}: remove: {e}", self.ctx()));
+            }
+            Op::Recreate(s) => {
+                let (blob, size) = self
+                    .volume
+                    .open(PARTITION, &name(s))
+                    .await
+                    .unwrap_or_else(|e| panic!("{}: recreate: {e}", self.ctx()));
+                assert_eq!(size, 0, "{}: recreated blob not empty", self.ctx());
+                self.blobs.insert(s, blob);
+            }
+            Op::Sync(mask) => {
+                let slots: Vec<u8> = (0..BLOBS)
+                    .filter(|&s| mask & (1 << s) != 0 && self.live(s))
+                    .collect();
+                if let [slot] = slots[..] {
+                    self.blobs[&slot]
+                        .sync()
+                        .await
+                        .unwrap_or_else(|e| panic!("{}: sync: {e}", self.ctx()));
+                } else {
+                    // Register every root, then drive one handle: the
+                    // leader drains the pool and commits the union.
+                    let mut handles = Vec::new();
+                    for slot in slots {
+                        handles.push(self.blobs[&slot].start_sync().await);
+                    }
+                    for handle in handles {
+                        handle
+                            .await
+                            .unwrap_or_else(|e| panic!("{}: pooled sync: {e}", self.ctx()));
+                    }
+                }
+            }
+            Op::BatchAppend(s) | Op::BatchOverwrite(s) => {
+                let offset = match op {
+                    Op::BatchAppend(_) => self.staged_cells(s) as u64 * CELL,
+                    _ => 0,
+                };
+                let data = pattern(ctr.expect("batch write carries a value"));
+                let blob = self.blobs[&s].clone();
+                let rig = self.batch_mut().await;
+                rig.batch
+                    .write_at(&blob, offset, IoBuf::copy_from_slice(&data))
+                    .await
+                    .unwrap_or_else(|e| panic!("batch write: {e}"));
+            }
+            Op::BatchCreate(s) => {
+                let rig = self.batch_mut().await;
+                let blob = rig
+                    .batch
+                    .create(PARTITION, &name(s))
+                    .unwrap_or_else(|e| panic!("batch create: {e}"));
+                rig.created.insert(s, blob);
+            }
+            Op::BatchApply => {
+                let rig = self.batch.take().expect("apply without a batch");
+                let (has_creation, creation_only) = {
+                    let batch = self.tracked[0].state.volume.batch.as_ref();
+                    batch.map_or((false, false), |batch| {
+                        (
+                            batch.values().any(|staged| staged.created),
+                            batch.values().all(|staged| staged.created),
+                        )
+                    })
+                };
+                if has_creation && !creation_only {
+                    rig.batch
+                        .apply_sync()
+                        .await
+                        .unwrap_or_else(|e| panic!("{}: apply_sync: {e}", self.ctx()));
+                } else {
+                    rig.batch
+                        .apply()
+                        .await
+                        .unwrap_or_else(|e| panic!("{}: apply: {e}", self.ctx()));
+                }
+                self.blobs.extend(rig.created);
+            }
+            Op::BatchDrop => {
+                drop(self.batch.take().expect("drop without a batch"));
+            }
+        }
+    }
+
+    /// The live real batch, started on first use (mirrors the model's
+    /// `get_or_insert`).
+    async fn batch_mut(&mut self) -> &mut BatchRig {
+        if self.batch.is_none() {
+            let batch = self.volume.batch().await.expect("start batch");
+            self.batch = Some(BatchRig {
+                batch,
+                created: BTreeMap::new(),
+            });
+        }
+        self.batch.as_mut().expect("just created")
+    }
+
+    /// Read every live blob through the public API and compare against
+    /// every tracked state's translated logical view.
+    async fn check_live(&self) {
+        for slot in 0..BLOBS {
+            if !self.live(slot) {
+                assert!(
+                    !self.blobs.contains_key(&slot),
+                    "{}: handle for dead slot {slot}",
+                    self.ctx()
+                );
+                continue;
+            }
+            let size = self.size_cells(slot) as u64 * CELL;
+            let cells = if size == 0 {
+                Vec::new()
+            } else {
+                let bytes = self.blobs[&slot]
+                    .read_at(0, size as usize)
+                    .await
+                    .unwrap_or_else(|e| panic!("{}: live read slot {slot}: {e}", self.ctx()))
+                    .coalesce();
+                decode_cells(bytes.as_ref())
+            };
+            for t in &self.tracked {
+                let logical = t.state.volume.logical();
+                let expected = translated(t, &logical);
+                assert_eq!(
+                    Some(&cells),
+                    expected[slot as usize].as_ref(),
+                    "{}: live content of slot {slot} diverged from the model",
+                    self.ctx()
+                );
+            }
+        }
+    }
+
+    /// Crash the volume after (model-side) `extra` actions and check every
+    /// materialized outcome against the model's allowed states.
+    async fn crash_probe(&self, extra: &[Action], cap: usize, seed: u64, stats: &mut Stats) {
+        let space = CrashSpace::capture(&self.tearing);
+        let mut actions = extra.to_vec();
+        actions.push(Action::Crash);
+        let allowed = states_after(&self.tracked, &actions, &self.trace);
+        let allowed_obs: Vec<Obs> = {
+            let mut set = Vec::new();
+            for (parent, state) in &allowed {
+                let obs = translated(&self.tracked[*parent], &state.volume.logical());
+                if !set.contains(&obs) {
+                    set.push(obs);
+                }
+            }
+            set
+        };
+        let (cases, exhaustive) = space.enumerate(cap, seed);
+        stats.crash_points += 1;
+        if exhaustive {
+            stats.exhaustive_points += 1;
+        }
+        for case in cases {
+            stats.cases += 1;
+            let ctx = format!(
+                "{}; model extra {extra:?}; crash case: {}",
+                self.ctx(),
+                case.desc
+            );
+            let pool = self.pool.clone();
+            let checked = std::panic::AssertUnwindSafe(async {
+                let obs = extract(&pool, case.image.clone())
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("recovery/read failed on a pure-crash history: {e}")
+                    });
+                assert!(
+                    allowed_obs.contains(&obs),
+                    "recovered state is not allowed by the model\n  \
+                     recovered: {obs:?}\n  allowed ({}): {allowed_obs:?}",
+                    allowed_obs.len()
+                );
+            })
+            .catch_unwind()
+            .await;
+            if let Err(payload) = checked {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "non-string panic".into());
+                panic!("trace conformance failure\n  at: {ctx}\n  {msg}");
+            }
+        }
+    }
+}
+
+/// Reopen a crashed image, extract its observable state through the public
+/// API, and run the strict bookkeeping audit on the recovered state.
+async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
+    let tearing = Tearing::from_image(pool.clone(), image).await;
+    let gated = Gated::new(tearing.clone());
+    let yields = Arc::new(AtomicBool::new(false));
+    let stack = Yielding {
+        inner: gated,
+        active: yields,
+    };
+    let volume = Volume::new(stack, pool.clone(), Config::default());
+    let names = match volume.scan(PARTITION).await {
+        Ok(names) => names,
+        Err(Error::PartitionMissing(_)) => Vec::new(),
+        Err(e) => return Err(format!("scan: {e}")),
+    };
+    let mut obs: Obs = Vec::new();
+    let mut blobs = Vec::new();
+    for slot in 0..BLOBS {
+        if !names.contains(&name(slot)) {
+            obs.push(None);
+            continue;
+        }
+        let (blob, size) = volume
+            .open(PARTITION, &name(slot))
+            .await
+            .map_err(|e| format!("open slot {slot}: {e}"))?;
+        if !size.is_multiple_of(CELL) {
+            return Err(format!("slot {slot}: size {size} is not cell-aligned"));
+        }
+        let cells = if size == 0 {
+            Vec::new()
+        } else {
+            let bytes = blob
+                .read_at(0, size as usize)
+                .await
+                .map_err(|e| format!("read slot {slot}: {e}"))?
+                .coalesce();
+            decode_cells(bytes.as_ref())
+        };
+        obs.push(Some(cells));
+        blobs.push(blob);
+    }
+    // The freshly recovered state is quiesced: bookkeeping must be exact.
+    audit_volume(&volume, true);
+    Ok(obs)
+}
+
+// ---------------------------------------------------------------------------
+// Workload exploration
+// ---------------------------------------------------------------------------
+
+/// A bounded-exhaustive workload: DFS over every enabled op sequence up to
+/// `depth`, with crash probes at every node and commit-window/fsync-fail
+/// probes at shallow nodes.
+struct Workload {
+    menu: &'static [Op],
+    depth: usize,
+    /// Commit-window probes: park a sync of each mask at the inner fsync,
+    /// interleave up to `window_depth` ops from `window_menu`, then either
+    /// crash mid-commit or confirm and crash.
+    window_masks: &'static [u8],
+    window_menu: &'static [Op],
+    window_depth: usize,
+    window_max_prefix: usize,
+    /// Fsync-failure probes (the poison latch) at prefixes up to this
+    /// length (0 = disabled). Probes sync of slot 0.
+    fail_max_prefix: usize,
+    /// Outcome cap per crash point (exhaustive product when it fits).
+    cap: usize,
+}
+
+/// All op sequences over `menu` of length 0..=`max`.
+fn sequences(menu: &[Op], max: usize) -> Vec<Vec<Op>> {
+    let mut out: Vec<Vec<Op>> = vec![Vec::new()];
+    let mut frontier: Vec<Vec<Op>> = vec![Vec::new()];
+    for _ in 0..max {
+        let mut next = Vec::new();
+        for seq in &frontier {
+            for &op in menu {
+                let mut extended = seq.clone();
+                extended.push(op);
+                next.push(extended.clone());
+                out.push(extended);
+            }
+        }
+        frontier = next;
+    }
+    out
+}
+
+/// Replay `prefix` on a fresh rig. Returns None if some op is disabled
+/// (the caller enumerated it blindly).
+async fn replay(prefix: &[Op]) -> Option<Rig> {
+    let mut rig = Rig::new().await;
+    for &op in prefix {
+        if !rig.enabled(op) {
+            return None;
+        }
+        rig.execute(op).await;
+    }
+    Some(rig)
+}
+
+/// Park a commit of `mask` at the inner fsync on `rig`. Returns the leader
+/// task plus the follower handles.
+async fn park_commit(
+    rig: &mut Rig,
+    mask: u8,
+) -> (
+    tokio::task::JoinHandle<Result<(), Error>>,
+    Vec<crate::Handle<()>>,
+) {
+    let slots: Vec<u8> = (0..BLOBS)
+        .filter(|&s| mask & (1 << s) != 0 && rig.live(s))
+        .collect();
+    assert!(!slots.is_empty(), "window mask selects no live blob");
+    rig.gated.sync_gate.arm();
+    let mut handles = Vec::new();
+    for slot in &slots {
+        handles.push(rig.blobs[slot].start_sync().await);
+    }
+    let leader = tokio::spawn(handles.remove(0));
+    // Bounded wait: the model said the commit is non-clean, so it must
+    // reach the inner fsync.
+    for _ in 0..1_000_000u32 {
+        if rig.gated.sync_gate.is_reached() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        rig.gated.sync_gate.is_reached(),
+        "{}: commit of mask {mask:#b} never reached the inner fsync",
+        rig.ctx()
+    );
+    rig.step_model_only(&[Action::Snapshot(mask), Action::WriteMeta]);
+    rig.in_flight = true;
+    (leader, handles)
+}
+
+/// One commit-window probe: park a sync at the fsync, interleave `suffix`,
+/// then crash mid-commit or confirm-and-crash.
+async fn window_probe(
+    prefix: &[Op],
+    mask: u8,
+    suffix: &[Op],
+    confirm: bool,
+    cap: usize,
+    seed: u64,
+    stats: &mut Stats,
+) {
+    let Some(mut rig) = replay(prefix).await else {
+        return;
+    };
+    // The model must consider the commit non-clean, or the real sync
+    // returns without any fsync to park.
+    {
+        let probe = step(
+            &rig.tracked[0].state,
+            Action::Snapshot(mask),
+            &SPEC,
+            &rig.trace,
+        );
+        if !matches!(probe, Ok(Some(_))) {
+            return;
+        }
+    }
+    let (leader, followers) = park_commit(&mut rig, mask).await;
+    // Interleave ops in the commit window (the post-snapshot write races
+    // the model proves the freeze rule against).
+    for &op in suffix {
+        if !rig.enabled(op) {
+            leader.abort();
+            let _ = leader.await;
+            rig.gated.sync_gate.release();
+            return;
+        }
+        rig.execute(op).await;
+    }
+    if confirm {
+        rig.gated.sync_gate.release();
+        leader
+            .await
+            .expect("leader task")
+            .unwrap_or_else(|e| panic!("{}: parked commit failed: {e}", rig.ctx()));
+        for handle in followers {
+            handle
+                .await
+                .unwrap_or_else(|e| panic!("{}: follower sync failed: {e}", rig.ctx()));
+        }
+        rig.in_flight = false;
+        rig.step_model_only(&[Action::FsyncOk]);
+        audit_volume(&rig.volume, rig.batch.is_none());
+        rig.check_live().await;
+        rig.crash_probe(&[], cap, seed, stats).await;
+    } else {
+        // Crash while the commit's metadata writes are pending.
+        rig.crash_probe(&[], cap, seed, stats).await;
+        leader.abort();
+        let _ = leader.await;
+        rig.gated.sync_gate.release();
+        drop(followers);
+    }
+}
+
+/// One fsync-failure probe: the poison latch plus crash conformance. The
+/// model-side allowed set is the crash fan of the MetaWritten state — the
+/// exact union of the model's fsyncgate residue states' crash outcomes
+/// (kept/landed/lost each resolve within {durable, version, torn}).
+async fn fail_probe(prefix: &[Op], slot: u8, cap: usize, seed: u64, stats: &mut Stats) {
+    let Some(rig) = replay(prefix).await else {
+        return;
+    };
+    {
+        let probe = step(
+            &rig.tracked[0].state,
+            Action::Snapshot(1 << slot),
+            &SPEC,
+            &rig.trace,
+        );
+        if !matches!(probe, Ok(Some(_))) {
+            return;
+        }
+    }
+    rig.gated.sync_gate.arm_fail();
+    let err = rig.blobs[&slot].sync().await;
+    assert!(err.is_err(), "{}: gated fsync must fail", rig.ctx());
+    // The latch: every subsequent operation fails.
+    assert!(
+        rig.blobs[&slot]
+            .write_at(0, IoBuf::copy_from_slice(&[0u8; 8]))
+            .await
+            .is_err(),
+        "{}: write after a failed commit must fail",
+        rig.ctx()
+    );
+    assert!(
+        rig.blobs[&slot].sync().await.is_err(),
+        "{}: sync after a failed commit must fail",
+        rig.ctx()
+    );
+    assert!(
+        rig.volume.batch().await.is_err(),
+        "{}: batch after a failed commit must fail",
+        rig.ctx()
+    );
+    rig.crash_probe(
+        &[Action::Snapshot(1 << slot), Action::WriteMeta],
+        cap,
+        seed,
+        stats,
+    )
+    .await;
+}
+
+/// Explore a workload exhaustively: DFS over enabled op sequences with
+/// probes at every node.
+async fn explore(w: &Workload) -> Stats {
+    let mut stats = Stats::default();
+    let window_suffixes = sequences(w.window_menu, w.window_depth);
+    let mut stack: Vec<Vec<Op>> = vec![Vec::new()];
+    while let Some(prefix) = stack.pop() {
+        stats.nodes += 1;
+        let seed = prefix.len() as u64 ^ 0xC0FF_EE00;
+        let mut rig = Rig::new().await;
+        for &op in &prefix {
+            rig.execute(op).await;
+        }
+        // Plain crash at this node.
+        rig.crash_probe(&[], w.cap, seed, &mut stats).await;
+        // Commit-window and fail probes replay the prefix on fresh rigs.
+        if prefix.len() <= w.window_max_prefix {
+            for &mask in w.window_masks {
+                for suffix in &window_suffixes {
+                    for confirm in [false, true] {
+                        window_probe(&prefix, mask, suffix, confirm, w.cap, seed, &mut stats).await;
+                    }
+                }
+            }
+        }
+        if prefix.len() <= w.fail_max_prefix {
+            fail_probe(&prefix, 0, w.cap, seed, &mut stats).await;
+        }
+        // Children.
+        if prefix.len() < w.depth {
+            for &op in w.menu {
+                if rig.enabled(op) {
+                    let mut child = prefix.clone();
+                    child.push(op);
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    println!("workload stats: {stats:?}");
+    stats
+}
+
+// ---------------------------------------------------------------------------
+// Default-suite workloads (bounded exhaustive)
+// ---------------------------------------------------------------------------
+
+/// Core workload: appends on two blobs, an overwrite (COW + freeze rule),
+/// group syncs — with commit-window interleavings and fsync failures.
+/// The real-volume counterpart of the model's CORE + LATCH workloads.
+#[tokio::test]
+async fn conformance_core() {
+    let stats = explore(&Workload {
+        menu: &[
+            Op::Append(0),
+            Op::Append(1),
+            Op::Overwrite(0),
+            Op::Sync(0b011),
+        ],
+        depth: 5,
+        window_masks: &[0b001, 0b011],
+        window_menu: &[Op::Append(0), Op::Overwrite(0)],
+        window_depth: 1,
+        window_max_prefix: 3,
+        fail_max_prefix: 2,
+        cap: 1024,
+    })
+    .await;
+    assert!(stats.cases > 2_000, "suspiciously few cases: {stats:?}");
+}
+
+/// Recycling workload: overwrite/rewind/hole-growth/remove/recreate with
+/// per-blob commits. The counterpart of the model's RECYCLE + REWIND
+/// workloads (extent reuse, deferred frees, shrink shapes).
+#[tokio::test]
+async fn conformance_recycle() {
+    let stats = explore(&Workload {
+        menu: &[
+            Op::Append(0),
+            Op::Overwrite(0),
+            Op::ResizeDown(0),
+            Op::ResizeUp(0),
+            Op::Remove(0),
+            Op::Recreate(0),
+            Op::Sync(0b001),
+        ],
+        depth: 3,
+        window_masks: &[0b001],
+        window_menu: &[],
+        window_depth: 0,
+        window_max_prefix: 3,
+        fail_max_prefix: 0,
+        cap: 1024,
+    })
+    .await;
+    assert!(stats.cases > 1_000, "suspiciously few cases: {stats:?}");
+}
+
+/// Batch workload: cross-blob staging, publish, drop, selective commits
+/// that must respect the applied group (never-split). The counterpart of
+/// the model's BATCH/BATCH_COW workloads.
+#[tokio::test]
+async fn conformance_batch() {
+    let stats = explore(&Workload {
+        menu: &[
+            Op::Append(0),
+            Op::BatchAppend(0),
+            Op::BatchAppend(1),
+            Op::BatchOverwrite(0),
+            Op::BatchApply,
+            Op::BatchDrop,
+            Op::Sync(0b001),
+        ],
+        depth: 4,
+        window_masks: &[0b010],
+        window_menu: &[],
+        window_depth: 0,
+        window_max_prefix: 2,
+        fail_max_prefix: 0,
+        cap: 512,
+    })
+    .await;
+    assert!(stats.cases > 1_000, "suspiciously few cases: {stats:?}");
+}
+
+/// Batch-creation workload: recreating a removed blob through a batch
+/// (mixed batches commit atomically via apply_sync, creation-only batches
+/// publish commit-free). The counterpart of the model's BATCH_CREATE and
+/// BATCH_CREATE_FREE workloads.
+#[tokio::test]
+async fn conformance_batch_create() {
+    let stats = explore(&Workload {
+        menu: &[
+            Op::Remove(1),
+            Op::BatchCreate(1),
+            Op::BatchAppend(0),
+            Op::BatchApply,
+            Op::Append(1),
+            Op::Sync(0b001),
+        ],
+        depth: 5,
+        window_masks: &[],
+        window_menu: &[],
+        window_depth: 0,
+        window_max_prefix: 0,
+        fail_max_prefix: 0,
+        cap: 512,
+    })
+    .await;
+    assert!(stats.cases > 1_000, "suspiciously few cases: {stats:?}");
+}
+
+/// The stale-tail directed family (blocker B1's shape): shrink a sparse
+/// blob into (or below) a hole, then make a LOWER chunk the new partial
+/// frontier and commit it. A stale tail buffer would durably record the
+/// dropped pre-shrink frontier as the new frontier's shadow, which
+/// recovery would then splice over the committed bytes — detected here as
+/// an illegal rollback or a failed pure-crash recovery.
+#[tokio::test]
+async fn conformance_directed_shrink_into_hole() {
+    let mut stats = Stats::default();
+    // Grow over a hole, back the high block, commit, shrink below all
+    // backing, then commit a new low partial frontier.
+    let traces: &[&[Op]] = &[
+        &[
+            Op::ResizeUp(0),
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::ResizeDown(0),
+            Op::Overwrite(0),
+            Op::Sync(0b001),
+        ],
+        // The same shape with an extra append before the shrink (the
+        // boundary lands in the hole rather than below all backing).
+        &[
+            Op::ResizeUp(0),
+            Op::Append(0),
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::ResizeDown(0),
+            Op::ResizeDown(0),
+            Op::Overwrite(0),
+            Op::Sync(0b001),
+        ],
+        // Rewind below a committed boundary, then append back over it.
+        &[
+            Op::Append(0),
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::ResizeDown(0),
+            Op::Append(0),
+            Op::Sync(0b001),
+        ],
+    ];
+    for (i, trace) in traces.iter().enumerate() {
+        let mut rig = Rig::new().await;
+        for &op in *trace {
+            assert!(rig.enabled(op), "directed trace {i}: {op:?} disabled");
+            rig.execute(op).await;
+            rig.crash_probe(&[], 2048, i as u64, &mut stats).await;
+        }
+    }
+    println!("directed shrink stats: {stats:?}");
+    assert!(
+        stats.exhaustive_points == stats.crash_points && stats.cases > 30,
+        "suspiciously thin coverage: {stats:?}"
+    );
+}
+
+/// The torn-shadow directed family (blocker B2's shape): a committed
+/// partial frontier, then a commit whose dirt avoids the frontier (a COW
+/// of chunk 0), crashed at the fsync. The outcome where everything lands
+/// except the fresh shadow (which tears) must reject the candidate and
+/// roll back exactly one commit — never splice the torn shadow over the
+/// committed frontier.
+#[tokio::test]
+async fn conformance_directed_torn_shadow() {
+    let mut stats = Stats::default();
+    // Three cells: chunk 0 full, chunk 1 a committed partial frontier.
+    let prefix = &[
+        Op::Append(0),
+        Op::Append(0),
+        Op::Append(0),
+        Op::Sync(0b001),
+        Op::Overwrite(0),
+    ];
+    window_probe(prefix, 0b001, &[], false, 4096, 7, &mut stats).await;
+    // The confirm arm as well: freeze-rule coverage for the same shape.
+    window_probe(prefix, 0b001, &[Op::Append(0)], true, 4096, 7, &mut stats).await;
+    println!("directed torn-shadow stats: {stats:?}");
+    assert!(
+        stats.exhaustive_points >= 1,
+        "torn-shadow probe must enumerate exhaustively: {stats:?}"
+    );
+    assert!(stats.cases > 200, "suspiciously few cases: {stats:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Deep randomized mode (soak profile)
+// ---------------------------------------------------------------------------
+
+/// Everything the random walk may do.
+const DEEP_MENU: &[Op] = &[
+    Op::Append(0),
+    Op::Append(1),
+    Op::Append(2),
+    Op::Overwrite(0),
+    Op::Overwrite(1),
+    Op::ResizeDown(0),
+    Op::ResizeUp(0),
+    Op::Remove(0),
+    Op::Recreate(0),
+    Op::Sync(0b001),
+    Op::Sync(0b010),
+    Op::Sync(0b111),
+    Op::BatchAppend(0),
+    Op::BatchAppend(1),
+    Op::BatchOverwrite(0),
+    Op::BatchApply,
+    Op::BatchDrop,
+];
+
+/// Seeded random deep walk: long traces over the full vocabulary with
+/// mid-walk crashes (sampled outcomes, all checked; one outcome resumed
+/// with the lockstep filtered to the matching model states). Deeper
+/// budgets than the default suite; run with the full test profile.
+#[tokio::test]
+#[ignore]
+async fn conformance_random_deep() {
+    for seed in 0..16u64 {
+        random_walk(seed).await;
+    }
+}
+
+async fn random_walk(seed: u64) {
+    let mut rng = TestRng::new(seed);
+    let mut stats = Stats::default();
+    let mut rig = Rig::new().await;
+    let mut crashes = 0usize;
+    for step_idx in 0..18u32 {
+        // Occasionally crash (bounded), otherwise a random enabled op.
+        if crashes < 2 && rng.random_range(0..8u8) == 0 {
+            crashes += 1;
+            let space = CrashSpace::capture(&rig.tearing);
+            let allowed = states_after(&rig.tracked, &[Action::Crash], &rig.trace);
+            let (cases, _) = space.enumerate(64, seed ^ step_idx as u64);
+            let mut resumed = false;
+            for case in cases {
+                stats.cases += 1;
+                let obs = extract(&rig.pool, case.image.clone())
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "seed {seed} step {step_idx}: recovery failed ({}): {e}",
+                            case.desc
+                        )
+                    });
+                let matching: Vec<Tracked> = allowed
+                    .iter()
+                    .filter(|(parent, state)| {
+                        translated(&rig.tracked[*parent], &state.volume.logical()) == obs
+                    })
+                    .map(|(parent, state)| {
+                        // Budgets are exploration bounds, not semantic
+                        // state: recovery's re-crash exploration returns
+                        // matching states with depleted budgets, so
+                        // resumed lockstep states get fresh ones (which
+                        // also lets the dedupe below collapse them).
+                        let mut state = state.clone();
+                        state.actions_left = 120;
+                        state.crashes_left = 6;
+                        Tracked {
+                            state,
+                            translate: rig.tracked[*parent].translate.clone(),
+                        }
+                    })
+                    .collect();
+                assert!(
+                    !matching.is_empty(),
+                    "seed {seed} step {step_idx}: recovered state not allowed \
+                     ({}):\n  {obs:?}",
+                    case.desc
+                );
+                // Resume the walk on the first outcome (the rest were
+                // membership-checked and dropped).
+                if !resumed {
+                    resumed = true;
+                    let mut deduped: Vec<Tracked> = Vec::new();
+                    let mut seen: HashSet<(ModelState, Vec<(Cell, u64)>)> = HashSet::new();
+                    for t in matching {
+                        let key = (
+                            t.state.clone(),
+                            t.translate.iter().map(|(c, v)| (*c, *v)).collect(),
+                        );
+                        if seen.insert(key) {
+                            deduped.push(t);
+                        }
+                    }
+                    let next_ctr = rig.next_ctr;
+                    let ops = rig.ops.clone();
+                    let trace = rig.trace.clone();
+                    rig = Rig::resume(rig.pool.clone(), case.image, deduped, next_ctr, ops, trace)
+                        .await;
+                    rig.check_live().await;
+                }
+            }
+            continue;
+        }
+        let enabled: Vec<Op> = DEEP_MENU
+            .iter()
+            .copied()
+            .filter(|&op| rig.enabled(op))
+            .collect();
+        if enabled.is_empty() {
+            break;
+        }
+        let op = enabled[rng.random_range(0..enabled.len())];
+        rig.execute(op).await;
+    }
+    // Final crash conformance.
+    rig.crash_probe(&[], 256, seed, &mut stats).await;
+    println!("random walk seed {seed}: {stats:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation injection (the layer below the model)
+// ---------------------------------------------------------------------------
+
+/// Poll `fut` up to `polls` times. Returns whether it completed (with its
+/// result asserted Ok).
+async fn poll_n<F: Future<Output = Result<(), Error>> + Unpin>(fut: &mut F, polls: usize) -> bool {
+    for _ in 0..polls {
+        if let Poll::Ready(result) = futures::poll!(&mut *fut) {
+            result.expect("driven-to-completion commit succeeds");
+            return true;
+        }
+    }
+    false
+}
+
+/// Assert the volume is poisoned: every subsequent operation fails.
+async fn assert_poisoned(rig: &Rig) {
+    for blob in rig.blobs.values() {
+        assert!(
+            blob.write_at(0, IoBuf::copy_from_slice(&[0u8; 8]))
+                .await
+                .is_err(),
+            "write on a poisoned volume must fail"
+        );
+        assert!(
+            blob.sync().await.is_err(),
+            "sync on a poisoned volume must fail"
+        );
+    }
+    assert!(
+        rig.volume.batch().await.is_err(),
+        "batch on a poisoned volume must fail"
+    );
+}
+
+/// Cancel a `blob.sync()` future after every possible poll count. B3's
+/// CancelGuard contract, pinned exactly: poison if and only if the future
+/// had assumed commit leadership (drained the pool ticket); benign before
+/// (the registered root stays pooled for the next commit).
+#[tokio::test]
+async fn conformance_cancel_sync() {
+    let mut polls = 1usize;
+    loop {
+        let mut rig = Rig::new().await;
+        rig.execute(Op::Append(0)).await;
+        rig.execute(Op::Append(1)).await;
+
+        let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let ticket_before = ready.pending.lock().ticket.clone();
+        rig.yields.store(true, Ordering::SeqCst);
+        let completed = {
+            let mut fut = Box::pin(rig.blobs[&0].sync());
+            let completed = poll_n(&mut fut, polls).await;
+            drop(fut);
+            completed
+        };
+        rig.yields.store(false, Ordering::SeqCst);
+        if completed {
+            // Enumerated every await point; the final iteration completed.
+            rig.step_model_only(&[Action::Snapshot(0b001), Action::WriteMeta, Action::FsyncOk]);
+            rig.check_live().await;
+            assert!(polls > 2, "expected several await points, got {polls}");
+            println!("cancel_sync: enumerated {polls} poll boundaries");
+            break;
+        }
+
+        let drained = !Arc::ptr_eq(&ready.pending.lock().ticket, &ticket_before);
+        let poisoned = ready.poisoned.get().is_some();
+        assert_eq!(
+            drained, poisoned,
+            "polls {polls}: dropped commit future must poison exactly when \
+             it assumed leadership (drained {drained}, poisoned {poisoned})"
+        );
+
+        let mut stats = Stats::default();
+        if poisoned {
+            assert_poisoned(&rig).await;
+            // Crash conformance: the cancelled commit is an attempt; the
+            // union over cancel points is the MetaWritten crash fan plus
+            // the no-metadata fan (both computed from the same lockstep).
+            rig.crash_probe(
+                &[Action::Snapshot(0b001), Action::WriteMeta],
+                256,
+                polls as u64,
+                &mut stats,
+            )
+            .await;
+        } else {
+            // Benign: the pooled root (if registered) is covered by the
+            // next commit, which the model sees as a union capture.
+            let pooled = {
+                let pending = ready.pending.lock();
+                !pending.roots.is_empty()
+            };
+            let mask = if pooled { 0b011 } else { 0b010 };
+            rig.blobs[&1].sync().await.expect("post-cancel sync");
+            rig.step_model_only(&[Action::Snapshot(mask), Action::WriteMeta, Action::FsyncOk]);
+            audit_volume(&rig.volume, true);
+            rig.check_live().await;
+            rig.crash_probe(&[], 256, polls as u64, &mut stats).await;
+        }
+        polls += 1;
+        assert!(polls < 10_000, "cancellation enumeration diverged");
+    }
+}
+
+/// Cancel a partially-driven `start_sync` handle after every poll count:
+/// the same contract as a cancelled sync future (the handle IS the drive
+/// future), plus the never-polled case staying benign.
+#[tokio::test]
+async fn conformance_cancel_start_sync_handle() {
+    // Never polled: benign, root stays pooled.
+    {
+        let mut rig = Rig::new().await;
+        rig.execute(Op::Append(0)).await;
+        let handle = rig.blobs[&0].start_sync().await;
+        drop(handle);
+        let ready = rig.volume.shared.ready.get().expect("recovered");
+        assert!(
+            ready.poisoned.get().is_none(),
+            "never-polled handle drop must stay benign"
+        );
+        rig.blobs[&0]
+            .sync()
+            .await
+            .expect("later sync covers the root");
+        rig.step_model_only(&[Action::Snapshot(0b001), Action::WriteMeta, Action::FsyncOk]);
+        rig.check_live().await;
+        let mut stats = Stats::default();
+        rig.crash_probe(&[], 256, 0, &mut stats).await;
+    }
+
+    // Partially driven at every poll boundary.
+    let mut polls = 1usize;
+    loop {
+        let mut rig = Rig::new().await;
+        rig.execute(Op::Append(0)).await;
+        let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let ticket_before = ready.pending.lock().ticket.clone();
+        rig.yields.store(true, Ordering::SeqCst);
+        let completed = {
+            let mut handle = Box::pin(rig.blobs[&0].start_sync().await);
+            let completed = poll_n(&mut handle, polls).await;
+            drop(handle);
+            completed
+        };
+        rig.yields.store(false, Ordering::SeqCst);
+        if completed {
+            println!("cancel_start_sync: enumerated {polls} poll boundaries");
+            break;
+        }
+        let drained = !Arc::ptr_eq(&ready.pending.lock().ticket, &ticket_before);
+        let poisoned = ready.poisoned.get().is_some();
+        assert_eq!(
+            drained, poisoned,
+            "polls {polls}: dropped handle must poison exactly at leadership"
+        );
+        if poisoned {
+            assert_poisoned(&rig).await;
+        }
+        polls += 1;
+        assert!(polls < 10_000, "cancellation enumeration diverged");
+    }
+}
+
+/// Cancel a `Storage::remove` future after every poll count: the removal
+/// commit runs directly inside the caller's future (no pooled ticket), so
+/// a drop mid-commit must poison — the unlink already consumed state.
+#[tokio::test]
+async fn conformance_cancel_remove() {
+    let mut polls = 1usize;
+    loop {
+        let mut rig = Rig::new().await;
+        rig.execute(Op::Append(0)).await;
+        rig.execute(Op::Sync(0b001)).await;
+        let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        rig.blobs.remove(&0);
+        rig.yields.store(true, Ordering::SeqCst);
+        let completed = {
+            let target = name(0);
+            let mut fut = Box::pin(rig.volume.remove(PARTITION, Some(&target)));
+            let completed = poll_n(&mut fut, polls).await;
+            drop(fut);
+            completed
+        };
+        rig.yields.store(false, Ordering::SeqCst);
+        if completed {
+            rig.step_model_only(&[
+                Action::Remove(0),
+                Action::Snapshot(0b001),
+                Action::WriteMeta,
+                Action::FsyncOk,
+            ]);
+            rig.check_live().await;
+            println!("cancel_remove: enumerated {polls} poll boundaries");
+            break;
+        }
+        // The removal mutates the namespace before its commit's first
+        // await, so every cancelled prefix has consumed state: it must
+        // poison.
+        let poisoned = ready.poisoned.get().is_some();
+        assert!(
+            poisoned,
+            "polls {polls}: cancelled remove left an unlinked namespace \
+             without poisoning"
+        );
+        assert_poisoned(&rig).await;
+        // Crash conformance: the removal commit is an attempt; outcomes
+        // where its metadata vanished legally resurrect the blob.
+        let mut stats = Stats::default();
+        rig.crash_probe(
+            &[
+                Action::Remove(0),
+                Action::Snapshot(0b001),
+                Action::WriteMeta,
+            ],
+            256,
+            polls as u64,
+            &mut stats,
+        )
+        .await;
+        polls += 1;
+        assert!(polls < 10_000, "cancellation enumeration diverged");
+    }
+}
+
+/// Cancel a `Batch::apply_sync` future after every poll count. The volume
+/// must either be poisoned (with the crash conformance of an attempted
+/// batch commit) or fully consistent with the batch never applying — a
+/// half-published batch is data loss waiting for a snapshot.
+#[tokio::test]
+async fn conformance_cancel_apply_sync() {
+    let mut polls = 1usize;
+    loop {
+        let mut rig = Rig::new().await;
+        rig.execute(Op::Append(0)).await;
+        rig.execute(Op::Sync(0b001)).await;
+        rig.execute(Op::BatchAppend(0)).await;
+        rig.execute(Op::BatchAppend(1)).await;
+
+        let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let batch_rig = rig.batch.take().expect("staged batch");
+        rig.yields.store(true, Ordering::SeqCst);
+        let completed = {
+            let mut fut = Box::pin(batch_rig.batch.apply_sync());
+            let completed = poll_n(&mut fut, polls).await;
+            drop(fut);
+            completed
+        };
+        rig.yields.store(false, Ordering::SeqCst);
+        drop(batch_rig.created);
+        if completed {
+            rig.step_model_only(&[Action::BatchApply, Action::Snapshot(0b011)]);
+            rig.step_model_only(&[Action::WriteMeta, Action::FsyncOk]);
+            rig.check_live().await;
+            println!("cancel_apply_sync: enumerated {polls} poll boundaries");
+            break;
+        }
+
+        let poisoned = ready.poisoned.get().is_some();
+        let mut stats = Stats::default();
+        if poisoned {
+            assert_poisoned(&rig).await;
+            // Crash conformance: the union over cancel points — batch
+            // never published, or published with its commit's metadata
+            // pending.
+            let space = CrashSpace::capture(&rig.tearing);
+            let mut allowed_obs: Vec<Obs> = Vec::new();
+            for actions in [
+                vec![Action::BatchDrop, Action::Crash],
+                vec![
+                    Action::BatchApply,
+                    Action::Snapshot(0b011),
+                    Action::WriteMeta,
+                    Action::Crash,
+                ],
+            ] {
+                for (parent, state) in states_after(&rig.tracked, &actions, &rig.trace) {
+                    let obs = translated(&rig.tracked[parent], &state.volume.logical());
+                    if !allowed_obs.contains(&obs) {
+                        allowed_obs.push(obs);
+                    }
+                }
+            }
+            let (cases, _) = space.enumerate(256, polls as u64);
+            for case in cases {
+                stats.cases += 1;
+                let obs = extract(&rig.pool, case.image).await.unwrap_or_else(|e| {
+                    panic!("polls {polls}: recovery failed ({}): {e}", case.desc)
+                });
+                assert!(
+                    allowed_obs.contains(&obs),
+                    "polls {polls}: recovered state not allowed after cancelled \
+                     apply_sync ({}):\n  {obs:?}\n  allowed: {allowed_obs:?}",
+                    case.desc
+                );
+            }
+        } else {
+            // Not poisoned: the batch must not have published anything.
+            // The staged content dies with the dropped future; the volume
+            // stays fully usable.
+            rig.step_model_only(&[Action::BatchDrop]);
+            audit_volume(&rig.volume, true);
+            rig.check_live().await;
+            rig.execute(Op::Append(0)).await;
+            rig.execute(Op::Sync(0b001)).await;
+            rig.crash_probe(&[], 256, polls as u64, &mut stats).await;
+        }
+        polls += 1;
+        assert!(polls < 10_000, "cancellation enumeration diverged");
+    }
+}
+
+/// Cancel a `Batch::apply_sync` future while it is still QUEUED on the
+/// commit lock (held by a parked unrelated sync): nothing was consumed, so
+/// the drop must stay benign — the staged batch dies cleanly (extents
+/// reclaimed, counters restored) and the volume keeps working.
+#[tokio::test]
+async fn conformance_cancel_apply_queued() {
+    let mut rig = Rig::new().await;
+    rig.execute(Op::Append(2)).await;
+    rig.execute(Op::BatchAppend(0)).await;
+    rig.execute(Op::BatchAppend(1)).await;
+
+    // Park an unrelated sync at the inner fsync: it holds the commit lock.
+    rig.gated.sync_gate.arm();
+    let parked = {
+        let blob = rig.blobs[&2].clone();
+        tokio::spawn(async move { blob.sync().await })
+    };
+    rig.gated.sync_gate.wait_reached().await;
+    rig.step_model_only(&[Action::Snapshot(0b100), Action::WriteMeta]);
+
+    // The apply queues on the commit lock and can make no progress; drop
+    // it while queued.
+    let batch_rig = rig.batch.take().expect("staged batch");
+    {
+        let mut fut = Box::pin(batch_rig.batch.apply_sync());
+        for _ in 0..16 {
+            assert!(
+                futures::poll!(fut.as_mut()).is_pending(),
+                "apply cannot proceed while the commit lock is held"
+            );
+        }
+        drop(fut);
+    }
+    drop(batch_rig.created);
+    let ready = rig.volume.shared.ready.get().expect("recovered");
+    assert!(
+        ready.poisoned.get().is_none(),
+        "queued apply drop must stay benign"
+    );
+    rig.step_model_only(&[Action::BatchDrop]);
+
+    // Release the parked sync and confirm the volume is fully healthy.
+    rig.gated.sync_gate.release();
+    parked.await.expect("parked task").expect("parked sync");
+    rig.step_model_only(&[Action::FsyncOk]);
+    audit_volume(&rig.volume, true);
+    rig.check_live().await;
+    rig.execute(Op::Append(0)).await;
+    rig.execute(Op::Sync(0b001)).await;
+    let mut stats = Stats::default();
+    rig.crash_probe(&[], 256, 11, &mut stats).await;
+}
+
+/// Cancel a `Batch::apply_start_sync` future after every poll count, and
+/// then its returned handle after every poll count: the future's publish
+/// phase must be all-or-nothing (or poison), and the handle follows the
+/// CancelGuard contract.
+#[tokio::test]
+async fn conformance_cancel_apply_start_sync() {
+    // Phase 1: cancel the apply_start_sync future itself.
+    let mut polls = 1usize;
+    loop {
+        let mut rig = Rig::new().await;
+        rig.execute(Op::BatchAppend(0)).await;
+        rig.execute(Op::BatchAppend(1)).await;
+        let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let batch_rig = rig.batch.take().expect("staged batch");
+        rig.yields.store(true, Ordering::SeqCst);
+        let outcome = {
+            let mut fut = Box::pin(batch_rig.batch.apply_start_sync());
+            let mut outcome = None;
+            for _ in 0..polls {
+                if let Poll::Ready(result) = futures::poll!(fut.as_mut()) {
+                    outcome = Some(result.expect("apply_start_sync succeeds"));
+                    break;
+                }
+            }
+            outcome
+        };
+        rig.yields.store(false, Ordering::SeqCst);
+        drop(batch_rig.created);
+        match outcome {
+            Some(handle) => {
+                // Completed: the publish landed; resolve the handle and
+                // finish the lockstep.
+                handle.await.expect("started commit lands");
+                rig.step_model_only(&[
+                    Action::BatchApply,
+                    Action::Snapshot(0b011),
+                    Action::WriteMeta,
+                    Action::FsyncOk,
+                ]);
+                rig.check_live().await;
+                println!("cancel_apply_start_sync: enumerated {polls} poll boundaries");
+                break;
+            }
+            None => {
+                let poisoned = ready.poisoned.get().is_some();
+                if poisoned {
+                    assert_poisoned(&rig).await;
+                } else {
+                    // The publish must be all-or-nothing: either invisible
+                    // (dropped batch) or fully applied with its roots
+                    // registered for the next commit.
+                    let published = {
+                        let state = ready.state.lock();
+                        !state.groups.is_empty()
+                    };
+                    if published {
+                        rig.step_model_only(&[Action::BatchApply]);
+                    } else {
+                        rig.step_model_only(&[Action::BatchDrop]);
+                    }
+                    rig.check_live().await;
+                    if rig.enabled(Op::Sync(0b011)) {
+                        rig.execute(Op::Sync(0b011)).await;
+                    }
+                    let mut stats = Stats::default();
+                    rig.crash_probe(&[], 128, polls as u64, &mut stats).await;
+                }
+            }
+        }
+        polls += 1;
+        assert!(polls < 10_000, "cancellation enumeration diverged");
+    }
+
+    // Phase 2: cancel the returned handle mid-drive (CancelGuard).
+    let mut polls = 1usize;
+    loop {
+        let mut rig = Rig::new().await;
+        rig.execute(Op::BatchAppend(0)).await;
+        rig.execute(Op::BatchAppend(1)).await;
+        let ready = rig.volume.shared.ready.get().expect("recovered").clone();
+        let batch_rig = rig.batch.take().expect("staged batch");
+        let handle = batch_rig.batch.apply_start_sync().await.expect("publish");
+        drop(batch_rig.created);
+        rig.step_model_only(&[Action::BatchApply]);
+        let ticket_before = ready.pending.lock().ticket.clone();
+        rig.yields.store(true, Ordering::SeqCst);
+        let completed = {
+            let mut handle = Box::pin(handle);
+            let completed = poll_n(&mut handle, polls).await;
+            drop(handle);
+            completed
+        };
+        rig.yields.store(false, Ordering::SeqCst);
+        if completed {
+            rig.step_model_only(&[Action::Snapshot(0b011), Action::WriteMeta, Action::FsyncOk]);
+            rig.check_live().await;
+            println!("cancel_apply_start_sync handle: enumerated {polls} poll boundaries");
+            break;
+        }
+        let drained = !Arc::ptr_eq(&ready.pending.lock().ticket, &ticket_before);
+        let poisoned = ready.poisoned.get().is_some();
+        assert_eq!(
+            drained, poisoned,
+            "polls {polls}: dropped apply_start_sync handle must poison \
+             exactly at leadership"
+        );
+        if poisoned {
+            assert_poisoned(&rig).await;
+            let mut stats = Stats::default();
+            rig.crash_probe(
+                &[Action::Snapshot(0b011), Action::WriteMeta],
+                128,
+                polls as u64,
+                &mut stats,
+            )
+            .await;
+        } else {
+            // Benign: the group's roots stay pooled; a later sync of an
+            // unrelated blob commits the union (never-split).
+            rig.execute(Op::Sync(0b011)).await;
+            let mut stats = Stats::default();
+            rig.crash_probe(&[], 128, polls as u64, &mut stats).await;
+        }
+        polls += 1;
+        assert!(polls < 10_000, "cancellation enumeration diverged");
+    }
+}

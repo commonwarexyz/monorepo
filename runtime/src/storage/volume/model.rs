@@ -118,6 +118,41 @@
 //! assert the checker FINDS a violation for every disabled safeguard
 //! (mutation-testing the model) and finds none with all safeguards enabled.
 //!
+//! # Three layers of trust
+//!
+//! The volume's crash story is checked at three layers, each covering the
+//! blind spots of the one above it:
+//!
+//! 1. THE MODEL (this module) checks the PROTOCOL exhaustively: every
+//!    interleaving of the bounded workloads, every per-block crash
+//!    resolution, every re-crash during recovery. It proves the protocol's
+//!    decisions, but over an abstract volume whose bookkeeping is correct
+//!    by construction — implementation state the model does not carry
+//!    (tail buffers, CRC caches, allocator bookkeeping, RAM counters) is
+//!    outside its reach, and a model that diverges from the code proves
+//!    nothing about the code.
+//! 2. TRACE CONFORMANCE (the `conformance` module) checks that the
+//!    IMPLEMENTATION REFINES the model on enumerated histories: each
+//!    bounded workload is executed against the REAL volume, crashes are
+//!    materialized at the model's block granularity (every pending inner
+//!    write independently lands, vanishes, or tears), and the recovered
+//!    real state must be one of the states the model allows for exactly
+//!    that history. The correspondence between model and implementation is
+//!    CHECKED there, not assumed here. `step`, [`initial_state`], and the
+//!    state internals are exposed to that module for lockstep execution.
+//! 3. CANCELLATION INJECTION (also `conformance`) covers the class BELOW
+//!    the model: commit/apply futures dropped at every await boundary.
+//!    A dropped future keeps the process alive with half-updated RAM —
+//!    no crash action models that, so the model is structurally blind to
+//!    it. The injector pins the poison-on-cancellation contract instead.
+//!
+//! What remains uncovered by all three layers: platform I/O semantics (the
+//! block-granular tearing model and fsyncgate cache model are assumptions
+//! about the OS and device, not checked facts), wall-clock effects,
+//! reader/writer async interleavings (see below), and staged batch resize
+//! (`Batch::resize` has no model action — its shrink-into-hole regressions
+//! are pinned by unit tests in `tests`).
+//!
 //! # Deliberately out of scope
 //!
 //! Reader/writer async interleavings (the implementation serializes writers
@@ -133,11 +168,11 @@ const BLOCKS: usize = 12;
 /// First allocatable block.
 const RESERVED: usize = 2;
 /// Logical cells per block.
-const CELLS_PER_BLOCK: u8 = 2;
+pub(super) const CELLS_PER_BLOCK: u8 = 2;
 /// Blobs in the workload.
-const BLOBS: u8 = 3;
+pub(super) const BLOBS: u8 = 3;
 /// Maximum committed cells per blob (bounds the space).
-const MAX_CELLS: u8 = 4;
+pub(super) const MAX_CELLS: u8 = 4;
 
 /// A logical cell value.
 ///
@@ -145,7 +180,7 @@ const MAX_CELLS: u8 = 4;
 /// history writes byte-identical values — this is what reproduces the
 /// stale-slot resurrection scenario.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Cell {
+pub(super) enum Cell {
     /// Zeros: holes and explicit zero fill are logically identical.
     Zero,
     /// Unverifiable residue in an uncommitted region (never expected).
@@ -289,16 +324,16 @@ struct Run {
 
 /// One blob's RAM state.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-struct BlobState {
-    live: bool,
-    gen: u8,
-    size: u8,
+pub(super) struct BlobState {
+    pub(super) live: bool,
+    pub(super) gen: u8,
+    pub(super) size: u8,
     /// Logical block -> run. Absent = hole.
     runs: BTreeMap<u8, Run>,
     /// Durable shadow block from the last commit covering this blob.
     shadow: Option<usize>,
     /// Per-cell version counters (deterministic, replay-identical values).
-    vers: BTreeMap<u8, u8>,
+    pub(super) vers: BTreeMap<u8, u8>,
     /// Blocks with content changes since the last capture of this blob.
     dirty_blocks: Vec<u8>,
     dirty: bool,
@@ -325,9 +360,9 @@ struct StagedRun {
 
 /// One blob's staged overlay in an unapplied batch.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct StagedSlot {
+pub(super) struct StagedSlot {
     /// Staged logical size (starts at the published size).
-    size: u8,
+    pub(super) size: u8,
     /// Staged run overlay: replaces the published run at the same block.
     runs: BTreeMap<u8, StagedRun>,
     /// Blocks allocated by the batch (freed if it is dropped unapplied).
@@ -336,7 +371,7 @@ struct StagedSlot {
     replaced: Vec<usize>,
     /// The slot is a staged CREATION: the blob does not exist until apply
     /// publishes it (and, per the spec, immediately begins its commit).
-    created: bool,
+    pub(super) created: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -365,8 +400,8 @@ struct InFlight {
 
 /// The volume's RAM state (dies with the process).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Volume {
-    blobs: Vec<BlobState>,
+pub(super) struct Volume {
+    pub(super) blobs: Vec<BlobState>,
     /// Free physical blocks, deterministic order.
     free: Vec<usize>,
     /// (block, freeing seq): allocatable once that seq confirms.
@@ -380,7 +415,7 @@ struct Volume {
     in_flight: Option<InFlight>,
     poisoned: bool,
     /// The staged (unapplied) batch, if any. At most one at a time.
-    batch: Option<BTreeMap<u8, StagedSlot>>,
+    pub(super) batch: Option<BTreeMap<u8, StagedSlot>>,
     /// Applied-but-uncommitted atomic groups: disjoint slot sets, merged
     /// when batches share slots, cleared when a commit resolves them.
     groups: Vec<Vec<u8>>,
@@ -393,14 +428,14 @@ struct Volume {
 /// A pure logical view: per slot, (generation, committed cells). Holes and
 /// explicit zeros both read as `Cell::Zero` — callers cannot distinguish.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-struct Logical {
-    blobs: Vec<Option<(u8, Vec<Cell>)>>,
+pub(super) struct Logical {
+    pub(super) blobs: Vec<Option<(u8, Vec<Cell>)>>,
 }
 
 /// Protocol safeguards. Production = all enabled; tests disable one at a
 /// time to prove the checker detects each corresponding bug class.
 #[derive(Clone, Copy, Debug)]
-struct Rules {
+pub(super) struct Rules {
     /// Freeze snapshotted runs at snapshot time (not only at confirmation).
     /// Disabling reintroduces the panel's fatal-1: post-snapshot in-place
     /// overwrites of manifested chunks roll back confirmed commits.
@@ -461,7 +496,7 @@ struct Rules {
     manifest_fresh_shadow: bool,
 }
 
-const SPEC: Rules = Rules {
+pub(super) const SPEC: Rules = Rules {
     freeze_at_snapshot: true,
     shadow_tails: true,
     zero_losing_slot: true,
@@ -477,10 +512,10 @@ const SPEC: Rules = Rules {
 };
 
 /// Capture mask covering every blob (group-commit behavior).
-const ALL: u8 = (1 << BLOBS) - 1;
+pub(super) const ALL: u8 = (1 << BLOBS) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action {
+pub(super) enum Action {
     Append(u8),
     /// Overwrite cell 0 (exercises the freeze rule / COW).
     Overwrite(u8),
@@ -605,7 +640,7 @@ impl Volume {
     }
 
     /// The logical state a snapshot taken now would capture.
-    fn logical(&self) -> Logical {
+    pub(super) fn logical(&self) -> Logical {
         let mut blobs = Vec::new();
         for b in &self.blobs {
             if !b.live {
@@ -1079,27 +1114,27 @@ fn queue_repairs(disk: &mut Disk, adopted: &Adopted, rules: &Rules) {
 
 /// The full checker state.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct State {
+pub(super) struct State {
     disk: Disk,
-    volume: Volume,
+    pub(super) volume: Volume,
     /// The last logical state observed as durable by this process lineage.
     baseline: Logical,
     /// Snapshots of commits attempted since the baseline was observed.
     attempts: Vec<Logical>,
     /// A commit failed; no further sync may report success (I4).
     latched: bool,
-    actions_left: u8,
-    crashes_left: u8,
+    pub(super) actions_left: u8,
+    pub(super) crashes_left: u8,
 }
 
 /// A violation with its full trace.
 #[derive(Debug)]
-struct Violation {
-    trace: Vec<Action>,
-    reason: String,
+pub(super) struct Violation {
+    pub(super) trace: Vec<Action>,
+    pub(super) reason: String,
 }
 
-fn initial_state(actions: u8, crashes: u8) -> State {
+pub(super) fn initial_state(actions: u8, crashes: u8) -> State {
     // The model starts post-init: seq-0 superblock in slot 0 plus a table
     // containing the workload's (empty) blobs, both durable. Init itself is
     // two syncs — table first, then the superblock pointing at it — so a
@@ -1430,7 +1465,7 @@ fn begin_snapshot(
 
 /// Apply one action. Returns successor states (a crash fans out), or None if
 /// the action is not enabled in this state.
-fn step(
+pub(super) fn step(
     state: &State,
     action: Action,
     rules: &Rules,

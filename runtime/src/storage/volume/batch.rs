@@ -52,7 +52,7 @@
 //! together (proven in the model's commit-free carve-out).
 
 use super::{
-    alloc::Extent,
+    alloc::{block_align, Extent},
     commit,
     core::{
         chunk_of, load_committed_page, stage_write, BlobCore, BlobInner, ChunkCrc, ChunkState,
@@ -382,17 +382,44 @@ impl<S: crate::Storage> Batch<S> {
                     len: r.capacity,
                 });
             }
-            // Trim the boundary run in the overlay (capacity kept: staged
-            // shrink never trims extent capacity; a later capture of the
-            // published state reclaims nothing it still owns).
+            // Trim the boundary run in the overlay, splitting off the
+            // capacity slack exactly as a published shrink would: every
+            // run must keep `capacity == block_align(len)`, or a later
+            // staged COW of the boundary chunk orphans the slack
+            // (`cow_remap_staged` frees only the chunk's block) and a
+            // publish installs a run whose slack no capture records —
+            // found by the conformance extent-accounting audit. Private
+            // slack is carved out of the batch's fresh extent (freed at
+            // apply or drop). Base slack joins the replaced extents,
+            // freed only at apply — a dropped batch reclaims nothing the
+            // published run still owns.
             if len > 0 {
                 if let Some((l, run, private)) = overlay.covering(&inner, len - 1) {
                     if l + run.len > len {
+                        let keep_len = len - l;
+                        let keep_cap = block_align(keep_len);
+                        if run.capacity > keep_cap {
+                            let slack = Extent {
+                                offset: run.physical + keep_cap,
+                                len: run.capacity - keep_cap,
+                            };
+                            if private {
+                                for extent in overlay.fresh.iter_mut() {
+                                    if extent.offset == run.physical {
+                                        extent.len = keep_cap;
+                                    }
+                                }
+                                staged.discarded.push(slack);
+                            } else {
+                                overlay.replaced.push(slack);
+                            }
+                        }
                         overlay.runs.insert(
                             l,
                             StagedRun {
                                 meta: RunMeta {
-                                    len: len - l,
+                                    len: keep_len,
+                                    capacity: keep_cap,
                                     ..run
                                 },
                                 private,
@@ -606,6 +633,15 @@ impl<S: crate::Storage> Batch<S> {
         // before any staged overlay against them publishes), then each
         // blob's overlay (blob-id order; the commit lock keeps any snapshot
         // from observing a partial publish).
+        //
+        // The publish (and, for apply_sync, its commit) is one cancellation
+        // domain: the per-blob loop awaits write locks, so the caller's
+        // future can be dropped with the batch half-published — group and
+        // dirty bookkeeping unrecorded, staged-batch counters leaked, and
+        // the staged extents neither referenced nor reclaimable. A `Drop`
+        // impl cannot finish or unwind the publish, so cancellation poisons
+        // (found by the conformance cancellation injector).
+        let guard = commit::PoisonOnCancel::arm(&self.ready);
         let staged = std::mem::take(&mut self.staged);
         let mut roots: Vec<u64> = Vec::with_capacity(self.creations.len() + staged.len());
         if !self.creations.is_empty() {
@@ -677,16 +713,24 @@ impl<S: crate::Storage> Batch<S> {
         }
 
         match mode {
-            ApplyMode::Publish => Ok(None),
-            ApplyMode::Commit => commit::commit_locked(&self.ready, &roots)
-                .await
-                .map(|()| None),
+            ApplyMode::Publish => {
+                guard.disarm();
+                Ok(None)
+            }
+            ApplyMode::Commit => {
+                let result = commit::commit_locked(&self.ready, &roots).await;
+                // A failed commit latched its own poison, and a
+                // cancelled one fires the commit's inner guard.
+                guard.disarm();
+                result.map(|()| None)
+            }
             ApplyMode::StartCommit => {
                 // Register while still holding the commit lock: the next
                 // leader to drain the pool (or the handle itself, whichever
                 // acquires the lock first) covers the group's roots.
                 let ticket = commit::register(&self.ready, &roots);
                 let ready = self.ready.clone();
+                guard.disarm();
                 Ok(Some(Handle::from_future(async move {
                     commit::drive(&ready, ticket).await
                 })))

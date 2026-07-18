@@ -160,6 +160,48 @@ impl Allocator {
     pub(super) const fn free_bytes(&self) -> u64 {
         self.free_bytes
     }
+
+    /// Whether `extent` intersects any free range or the free tail beyond
+    /// [`Self::end`] (tests only). An allocated (referenced) extent must
+    /// never overlap free space.
+    #[cfg(test)]
+    pub(super) fn overlaps_free(&self, extent: Extent) -> bool {
+        if extent.offset + extent.len > self.end {
+            return true;
+        }
+        if let Some((&offset, &len)) = self.free.range(..extent.offset + extent.len).next_back() {
+            if offset + len > extent.offset {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The free ranges, for audit diagnostics (tests only).
+    #[cfg(test)]
+    pub(super) fn free_ranges(&self) -> Vec<(u64, u64)> {
+        self.free.iter().map(|(&o, &l)| (o, l)).collect()
+    }
+
+    /// Assert the free index's internal invariants: aligned, non-empty,
+    /// coalesced, below the high-water mark, and an exact running total
+    /// (tests only).
+    #[cfg(test)]
+    pub(super) fn audit(&self) {
+        let mut total = 0;
+        let mut prev_end = 0;
+        for (&offset, &len) in &self.free {
+            assert!(
+                offset.is_multiple_of(BLOCK) && len.is_multiple_of(BLOCK) && len > 0,
+                "unaligned free range ({offset}, {len})"
+            );
+            assert!(offset > prev_end, "uncoalesced free ranges");
+            assert!(offset + len < self.end, "free range touches the end");
+            prev_end = offset + len;
+            total += len;
+        }
+        assert_eq!(total, self.free_bytes, "free byte total drifted");
+    }
 }
 
 #[cfg(test)]

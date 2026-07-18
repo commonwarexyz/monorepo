@@ -14,7 +14,7 @@ use commonware_utils::{sync::Mutex, TestRng};
 use rand::{Rng as _, RngExt as _};
 use std::{collections::BTreeMap, sync::Arc};
 
-fn test_pool() -> BufferPool {
+pub(super) fn test_pool() -> BufferPool {
     let mut registry = Registry::default();
     BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
 }
@@ -251,22 +251,22 @@ async fn test_volume_eager_init() {
 }
 
 /// (offset, bytes) writes since the last sync, in order.
-type Unsynced = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
+pub(super) type Unsynced = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
 
 /// An inner storage wrapper that records unsynced writes to the volume file
 /// and can materialize power-loss outcomes: each unsynced BLOCK-granular
 /// piece independently lands, vanishes, or tears (block filled with
 /// garbage).
 #[derive(Clone)]
-struct Tearing {
+pub(super) struct Tearing {
     inner: memory::Storage,
-    unsynced: Unsynced,
+    pub(super) unsynced: Unsynced,
     /// Durable content of the volume file at the last sync.
-    durable: Arc<Mutex<Vec<u8>>>,
+    pub(super) durable: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Tearing {
-    fn new(pool: BufferPool) -> Self {
+    pub(super) fn new(pool: BufferPool) -> Self {
         Self {
             inner: memory::Storage::new(pool),
             unsynced: Arc::new(Mutex::new(Vec::new())),
@@ -318,7 +318,7 @@ impl Tearing {
     }
 
     /// Build a wrapper whose durable state is `image` (a post-crash disk).
-    async fn from_image(pool: BufferPool, image: Vec<u8>) -> Self {
+    pub(super) async fn from_image(pool: BufferPool, image: Vec<u8>) -> Self {
         let tearing = Self::new(pool);
         let cfg = Config::default();
         let (file, _) = tearing.inner.open(&cfg.partition, &cfg.name).await.unwrap();
@@ -364,7 +364,7 @@ impl crate::Storage for Tearing {
 }
 
 #[derive(Clone)]
-struct TearingBlob {
+pub(super) struct TearingBlob {
     inner: memory::Blob,
     unsynced: Unsynced,
     durable: Arc<Mutex<Vec<u8>>>,
@@ -440,6 +440,19 @@ async fn test_volume_power_loss_soak() {
     for seed in 0..32u64 {
         power_loss_round(seed).await;
     }
+}
+
+/// Run the always-on bookkeeping audit on a live volume (skipped before
+/// recovery has run and after poisoning, where bookkeeping is abandoned
+/// mid-flight by design).
+pub(super) fn audit_volume<S: crate::Storage>(volume: &Volume<S>, quiesced: bool) {
+    let Some(ready) = volume.shared.ready.get() else {
+        return;
+    };
+    if ready.poisoned.get().is_some() {
+        return;
+    }
+    ready.state.lock().audit(quiesced);
 }
 
 /// Commit `name` plus the transitive closure of pending groups touching it
@@ -655,6 +668,10 @@ async fn power_loss_round(seed: u64) {
                 groups.clear();
             }
         }
+        // Every step leaves the volume quiesced (all operations awaited,
+        // batches consumed within their step): the bookkeeping invariants
+        // must hold exactly.
+        audit_volume(&volume, true);
     }
 }
 
@@ -1614,7 +1631,7 @@ async fn test_volume_batch_stages_over_pending_chunk() {
 /// fail, returns an error outright). Later operations pass through
 /// untouched.
 #[derive(Clone, Default)]
-struct Gate {
+pub(super) struct Gate {
     armed: Arc<std::sync::atomic::AtomicBool>,
     reached: Arc<std::sync::atomic::AtomicBool>,
     released: Arc<std::sync::atomic::AtomicBool>,
@@ -1622,7 +1639,7 @@ struct Gate {
 }
 
 impl Gate {
-    fn arm(&self) {
+    pub(super) fn arm(&self) {
         use std::sync::atomic::Ordering::SeqCst;
         self.released.store(false, SeqCst);
         self.reached.store(false, SeqCst);
@@ -1630,7 +1647,7 @@ impl Gate {
     }
 
     /// Fail the next matching operation outright.
-    fn arm_fail(&self) {
+    pub(super) fn arm_fail(&self) {
         use std::sync::atomic::Ordering::SeqCst;
         self.fail.store(true, SeqCst);
     }
@@ -1650,14 +1667,19 @@ impl Gate {
         Ok(())
     }
 
-    async fn wait_reached(&self) {
+    /// Whether an armed operation has reached the gate.
+    pub(super) fn is_reached(&self) -> bool {
+        self.reached.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) async fn wait_reached(&self) {
         use std::sync::atomic::Ordering::SeqCst;
         while !self.reached.load(SeqCst) {
             tokio::task::yield_now().await;
         }
     }
 
-    fn release(&self) {
+    pub(super) fn release(&self) {
         use std::sync::atomic::Ordering::SeqCst;
         self.released.store(true, SeqCst);
     }
@@ -1667,17 +1689,17 @@ impl Gate {
 /// cross-task interleavings inside the volume (a task parked at a gate
 /// holds whatever volume locks it acquired on the way in).
 #[derive(Clone)]
-struct Gated<S: crate::Storage> {
+pub(super) struct Gated<S: crate::Storage> {
     inner: S,
     read_gate: Gate,
     write_gate: Gate,
-    sync_gate: Gate,
+    pub(super) sync_gate: Gate,
     /// Completed inner syncs (fsyncs that reached the backend).
     syncs: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl<S: crate::Storage> Gated<S> {
-    fn new(inner: S) -> Self {
+    pub(super) fn new(inner: S) -> Self {
         Self {
             inner,
             read_gate: Gate::default(),
@@ -1725,7 +1747,7 @@ impl<S: crate::Storage> crate::Storage for Gated<S> {
 }
 
 #[derive(Clone)]
-struct GatedBlob<B: crate::Blob> {
+pub(super) struct GatedBlob<B: crate::Blob> {
     inner: B,
     read_gate: Gate,
     write_gate: Gate,
@@ -3724,6 +3746,42 @@ async fn test_volume_batch_shrink_into_hole() {
     assert_eq!(got.as_ref(), &vec![0x11u8; 3 * BLOCK as usize + 100][..]);
     let got = blob.read_at(3 * BLOCK + 100, 200).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &[0u8; 200]);
+}
+
+/// A staged shrink must trim the boundary run's capacity slack exactly as
+/// a published shrink would: kept slack is orphaned by a later staged COW
+/// of the boundary chunk (the COW remap frees only the chunk's block),
+/// leaking the extent until restart. Found by the extent-accounting audit
+/// under the conformance harness's soak wiring, pinned here as the minimal
+/// shape (a staged record rewrite: shrink + overwrite + apply_sync).
+#[tokio::test]
+async fn test_volume_batch_shrink_trims_capacity() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner.clone(), pool.clone(), Config::default());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+
+    // Two committed blocks: the boundary run's extent spans both.
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![0x11u8; 2 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+
+    // Staged record rewrite: shrink below one block, then overwrite from 0
+    // (a staged COW of the trimmed boundary chunk).
+    let mut batch = volume.batch().await.unwrap();
+    batch.resize(&blob, 100).await.unwrap();
+    batch
+        .write_at(&blob, 0, IoBuf::copy_from_slice(&[0x22u8; 100]))
+        .await
+        .unwrap();
+    batch.apply_sync().await.unwrap();
+
+    // Quiesced accounting must be exact: the shrink's slack and the COW'd
+    // block are both reclaimed once the commit confirms.
+    audit_volume(&volume, true);
+    let got = blob.read_at(0, 100).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[0x22u8; 100]);
 }
 
 /// A power-loss outcome that tears exactly the newest commit's SHADOW
