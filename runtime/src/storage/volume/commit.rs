@@ -638,10 +638,17 @@ fn capture_blob<S: crate::Storage>(
         // Refs wholly below the pruned floor drop (their extents supersede
         // below); a straddling ref stays with its low values unused, so
         // pruning never rewrites the array.
-        (
-            prev_end,
-            prev_refs.iter().filter(|r| live_ref(r)).copied().collect(),
-        )
+        let live: Vec<ChecksumRef> = prev_refs.iter().filter(|r| live_ref(r)).copied().collect();
+        // The new array continues the retained coverage. With nothing
+        // retained (no previous refs, or the floor passed them all), it
+        // restarts at the floor's chunk: chunks below it are unbacked and
+        // never loaded, and no ref may end at or below the floor chunk.
+        let start = if live.is_empty() {
+            floor_chunk
+        } else {
+            prev_end
+        };
+        (start, live)
     } else {
         (floor_chunk, Vec::new())
     };

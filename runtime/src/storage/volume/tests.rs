@@ -142,6 +142,49 @@ async fn test_volume_prune_end_to_end() {
     audit_volume(&volume, true);
 }
 
+/// A delta capture retaining ZERO checksum refs (the floor passed every
+/// previous ref) must restart its array at the floor's chunk. Restarting
+/// at the stale prev_end mints a ref over the dead gap: with a PARTIAL
+/// straddling frontier (covered_end == floor chunk) the minted ref ends
+/// exactly at the floor's chunk — wholly below it — and hydration rejects
+/// the blob at the next open (found by the fixed journal's prune-heavy
+/// cycles).
+#[tokio::test]
+async fn test_volume_prune_past_all_refs_reopens() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
+    let (blob, _) = volume.open("p", b"journal").await.unwrap();
+    // Two committed chunks (one ref ending at chunk 2)...
+    blob.write_at(0, IoBuf::from(vec![1u8; 2 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    // ...then a sparse partial frontier at chunk 5 and a mid-chunk prune
+    // past every ref: the capture is delta-shaped, retains nothing, and
+    // its frontier is partial (covered_end == the floor's chunk).
+    blob.write_at(5 * BLOCK, IoBuf::from(vec![2u8; 100]))
+        .await
+        .unwrap();
+    blob.prune(5 * BLOCK + 50).await.unwrap();
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+    // Hydration validates ref coverage from the floor's chunk.
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
+    let (blob, size) = volume.open("p", b"journal").await.unwrap();
+    assert_eq!(size, 5 * BLOCK + 100);
+    assert_eq!(blob.floor(), 5 * BLOCK + 50);
+    let got = blob.read_at(5 * BLOCK + 50, 50).await.unwrap().coalesce();
+    assert_eq!(got.as_ref(), &vec![2u8; 50][..]);
+    audit_volume(&volume, true);
+}
+
 #[tokio::test]
 async fn test_volume_storage_contract() {
     run_storage_tests(volume_over_memory()).await;
