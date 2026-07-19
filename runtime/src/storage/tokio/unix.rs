@@ -1,13 +1,17 @@
 use super::Header;
 use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use cfg_if::cfg_if;
+use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;
 use std::{
     fs::File,
     io::IoSlice,
     os::{fd::AsRawFd, unix::fs::FileExt},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
 };
 use tokio::task;
 
@@ -32,26 +36,60 @@ pub struct Blob {
     name: Vec<u8>,
     file: Arc<File>,
     pool: BufferPool,
-    // TODO(prune-campaign): persist the floor in the blob header at sync
-    // and punch the pruned range; this in-RAM floor does not survive
-    // reopen yet.
-    floor: Arc<std::sync::atomic::AtomicU64>,
+    /// Version recorded in the blob header, needed to rewrite it at sync.
+    blob_version: u16,
+    /// The pruned floor: bytes below it were dropped. Seeded from the
+    /// header at open and persisted back at sync while `floor_dirty`.
+    floor: Arc<AtomicU64>,
+    /// Whether the in-RAM floor has advanced past the persisted one.
+    floor_dirty: Arc<AtomicBool>,
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: File, pool: BufferPool) -> Self {
+    pub fn new(
+        partition: String,
+        name: &[u8],
+        file: File,
+        pool: BufferPool,
+        blob_version: u16,
+        floor: u64,
+    ) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(file),
             pool,
-            floor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            blob_version,
+            floor: Arc::new(AtomicU64::new(floor)),
+            floor_dirty: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
+    fn sync_inner(
+        file: &File,
+        partition: &str,
+        name: &[u8],
+        blob_version: u16,
+        floor: &AtomicU64,
+        floor_dirty: &AtomicBool,
+    ) -> Result<(), Error> {
+        // A dirty floor is rewritten into the header by the same sync that
+        // makes the pruned state durable. The flag clears only after a
+        // successful sync (a failure leaves it set for the next attempt),
+        // and only if no concurrent prune advanced the floor past the
+        // value written.
+        let dirty = floor_dirty.load(Ordering::Relaxed);
+        let synced_floor = floor.load(Ordering::Relaxed);
+        if dirty {
+            let header = Header::with_floor(blob_version, synced_floor);
+            Self::write_single_at(file, 0, &header.encode())?;
+        }
         file.sync_all()
-            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))
+            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))?;
+        if dirty && floor.load(Ordering::Relaxed) == synced_floor {
+            floor_dirty.store(false, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -230,6 +268,55 @@ impl Blob {
 
         Ok(())
     }
+
+    /// Best-effort deallocation of the raw byte range `[start, start + len)`
+    /// while keeping the file size. Errors are deliberately dropped: a
+    /// filesystem without hole punching degrades to unreclaimed space.
+    fn punch_hole(file: &File, start: u64, len: u64) {
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                let (Ok(start), Ok(len)) = (
+                    libc::off_t::try_from(start),
+                    libc::off_t::try_from(len),
+                ) else {
+                    return;
+                };
+                // SAFETY: `file` owns a valid fd that lives across the call;
+                // `fallocate` reads only its scalar arguments.
+                unsafe {
+                    libc::fallocate(
+                        file.as_raw_fd(),
+                        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                        start,
+                        len,
+                    );
+                }
+            } else if #[cfg(target_os = "macos")] {
+                let (Ok(fp_offset), Ok(fp_length)) = (
+                    libc::off_t::try_from(start),
+                    libc::off_t::try_from(len),
+                ) else {
+                    return;
+                };
+                let args = libc::fpunchhole_t {
+                    fp_flags: 0,
+                    reserved: 0,
+                    fp_offset,
+                    fp_length,
+                };
+                // SAFETY: `file` owns a valid fd that lives across the call;
+                // `args` is a properly initialized `fpunchhole_t` that the
+                // kernel only reads for the duration of the call.
+                unsafe {
+                    libc::fcntl(file.as_raw_fd(), libc::F_PUNCHHOLE, &args);
+                }
+            } else {
+                // No hole-punching API on this platform: pruned bytes keep
+                // their space until the blob is removed.
+                let _ = (file, start, len);
+            }
+        }
+    }
 }
 
 impl crate::Blob for Blob {
@@ -246,6 +333,14 @@ impl crate::Blob for Blob {
         let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via read_exact below.
         unsafe { bufs.set_len(len) };
+        let floor = self.floor.load(Ordering::Relaxed);
+        if offset < floor {
+            return Err(Error::OffsetPruned(
+                self.partition.clone(),
+                hex(&self.name),
+                floor,
+            ));
+        }
         let offset = offset
             .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -293,10 +388,18 @@ impl crate::Blob for Blob {
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
-        let file = self.file.clone();
+        let floor = self.floor.load(Ordering::Relaxed);
+        if offset < floor {
+            return Err(Error::OffsetPruned(
+                self.partition.clone(),
+                hex(&self.name),
+                floor,
+            ));
+        }
         let offset = offset
             .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
+        let file = self.file.clone();
         task::spawn_blocking(move || match bufs.try_into_single() {
             Ok(buf) => Self::write_single_at(&file, offset, buf.as_ref()),
             Err(bufs) => Self::write_vectored_at(&file, offset, bufs, None),
@@ -311,7 +414,14 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
-        let file = self.file.clone();
+        let floor = self.floor.load(Ordering::Relaxed);
+        if offset < floor {
+            return Err(Error::OffsetPruned(
+                self.partition.clone(),
+                hex(&self.name),
+                floor,
+            ));
+        }
         let offset = offset
             .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -322,26 +432,35 @@ impl crate::Blob for Blob {
 
         cfg_if! {
             if #[cfg(target_os = "linux")] {
-                task::spawn_blocking(move || {
-                    Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC))
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?
-            } else {
-                let partition = self.partition.clone();
-                let name = self.name.clone();
-                task::spawn_blocking(move || {
-                    Self::write_vectored_at(&file, offset, bufs, None)?;
-                    Self::sync_inner(&file, &partition, &name)
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?
+                // `RWF_SYNC` only persists this write's bytes: with a dirty
+                // floor the header must be rewritten and fsynced too, so
+                // take the write-then-sync path below instead.
+                if !self.floor_dirty.load(Ordering::Relaxed) {
+                    let file = self.file.clone();
+                    return task::spawn_blocking(move || {
+                        Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC))
+                    })
+                    .await
+                    .map_err(|_| Error::WriteFailed)?;
+                }
             }
         }
+
+        let file = self.file.clone();
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        let blob_version = self.blob_version;
+        let floor = self.floor.clone();
+        let floor_dirty = self.floor_dirty.clone();
+        task::spawn_blocking(move || {
+            Self::write_vectored_at(&file, offset, bufs, None)?;
+            Self::sync_inner(&file, &partition, &name, blob_version, &floor, &floor_dirty)
+        })
+        .await
+        .map_err(|_| Error::WriteFailed)?
     }
 
     async fn prune(&self, offset: u64) -> Result<(), Error> {
-        use std::sync::atomic::Ordering;
         let size = self
             .file
             .metadata()
@@ -353,19 +472,31 @@ impl crate::Blob for Blob {
         if offset > size {
             return Err(Error::BlobInsufficientLength);
         }
-        self.floor.fetch_max(offset, Ordering::Relaxed);
+        let old = self.floor.fetch_max(offset, Ordering::Relaxed);
+        if offset > old {
+            self.floor_dirty.store(true, Ordering::Relaxed);
+            Self::punch_hole(&self.file, Header::DATA_OFFSET_U64 + old, offset - old);
+        }
         Ok(())
     }
 
     fn floor(&self) -> u64 {
-        self.floor.load(std::sync::atomic::Ordering::Relaxed)
+        self.floor.load(Ordering::Relaxed)
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let file = self.file.clone();
+        let floor = self.floor.load(Ordering::Relaxed);
+        if len < floor {
+            return Err(Error::OffsetPruned(
+                self.partition.clone(),
+                hex(&self.name),
+                floor,
+            ));
+        }
         let len = len
             .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
+        let file = self.file.clone();
         task::spawn_blocking(move || file.set_len(len))
             .await
             .map_err(|e| e.into())
@@ -380,12 +511,17 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
-        task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name))
-            .await
-            .map_err(|e| {
-                let err: std::io::Error = e.into();
-                Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), err.into())
-            })?
+        let blob_version = self.blob_version;
+        let floor = self.floor.clone();
+        let floor_dirty = self.floor_dirty.clone();
+        task::spawn_blocking(move || {
+            Self::sync_inner(&file, &partition, &name, blob_version, &floor, &floor_dirty)
+        })
+        .await
+        .map_err(|e| {
+            let err: std::io::Error = e.into();
+            Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), err.into())
+        })?
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -393,8 +529,12 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
+        let blob_version = self.blob_version;
+        let floor = self.floor.clone();
+        let floor_dirty = self.floor_dirty.clone();
         task::spawn_blocking(move || {
-            let result = Self::sync_inner(&file, &partition, &name);
+            let result =
+                Self::sync_inner(&file, &partition, &name, blob_version, &floor, &floor_dirty);
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)

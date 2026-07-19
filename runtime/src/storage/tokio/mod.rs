@@ -142,7 +142,7 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let (blob_version, logical_size) = if Header::missing(len) {
+        let (blob_version, logical_size, floor) = if Header::missing(len) {
             // New or partially-created blob: reset it and write a fresh header. The
             // file grows only as header bytes are written, so a create interrupted by
             // a process crash leaves some prefix of the header, which the next open
@@ -157,7 +157,7 @@ impl crate::Storage for Storage {
             file.sync_all()
                 .await
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-            (blob_version, 0)
+            (blob_version, 0, 0)
         } else {
             // Existing blob - read and validate header
             let mut header_bytes = [0u8; Header::SIZE];
@@ -175,7 +175,14 @@ impl crate::Storage for Storage {
 
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone()),
+                Self::Blob::new(
+                    partition.into(),
+                    name,
+                    file,
+                    self.pool.clone(),
+                    blob_version,
+                    floor,
+                ),
                 logical_size,
                 blob_version,
             ))
@@ -184,7 +191,14 @@ impl crate::Storage for Storage {
         {
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone()),
+                Self::Blob::new(
+                    partition.into(),
+                    name,
+                    file,
+                    self.pool.clone(),
+                    blob_version,
+                    floor,
+                ),
                 logical_size,
                 blob_version,
             ))
@@ -345,13 +359,13 @@ mod tests {
         let (blob, size) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0, "new blob should have logical size 0");
 
-        // Verify raw file has 8 bytes (header only)
+        // Verify raw file holds only the header
         let file_path = storage_directory.join("partition").join(hex(b"test"));
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert_eq!(
             metadata.len(),
             Header::SIZE_U64,
-            "raw file should have 8-byte header"
+            "raw file should be header-only"
         );
 
         // Test 2: Logical offset handling - write at offset 0 stores at the data offset
@@ -370,6 +384,11 @@ mod tests {
         assert_eq!(
             &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
             &Header::RUNTIME_VERSION.to_be_bytes()
+        );
+        // Floor (bytes 8-15) starts at zero.
+        assert_eq!(
+            &raw_content[Header::MAGIC_LENGTH + 2 * Header::VERSION_LENGTH..Header::SIZE],
+            &0u64.to_be_bytes()
         );
         // Data starts at the aligned data offset.
         assert_eq!(&raw_content[Header::DATA_OFFSET..], data);
@@ -409,7 +428,7 @@ mod tests {
         assert_eq!(read_buf.coalesce(), b"test data");
         drop(blob2);
 
-        // Test 6: Corrupted blob recovery (0 < raw_size < 8)
+        // Test 6: Corrupted blob recovery (0 < raw_size < Header::SIZE)
         // Manually create a corrupted file with only 4 bytes
         let corrupted_path = storage_directory.join("partition").join(hex(b"corrupted"));
         std::fs::write(&corrupted_path, vec![0u8; 4]).unwrap();
@@ -418,7 +437,7 @@ mod tests {
         let (blob3, size3) = storage.open("partition", b"corrupted").await.unwrap();
         assert_eq!(size3, 0, "corrupted blob should return logical size 0");
 
-        // Verify raw file now has proper 8-byte header
+        // Verify raw file now has a proper header
         let metadata = std::fs::metadata(&corrupted_path).unwrap();
         assert_eq!(
             metadata.len(),
@@ -428,6 +447,120 @@ mod tests {
 
         // Cleanup
         drop(blob3);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_prune_guards() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_prune_guards_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        let data: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
+        blob.write_at(0, data.clone()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Pruning beyond the size fails and leaves the floor untouched.
+        assert!(matches!(
+            blob.prune(8193).await,
+            Err(crate::Error::BlobInsufficientLength)
+        ));
+        assert_eq!(blob.floor(), 0);
+
+        // The raw floor is byte-exact.
+        blob.prune(4096).await.unwrap();
+        assert_eq!(blob.floor(), 4096);
+
+        // Reads, writes, and resizes below the floor fail with the floor.
+        assert!(matches!(
+            blob.read_at(4095, 1).await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        let buf = crate::IoBufMut::with_capacity(1);
+        assert!(matches!(
+            blob.read_at_buf(4095, 1, buf).await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        assert!(matches!(
+            blob.write_at(4095, b"x").await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        assert!(matches!(
+            blob.write_at_sync(4095, b"x").await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        assert!(matches!(
+            blob.resize(4095).await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+
+        // At the floor they succeed.
+        let read = blob.read_at(4096, 100).await.unwrap();
+        assert_eq!(read.coalesce().as_ref(), &data[4096..4196]);
+        blob.write_at(4096, b"x").await.unwrap();
+        blob.resize(4096).await.unwrap();
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_prune_floor_persistence() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_prune_persist_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        blob.write_at(0, vec![7u8; 8192]).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // A synced floor is written into the on-disk header.
+        blob.prune(4096).await.unwrap();
+        blob.sync().await.unwrap();
+        let file_path = storage_directory.join("partition").join(hex(b"prune"));
+        let raw = std::fs::read(&file_path).unwrap();
+        assert_eq!(
+            &raw[Header::MAGIC_LENGTH + 2 * Header::VERSION_LENGTH..Header::SIZE],
+            &4096u64.to_be_bytes()
+        );
+
+        // And survives reopen.
+        drop(blob);
+        let (blob, len) = storage.open("partition", b"prune").await.unwrap();
+        assert_eq!(len, 8192);
+        assert_eq!(blob.floor(), 4096);
+        assert!(matches!(
+            blob.read_at(0, 1).await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        let read = blob.read_at(4096, 4096).await.unwrap();
+        assert_eq!(read.coalesce().as_ref(), &[7u8; 4096]);
+
+        // An unsynced floor advance regresses to the synced floor on reopen.
+        blob.prune(5000).await.unwrap();
+        assert_eq!(blob.floor(), 5000);
+        drop(blob);
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        assert_eq!(blob.floor(), 4096);
+
+        // write_at_sync persists a dirty floor too.
+        blob.prune(5000).await.unwrap();
+        blob.write_at_sync(5000, b"x").await.unwrap();
+        drop(blob);
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        assert_eq!(blob.floor(), 5000);
+
+        // As does start_sync.
+        blob.prune(6000).await.unwrap();
+        blob.start_sync().await.await.unwrap();
+        drop(blob);
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        assert_eq!(blob.floor(), 6000);
+
+        drop(blob);
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 

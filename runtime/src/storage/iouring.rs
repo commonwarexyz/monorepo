@@ -33,8 +33,12 @@ use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -155,7 +159,7 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let (blob_version, logical_len) = if Header::missing(raw_len) {
+        let (blob_version, logical_len, floor) = if Header::missing(raw_len) {
             // New or partially-created blob: reset it and write a fresh header. The
             // file grows only as header bytes are written, so a create interrupted by
             // a process crash leaves some prefix of the header, which the next open
@@ -170,7 +174,7 @@ impl crate::Storage for Storage {
             file.sync_all()
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
 
-            (blob_version, 0)
+            (blob_version, 0, 0)
         } else {
             // Existing blob - read and validate header
             file.seek(SeekFrom::Start(0))
@@ -188,6 +192,8 @@ impl crate::Storage for Storage {
             file,
             self.io_handle.clone(),
             self.pool.clone(),
+            blob_version,
+            floor,
         );
         Ok((blob, logical_len, blob_version))
     }
@@ -263,6 +269,13 @@ pub struct Blob {
     io_handle: iouring::Handle,
     /// Buffer pool for read allocations
     pool: BufferPool,
+    /// Version recorded in the blob header, needed to rewrite it at sync.
+    blob_version: u16,
+    /// The pruned floor: bytes below it were dropped. Seeded from the
+    /// header at open and persisted back at sync while `floor_dirty`.
+    floor: Arc<AtomicU64>,
+    /// Whether the in-RAM floor has advanced past the persisted one.
+    floor_dirty: Arc<AtomicBool>,
 }
 
 impl Clone for Blob {
@@ -273,6 +286,9 @@ impl Clone for Blob {
             file: self.file.clone(),
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
+            blob_version: self.blob_version,
+            floor: self.floor.clone(),
+            floor_dirty: self.floor_dirty.clone(),
         }
     }
 }
@@ -285,6 +301,8 @@ impl Blob {
         file: File,
         io_handle: iouring::Handle,
         pool: BufferPool,
+        blob_version: u16,
+        floor: u64,
     ) -> Self {
         Self {
             partition,
@@ -292,6 +310,9 @@ impl Blob {
             file: Arc::new(file),
             io_handle,
             pool,
+            blob_version,
+            floor: Arc::new(AtomicU64::new(floor)),
+            floor_dirty: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -321,6 +342,14 @@ impl crate::Blob for Blob {
             (tmp, Some(input_bufs))
         };
 
+        let floor = self.floor.load(Ordering::Relaxed);
+        if offset < floor {
+            return Err(Error::OffsetPruned(
+                self.partition.clone(),
+                hex(&self.name),
+                floor,
+            ));
+        }
         let offset = offset
             .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -347,6 +376,14 @@ impl crate::Blob for Blob {
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
+        let floor = self.floor.load(Ordering::Relaxed);
+        if offset < floor {
+            return Err(Error::OffsetPruned(
+                self.partition.clone(),
+                hex(&self.name),
+                floor,
+            ));
+        }
         let offset = offset
             .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -366,6 +403,14 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
+        let floor = self.floor.load(Ordering::Relaxed);
+        if offset < floor {
+            return Err(Error::OffsetPruned(
+                self.partition.clone(),
+                hex(&self.name),
+                floor,
+            ));
+        }
         let offset = offset
             .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -374,13 +419,73 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
+        // A single-write flush cannot persist a dirty floor: with one
+        // pending, the header must be rewritten and fsynced with this
+        // write, so take the write-then-sync path instead.
+        if self.floor_dirty.load(Ordering::Relaxed) {
+            self.io_handle
+                .write_at(self.file.clone(), offset, bufs)
+                .await?;
+            return self.sync().await;
+        }
+
         self.io_handle
             .write_at_sync(self.file.clone(), offset, bufs)
             .await
     }
 
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        let size = self
+            .file
+            .metadata()
+            .map_err(|e| {
+                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())
+            })?
+            .len()
+            .saturating_sub(Header::DATA_OFFSET_U64);
+        if offset > size {
+            return Err(Error::BlobInsufficientLength);
+        }
+        let old = self.floor.fetch_max(offset, Ordering::Relaxed);
+        if offset > old {
+            self.floor_dirty.store(true, Ordering::Relaxed);
+            // Best-effort deallocation of the newly pruned raw range while
+            // keeping the file size. Errors are deliberately dropped: a
+            // filesystem without hole punching degrades to unreclaimed
+            // space.
+            if let (Ok(start), Ok(len)) = (
+                libc::off_t::try_from(Header::DATA_OFFSET_U64 + old),
+                libc::off_t::try_from(offset - old),
+            ) {
+                // SAFETY: `self.file` owns a valid fd that lives across the
+                // call; `fallocate` reads only its scalar arguments.
+                unsafe {
+                    libc::fallocate(
+                        self.file.as_raw_fd(),
+                        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                        start,
+                        len,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn floor(&self) -> u64 {
+        self.floor.load(Ordering::Relaxed)
+    }
+
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        let floor = self.floor.load(Ordering::Relaxed);
+        if len < floor {
+            return Err(Error::OffsetPruned(
+                self.partition.clone(),
+                hex(&self.name),
+                floor,
+            ));
+        }
         let len = len
             .checked_add(Header::DATA_OFFSET_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -394,22 +499,61 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        // A dirty floor is rewritten into the header by the same sync that
+        // makes the pruned state durable. The flag clears only after a
+        // successful sync (a failure leaves it set for the next attempt),
+        // and only if no concurrent prune advanced the floor past the
+        // value written.
+        let dirty = self.floor_dirty.load(Ordering::Relaxed);
+        let synced_floor = self.floor.load(Ordering::Relaxed);
+        if dirty {
+            let header = Header::with_floor(self.blob_version, synced_floor);
+            self.io_handle
+                .write_at(self.file.clone(), 0, header.encode().into())
+                .await?;
+        }
         self.io_handle
             .sync(self.file.clone())
             .await
             .map_err(|err| match err {
                 Error::Io(e) => Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e),
                 err => err,
-            })
+            })?;
+        if dirty && self.floor.load(Ordering::Relaxed) == synced_floor {
+            self.floor_dirty.store(false, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     async fn start_sync(&self) -> Handle<()> {
         let partition = self.partition.clone();
         let name = self.name.clone();
+        // As in [Self::sync], a dirty floor is rewritten into the header
+        // before the fsync is registered and the flag clears only through
+        // a successful completion.
+        let dirty = self.floor_dirty.load(Ordering::Relaxed);
+        let synced_floor = self.floor.load(Ordering::Relaxed);
+        if dirty {
+            let header = Header::with_floor(self.blob_version, synced_floor);
+            if let Err(err) = self
+                .io_handle
+                .write_at(self.file.clone(), 0, header.encode().into())
+                .await
+            {
+                return Handle::ready(Err(err));
+            }
+        }
+        let floor = self.floor.clone();
+        let floor_dirty = self.floor_dirty.clone();
         let receiver = self.io_handle.start_sync(self.file.clone()).await;
         Handle::from_future(async move {
             match receiver.await {
-                Ok(Ok(())) => Ok(()),
+                Ok(Ok(())) => {
+                    if dirty && floor.load(Ordering::Relaxed) == synced_floor {
+                        floor_dirty.store(false, Ordering::Relaxed);
+                    }
+                    Ok(())
+                }
                 Ok(Err(Error::Io(e))) => Err(Error::BlobSyncFailed(partition, hex(&name), e)),
                 Ok(Err(err)) => Err(err),
                 Err(_) => Err(Error::Closed),
@@ -511,13 +655,13 @@ mod tests {
         let (blob, size) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0, "new blob should have logical size 0");
 
-        // Verify raw file has 8 bytes (header only)
+        // Verify raw file holds only the header
         let file_path = storage_directory.join("partition").join(hex(b"test"));
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert_eq!(
             metadata.len(),
             Header::SIZE_U64,
-            "raw file should have 8-byte header"
+            "raw file should be header-only"
         );
 
         // Test 2: Logical offset handling - write at offset 0 stores at the data offset
@@ -536,6 +680,11 @@ mod tests {
         assert_eq!(
             &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
             &Header::RUNTIME_VERSION.to_be_bytes()
+        );
+        // Floor (bytes 8-15) starts at zero.
+        assert_eq!(
+            &raw_content[Header::MAGIC_LENGTH + 2 * Header::VERSION_LENGTH..Header::SIZE],
+            &0u64.to_be_bytes()
         );
         // Data starts at the aligned data offset.
         assert_eq!(&raw_content[Header::DATA_OFFSET..], data);
@@ -575,7 +724,7 @@ mod tests {
         assert_eq!(read_buf, b"test data");
         drop(blob2);
 
-        // Test 6: Corrupted blob recovery (0 < raw_size < 8)
+        // Test 6: Corrupted blob recovery (0 < raw_size < Header::SIZE)
         // Manually create a corrupted file with only 4 bytes
         let corrupted_path = storage_directory.join("partition").join(hex(b"corrupted"));
         std::fs::write(&corrupted_path, vec![0u8; 4]).unwrap();
@@ -584,7 +733,7 @@ mod tests {
         let (blob3, size3) = storage.open("partition", b"corrupted").await.unwrap();
         assert_eq!(size3, 0, "corrupted blob should return logical size 0");
 
-        // Verify raw file now has proper 8-byte header
+        // Verify raw file now has a proper header
         let metadata = std::fs::metadata(&corrupted_path).unwrap();
         assert_eq!(
             metadata.len(),
@@ -594,6 +743,117 @@ mod tests {
 
         // Cleanup
         drop(blob3);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_prune_guards() {
+        // Verify prune validation, the byte-exact floor, and the below-floor guards.
+        let (storage, storage_directory) = create_test_storage();
+
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        let data: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
+        blob.write_at(0, data.clone()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Pruning beyond the size fails and leaves the floor untouched.
+        assert!(matches!(
+            blob.prune(8193).await,
+            Err(crate::Error::BlobInsufficientLength)
+        ));
+        assert_eq!(blob.floor(), 0);
+
+        // The raw floor is byte-exact.
+        blob.prune(4096).await.unwrap();
+        assert_eq!(blob.floor(), 4096);
+
+        // Reads, writes, and resizes below the floor fail with the floor.
+        assert!(matches!(
+            blob.read_at(4095, 1).await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        let buf = IoBufMut::with_capacity(1);
+        assert!(matches!(
+            blob.read_at_buf(4095, 1, buf).await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        assert!(matches!(
+            blob.write_at(4095, b"x").await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        assert!(matches!(
+            blob.write_at_sync(4095, b"x").await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        assert!(matches!(
+            blob.resize(4095).await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+
+        // At the floor they succeed.
+        let read = blob.read_at(4096, 100).await.unwrap();
+        assert_eq!(read.coalesce().as_ref(), &data[4096..4196]);
+        blob.write_at(4096, b"x".to_vec()).await.unwrap();
+        blob.resize(4096).await.unwrap();
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_prune_floor_persistence() {
+        // Verify the floor persists through the header at sync and regresses
+        // to the synced floor when unsynced.
+        let (storage, storage_directory) = create_test_storage();
+
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        blob.write_at(0, vec![7u8; 8192]).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // A synced floor is written into the on-disk header.
+        blob.prune(4096).await.unwrap();
+        blob.sync().await.unwrap();
+        let file_path = storage_directory.join("partition").join(hex(b"prune"));
+        let raw = std::fs::read(&file_path).unwrap();
+        assert_eq!(
+            &raw[Header::MAGIC_LENGTH + 2 * Header::VERSION_LENGTH..Header::SIZE],
+            &4096u64.to_be_bytes()
+        );
+
+        // And survives reopen.
+        drop(blob);
+        let (blob, len) = storage.open("partition", b"prune").await.unwrap();
+        assert_eq!(len, 8192);
+        assert_eq!(blob.floor(), 4096);
+        assert!(matches!(
+            blob.read_at(0, 1).await,
+            Err(crate::Error::OffsetPruned(_, _, 4096))
+        ));
+        let read = blob.read_at(4096, 4096).await.unwrap();
+        assert_eq!(read.coalesce().as_ref(), &[7u8; 4096]);
+
+        // An unsynced floor advance regresses to the synced floor on reopen.
+        blob.prune(5000).await.unwrap();
+        assert_eq!(blob.floor(), 5000);
+        drop(blob);
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        assert_eq!(blob.floor(), 4096);
+
+        // write_at_sync persists a dirty floor too.
+        blob.prune(5000).await.unwrap();
+        blob.write_at_sync(5000, b"x".to_vec()).await.unwrap();
+        drop(blob);
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        assert_eq!(blob.floor(), 5000);
+
+        // As does start_sync.
+        blob.prune(6000).await.unwrap();
+        blob.start_sync().await.await.unwrap();
+        drop(blob);
+        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
+        assert_eq!(blob.floor(), 6000);
+
+        drop(blob);
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
@@ -965,7 +1225,7 @@ mod tests {
         );
         drop(io_loop);
 
-        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
+        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool, 0, 0);
 
         // Read and write should fail through their wrapper-specific error enums
         // when the submission channel has already been disconnected.
@@ -1017,7 +1277,7 @@ mod tests {
         );
         drop(io_loop);
 
-        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
+        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool, 0, 0);
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
         let err = blob
             .sync()
@@ -1049,7 +1309,7 @@ mod tests {
         );
         drop(io_loop);
 
-        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
+        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool, 0, 0);
         let err = blob
             .start_sync()
             .await
@@ -1085,7 +1345,7 @@ mod tests {
         );
         drop(io_loop);
 
-        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
+        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool, 0, 0);
         let err = blob
             .resize(0)
             .await
@@ -1116,7 +1376,15 @@ mod tests {
         );
         let handle = std::thread::spawn(move || io_loop.run());
 
-        let blob = Blob::new("partition".into(), b"blob", file, submitter.clone(), pool);
+        let blob = Blob::new(
+            "partition".into(),
+            b"blob",
+            file,
+            submitter.clone(),
+            pool,
+            0,
+            0,
+        );
         // The request should reach the kernel and come back as a wrapped sync failure.
         let err = blob
             .sync()

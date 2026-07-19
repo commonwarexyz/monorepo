@@ -153,20 +153,22 @@ stability_scope!(BETA {
 
     /// Fixed-size header at the start of each [crate::Blob].
     ///
-    /// On-disk layout (8 bytes, big-endian):
+    /// On-disk layout (16 bytes, big-endian):
     /// - Bytes 0-3: [Header::MAGIC]
     /// - Bytes 4-5: Runtime Version (u16)
     /// - Bytes 6-7: Blob Version (u16)
+    /// - Bytes 8-15: Pruned floor (u64)
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) struct Header {
         magic: [u8; Self::MAGIC_LENGTH],
         runtime_version: u16,
         pub(crate) blob_version: u16,
+        pub(crate) floor: u64,
     }
 
     impl Header {
         /// Size of the header in bytes.
-        pub(crate) const SIZE: usize = 8;
+        pub(crate) const SIZE: usize = 16;
 
         /// Size of the header as u64 for offset calculations.
         pub(crate) const SIZE_U64: u64 = Self::SIZE as u64;
@@ -204,29 +206,40 @@ stability_scope!(BETA {
         }
 
         /// Creates a header for a new blob using the latest version from the range.
-        /// Returns (header, blob_version).
+        /// Returns (header, blob_version). New blobs start with a floor of zero.
         pub(crate) const fn new(versions: &std::ops::RangeInclusive<u16>) -> (Self, u16) {
             let blob_version = *versions.end();
-            let header = Self {
+            (Self::with_floor(blob_version, 0), blob_version)
+        }
+
+        /// Creates the header image a sync persists: the same identity fields
+        /// as a fresh header at `blob_version`, carrying the pruned `floor`.
+        pub(crate) const fn with_floor(blob_version: u16, floor: u64) -> Self {
+            Self {
                 magic: Self::MAGIC,
                 runtime_version: Self::RUNTIME_VERSION,
                 blob_version,
-            };
-            (header, blob_version)
+                floor,
+            }
         }
 
-        /// Parses and validates an existing header, returning the blob version
-        /// and logical size for a backend whose data begins at `data_offset`.
+        /// Parses and validates an existing header, returning the blob version,
+        /// logical size, and pruned floor for a backend whose data begins at
+        /// `data_offset`.
         pub(crate) fn from(
             raw_bytes: [u8; Self::SIZE],
             raw_len: u64,
             versions: &RangeInclusive<u16>,
             data_offset: u64,
-        ) -> Result<(u16, u64), HeaderError> {
+        ) -> Result<(u16, u64, u64), HeaderError> {
             let header: Self = Self::decode(raw_bytes.as_slice())
                 .expect("header decode should never fail for correct size input");
             header.validate(versions)?;
-            Ok((header.blob_version, raw_len.saturating_sub(data_offset)))
+            Ok((
+                header.blob_version,
+                raw_len.saturating_sub(data_offset),
+                header.floor,
+            ))
         }
 
         /// Validates the magic bytes, runtime version, and blob version.
@@ -265,6 +278,7 @@ stability_scope!(BETA {
             buf.put_slice(&self.magic);
             buf.put_u16(self.runtime_version);
             buf.put_u16(self.blob_version);
+            buf.put_u64(self.floor);
         }
     }
 
@@ -278,10 +292,12 @@ stability_scope!(BETA {
             buf.copy_to_slice(&mut magic);
             let runtime_version = buf.get_u16();
             let blob_version = buf.get_u16();
+            let floor = buf.get_u64();
             Ok(Self {
                 magic,
                 runtime_version,
                 blob_version,
+                floor,
             })
         }
     }
@@ -306,7 +322,8 @@ stability_scope!(BETA {
 impl arbitrary::Arbitrary<'_> for Header {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let version: u16 = u.arbitrary()?;
-        Ok(Self::new(&(version..=version)).0)
+        let floor: u64 = u.arbitrary()?;
+        Ok(Self::with_floor(version, floor))
     }
 }
 
@@ -323,6 +340,21 @@ pub(crate) mod tests {
         assert_eq!(header.magic, Header::MAGIC);
         assert_eq!(header.runtime_version, Header::RUNTIME_VERSION);
         assert_eq!(header.blob_version, 42);
+        assert_eq!(header.floor, 0, "new blobs start with a floor of zero");
+    }
+
+    #[test]
+    fn test_header_layout() {
+        let header = Header::with_floor(7, 0x0102030405060708);
+        let bytes = header.encode();
+        assert_eq!(bytes.len(), Header::SIZE);
+        assert_eq!(&bytes[..Header::MAGIC_LENGTH], &Header::MAGIC);
+        let versions_end = Header::MAGIC_LENGTH + 2 * Header::VERSION_LENGTH;
+        assert_eq!(
+            &bytes[Header::MAGIC_LENGTH..versions_end],
+            [Header::RUNTIME_VERSION.to_be_bytes(), 7u16.to_be_bytes()].concat()
+        );
+        assert_eq!(&bytes[versions_end..], &0x0102030405060708u64.to_be_bytes());
     }
 
     #[test]
@@ -373,6 +405,13 @@ pub(crate) mod tests {
         let bytes = header.encode();
         let decoded: Header = Header::decode(bytes.as_ref()).unwrap();
         assert_eq!(header, decoded);
+
+        // A non-zero floor round-trips too.
+        let header = Header::with_floor(123, u64::MAX - 1);
+        let bytes = header.encode();
+        let decoded: Header = Header::decode(bytes.as_ref()).unwrap();
+        assert_eq!(header, decoded);
+        assert_eq!(decoded.floor, u64::MAX - 1);
     }
 
     #[cfg(feature = "arbitrary")]
