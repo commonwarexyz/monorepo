@@ -209,7 +209,6 @@ fn test_config<S: Strategy>(
             write_buffer: NZUsize!(1024),
             compression: None,
             codec_config: ((0..=10000).into(), ()),
-            items_per_section: NZU64!(7),
             page_cache,
         },
     }

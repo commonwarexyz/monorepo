@@ -15,7 +15,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU16};
 use libfuzzer_sys::fuzz_target;
 use rand::RngExt as _;
 use rand_core::CryptoRng;
@@ -27,7 +27,6 @@ const MAX_VALUE_SIZE: usize = 256;
 const MAX_PROOF_OPS: u64 = 100;
 const PAGE_SIZE: NonZeroU16 = NZU16!(77);
 const PAGE_CACHE_SIZE: usize = 9;
-const ITEMS_PER_SECTION: u64 = 5;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum ImmutableOperation {
@@ -110,7 +109,6 @@ fn db_config(
         },
         log: VConfig {
             partition: format!("log-{suffix}"),
-            items_per_section: NZU64!(ITEMS_PER_SECTION),
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
             write_buffer: NZUsize!(1024),

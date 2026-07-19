@@ -24,7 +24,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, NZU16};
 use std::num::{NonZeroU16, NonZeroUsize};
 
 // Type aliases
@@ -143,7 +143,6 @@ fn fixed_log_config(suffix: &str, page_cache: CacheRef) -> FConfig {
 fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfig<C> {
     VConfig {
         partition: format!("{suffix}-log"),
-        items_per_section: NZU64!(7),
         compression: None,
         codec_config,
         page_cache,
@@ -237,7 +236,6 @@ fn compact_witness_config(
 ) -> crate::journal::contiguous::variable::Config<()> {
     crate::journal::contiguous::variable::Config {
         partition: format!("{suffix}-compact-witness"),
-        items_per_section: NZU64!(64),
         compression: None,
         codec_config: (),
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),

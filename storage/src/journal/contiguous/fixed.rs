@@ -57,7 +57,7 @@
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use super::blobs::{Blob, Replay as BlobReplay};
+use super::{Blob, Replay as BlobReplay};
 #[commonware_macros::stability(ALPHA)]
 use crate::{journal::authenticated, merkle};
 use crate::{
@@ -107,12 +107,12 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
         return Err(Error::ItemPruned(start_pos));
     }
 
-    let mut states = Vec::new();
+    let mut state = None;
     if start_pos < bounds.end {
         let offset = start_pos
             .checked_mul(A::SIZE as u64)
             .ok_or(Error::OffsetOverflow)?;
-        states.push(FixedReplayState::<B, A> {
+        state = Some(FixedReplayState::<B, A> {
             replay: blob.replay_from(offset, buffer)?,
             pos: start_pos,
             end_pos: bounds.end,
@@ -121,7 +121,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
         });
     }
 
-    Ok(super::replay_stream_from_states(states))
+    Ok(super::replay_stream(state))
 }
 
 /// Replay state over the journal's blob.
@@ -343,7 +343,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         .map_err(Error::Runtime)?;
 
         let metrics = Metrics::new(context);
-        metrics.update_single_blob(bounds.end, bounds.start);
+        metrics.update(bounds.end, bounds.start);
 
         Ok(Self {
             context: ops_context,
@@ -613,8 +613,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.bounds.end = end;
         self.dirty = true;
 
-        self.metrics
-            .update_single_blob(self.bounds.end, self.bounds.start);
+        self.metrics.update(self.bounds.end, self.bounds.start);
         Ok(self.bounds.end - 1)
     }
 
@@ -645,8 +644,37 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .map_err(Error::Runtime)?;
         self.bounds.end = size;
         self.dirty = true;
-        self.metrics
-            .update_single_blob(self.bounds.end, self.bounds.start);
+        self.metrics.update(self.bounds.end, self.bounds.start);
+
+        Ok(())
+    }
+
+    /// [Self::rewind], staged with `batch`: the truncation publishes and becomes durable when
+    /// the caller applies the batch, atomically with everything else it stages. Even when no
+    /// bytes drop, the blob's flushed state joins the batch for durability membership, so no
+    /// dirty state survives the commit.
+    ///
+    /// Once staged the batch is this blob's ONE writer: the caller must apply the batch
+    /// before mutating the journal again.
+    pub(crate) async fn rewind_into(
+        &mut self,
+        size: u64,
+        batch: &mut E::Batch,
+    ) -> Result<(), Error> {
+        if size > self.bounds.end {
+            return Err(Error::InvalidRewind(size));
+        }
+        if size < self.bounds.start {
+            return Err(Error::ItemPruned(size));
+        }
+
+        self.blob
+            .resize_into(Self::items_to_bytes(size)?, batch)
+            .await
+            .map_err(Error::Runtime)?;
+        self.bounds.end = size;
+        self.dirty = false;
+        self.metrics.update(self.bounds.end, self.bounds.start);
 
         Ok(())
     }
@@ -708,8 +736,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.blob.sync_into(batch).await.map_err(Error::Runtime)?;
         self.dirty = false;
 
-        self.metrics
-            .update_single_blob(self.bounds.end, self.bounds.start);
+        self.metrics.update(self.bounds.end, self.bounds.start);
 
         Ok(true)
     }
@@ -755,12 +782,47 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
 
         // Clearing below the pruning boundary cannot reuse the blob (nothing may shrink below
-        // the floor): remove and recreate it, then commit the new image.
-        let old = self.raw.clone();
-        let raw = Self::recreate_pruned(&self.context, &self.partition, old, bytes).await?;
+        // the floor): remove the partition (one commit), then recreate the pruned image and
+        // commit it. A crash between the two commits recovers an empty journal at position 0.
         let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
-        batch.sync(&raw);
+        self.stage_remove(&mut batch).await?;
         batch.apply_sync().await.map_err(Error::Runtime)?;
+
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        self.finish_recreate(new_size, &mut batch).await?;
+        batch.apply_sync().await.map_err(Error::Runtime)
+    }
+
+    /// Stage the removal of the journal's whole partition with `batch` (an ALPHA clear-path
+    /// step). Once the caller applies the batch, the journal holds handles to a removed blob
+    /// and must not be touched until [Self::finish_recreate] rebuilds it.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn stage_remove(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
+        // Settle any started sync before the blob is removed out from under the writer.
+        self.blob.wait_for_sync().await.map_err(Error::Runtime)?;
+        batch.remove(&self.partition, None);
+        Ok(())
+    }
+
+    /// Rebuild the journal after an applied [Self::stage_remove]: recreate the blob as
+    /// `new_size * CHUNK_SIZE` bytes of fully pruned prefix and stage the new image's
+    /// durability with `batch` (the caller applies it). The journal is empty at `new_size`
+    /// once the batch lands.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn finish_recreate(
+        &mut self,
+        new_size: u64,
+        batch: &mut E::Batch,
+    ) -> Result<(), Error> {
+        let bytes = Self::items_to_bytes(new_size)?;
+        let (raw, size) = self
+            .context
+            .open(&self.partition, BLOB_NAME)
+            .await
+            .map_err(Error::Runtime)?;
+        assert_eq!(size, 0, "the applied removal emptied the partition");
+        Self::materialize(&raw, bytes).await?;
+        batch.sync(&raw);
         self.raw = raw;
         self.bounds = new_size..new_size;
         self.finish_clear(new_size).await
@@ -807,8 +869,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         .await
         .map_err(Error::Runtime)?;
         self.dirty = false;
-        self.metrics
-            .update_single_blob(self.bounds.end, self.bounds.start);
+        self.metrics.update(self.bounds.end, self.bounds.start);
         Ok(())
     }
 }
@@ -1144,32 +1205,27 @@ mod tests {
             .expect("counter missing")
     }
 
-    /// The generic suite over the fixed journal. Pruning is exact, so the expected boundary is
-    /// the identity.
+    /// The generic suite over the fixed journal.
     #[test_traced]
     fn test_fixed_journal_contiguous_suite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            run_contiguous_tests(
-                move |test_name: String, idx: usize| {
-                    let label = test_name.replace('-', "_");
-                    let context = context
-                        .child("test")
-                        .with_attribute("name", &label)
-                        .with_attribute("index", idx);
-                    async move {
-                        let cfg = Config {
-                            partition: format!("suite-{test_name}"),
-                            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                            write_buffer: NZUsize!(2048),
-                        };
-                        Journal::<_, u64>::init(context, cfg).await
-                    }
-                    .boxed()
-                },
-                // Native pruning is byte-exact, so the boundary is the requested position.
-                |n| n,
-            )
+            run_contiguous_tests(move |test_name: String, idx: usize| {
+                let label = test_name.replace('-', "_");
+                let context = context
+                    .child("test")
+                    .with_attribute("name", &label)
+                    .with_attribute("index", idx);
+                async move {
+                    let cfg = Config {
+                        partition: format!("suite-{test_name}"),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        write_buffer: NZUsize!(2048),
+                    };
+                    Journal::<_, u64>::init(context, cfg).await
+                }
+                .boxed()
+            })
             .await;
         });
     }

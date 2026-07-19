@@ -14,7 +14,7 @@ use commonware_storage::queue::{Config, Queue};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroUsize},
 };
 
 /// Maximum write buffer size.
@@ -29,10 +29,6 @@ fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
 
 fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
 }
 
 fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
@@ -76,9 +72,6 @@ struct FuzzInput {
     /// Number of pages in the buffer pool cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    /// Items per section.
-    #[arbitrary(with = bounded_items_per_section)]
-    items_per_section: u64,
     /// Write buffer size.
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
@@ -438,7 +431,6 @@ async fn verify_recovery(
 fn fuzz(input: FuzzInput) {
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
-    let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
     let partition_name = format!("queue-crash-recovery-{}", input.seed);
@@ -454,7 +446,6 @@ fn fuzz(input: FuzzInput) {
         async move {
             let queue_cfg = Config {
                 partition: partition_name,
-                items_per_section,
                 compression: None,
                 codec_config: ((0usize..).into(), ()),
                 page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
@@ -486,7 +477,6 @@ fn fuzz(input: FuzzInput) {
 
         let queue_cfg = Config {
             partition: partition_name,
-            items_per_section,
             compression: None,
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),

@@ -143,7 +143,7 @@ pub(crate) mod test {
         deterministic::{self, Context},
         BufferPooler, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+    use commonware_utils::{NZUsize, TestRng, NZU16};
     use rand::Rng;
     use std::{
         num::{NonZeroU16, NonZeroUsize},
@@ -165,7 +165,6 @@ pub(crate) mod test {
             },
             journal_config: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
-                items_per_section: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),

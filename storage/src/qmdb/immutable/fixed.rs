@@ -122,7 +122,6 @@ mod tests {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: "compact-immutable-fixed-witness".into(),
-                items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -300,7 +299,7 @@ mod tests {
     fn test_fixed_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_pruning(ctx, open::<mmr::Family>, |loc| loc).await;
+            test::test_immutable_pruning(ctx, open::<mmr::Family>).await;
         });
     }
 
@@ -638,7 +637,7 @@ mod tests {
     fn test_fixed_pruning_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_pruning(ctx, open::<mmb::Family>, |loc| loc).await;
+            test::test_immutable_pruning(ctx, open::<mmb::Family>).await;
         });
     }
 

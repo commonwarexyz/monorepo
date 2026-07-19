@@ -117,7 +117,6 @@ mod test {
             },
             log: JournalConfig {
                 partition: format!("log-journal-{suffix}"),
-                items_per_section: NZU64!(7),
                 compression: None,
                 codec_config: ((0..=10000).into(), ()),
                 page_cache,
@@ -156,7 +155,6 @@ mod test {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: "compact-keyless-variable-witness".into(),
-                items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -227,16 +225,15 @@ mod test {
         });
     }
 
-    /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,
+    /// Regression: when pruning leaves `bounds.start` ahead of the first retained commit,
     /// `historical_proof` for sizes in that leading interval must report `HistoricalFloorPruned`
     /// (the floor metadata is gone) rather than the misleading `UnexpectedData` (which sounds like
     /// data corruption).
     ///
-    /// Items_per_section=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
-    /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <=
-    /// 8) and retains blob 1 ([7, 14)). `bounds.start = 7` is a non-commit op (an Append), and the
-    /// previous commit at location 4 was pruned. `historical_proof(op_count=8, ...)` asks for the
-    /// state just before the first retained commit, which has no retained governing floor.
+    /// Batches of 3 appends + 1 commit place commits at locations 0, 4, 8, 12, .... Pruning to
+    /// loc=7 leaves `bounds.start = 7`, a non-commit op (an Append) whose governing commit at
+    /// location 4 was pruned. `historical_proof(op_count=8, ...)` asks for the state just before
+    /// the first retained commit, which has no retained governing floor.
     #[test_traced("INFO")]
     fn test_keyless_historical_proof_floor_pruned() {
         use crate::merkle::Location;
@@ -258,9 +255,9 @@ mod test {
                     .unwrap();
             }
 
-            // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
-            // commit is at 8.
-            db.prune(Location::new(8)).await.unwrap();
+            // Prune to loc=7 (exact): bounds.start = 7 (an Append), first retained commit is
+            // at 8.
+            db.prune(Location::new(7)).await.unwrap();
             let bounds = db.bounds();
             assert_eq!(*bounds.start, 7);
 

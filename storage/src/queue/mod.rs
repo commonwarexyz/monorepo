@@ -38,7 +38,7 @@
 //! use commonware_codec::RangeCfg;
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_storage::{queue::{Queue, Config}};
-//! use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+//! use std::num::{NonZeroU16, NonZeroUsize};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -52,7 +52,6 @@
 //!     // Create a queue
 //!     let mut queue = Queue::<_, Vec<u8>>::init(context, Config {
 //!         partition: "my-queue".into(),
-//!         items_per_section: NonZeroU64::new(1000).unwrap(),
 //!         compression: None,
 //!         codec_config: ((0..).into(), ()), // RangeCfg for Vec length, () for u8
 //!         page_cache,

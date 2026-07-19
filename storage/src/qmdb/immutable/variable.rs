@@ -120,7 +120,6 @@ mod tests {
             },
             log: JournalConfig {
                 partition: format!("log-{suffix}"),
-                items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: ((), ()),
                 page_cache,
@@ -145,7 +144,6 @@ mod tests {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: "compact-immutable-variable-witness".into(),
-                items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -198,43 +196,6 @@ mod tests {
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
         is_send(db.rewind(loc));
-    }
-
-    fn small_sections_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> Config<TwoCap, ((), ()), Sequential> {
-        let mut cfg = config(suffix, pooler);
-        cfg.log.items_per_section = NZU64!(1);
-        cfg
-    }
-
-    async fn open_small_sections_db<F: Family>(
-        context: deterministic::Context,
-    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = small_sections_config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn open_small_sections<F: Family>(
-        ctx: deterministic::Context,
-    ) -> Pin<
-        Box<
-            dyn Future<
-                    Output = Db<
-                        F,
-                        deterministic::Context,
-                        Digest,
-                        Digest,
-                        Sha256,
-                        TwoCap,
-                        Sequential,
-                    >,
-                > + Send,
-        >,
-    > {
-        Box::pin(open_small_sections_db::<F>(ctx))
     }
 
     #[test_traced("WARN")]
@@ -305,7 +266,7 @@ mod tests {
     fn test_variable_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_pruning(ctx, open::<mmr::Family>, |loc| loc / 5 * 5).await;
+            test::test_immutable_pruning(ctx, open::<mmr::Family>).await;
         });
     }
 
@@ -470,11 +431,7 @@ mod tests {
     fn test_variable_batch_sequential_key_override() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_batch_sequential_key_override(
-                ctx,
-                open_small_sections::<mmr::Family>,
-            )
-            .await;
+            test::test_immutable_batch_sequential_key_override(ctx, open::<mmr::Family>).await;
         });
     }
 
@@ -557,11 +514,7 @@ mod tests {
     fn test_variable_rewind_pruned_target_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_rewind_pruned_target_errors(
-                ctx,
-                open_small_sections::<mmr::Family>,
-            )
-            .await;
+            test::test_immutable_rewind_pruned_target_errors(ctx, open::<mmr::Family>).await;
         });
     }
 
@@ -651,7 +604,7 @@ mod tests {
     fn test_variable_pruning_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_pruning(ctx, open::<mmb::Family>, |loc| loc / 5 * 5).await;
+            test::test_immutable_pruning(ctx, open::<mmb::Family>).await;
         });
     }
 
@@ -755,11 +708,7 @@ mod tests {
     fn test_variable_batch_sequential_key_override_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_batch_sequential_key_override(
-                ctx,
-                open_small_sections::<mmb::Family>,
-            )
-            .await;
+            test::test_immutable_batch_sequential_key_override(ctx, open::<mmb::Family>).await;
         });
     }
 
@@ -842,11 +791,7 @@ mod tests {
     fn test_variable_rewind_pruned_target_errors_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_rewind_pruned_target_errors(
-                ctx,
-                open_small_sections::<mmb::Family>,
-            )
-            .await;
+            test::test_immutable_rewind_pruned_target_errors(ctx, open::<mmb::Family>).await;
         });
     }
 

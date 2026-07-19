@@ -786,7 +786,6 @@ pub mod tests {
             },
             journal_config: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
-                items_per_section: NZU64!(7),
                 compression: None,
                 codec_config: ((), ()),
                 page_cache,
@@ -1586,7 +1585,6 @@ pub mod tests {
                 },
                 journal_config: VConfig {
                     partition: "forged-exclusion-log".to_string(),
-                    items_per_section: NZU64!(7),
                     compression: None,
                     codec_config: (((0..=8).into(), ()), ((0..=8).into(), ())),
                     page_cache,

@@ -1192,7 +1192,7 @@ mod tests {
         },
         translator::TwoCap,
     };
-    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, NZUsize, NZU16};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type FixedDb = fixed::Db<
@@ -1265,7 +1265,6 @@ mod tests {
             },
             journal_config: VariableJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
-                items_per_section: NZU64!(7),
                 compression: None,
                 codec_config: ((), ()),
                 page_cache,

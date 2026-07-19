@@ -26,12 +26,12 @@ use commonware_storage::{
     qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU16};
 use criterion::{criterion_group, Criterion};
 use std::{
     hint::black_box,
     marker::PhantomData,
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroUsize},
     time::{Duration, Instant},
 };
 
@@ -278,7 +278,6 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
 // -- Config --
 
 // Use huge blobs to avoid iteration times being affected by blob boundary crossings.
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 // Large enough such that most reads hit the cache.
@@ -308,7 +307,6 @@ fn fix_log_cfg(pc: CacheRef) -> FConfig {
 fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
     VConfig {
         partition: format!("log-journal-{PARTITION}"),
-        items_per_section: ITEMS_PER_BLOB,
         compression: None,
         codec_config: ((), ()),
         page_cache: pc,

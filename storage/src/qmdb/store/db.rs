@@ -8,7 +8,7 @@
 //!     qmdb::store::db::{Config, Db},
 //!     translator::TwoCap,
 //! };
-//! use commonware_utils::{NZUsize, NZU16, NZU64};
+//! use commonware_utils::{NZUsize, NZU16};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
 //! use commonware_runtime::{
@@ -27,7 +27,6 @@
 //!             write_buffer: NZUsize!(64 * 1024),
 //!             compression: None,
 //!             codec_config: ((), ()),
-//!             items_per_section: NZU64!(4),
 //!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
@@ -323,13 +322,13 @@ where
             ));
         }
 
-        // ONE batch stages the sync and the prune: the floor justifying the boundary may
+        // ONE batch stages the prune and the sync: the floor justifying the boundary may
         // exist only in buffered operations (it advances before its batch is durable), so the
-        // removals must not become durable without it. The log prunes at section boundaries,
-        // so the actual oldest retained location may be less than requested.
+        // removals must not become durable without it. The prune runs first (a native journal
+        // prune must be the batch's first touch of its blobs) and is exact.
         let mut batch = self.log.context().batch().await?;
-        self.log.sync_into(&mut batch).await?;
         let pruned = self.log.prune_into(*prune_loc, &mut batch).await?;
+        self.log.sync_into(&mut batch).await?;
         batch.apply_sync().await?;
         if !pruned {
             return Ok(());
@@ -529,7 +528,7 @@ mod test {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZUsize, NZU16};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
@@ -545,7 +544,6 @@ mod test {
                 write_buffer: NZUsize!(64 * 1024),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
-                items_per_section: NZU64!(7),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
@@ -767,9 +765,8 @@ mod test {
             assert_eq!(*db.inactivity_floor_loc, 398);
             let floor = db.inactivity_floor_loc;
 
-            // All blobs prior to the inactivity floor are pruned, so the oldest retained location
-            // is the first in the last retained blob.
-            assert_eq!(db.log.bounds().start, *floor - *floor % 7);
+            // Pruning is exact: the oldest retained location is the inactivity floor.
+            assert_eq!(db.log.bounds().start, *floor);
 
             db.destroy().await.unwrap();
         });

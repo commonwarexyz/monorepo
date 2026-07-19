@@ -13,7 +13,7 @@ use commonware_storage::{
     },
     Context,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, NZU16};
 use tracing::error;
 
 /// Database type alias.
@@ -28,7 +28,6 @@ pub fn create_config(context: &impl BufferPooler) -> CompactConfig<Sequential> {
         strategy: Sequential,
         witness: variable::Config {
             partition: "compact-immutable-witness".into(),
-            items_per_section: NZU64!(4096),
             compression: None,
             codec_config: (),
             page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(64)),

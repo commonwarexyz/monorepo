@@ -37,11 +37,11 @@ use commonware_storage::{
     qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU16};
 use rand::Rng;
 use std::{
     hint::black_box,
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroUsize},
     time::Instant,
 };
 
@@ -140,7 +140,6 @@ type AnyVarMerkleized = std::sync::Arc<
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072);
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const CHURN_BATCHES: u64 = 4;
 
@@ -400,7 +399,6 @@ fn main() {
                     merkle_config,
                     journal_config: VConfig {
                         partition: "constantinople-var-log".into(),
-                        items_per_section: ITEMS_PER_BLOB,
                         compression: None,
                         codec_config: ((), ()),
                         page_cache: pc_var,

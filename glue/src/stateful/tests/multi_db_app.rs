@@ -437,13 +437,10 @@ impl EngineDefinition for MultiDbEngine {
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
         };
-        // One witness entry per section so the periodic prune actually drops entries
-        // (pruning is section-aligned).
         let db_config_b = immutable::fixed::CompactConfig {
             strategy: Sequential,
             witness: VariableLogConfig {
                 partition: format!("{partition_prefix}-qmdb-b-witness"),
-                items_per_section: NZU64!(1),
                 compression: None,
                 codec_config: (),
                 page_cache: page_cache.clone(),

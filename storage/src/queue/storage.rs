@@ -9,7 +9,7 @@ use crate::{
 use commonware_codec::CodecShared;
 use commonware_macros::boxed;
 use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::GaugeExt, WriteBatch as _};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use tracing::debug;
 
 /// Configuration for [Queue].
@@ -17,12 +17,6 @@ use tracing::debug;
 pub struct Config<C> {
     /// The storage partition name for the queue's journal.
     pub partition: String,
-
-    /// The number of items to store in each journal section.
-    ///
-    /// Larger values reduce file overhead but increase minimum pruning granularity.
-    /// Once set, this value cannot be changed across restarts.
-    pub items_per_section: NonZeroU64,
 
     /// Optional zstd compression level for stored items.
     ///
@@ -36,7 +30,7 @@ pub struct Config<C> {
     /// Page cache for buffering reads from the underlying journal.
     pub page_cache: CacheRef,
 
-    /// Write buffer size for each section.
+    /// Write buffer size for each of the journal's blobs.
     pub write_buffer: NonZeroUsize,
 }
 
@@ -53,7 +47,7 @@ pub struct Config<C> {
 /// - [enqueue](Self::enqueue): Append + sync in one step. The item is durable before return.
 /// - [dequeue](Self::dequeue): Return the next unacked item in FIFO order.
 /// - [ack](Self::ack) / [ack_up_to](Self::ack_up_to): Mark items as processed (in-memory only).
-/// - [sync](Self::sync): Persist appended items and prune completed sections below the
+/// - [sync](Self::sync): Persist appended items and prune acknowledged items below the
 ///   ack floor, in one atomic commit.
 ///
 /// # Acknowledgment
@@ -115,7 +109,6 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
             context.child("journal"),
             variable::Config {
                 partition: cfg.partition,
-                items_per_section: cfg.items_per_section,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
                 page_cache: cfg.page_cache,
@@ -341,8 +334,10 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
             .batch()
             .await
             .map_err(crate::journal::Error::Runtime)?;
-        self.journal.sync_into(&mut batch).await?;
+        // Prune first: the journal's native prunes require the batch to not yet stage over
+        // its blobs.
         self.journal.prune_into(self.ack_floor, &mut batch).await?;
+        self.journal.sync_into(&mut batch).await?;
         batch
             .apply_sync()
             .await
@@ -366,7 +361,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -375,7 +370,6 @@ mod tests {
     fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
         Config {
             partition: partition.into(),
-            items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -759,7 +753,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Enqueue items (more than items_per_section to test pruning)
+            // Enqueue items
             for i in 0..25u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
@@ -780,7 +774,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ack_across_sections() {
+    fn test_ack_in_batches() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_multi_prune", &context);
@@ -788,7 +782,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Enqueue many items across multiple sections (items_per_section = 10)
+            // Enqueue many items
             for i in 0..50u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
@@ -840,7 +834,8 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_config("test_recovery_replay", &context);
 
-            // First session: enqueue items, ack some (but not enough to prune)
+            // First session: enqueue items, ack some, but DON'T sync afterwards (the acks
+            // stay in memory and prune nothing).
             {
                 let mut queue = Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
                     .await
@@ -850,13 +845,11 @@ mod tests {
                     queue.enqueue(vec![i]).await.unwrap();
                 }
 
-                // Ack items 0, 1, 2 - but items_per_section=10, so no pruning
+                // Ack items 0, 1, 2 - in memory only, so no pruning
                 queue.ack(0).unwrap();
                 queue.ack(1).unwrap();
                 queue.ack(2).unwrap();
                 assert_eq!(queue.ack_floor(), 3);
-
-                queue.sync().await.unwrap();
             }
 
             // Second session: all items are re-delivered (no pruning occurred)
@@ -890,23 +883,21 @@ mod tests {
                     .await
                     .unwrap();
 
-                // Enqueue items across multiple sections (items_per_section = 10)
+                // Enqueue items
                 for i in 0..25u8 {
                     queue.enqueue(vec![i]).await.unwrap();
                 }
 
-                // Ack items 0-14 to advance floor past section 0
+                // Ack items 0-14 to advance the floor
                 for i in 0..15 {
                     queue.ack(i).unwrap();
                 }
                 assert_eq!(queue.ack_floor(), 15);
 
-                // Sync triggers pruning
+                // Sync triggers pruning, exactly at the ack floor.
                 queue.sync().await.unwrap();
-
-                // Verify pruning occurred
                 let pruning_boundary = queue.journal.bounds().start;
-                assert!(pruning_boundary > 0, "expected some pruning to occur");
+                assert_eq!(pruning_boundary, 15);
 
                 pruning_boundary
             };

@@ -132,7 +132,6 @@ mod test {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: "compact-keyless-fixed-witness".into(),
-                items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

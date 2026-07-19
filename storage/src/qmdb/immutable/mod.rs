@@ -786,8 +786,6 @@ pub(super) mod test {
     use core::{future::Future, pin::Pin};
     use std::ops::Range;
 
-    const ITEMS_PER_SECTION: u64 = 5;
-
     type TestDb<F, V, C> = Immutable<
         F,
         deterministic::Context,
@@ -1278,15 +1276,12 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// `boundary` maps a requested prune location to the boundary the log guarantees:
-    /// the identity for the fixed log (exact pruning), section-aligned for the variable log.
     #[boxed]
     pub(crate) async fn test_immutable_pruning<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
-        boundary: fn(u64) -> u64,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
@@ -1313,8 +1308,8 @@ pub(super) mod test {
             batch = batch.set(k, v);
         }
         // The inactivity floor must cover both prune targets in this test.
-        // Second prune request is at ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1.
-        let inactivity_floor = Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1);
+        // Second prune request is at ELEMENTS / 2 + 9.
+        let inactivity_floor = Location::new(ELEMENTS / 2 + 9);
         let merkleized = batch.merkleize(&db, None, inactivity_floor).await;
         db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.bounds().end, ELEMENTS + 2);
@@ -1324,8 +1319,8 @@ pub(super) mod test {
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
 
-        // The boundary advances per the log's pruning alignment.
-        let first_boundary = boundary((ELEMENTS + 2) / 2);
+        // Pruning is exact: the boundary is the requested location.
+        let first_boundary = (ELEMENTS + 2) / 2;
         let oldest_retained_loc = bounds.start;
         assert_eq!(oldest_retained_loc, Location::new(first_boundary));
 
@@ -1349,10 +1344,10 @@ pub(super) mod test {
         let oldest_retained_loc = bounds.start;
         assert_eq!(oldest_retained_loc, Location::new(first_boundary));
 
-        // Prune to a non-section boundary.
-        let second_request = ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1);
+        // Prune to an arbitrary interior position: the boundary lands exactly there.
+        let second_request = ELEMENTS / 2 + 9;
         db.prune(Location::new(second_request)).await.unwrap();
-        let second_boundary = boundary(second_request);
+        let second_boundary = second_request;
         let oldest_retained_loc = db.bounds().start;
         assert_eq!(oldest_retained_loc, Location::new(second_boundary));
 
@@ -1364,7 +1359,7 @@ pub(super) mod test {
         assert_eq!(oldest_retained_loc, Location::new(second_boundary));
 
         // Try to fetch a key before the inactivity floor (not in snapshot after reopen).
-        let floor_val = ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1;
+        let floor_val = ELEMENTS / 2 + 9;
         let inactive_key = sorted_keys[floor_val as usize - 2];
         assert!(db.get(&inactive_key).await.unwrap().is_none());
 
@@ -1601,16 +1596,15 @@ pub(super) mod test {
     #[boxed]
     pub(crate) async fn test_immutable_rewind_pruned_target_errors<F: Family, V, C>(
         context: deterministic::Context,
-        open_small_sections_db: impl Fn(
+        open_db: impl Fn(
             deterministic::Context,
-        )
-            -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let mut db = open_small_sections_db(context.child("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let first_range = commit_sets(
             &mut db,
@@ -2177,22 +2171,18 @@ pub(super) mod test {
     /// of them, live and across a restart, and after pruning every other version it returns the
     /// survivor. The prune check runs on a never-restarted db so the snapshot still holds both
     /// locations and `get()` must skip the pruned one within the bucket.
-    ///
-    /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
-    /// so pruning is per-item.
     #[boxed]
     pub(crate) async fn test_immutable_batch_sequential_key_override<F: Family, V, C>(
         context: deterministic::Context,
-        open_db_small_sections: impl Fn(
+        open_db: impl Fn(
             deterministic::Context,
-        )
-            -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db_small_sections(context.child("db")).await;
+        let mut db = open_db(context.child("db")).await;
 
         let key = Sha256::hash(&0u64.to_be_bytes());
         let v1 = Sha256::fill(1u8);
@@ -2228,7 +2218,7 @@ pub(super) mod test {
         // A restart must also serve one of the written values.
         db.sync().await.unwrap();
         drop(db);
-        let db = open_db_small_sections(context.child("reopen")).await;
+        let db = open_db(context.child("reopen")).await;
         let reopened = db.get(&key).await.unwrap().unwrap();
         assert!(reopened == v1 || reopened == v2);
         db.destroy().await.unwrap();
@@ -2237,7 +2227,7 @@ pub(super) mod test {
         // snapshot bucket holds both locations. Floor=4 permits prune(2).
         // Layout: 0=initial commit, 1=Set(key,v1), 2=Commit, 3=Set(key,v2),
         // 4=Commit(floor=4)
-        let mut db = open_db_small_sections(context.child("prune")).await;
+        let mut db = open_db(context.child("prune")).await;
         db.apply_batch(
             db.new_batch()
                 .set(key, v1)
@@ -2255,9 +2245,9 @@ pub(super) mod test {
         .await
         .unwrap();
 
-        // Prune past the first Set (loc 1). With items_per_section=1, pruning
-        // to loc 2 removes the blob containing loc 1. get() must skip the
-        // pruned location within the bucket and serve the survivor.
+        // Prune past the first Set (loc 1): pruning is exact, so loc 1 drops.
+        // get() must skip the pruned location within the bucket and serve the
+        // survivor.
         db.prune(Location::new(2)).await.unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v2));
 

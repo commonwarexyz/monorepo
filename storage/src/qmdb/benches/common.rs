@@ -27,17 +27,13 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU16};
 use rand::{distr::Distribution, Rng};
 use rand_distr::Zipf;
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroUsize};
 
 pub type Digest = DigestOf<Sha256>;
 
-/// Default items per section for the variable-journal benchmarks. This is small enough that
-/// section boundary crossings can affect benchmark time. Benchmarks that don't want to measure
-/// that cost should override via the `_with` config generators.
-pub const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
 pub const CHUNK_SIZE: usize = 32;
 pub const THREADS: NonZeroUsize = NZUsize!(8);
 pub const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
@@ -119,15 +115,9 @@ fn fix_log_cfg(suffix: &str, page_cache: CacheRef) -> FConfig {
     }
 }
 
-fn var_log_cfg<C>(
-    suffix: &str,
-    page_cache: CacheRef,
-    codec_config: C,
-    items_per_section: NonZeroU64,
-) -> VConfig<C> {
+fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfig<C> {
     VConfig {
         partition: format!("log-journal-{suffix}"),
-        items_per_section,
         compression: None,
         codec_config,
         page_cache,
@@ -178,17 +168,10 @@ pub fn cur_fix_cfg(ctx: &(impl BufferPooler + Strategizer)) -> CurrentFixedConfi
 pub fn any_var_digest_cfg(
     ctx: &(impl BufferPooler + Strategizer),
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
-    any_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
-}
-
-pub fn any_var_digest_cfg_with(
-    ctx: &(impl BufferPooler + Strategizer),
-    items_per_section: NonZeroU64,
-) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_section),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
     }
@@ -197,17 +180,10 @@ pub fn any_var_digest_cfg_with(
 pub fn cur_var_digest_cfg(
     ctx: &(impl BufferPooler + Strategizer),
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
-    cur_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
-}
-
-pub fn cur_var_digest_cfg_with(
-    ctx: &(impl BufferPooler + Strategizer),
-    items_per_section: NonZeroU64,
-) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_section),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
@@ -220,22 +196,10 @@ type VarVecCfg = ((), (commonware_codec::RangeCfg<usize>, ()));
 pub fn any_var_vec_cfg(
     ctx: &(impl BufferPooler + Strategizer),
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
-    any_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
-}
-
-pub fn any_var_vec_cfg_with(
-    ctx: &(impl BufferPooler + Strategizer),
-    items_per_section: NonZeroU64,
-) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        journal_config: var_log_cfg(
-            PARTITION_VAR,
-            page_cache,
-            ((), ((0..=10000).into(), ())),
-            items_per_section,
-        ),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
     }
@@ -244,22 +208,10 @@ pub fn any_var_vec_cfg_with(
 pub fn cur_var_vec_cfg(
     ctx: &(impl BufferPooler + Strategizer),
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
-    cur_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
-}
-
-pub fn cur_var_vec_cfg_with(
-    ctx: &(impl BufferPooler + Strategizer),
-    items_per_section: NonZeroU64,
-) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        journal_config: var_log_cfg(
-            PARTITION_VAR,
-            page_cache,
-            ((), ((0..=10000).into(), ())),
-            items_per_section,
-        ),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
@@ -269,22 +221,10 @@ pub fn cur_var_vec_cfg_with(
 pub fn keyless_cfg(
     ctx: &(impl BufferPooler + Strategizer),
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
-    keyless_cfg_with(ctx, ITEMS_PER_BLOB)
-}
-
-pub fn keyless_cfg_with(
-    ctx: &(impl BufferPooler + Strategizer),
-    items_per_section: NonZeroU64,
-) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
         merkle: merkle_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
-        log: var_log_cfg(
-            PARTITION_KEYLESS,
-            page_cache,
-            ((0..=10000).into(), ()),
-            items_per_section,
-        ),
+        log: var_log_cfg(PARTITION_KEYLESS, page_cache, ((0..=10000).into(), ())),
     }
 }
 

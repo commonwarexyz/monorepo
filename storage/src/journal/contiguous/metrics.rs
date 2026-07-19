@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 /// Metrics for a contiguous journal.
 ///
-/// Fixed and variable journals register the same set. Sub-components (the blob manager and the
-/// variable journal's offsets journal) register their own metrics under child contexts.
+/// Fixed and variable journals register the same set. The variable journal's offsets journal
+/// registers its own set under a child context.
 pub(super) struct Metrics<E: Clock> {
     /// Logical end position.
     size: Gauge,
@@ -144,27 +144,13 @@ impl<E: Clock> Metrics<E> {
         self.sync_duration.scoped(&self.clock)
     }
 
-    /// Update state gauges for a single-blob journal: the blob containing the newest retained
-    /// item is THE blob, so the tail gauge equals the retained count.
-    pub(super) fn update_single_blob(&self, size: u64, pruning_boundary: u64) {
+    /// Update state gauges from current bounds: every item lives in ONE blob, so the tail
+    /// gauge equals the retained count.
+    pub(super) fn update(&self, size: u64, pruning_boundary: u64) {
         let _ = self.size.try_set(size);
         let _ = self.pruning_boundary.try_set(pruning_boundary);
         let retained = size.saturating_sub(pruning_boundary);
         let _ = self.retained.try_set(retained);
         let _ = self.tail_items.try_set(retained);
-    }
-
-    /// Update state gauges from current bounds.
-    pub(super) fn update(&self, size: u64, pruning_boundary: u64, items_per_blob: u64) {
-        let _ = self.size.try_set(size);
-        let _ = self.pruning_boundary.try_set(pruning_boundary);
-        let _ = self.retained.try_set(size.saturating_sub(pruning_boundary));
-        let tail_items = if size == pruning_boundary {
-            0
-        } else {
-            let tail_start = ((size - 1) / items_per_blob) * items_per_blob;
-            size - pruning_boundary.max(tail_start)
-        };
-        let _ = self.tail_items.try_set(tail_items);
     }
 }

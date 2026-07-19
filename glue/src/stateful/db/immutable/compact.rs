@@ -451,7 +451,6 @@ mod tests {
             strategy: Sequential,
             witness: commonware_storage::journal::contiguous::variable::Config {
                 partition: format!("stateful-immutable-unjournaled-{suffix}-witness"),
-                items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11)),
@@ -821,9 +820,7 @@ mod tests {
     #[test]
     fn managed_db_prune_bounds_fixed_immutable_unjournaled_rewind_history() {
         deterministic::Runner::default().start(|context| async move {
-            // One witness entry per section so pruning takes effect at entry granularity.
-            let mut config = fixed_config(&context, "prune");
-            config.witness.items_per_section = NZU64!(1);
+            let config = fixed_config(&context, "prune");
             let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
 
             // Commit three ranges, recording each target.

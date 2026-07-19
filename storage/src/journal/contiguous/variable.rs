@@ -1,19 +1,69 @@
 //! Position-based journal for variable-length items.
 //!
-//! Items are stored as varint-framed records in data blobs. A parallel offsets journal (a
-//! legacy multi-blob fixed journal of `u64`s, `super::legacy`) records, for each position,
-//! the byte offset one past its frame's end within its data blob: frame `i` spans
-//! `[entry[i - 1], entry[i])`, with the first frame of each data blob starting at byte 0.
-//! Every mutation stages both journals in one atomic batch, so recovery is a bounded per-blob
-//! length verification (see [Journal::init]).
+//! # Format
+//!
+//! Items are stored as varint-framed records in ONE data blob (`b"data"` in
+//! `{partition}_data`). A parallel offsets journal (a single-blob [super::fixed] journal of
+//! `u64`s in `{partition}_offsets`) records, for each position, the absolute byte offset one
+//! past its frame's end in the data blob: frame `i` spans `[entry[i - 1], entry[i])`, and the
+//! first RETAINED frame starts at the data blob's pruned floor.
+//!
+//! ```text
+//! data:    +---------+---------+-----+-----------+
+//!          | frame_0 | frame_1 | ... | frame_n-1 |
+//!          +---------+---------+-----+-----------+
+//! offsets: | end_0   | end_1   | ... | end_n-1   |
+//! ```
+//!
+//! # Pruning
+//!
+//! `prune(min_position)` prunes both sides exactly: the offsets journal to `min_position` and
+//! the data blob to the byte where `min_position`'s frame begins (both native
+//! [commonware_runtime::Blob::prune] floors are byte-exact). The pruning boundary IS the
+//! requested position — no section alignment, no retained slack.
+//!
+//! # Crash reconciliation
+//!
+//! Each blob's pruned floor is a mutation whose durability follows a commit capturing that
+//! blob, and a crash regresses each floor to its own last-committed value (never forward).
+//! `prune` stages both blobs in ONE batch whose commit captures both floors, so a crash
+//! ordinarily recovers a consistent pair. The [commonware_runtime::Blob] contract still ties
+//! each floor to its own blob's commits with no cross-blob pairing promised (and the
+//! test-only sequential batch fallback replays staged syncs in order), so init reconciles
+//! rather than assuming the pair:
+//!
+//! - Within `prune`, the DATA blob's native prune and staged sync always precede the offsets
+//!   journal's. The pending floor pair is therefore only ever (old, old), (new, old), or
+//!   (new, new): a commit can adopt the data floor without the offsets floor, never the
+//!   reverse, so across a crash the data floor can be AHEAD of the offsets boundary (entries
+//!   retained whose bytes are pruned) but never behind it.
+//! - On init the more advanced side is authoritative: the first retained entry ending past
+//!   the data floor names the true boundary, and the offsets journal is re-pruned to it
+//!   (pruning is idempotent and cheap). This order is load-bearing — it keeps the entry that
+//!   locates the first surviving frame retained. Had the offsets side been allowed to run
+//!   ahead instead, the entry recording where the first retained frame begins would already
+//!   be pruned and the data floor could not be interpreted (an undetectable state).
+//!
+//! # Recovery
+//!
+//! The storage backend restores every blob to exactly its last-synced state after a crash,
+//! and every mutation stages both blobs in ONE atomic batch, so recovery is verification plus
+//! the floor reconciliation above — never repair: the data blob must end exactly at the frame
+//! end recorded by the last offsets entry (at its floor when no entries are retained), and no
+//! frame is ever scanned or decoded.
+//!
+//! # Clearing / reset
+//!
+//! Clearing wipes all data and restarts the journal at a new size: the offsets journal
+//! materializes its fully pruned image and the data blob truncates to its floor, committed
+//! together. A clear at or above the offsets journal's pruning boundary transforms both blobs
+//! in place and is all-or-nothing: a crash recovers either the prior state or the cleared
+//! one. A clear BELOW the boundary must remove and recreate both partitions (nothing may
+//! shrink below a floor), so a crash between the removals' commit and the new image's commit
+//! recovers an EMPTY journal at position 0 — never fabricated items — and the sync flows that
+//! clear backwards re-clear on reopen.
 
-use super::{
-    blob_first_position,
-    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
-    legacy as fixed,
-    metrics::Metrics,
-    position_to_blob, Contiguous, Many, Mutable,
-};
+use super::{fixed, metrics::Metrics, Blob, Contiguous, Many, Mutable, Replay as BlobReplay};
 #[commonware_macros::stability(ALPHA)]
 use crate::{journal::authenticated, merkle};
 use crate::{
@@ -33,16 +83,18 @@ use commonware_runtime::{
     Blob as RBlob, Buf, IoBuf, WriteBatch as _,
 };
 use futures::{future::try_join_all, Stream};
-use std::{
-    collections::BTreeMap,
-    io::Cursor,
-    marker::PhantomData,
-    num::{NonZeroU64, NonZeroUsize},
-    ops::Range,
-    sync::Arc,
-};
+use std::{io::Cursor, marker::PhantomData, num::NonZeroUsize, ops::Range, sync::Arc};
 #[commonware_macros::stability(ALPHA)]
 use tracing::debug;
+
+/// Name of the single blob holding all frames.
+const BLOB_NAME: &[u8] = b"data";
+
+/// Suffix appended to the base partition name for the data blob's partition.
+const DATA_SUFFIX: &str = "_data";
+
+/// Suffix appended to the base partition name for the offsets journal's partition.
+const OFFSETS_SUFFIX: &str = "_offsets";
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
@@ -52,12 +104,6 @@ pub struct PreparedAppend<V> {
     compressed: bool,
     _marker: PhantomData<V>,
 }
-
-/// Suffix appended to the base partition name for the data blobs.
-const DATA_SUFFIX: &str = "_data";
-
-/// Suffix appended to the base partition name for the offsets journal.
-const OFFSETS_SUFFIX: &str = "_offsets";
 
 /// Decode one varint-framed item from the head of `bytes`, whose encoded length must be exactly
 /// `frame_len` (the gap to the next frame's offset). Returns `None` on any mismatch or decode
@@ -77,22 +123,20 @@ fn decode_frame_from_span<V: CodecShared>(
     decode_item::<V>(&bytes[varint_len..frame_len], codec_config, compressed).ok()
 }
 
-/// Replay state for one data blob in a variable-size journal.
+/// Replay state over the journal's data blob.
 ///
 /// Unlike fixed replay, each yielded item must first decode a varint frame length. The byte
 /// `budget` caps how much frame data this state emits in one stream batch.
 struct ReplayState<'a, B: RBlob, V: Codec> {
-    /// Blob index, used in corruption messages.
-    blob: u64,
-    /// Sequential logical bytes for this blob.
+    /// Sequential logical bytes for the data blob.
     replay: BlobReplay<'a, B>,
     /// Target maximum number of encoded bytes decoded per batch.
     budget: u64,
     /// Next position to yield.
     pos: u64,
-    /// Exclusive end position within this blob.
+    /// Exclusive end position.
     end_pos: u64,
-    /// Byte offset of the next frame in this blob.
+    /// Byte offset of the next frame.
     offset: u64,
     /// Codec configuration for decoded items.
     codec_config: V::Cfg,
@@ -104,7 +148,7 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
 impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V> {
     type Item = V;
 
-    /// Decode the next batch of varint-framed items from this blob.
+    /// Decode the next batch of varint-framed items.
     async fn next_batch(mut self) -> Option<(Vec<Result<(u64, V), Error>>, Self)> {
         if self.pos == self.end_pos {
             return None;
@@ -123,8 +167,8 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 Ok(true) => {}
                 Ok(false) if self.replay.remaining() == 0 => {
                     batch.push(Err(Error::Corruption(format!(
-                        "data blob {} ended before position {}",
-                        self.blob, self.pos
+                        "data blob ended before position {}",
+                        self.pos
                     ))));
                     self.pos = self.end_pos;
                     return Some((batch, self));
@@ -143,8 +187,8 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 Err(err) => {
                     if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
                         batch.push(Err(Error::Corruption(format!(
-                            "incomplete frame header in data blob {} at offset {}",
-                            self.blob, self.offset
+                            "incomplete frame header in the data blob at offset {}",
+                            self.offset
                         ))));
                     } else {
                         batch.push(Err(err));
@@ -158,8 +202,8 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 Ok(true) => {}
                 Ok(false) => {
                     batch.push(Err(Error::Corruption(format!(
-                        "incomplete frame in data blob {} at offset {}",
-                        self.blob, self.offset
+                        "incomplete frame in the data blob at offset {}",
+                        self.offset
                     ))));
                     self.pos = self.end_pos;
                     return Some((batch, self));
@@ -233,12 +277,6 @@ pub struct Config<C> {
     /// Base partition name. Sub-partitions will be created by appending DATA_SUFFIX and OFFSETS_SUFFIX.
     pub partition: String,
 
-    /// The number of items to store in each blob.
-    ///
-    /// Once set, this value cannot be changed across restarts.
-    /// All non-final blobs are logically full.
-    pub items_per_section: NonZeroU64,
-
     /// Optional compression level for stored items.
     pub compression: Option<u8>,
 
@@ -248,12 +286,12 @@ pub struct Config<C> {
     /// Page cache for buffering reads from the underlying storage.
     pub page_cache: CacheRef,
 
-    /// Write buffer size for each blob.
+    /// Write buffer size for each of the journal's two blobs.
     pub write_buffer: NonZeroUsize,
 }
 
 impl<C> Config<C> {
-    /// Returns the partition name for the data blobs.
+    /// Returns the partition name for the data blob.
     fn data_partition(&self) -> String {
         format!("{}{}", self.partition, DATA_SUFFIX)
     }
@@ -264,50 +302,55 @@ impl<C> Config<C> {
     }
 }
 
-/// A contiguous journal with variable-size entries.
-///
-/// This journal manages blob assignment automatically, allowing callers to append items
-/// sequentially without manually tracking blob indexes.
-///
-/// # Crash consistency
-///
-/// The storage backend restores every blob to exactly its last-synced state after a crash, so
-/// torn frames cannot exist, so a frame that fails to decode is corruption. The offsets journal
-/// and the data blobs can never diverge across a crash either: every mutation stages both sides
-/// in ONE atomic batch.
-///
-/// * `sync` stages the dirty data blobs, the offsets journal, and its boundary record together.
-/// * Appends at a blob rollover stage the filled data blob, the filled offsets blob, both
-///   successor creations, and the entries that filled them together.
-/// * `rewind` stages both truncations (and any cross-blob removals) together (see
-///   [Journal::rewind]).
-/// * `prune` stages the data-blob removals, the offsets prune, and the boundary record together.
-///
-/// Init therefore only verifies (no frame scanning, no repair): every retained data blob's byte
-/// length must exactly match the frame end recorded by its last offsets entry (zero for a blob
-/// with no entries). Any mismatch — including offsets ending behind the oldest data blob or
-/// starting in a different blob than the data — is corruption.
+/// Implementation of [super::Mutable] for variable-size value journals: one frame-encoded data
+/// blob indexed by a [super::fixed] journal of frame-end offsets (see the module docs).
 pub struct Journal<E: Context, V: Codec> {
-    /// The data blobs: sealed history plus the writable tail.
-    blobs: Writable<E>,
+    /// The storage context for data-blob operations.
+    context: E,
 
-    /// Index mapping each position to the byte offset one past its frame's end within its data
-    /// blob. A frame starts where its predecessor ends (byte 0 for the first frame of a blob).
+    /// The partition holding [Self::data].
+    data_partition: String,
+
+    /// The single data blob holding every frame.
+    data: Writer<E::Blob>,
+
+    /// Index mapping each position to the byte offset one past its frame's end in [Self::data].
+    /// A frame starts where its predecessor ends (the data blob's floor for the first retained
+    /// frame).
     offsets: fixed::Journal<E, u64>,
 
     /// The readable positions; `bounds.end` is the next append position.
-    bounds: Range<u64>,
-
-    /// Earliest data blob modified since the last `sync()`.
-    dirty_from_blob: Option<u64>,
-
-    /// The number of items per blob.
     ///
     /// # Invariant
     ///
-    /// This value is immutable after initialization and must remain consistent
-    /// across restarts. Changing this value will result in data loss or corruption.
-    items_per_blob: NonZeroU64,
+    /// `bounds` equals the offsets journal's bounds, and the data blob's floor is the byte
+    /// offset where `bounds.start`'s frame begins (the data blob's size when empty).
+    bounds: Range<u64>,
+
+    /// Whether the data blob has mutations not yet staged for durability.
+    dirty: bool,
+
+    /// The page cache backing [Self::data] (retained to rebuild it after a clear, an ALPHA
+    /// path — hence the manual stability gate).
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))]
+    page_cache: CacheRef,
+
+    /// The write buffer size for [Self::data] (retained to rebuild it after a clear, an ALPHA
+    /// path — hence the manual stability gate).
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))]
+    write_buffer: NonZeroUsize,
 
     /// Optional compression level when encoding items.
     compression: Option<u8>,
@@ -321,17 +364,18 @@ pub struct Journal<E: Context, V: Codec> {
 
 /// A reader over a variable journal.
 pub struct Reader<'a, E: Context, V: Codec> {
-    /// The journal's data blobs.
-    data: Blobs<'a, E::Blob>,
+    /// The journal's data blob.
+    data: Blob<'a, E::Blob>,
 
     /// The readable position range `[start, end)`.
     bounds: Range<u64>,
 
-    /// Maps each position to the byte offset one past its frame's end within its data blob.
-    offsets: fixed::Reader<'a, E, u64>,
+    /// Byte offset in the data blob where `bounds.start`'s frame begins (the data blob's
+    /// floor when this reader was created).
+    start_offset: u64,
 
-    /// The number of items in each blob.
-    items_per_blob: NonZeroU64,
+    /// Maps each position to the byte offset one past its frame's end in the data blob.
+    offsets: fixed::Reader<'a, E, u64>,
 
     /// [Codec] configuration for decoding items.
     codec_config: V::Cfg,
@@ -355,53 +399,43 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         Ok(())
     }
 
-    /// Whether `position` holds the first retained frame of its data blob (starting at byte 0).
-    const fn is_first_in_blob(&self, position: u64) -> bool {
-        position.is_multiple_of(self.items_per_blob.get()) || position == self.bounds.start
-    }
-
     /// Byte offset where `position`'s frame starts, if resolvable without I/O: the first
-    /// retained frame of a blob starts at byte 0, and any other frame starts where its
+    /// retained frame starts at the captured floor, and any other frame starts where its
     /// predecessor's entry says it ends.
     fn frame_start_sync(&self, position: u64) -> Option<u64> {
-        if self.is_first_in_blob(position) {
-            return Some(0);
+        if position == self.bounds.start {
+            return Some(self.start_offset);
         }
         self.offsets.try_read_sync(position - 1)
     }
 
     /// Byte offset where `position`'s frame starts, reading the predecessor entry if needed.
     async fn frame_start(&self, position: u64) -> Result<u64, Error> {
-        if self.is_first_in_blob(position) {
-            return Ok(0);
+        if position == self.bounds.start {
+            return Ok(self.start_offset);
         }
         self.offsets.read(position - 1).await
     }
 
-    /// Read the varint-framed item at byte `offset` via `blob`.
-    async fn read_at_offset(&self, blob: &Blob<'_, E::Blob>, offset: u64) -> Result<V, Error> {
-        read_frame_at(blob, offset, &self.codec_config, self.compressed)
+    /// Read the varint-framed item at byte `offset`.
+    async fn read_at_offset(&self, offset: u64) -> Result<V, Error> {
+        read_frame_at(&self.data, offset, &self.codec_config, self.compressed)
             .await
             .map(|(_, _, item)| item)
     }
 
-    /// Read consecutive items in one blob. `offsets` must be strictly increasing byte offsets of
+    /// Read consecutive items. `offsets` must be strictly increasing byte offsets of
     /// byte-adjacent frames.
     ///
-    /// Returns [Error::OffsetDataMismatch] if the on-disk varint at any offset reports a size
-    /// inconsistent with the gap to the next offset, or [Error::Corruption] if the offsets are not
-    /// strictly increasing.
-    async fn read_consecutive(
-        &self,
-        blob_handle: &Blob<'_, E::Blob>,
-        blob: u64,
-        offsets: &[u64],
-    ) -> Result<Vec<V>, Error> {
-        // Trivial spans take the single-item path; there is nothing to batch.
+    /// Returns [Error::Corruption] if the offsets are not strictly increasing or if the
+    /// on-disk varint at any offset reports a size inconsistent with the gap to the next
+    /// offset.
+    async fn read_run(&self, offsets: &[u64]) -> Result<Vec<V>, Error> {
+        // Trivial runs take the single-item path; there is nothing to batch.
         if offsets.len() <= 1 {
             let mut items = Vec::with_capacity(offsets.len());
             for &offset in offsets {
-                items.push(self.read_at_offset(blob_handle, offset).await?);
+                items.push(self.read_at_offset(offset).await?);
             }
             return Ok(items);
         }
@@ -409,7 +443,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         for window in offsets.windows(2) {
             if window[1] <= window[0] {
                 return Err(Error::Corruption(format!(
-                    "non-increasing offsets in blob {blob}: {} >= {}",
+                    "non-increasing frame offsets: {} >= {}",
                     window[0], window[1]
                 )));
             }
@@ -420,7 +454,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let start = offsets[0];
         let end = offsets[offsets.len() - 1];
         let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
-        let bytes = blob_handle.read_at(start, range_len).await?.coalesce();
+        let bytes = self.data.read_at(start, range_len).await?.coalesce();
         let bytes = bytes.as_ref();
 
         let mut items = Vec::with_capacity(offsets.len());
@@ -435,12 +469,10 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let (size, varint_len) = decode_length_prefix(&mut cursor)?;
             let actual_len = size.checked_add(varint_len).ok_or(Error::OffsetOverflow)?;
             if actual_len != item_len {
-                return Err(Error::OffsetDataMismatch {
-                    section: blob,
-                    offset,
-                    expected_len: item_len,
-                    actual_len,
-                });
+                return Err(Error::Corruption(format!(
+                    "offset/data layout mismatch at offset {offset}: offsets journal \
+                     expected {item_len}, data varint reports {actual_len}"
+                )));
             }
 
             // Validation above guarantees strictly increasing offsets, so `data_end` never
@@ -460,17 +492,14 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             local_offset = data_end;
         }
 
-        items.push(self.read_at_offset(blob_handle, end).await?);
+        items.push(self.read_at_offset(end).await?);
         Ok(items)
     }
 
-    /// Read the varint-framed item for `position` at byte `offset` from cached bytes, returning
-    /// `None` on any miss.
-    fn try_read_frame_sync(&self, position: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
-        let blob = self
-            .data
-            .get(position_to_blob(position, self.items_per_blob.get()))?;
-        let remaining = blob.size().checked_sub(offset)?;
+    /// Read the varint-framed item at byte `offset` from cached bytes, returning `None` on any
+    /// miss.
+    fn try_read_frame_sync(&self, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
+        let remaining = self.data.size().checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
         if header_len == 0 {
             return None;
@@ -478,7 +507,10 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
         // Read the varint header to determine item size.
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !blob.try_read_sync_into(&mut header[..header_len], offset) {
+        if !self
+            .data
+            .try_read_sync_into(&mut header[..header_len], offset)
+        {
             return None;
         }
         let mut cursor = Cursor::new(&header[..header_len]);
@@ -512,7 +544,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
         // Otherwise try reading the full item from cache.
         buf.resize(item_len, 0);
-        if !blob.try_read_sync_into(buf, offset) {
+        if !self.data.try_read_sync_into(buf, offset) {
             return None;
         }
         decode_item::<V>(
@@ -523,60 +555,36 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         .ok()
     }
 
-    /// Build one replay state for each data blob touched by `[start_pos, bounds.end)`.
-    async fn replay_states(
+    /// Build the replay state for `[start_pos, bounds.end)`, or `None` when the range is empty.
+    async fn replay_state(
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
-    ) -> Result<Vec<ReplayState<'a, E::Blob, V>>, Error> {
-        let bounds = self.bounds();
+    ) -> Result<Option<ReplayState<'a, E::Blob, V>>, Error> {
+        let bounds = self.bounds.clone();
         if start_pos > bounds.end {
             return Err(Error::ItemOutOfRange(start_pos));
         }
         if start_pos < bounds.start {
             return Err(Error::ItemPruned(start_pos));
         }
-
-        let mut states = Vec::new();
-        if start_pos < bounds.end {
-            // The first blob may start at a nonzero data offset; subsequent blob states always
-            // start at byte offset 0.
-            let items_per_blob = self.items_per_blob.get();
-            let start_blob = position_to_blob(start_pos, items_per_blob);
-            let end_blob = position_to_blob(bounds.end - 1, items_per_blob);
-            let start_offset = self.frame_start(start_pos).await?;
-
-            for blob in start_blob..=end_blob {
-                let blob_handle = self
-                    .data
-                    .get(blob)
-                    .expect("positions in bounds map to a retained blob");
-                let offset = if blob == start_blob { start_offset } else { 0 };
-
-                let first_pos = if blob == start_blob {
-                    start_pos
-                } else {
-                    blob_first_position(blob, items_per_blob)?
-                };
-                let end_pos = super::blob_end_position(blob, items_per_blob, bounds.end);
-
-                // Store codec settings in the state because the stream owns states across await
-                // points and cannot borrow `self`.
-                states.push(ReplayState::<E::Blob, V> {
-                    blob,
-                    replay: blob_handle.replay_from(offset, buffer)?,
-                    budget: buffer.get() as u64,
-                    pos: first_pos,
-                    end_pos,
-                    offset,
-                    codec_config: self.codec_config.clone(),
-                    compressed: self.compressed,
-                    _marker: PhantomData,
-                });
-            }
+        if start_pos == bounds.end {
+            return Ok(None);
         }
 
-        Ok(states)
+        // Store codec settings in the state because the stream owns the state across await
+        // points and cannot borrow `self`.
+        let offset = self.frame_start(start_pos).await?;
+        Ok(Some(ReplayState::<E::Blob, V> {
+            replay: self.data.clone().replay_from(offset, buffer)?,
+            budget: buffer.get() as u64,
+            pos: start_pos,
+            end_pos: bounds.end,
+            offset,
+            codec_config: self.codec_config.clone(),
+            compressed: self.compressed,
+            _marker: PhantomData,
+        }))
     }
 
     /// Validate a batched-read request: non-empty `positions` must be strictly increasing and
@@ -606,45 +614,27 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         miss_positions: &[u64],
         miss_offsets: &[u64],
     ) -> Result<(), Error> {
-        // Group runs of consecutive positions that fall into the same blob, then read all runs
-        // concurrently.
-        let items_per_blob = self.items_per_blob.get();
+        // Group runs of consecutive positions (whose frames are byte-adjacent), then read all
+        // runs concurrently.
         let mut runs = Vec::new();
-        let mut group_start = 0;
-        while group_start < miss_positions.len() {
-            let blob = position_to_blob(miss_positions[group_start], items_per_blob);
-            let mut group_end = group_start + 1;
-            while group_end < miss_positions.len()
-                && position_to_blob(miss_positions[group_end], items_per_blob) == blob
+        let mut run_start = 0;
+        while run_start < miss_positions.len() {
+            let mut run_end = run_start + 1;
+            while run_end < miss_positions.len()
+                && miss_positions[run_end - 1].checked_add(1) == Some(miss_positions[run_end])
             {
-                group_end += 1;
+                run_end += 1;
             }
-
-            let blob_handle = self
-                .data
-                .get(blob)
-                .expect("positions in bounds map to a retained blob");
-            // Consecutive positions are byte-adjacent frames, so each next offset gives the
-            // previous frame's encoded length.
-            let mut run_start = group_start;
-            while run_start < group_end {
-                let mut run_end = run_start + 1;
-                while run_end < group_end
-                    && miss_positions[run_end - 1].checked_add(1) == Some(miss_positions[run_end])
-                {
-                    run_end += 1;
-                }
-                runs.push((run_start, run_end, blob, blob_handle.clone()));
-                run_start = run_end;
-            }
-            group_start = group_end;
+            runs.push((run_start, run_end));
+            run_start = run_end;
         }
 
-        let run_items = try_join_all(runs.iter().map(|(run_start, run_end, blob, handle)| {
-            self.read_consecutive(handle, *blob, &miss_offsets[*run_start..*run_end])
-        }))
+        let run_items = try_join_all(
+            runs.iter()
+                .map(|&(run_start, run_end)| self.read_run(&miss_offsets[run_start..run_end])),
+        )
         .await?;
-        for ((run_start, _, _, _), items) in runs.iter().zip(run_items) {
+        for (&(run_start, _), items) in runs.iter().zip(run_items) {
             for (k, item) in items.into_iter().enumerate() {
                 let slot = miss_indices.map_or(run_start + k, |indices| indices[run_start + k]);
                 result[slot] = Some(item);
@@ -665,13 +655,13 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             return resolved;
         }
 
-        // A frame at position p spans [entry(p - 1), entry(p)) within its blob (starting at 0
-        // for the first retained frame of a blob), so one batched pass over the offsets journal
-        // resolves every queried frame's extent. Positions and their in-blob predecessors
-        // interleave into one strictly increasing lookup list.
+        // A frame at position p spans [entry(p - 1), entry(p)) — starting at the captured
+        // floor for the first retained position — so one batched pass over the offsets journal
+        // resolves every queried frame's extent. Positions and their predecessors interleave
+        // into one strictly increasing lookup list.
         let mut lookups: Vec<u64> = Vec::with_capacity(positions.len() * 2);
         for &position in positions {
-            if !self.is_first_in_blob(position) && position > 0 {
+            if position != self.bounds.start && position > 0 {
                 let previous = position - 1;
                 if lookups.last() != Some(&previous) {
                     lookups.push(previous);
@@ -683,10 +673,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
         let offsets = self.offsets.probe_items(&lookups);
 
-        // Split queried frames into known extents (served below by one batched cache read per
-        // data blob) and unknown extents (start known but end lookup missed, served by the
-        // per-frame path). Frames whose start could not be resolved stay `None`.
-        let items_per_blob = self.items_per_blob.get();
+        // Split queried frames into known extents (served below by one batched cache read) and
+        // unknown extents (start known but end lookup missed, served by the per-frame path).
+        // Frames whose start could not be resolved stay `None`.
         let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
         let mut singles: Vec<(usize, u64)> = Vec::new();
         let mut lookup_idx = 0;
@@ -699,8 +688,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             }
 
             // The predecessor lookup (when needed) sits immediately before the position's own.
-            let offset = if self.is_first_in_blob(position) {
-                Some(0)
+            let offset = if position == self.bounds.start {
+                Some(self.start_offset)
             } else {
                 offsets[lookup_idx - 1]
             };
@@ -715,35 +704,20 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             }
         }
 
-        let mut buf = Vec::new();
         let mut hits = 0u64;
 
-        // Serve known-extent frames: one batched cache read per data blob group.
-        let mut group_start = 0;
-        while group_start < extents.len() {
-            let blob_num = position_to_blob(positions[extents[group_start].0], items_per_blob);
-            let mut group_end = group_start + 1;
-            while group_end < extents.len()
-                && position_to_blob(positions[extents[group_end].0], items_per_blob) == blob_num
-            {
-                group_end += 1;
-            }
-            let group = &extents[group_start..group_end];
-            group_start = group_end;
-
-            let Some(blob) = self.data.get(blob_num) else {
-                continue;
-            };
-            let ranges: Vec<(u64, usize)> = group
+        // Serve known-extent frames with one batched cache read.
+        if !extents.is_empty() {
+            let ranges: Vec<(u64, usize)> = extents
                 .iter()
                 .map(|&(_, offset, len)| (offset, len))
                 .collect();
             let total: usize = ranges.iter().map(|&(_, len)| len).sum();
-            buf.resize(total, 0);
-            let missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
+            let mut buf = vec![0u8; total];
+            let missed = self.data.try_read_ranges_sync_into(&mut buf, &ranges);
             let mut missed = missed.into_iter().peekable();
             let mut local = 0usize;
-            for (range_idx, &(idx, _, len)) in group.iter().enumerate() {
+            for (range_idx, &(idx, _, len)) in extents.iter().enumerate() {
                 let slot = &buf[local..local + len];
                 local += len;
                 if missed.peek() == Some(&range_idx) {
@@ -762,7 +736,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         // Per-frame path for frames whose extent is unknown.
         let mut frame_buf = Vec::new();
         for (idx, offset) in singles {
-            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut frame_buf) {
+            if let Some(item) = self.try_read_frame_sync(offset, &mut frame_buf) {
                 out[idx] = Some(item);
                 hits += 1;
             }
@@ -822,7 +796,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
 
     /// Complete probe misses (strictly increasing by position): resolve outstanding frame
     /// starts without the offsets journal's cache pass (those entries just missed it) and read
-    /// the frames with one batched pass per blob run. Returns one item per miss, in order.
+    /// the frames with one batched pass per run. Returns one item per miss, in order.
     async fn fetch_misses(&self, misses: &[Miss]) -> Result<Vec<V>, Error> {
         if misses.is_empty() {
             return Ok(Vec::new());
@@ -834,8 +808,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             self.validate_readable(miss.position)?;
         }
 
-        // A frame start is its predecessor's entry. First-in-blob positions resolve to zero in
-        // the sync pass and are never unresolved here.
+        // A frame start is its predecessor's entry. The boundary position resolves to the
+        // captured floor in the sync pass and is never unresolved here.
         let unresolved: Vec<u64> = misses
             .iter()
             .filter(|miss| miss.offset.is_none())
@@ -850,7 +824,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             .await
             .map_err(|e| match e {
                 Error::ItemOutOfRange(e) | Error::ItemPruned(e) => {
-                    Error::Corruption(format!("blob/item should be found, but got: {e}"))
+                    Error::Corruption(format!("offsets entry should be found, but got: {e}"))
                 }
                 other => other,
             })?;
@@ -896,7 +870,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         let cached_offset = self.frame_start_sync(position);
         if let Some(offset) = cached_offset {
             let mut buf = Vec::new();
-            if let Some(item) = self.try_read_frame_sync(position, offset, &mut buf) {
+            if let Some(item) = self.try_read_frame_sync(offset, &mut buf) {
                 self.metrics.cache_hits.inc();
                 self.metrics.items_read.inc();
                 return Ok(item);
@@ -908,12 +882,8 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             Some(offset) => offset,
             None => self.frame_start(position).await?,
         };
-        let blob = self
-            .data
-            .get(position_to_blob(position, self.items_per_blob.get()))
-            .expect("position in bounds maps to a retained blob");
         self.metrics.cache_misses.inc();
-        let item = self.read_at_offset(&blob, offset).await?;
+        let item = self.read_at_offset(offset).await?;
         self.metrics.items_read.inc();
         Ok(item)
     }
@@ -933,7 +903,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         self.validate_readable(position).ok()?;
         let offset = self.frame_start_sync(position)?;
         let mut buf = Vec::new();
-        let item = self.try_read_frame_sync(position, offset, &mut buf)?;
+        let item = self.try_read_frame_sync(offset, &mut buf)?;
         self.metrics.cache_hits.inc();
         self.metrics.items_read.inc();
         Some(item)
@@ -954,133 +924,183 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let states = self.replay_states(start_pos, buffer).await?;
+        let state = self.replay_state(start_pos, buffer).await?;
 
-        Ok(super::replay_stream_from_states(states))
+        Ok(super::replay_stream(state))
     }
 }
 
 impl<E: Context, V: CodecShared> Journal<E, V> {
-    /// Mark all data blobs from `blob` onward as dirty.
-    fn mark_dirty_from(&mut self, blob: u64) {
-        self.dirty_from_blob = Some(
-            self.dirty_from_blob
-                .map_or(blob, |existing| existing.min(blob)),
-        );
-    }
-
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
     ///
-    /// Every mutation stages the offsets journal and the data blobs in ONE batch, so init only
-    /// verifies that the two sides agree (see the type docs); any disagreement is corruption.
+    /// Every mutation stages the offsets journal and the data blob in ONE batch, so init
+    /// verifies that the two sides agree and reconciles their pruned floors (see the module
+    /// docs). Any other disagreement is corruption.
     #[boxed]
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let items_per_blob = cfg.items_per_section.get();
-        let data_partition = cfg.data_partition();
-        let data_context = context.child("data");
-
-        let offsets = fixed::Journal::<E, u64>::init(
+        let mut offsets = fixed::Journal::<E, u64>::init(
             context.child("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
-                items_per_blob: cfg.items_per_section,
                 page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
             },
         )
         .await?;
 
-        let partition = Partition::new(
-            data_context,
-            data_partition,
-            cfg.page_cache,
-            cfg.write_buffer,
-        );
-        let pending = partition.open_all().await?;
+        let data_partition = cfg.data_partition();
+        let data_context = context.child("data");
+        let (raw, size) = data_context
+            .open(&data_partition, BLOB_NAME)
+            .await
+            .map_err(Error::Runtime)?;
 
-        // Verify the data blobs against the offsets journal and recover the bounds.
-        let bounds = Self::recover_bounds(&pending, &offsets, items_per_blob).await?;
+        // Verify the data blob against the offsets journal and reconcile the floors (which
+        // may re-prune the offsets journal).
+        let bounds = Self::recover_bounds(&mut offsets, &raw, size).await?;
 
-        // Seal every blob below the tail and assemble the blobs.
-        let tail_blob = position_to_blob(bounds.end, items_per_blob);
-        let blobs = Writable::recover(partition, pending, tail_blob).await?;
+        let data = Writer::new(raw, size, cfg.write_buffer.get(), cfg.page_cache.clone())
+            .await
+            .map_err(Error::Runtime)?;
 
         let metrics = Metrics::new(context);
-        metrics.update(bounds.end, bounds.start, items_per_blob);
+        metrics.update(bounds.end, bounds.start);
 
         Ok(Self {
-            blobs,
+            context: data_context,
+            data_partition,
+            data,
             offsets,
             bounds,
-            dirty_from_blob: None,
-            items_per_blob: cfg.items_per_section,
+            dirty: false,
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            page_cache: cfg.page_cache,
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            write_buffer: cfg.write_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             metrics: Arc::new(metrics),
         })
     }
 
+    /// Verify the offsets journal against the data blob, reconcile the two pruned floors, and
+    /// recover the journal bounds (see the module docs on recovery and crash reconciliation).
+    ///
+    /// Verification: with no retained entries the data blob must hold no retained bytes
+    /// (size == floor), and otherwise it must end exactly at the last entry. Reconciliation:
+    /// retained entries ending at or below the data floor index frames whose bytes are gone
+    /// (the data floor committed ahead of the offsets floor), so the offsets journal is
+    /// re-pruned to the first surviving frame — whose recorded start must equal the floor
+    /// exactly, anything else being corruption.
+    async fn recover_bounds(
+        offsets: &mut fixed::Journal<E, u64>,
+        raw: &E::Blob,
+        size: u64,
+    ) -> Result<Range<u64>, Error> {
+        let mut bounds = offsets.pruning_boundary()..offsets.size();
+        let floor = raw.floor();
+
+        // With no retained entries the data blob must be empty of retained bytes: entries
+        // become durable only in a batch that also captures the data bytes they index.
+        if bounds.is_empty() {
+            if size != floor {
+                return Err(Error::Corruption(format!(
+                    "data blob holds bytes {floor}..{size} but the offsets journal has no \
+                     entries at {}",
+                    bounds.end
+                )));
+            }
+            return Ok(bounds);
+        }
+
+        // The data blob must end exactly at the last indexed frame's end.
+        let last = offsets.read(bounds.end - 1).await?;
+        if last != size {
+            return Err(Error::Corruption(format!(
+                "data blob holds {size} bytes but its entries end at {last}"
+            )));
+        }
+
+        // Reconcile the floors. The first retained frame ending past the data floor is the
+        // common case (the floors committed together). Anything before it was pruned from the
+        // data blob ahead of the offsets journal.
+        if offsets.read(bounds.start).await? <= floor {
+            // Binary search for the first retained position whose frame ends past the floor
+            // (entries are strictly increasing).
+            let (mut lo, mut hi) = (bounds.start + 1, bounds.end);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if offsets.read(mid).await? <= floor {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            // The floor must be exactly where the first surviving frame begins (its
+            // predecessor's recorded end). A floor inside a frame is not a state any prune
+            // produces: corruption.
+            let frame_start = offsets.read(lo - 1).await?;
+            if frame_start != floor {
+                return Err(Error::Corruption(format!(
+                    "data floor {floor} falls inside the frame spanning {frame_start}..{}",
+                    offsets.read(lo.min(bounds.end - 1)).await?
+                )));
+            }
+
+            // Re-prune the laggard offsets journal to the authoritative boundary.
+            let pruned = offsets.prune(lo).await?;
+            debug_assert!(pruned, "the boundary strictly advances");
+            bounds.start = lo;
+        }
+
+        Ok(bounds)
+    }
+
     /// Initialize an empty [Journal] at the given logical `size`.
     ///
-    /// This discards any existing data and offsets: the data partition removal, the offsets
-    /// blob removals, and the offsets boundary record land in ONE batch, so the reset is
-    /// old-state-or-new-state.
+    /// This discards any existing data (the prior image must still be readable: a corrupt
+    /// store fails initialization rather than being silently discarded). The journal returned
+    /// has `bounds() == size..size` and the next append lands at position `size`.
     ///
-    /// Returns a journal with journal.bounds() == Range{start: size, end: size}
-    /// and next append at position `size`.
+    /// # Crash Safety
+    ///
+    /// The cleared image is durable when this call returns. A crash during the call recovers
+    /// the journal in its prior state or with bounds `size..size` — except when `size`
+    /// precedes the offsets journal's pruning boundary, which forces both partitions to be
+    /// removed and recreated, and a crash between those two commits recovers an EMPTY journal
+    /// at position 0 (see the module docs on clearing).
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        // A journal sized at `u64::MAX` can never accept an append, matching the fixed journal.
-        if size == u64::MAX {
-            return Err(Error::SizeOverflow);
-        }
-        let data_partition = cfg.data_partition();
-        let data_context = context.child("data");
-        let offsets_partition = cfg.offsets_partition();
-        let offsets_context = context.child("offsets");
-
-        // Fail before mutating if the offsets blob partitions are already inconsistent.
-        Partition::select(&offsets_context, &offsets_partition).await?;
-
-        // One batch resets everything; `init` then recovers the cleared journal.
-        let mut checkpoint =
-            super::checkpoint::Checkpoint::open(offsets_context.child("meta"), &offsets_partition)
-                .await?;
-        let mut batch = context.batch().await.map_err(Error::Runtime)?;
-        fixed::Journal::<E, u64>::stage_reset(
-            &offsets_context,
-            &offsets_partition,
-            &mut checkpoint,
-            size,
-            &mut batch,
-        )
-        .await?;
-        match data_context.scan(&data_partition).await {
-            Ok(_) => batch.remove(&data_partition, None),
-            Err(commonware_runtime::Error::PartitionMissing(_)) => {}
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-        batch.apply_sync().await.map_err(Error::Runtime)?;
-        drop(checkpoint);
-
-        Self::init(context, cfg).await
+        let mut journal = Self::init(context, cfg).await?;
+        journal.clear_to_size(size).await?;
+        Ok(journal)
     }
 
     /// Initialize a [Journal] for use in state sync.
     ///
-    /// The bounds are item locations (not blob indexes). This function prepares the
-    /// on-disk journal so that subsequent appends go to the correct physical location for the
-    /// requested range.
+    /// The bounds are item locations. This function prepares the on-disk journal so that
+    /// subsequent appends go to the correct physical location for the requested range.
     ///
     /// Behavior by existing on-disk state:
     /// - Fresh (no data): returns an empty journal, resetting to `range.start` if needed.
     /// - Stale (all data strictly before `range.start`): resets to `range.start` using the
     ///   crash-safe clear path and returns an empty journal.
-    /// - Overlap within [`range.start`, `range.end`]:
-    ///   - Prunes toward `range.start` (blob-aligned, so some items before
-    ///     `range.start` may be retained)
+    /// - Overlap within [`range.start`, `range.end`]: prunes to `range.start`, exactly.
     /// - Data beyond `range.end`: returns [Error::ItemOutOfRange].
     ///
     /// # Arguments
@@ -1103,9 +1123,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         debug!(
             range.start,
-            range.end,
-            items_per_blob = cfg.items_per_section.get(),
-            "initializing contiguous variable journal for sync"
+            range.end, "initializing contiguous variable journal for sync"
         );
 
         // Initialize contiguous journal
@@ -1128,8 +1146,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }
         }
 
-        // After a same-blob crash during a previous clear_to_size, the journal may recover to a
-        // stale position ahead of the requested start.
+        // After a crash during a previous clear_to_size, the journal may recover to a stale
+        // position ahead of the requested start.
         let bounds = journal.bounds.clone();
         if bounds.is_empty() && bounds.start > range.start {
             journal.clear_to_size(range.start).await?;
@@ -1170,12 +1188,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// # Durability
     ///
-    /// Unlike appends, a rewind is durable when this call returns, and it is ATOMIC: the
-    /// offsets journal's truncation, the data-side truncation (and any cross-blob removals),
-    /// and any still-dirty retained state land in ONE batch with one commit. If the
-    /// truncations were instead deferred to `sync`, a rollover after the rewind could durably
-    /// publish new entries over old data bytes — a state init cannot tell apart from a
-    /// consistent one.
+    /// Unlike appends, a rewind is durable when this call returns, and it is ATOMIC: the data
+    /// blob's truncation, the offsets journal's truncation, and any still-dirty retained
+    /// state land in ONE batch with one commit, so no crash can leave the two sides
+    /// describing different histories.
     ///
     /// # Errors
     ///
@@ -1198,44 +1214,27 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             return Err(Error::ItemPruned(size));
         }
 
-        let discard_blob = position_to_blob(size, self.items_per_blob.get());
-
-        // The byte offset of the first discarded item is the data truncation point.
-        let discard_offset =
-            if size.is_multiple_of(self.items_per_blob.get()) || size == self.bounds.start {
-                0
-            } else {
-                self.offsets.read(size - 1).await?
-            };
-
-        // ONE batch stages the whole rewind: the offsets journal's truncation (staged first so
-        // the sequential test fallback preserves the old offsets-then-data order) and the
-        // data-side truncation plus removals. Dirty state needs no extra staging: appends
-        // dirty only the tail and every rollover, prune, and sync commits, so all dirty blobs
-        // are at or above `discard_blob` — captured by the staged truncation or removed.
-        debug_assert!(self
-            .dirty_from_blob
-            .is_none_or(|dirty| dirty >= discard_blob));
-        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
-        self.offsets.rewind_into(size, &mut batch).await?;
-        if discard_blob == self.blobs.tail_blob_index() {
-            self.blobs
-                .rewind_tail_into(discard_offset, &mut batch)
-                .await?;
+        // The byte offset of the first discarded item's frame is the data truncation point.
+        let offset = if size == self.bounds.start {
+            self.data.floor()
         } else {
-            self.blobs
-                .rewind_into_sealed_into(discard_blob, discard_offset, &mut batch)
-                .await?;
-        }
+            self.offsets.read(size - 1).await?
+        };
+
+        // ONE batch stages the whole rewind, data before offsets (see the module docs on
+        // staging order). Truncations stage full durability membership, so no dirty state
+        // survives the commit.
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+        self.data
+            .resize_into(offset, &mut batch)
+            .await
+            .map_err(Error::Runtime)?;
+        self.dirty = false;
+        self.offsets.rewind_into(size, &mut batch).await?;
         batch.apply_sync().await.map_err(Error::Runtime)?;
-        self.dirty_from_blob = None;
 
         self.bounds.end = size;
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        self.metrics.update(self.bounds.end, self.bounds.start);
 
         Ok(())
     }
@@ -1331,101 +1330,58 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 "prepared append compression setting does not match journal".into(),
             ));
         }
-        let encoded = IoBuf::from(encoded);
 
-        // Reject the append before writing anything (to either the data blobs or offsets
-        // journal) if it would push the size past `u64::MAX`.
-        self.bounds
+        // Reject the append before writing anything (to either blob) if it would push the
+        // size past `u64::MAX` items, past an offsets journal byte size that is
+        // representable, or past a representable data byte offset.
+        let end = self
+            .bounds
             .end
             .checked_add(items_count as u64)
             .ok_or(Error::SizeOverflow)?;
+        end.checked_mul(fixed::Journal::<E, u64>::CHUNK_SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
+        let base = self.data.size();
+        base.checked_add(encoded.len() as u64)
+            .ok_or(Error::OffsetOverflow)?;
 
-        let items_per_blob = self.items_per_blob.get();
-        self.mark_dirty_from(position_to_blob(self.bounds.end, items_per_blob));
-        let mut written = 0;
-        while written < items_count {
-            let batch_count = super::batch_count_to_blob_boundary(
-                self.bounds.end,
-                items_count - written,
-                items_per_blob,
-            );
-            let batch_start = item_starts[written];
-            let batch_end = item_starts
-                .get(written + batch_count)
-                .copied()
-                .unwrap_or(encoded.len());
+        // Frame ends are absolute byte offsets in the data blob.
+        let ends: Vec<u64> = (0..items_count)
+            .map(|item| {
+                let frame_end = item_starts.get(item + 1).copied().unwrap_or(encoded.len());
+                base + frame_end as u64
+            })
+            .collect();
 
-            // Append pre-encoded data to the tail, then convert relative item boundaries into
-            // absolute frame end offsets. A large batch is written whole-page-direct to the
-            // blob; the returned offset is where this batch's first byte was written.
-            let base_offset = self
-                .blobs
-                .tail_writer()
-                .append_owned(encoded.slice(batch_start..batch_end))
-                .await
-                .map_err(Error::Runtime)?;
+        // Append the data bytes, then the entries indexing them. Both sides buffer, and the
+        // next sync stages them in ONE batch, so durable entries can never describe data
+        // bytes that were not captured by the same commit.
+        self.data
+            .append_owned(IoBuf::from(encoded))
+            .await
+            .map_err(Error::Runtime)?;
+        self.dirty = true;
+        let last = self.offsets.append_many(Many::Flat(&ends)).await?;
+        assert_eq!(last, end - 1);
 
-            let absolute_ends = (0..batch_count)
-                .map(|item| {
-                    let end = item_starts
-                        .get(written + item + 1)
-                        .copied()
-                        .unwrap_or(encoded.len());
-                    base_offset
-                        .checked_add((end - batch_start) as u64)
-                        .ok_or(Error::OffsetOverflow)
-                })
-                .collect::<Result<Vec<u64>, _>>()?;
-
-            // Append the frame ends for this blob batch to the offsets journal. At a blob
-            // boundary BOTH journals roll over, and everything lands in ONE batch: the
-            // offsets entries just appended, the offsets journal's rollover (filled blob +
-            // successor creation), the data journal's dirty blobs, and the data rollover.
-            // One commit, so the offsets journal can never become durably ahead of the data
-            // bytes it indexes, and "blob k+1 exists implies blob k is full and durable"
-            // holds atomically on both sides.
-            let last_offsets_pos =
-                if (self.bounds.end + batch_count as u64).is_multiple_of(items_per_blob) {
-                    let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
-                    let last_offsets_pos = self
-                        .offsets
-                        .append_many_into(Many::Flat(&absolute_ends), &mut batch)
-                        .await?;
-                    if let Some(dirty) = self.dirty_from_blob {
-                        self.blobs.sync_from_into(dirty, &mut batch).await?;
-                    }
-                    self.blobs.seal_tail_into(&mut batch).await?;
-                    batch.apply_sync().await.map_err(Error::Runtime)?;
-                    self.dirty_from_blob = Some(self.blobs.tail_blob_index());
-                    last_offsets_pos
-                } else {
-                    self.offsets.append_many(Many::Flat(&absolute_ends)).await?
-                };
-            assert_eq!(last_offsets_pos, self.bounds.end + batch_count as u64 - 1);
-
-            self.bounds.end += batch_count as u64;
-            written += batch_count;
-        }
-
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
-        Ok(self.bounds.end - 1)
+        self.bounds.end = end;
+        self.metrics.update(self.bounds.end, self.bounds.start);
+        Ok(end - 1)
     }
 
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
-    /// creation, and the snapshot stays readable across concurrent appends and prunes.
+    /// creation, and the snapshot stays readable across concurrent appends.
     ///
-    /// If the journal later rewinds into the returned reader's range, subsequent reads
-    /// from that range may observe unspecified contents.
+    /// If the journal later rewinds or clears into the returned reader's range, subsequent
+    /// reads from that range may observe unspecified contents. If the journal later PRUNES
+    /// into the reader's range, reads of the pruned positions may fail (the bytes drop at the
+    /// blob level and survive only while cached).
     pub async fn snapshot(&mut self) -> Result<Reader<'static, E, V>, Error> {
         Ok(Reader {
-            data: self.blobs.snapshot().await?,
+            data: Blob::Sealed(self.data.snapshot().await.map_err(Error::Runtime)?),
             bounds: self.bounds.clone(),
+            start_offset: self.data.floor(),
             offsets: self.offsets.snapshot().await?,
-            items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
             compressed: self.compression.is_some(),
             metrics: self.metrics.clone(),
@@ -1435,10 +1391,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// A reader borrowing the journal's live state.
     fn reader(&self) -> Reader<'_, E, V> {
         Reader {
-            data: self.blobs.reader(),
+            data: Blob::Writer(&self.data),
             bounds: self.bounds.clone(),
+            start_offset: self.data.floor(),
             offsets: self.offsets.reader(),
-            items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
             compressed: self.compression.is_some(),
             metrics: self.metrics.clone(),
@@ -1451,15 +1407,19 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.bounds.end
     }
 
-    /// Prune items at positions strictly less than `min_position`.
+    /// Prune items at positions below `min_position` (capped to the journal's size), exactly:
+    /// the new pruning boundary IS the requested position. Returns true if the boundary
+    /// advanced.
     ///
-    /// Returns `true` if any data was pruned, `false` otherwise.
+    /// Readers holding earlier snapshots may fail to read newly pruned positions (the bytes
+    /// drop at the blob level and survive only while cached); positions at or above the new
+    /// boundary stay readable everywhere.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
+    /// Both blobs' dirty bytes and their new floors land in ONE commit. The floors are
+    /// mutations whose durability follows that commit: a crash beforehand regresses them
+    /// (never the reverse) and init reconciles (see the module docs).
     pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
         if !self.prune_into(min_position, &mut batch).await? {
             return Ok(false);
         }
@@ -1467,88 +1427,83 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(true)
     }
 
-    /// Stage a prune with `batch`: the caller applies the batch. Returns true if a prune
-    /// was staged.
+    /// Stage a prune with `batch`: the caller applies the batch. Returns true if the boundary
+    /// advanced.
     ///
-    /// The batch stages everything the prune must commit atomically: dirty retained data
-    /// blobs (the prune target may be justified by an appended-but-unflushed item, e.g. a
-    /// consumer's commit record), the data-blob removals, and the offsets journal's own
-    /// staged prune (its dirty blobs, blob removals, and boundary record). No crash can
-    /// separate the data boundary from the offsets boundary.
+    /// Both blobs' buffered bytes are flushed and their native prunes run immediately (the
+    /// prune target may be justified by an appended-but-unflushed item, e.g. a consumer's
+    /// commit record); the batch then stages both blobs' durability so the floors and data
+    /// commit together, data before offsets (see the module docs on staging order).
+    ///
+    /// # Caller contract
+    ///
+    /// `batch` must not already stage over either of this journal's blobs: the native prunes
+    /// require them to have no open batch (writer exclusivity), so this must be the batch's
+    /// first touch of the journal. Call it before [Self::sync_into] when both join one batch.
     pub(crate) async fn prune_into(
         &mut self,
         min_position: u64,
         batch: &mut E::Batch,
     ) -> Result<bool, Error> {
-        let items_per_blob = self.items_per_blob.get();
-
-        // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = position_to_blob(min_position, items_per_blob);
-        let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
-        let min_blob = target_blob.min(tail_blob);
-
-        if min_blob <= self.blobs.oldest_blob_index() {
+        // Cap to the journal's size.
+        let min = min_position.min(self.bounds.end);
+        if min <= self.bounds.start {
             return Ok(false);
         }
 
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
+        // The byte where item `min`'s frame begins: its predecessor's recorded end. `min` is
+        // strictly above the boundary, so the predecessor's entry is retained.
+        let offset = self.offsets.read(min - 1).await?;
 
-        if let Some(dirty) = self.dirty_from_blob {
-            self.blobs
-                .sync_from_into(dirty.max(min_blob), batch)
-                .await?;
-            self.dirty_from_blob = None;
-        }
-        self.blobs.prune_into(min_blob, batch);
-        self.bounds.start = new_boundary;
-        self.offsets.prune_into(new_boundary, batch).await?;
+        // Prune the data blob FIRST (both the native mutation and the staged sync): the
+        // reconcilable crash direction is data-ahead-of-offsets, never the reverse.
+        self.data.prune(offset).await.map_err(Error::Runtime)?;
+        self.data.sync_into(batch).await.map_err(Error::Runtime)?;
+        self.dirty = false;
 
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        let pruned = self.offsets.prune_into(min, batch).await?;
+        debug_assert!(pruned, "the offsets boundary strictly advances");
+        self.bounds.start = min;
+
+        self.metrics.update(self.bounds.end, self.bounds.start);
 
         Ok(true)
     }
 
-    /// Stage the durability of dirty data blobs and the offsets journal
-    /// (including its checkpoint record) with `batch`: the whole batch
-    /// commits atomically, so no crash can separate data from offsets. Data
-    /// is still staged before offsets so a sequentially replayed batch (the
-    /// test-only mock fallback) preserves the data-then-offsets ordering
-    /// that keeps durable offsets at or behind the durable data bytes they
-    /// index.
+    /// Stage the durability of the data blob and the offsets journal with `batch`: the whole
+    /// batch commits atomically, so no crash can separate data from offsets. Data is staged
+    /// before offsets so even a sequentially replayed batch (the test-only mock fallback)
+    /// keeps durable entries at or behind the durable data bytes they index.
     pub(crate) async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
-        if let Some(start_blob) = self.dirty_from_blob {
-            self.blobs.sync_from_into(start_blob, batch).await?;
-            self.dirty_from_blob = None;
+        if self.dirty {
+            self.data.sync_into(batch).await.map_err(Error::Runtime)?;
+            self.dirty = false;
         }
         self.offsets.sync_into(batch).await
     }
 
     /// The storage context the journal operates on.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) const fn context(&self) -> &E {
-        self.blobs.context()
+        &self.context
     }
 
-    /// Durably persist the journal: dirty data blobs and the offsets
-    /// journal, one batch, one commit.
+    /// Durably persist the journal: the data blob and the offsets journal, one batch, one
+    /// commit.
     pub async fn sync(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
         self.sync_into(&mut batch).await?;
         batch.apply_sync().await.map_err(Error::Runtime)
     }
 
-    /// Remove any underlying blobs created by the journal.
+    /// Remove any persisted data created by the journal.
     ///
-    /// This destroys both the data blobs and the offsets journal: every partition's removal
-    /// lands in ONE atomic commit, so destruction is all-or-nothing.
+    /// This destroys both the data blob and the offsets journal: both partitions' removals
+    /// land in ONE atomic commit, so destruction is all-or-nothing.
     pub async fn destroy(self) -> Result<(), Error> {
-        let mut batch = self.context().batch().await.map_err(Error::Runtime)?;
+        let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
         self.destroy_into(&mut batch);
         batch.apply_sync().await.map_err(Error::Runtime)
     }
@@ -1556,128 +1511,80 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// [Self::destroy], staged with `batch`: every partition removal lands when the caller
     /// applies the batch with `apply_sync`, atomically with everything else it stages.
     pub(crate) fn destroy_into(self, batch: &mut E::Batch) {
-        self.blobs.stage_destroy(batch);
+        drop(self.data);
+        batch.remove(&self.data_partition, None);
         self.offsets.destroy_into(batch);
     }
 
     /// Clear all data and reset the journal to a new starting position.
     ///
-    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
-    /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
-    /// The data blob removals, the offsets blob removals, and the offsets boundary record land
-    /// in ONE batch, so a crash leaves the journal either in its prior state or fully cleared.
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused. After clearing, the
+    /// journal will behave as if initialized with `init_at_size(new_size)`.
+    ///
+    /// # Crash Safety
+    ///
+    /// The cleared image is durable when this call returns. A crash during the call recovers
+    /// the journal in its prior state or with bounds `new_size..new_size` — except when
+    /// `new_size` precedes the offsets journal's pruning boundary, which forces both
+    /// partitions to be removed and recreated, and a crash between those two commits recovers
+    /// an EMPTY journal at position 0 (see the module docs on clearing).
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
-        // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
+        // A journal sized at `u64::MAX` can never accept an append, and the offsets journal
+        // materializes at `new_size` entries, so the target must be byte-representable there.
+        // Both are checked before any mutation (the below-boundary path removes state that a
+        // later failure could not restore).
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
         }
+        new_size
+            .checked_mul(fixed::Journal::<E, u64>::CHUNK_SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
 
-        let mut batch = self.blobs.context().batch().await.map_err(Error::Runtime)?;
-        self.blobs.stage_clear(&mut batch);
-        self.offsets.stage_clear(new_size, &mut batch).await?;
-        batch.apply_sync().await.map_err(Error::Runtime)?;
+        if new_size >= self.offsets.pruning_boundary() {
+            // In place: the data blob truncates to its floor (empty, byte coordinates
+            // preserved) and the offsets journal materializes its fully pruned image; ONE
+            // commit lands both, so a crash recovers the prior state or the cleared one.
+            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+            let floor = self.data.floor();
+            self.data
+                .resize_into(floor, &mut batch)
+                .await
+                .map_err(Error::Runtime)?;
+            self.offsets.stage_clear(new_size, &mut batch).await?;
+            batch.apply_sync().await.map_err(Error::Runtime)?;
+            self.offsets.finish_clear(new_size).await?;
+        } else {
+            // Clearing below the offsets journal's pruning boundary cannot reuse its blob
+            // (nothing may shrink below a floor): ONE commit removes BOTH partitions
+            // together, a second commits the recreated image. A crash between them recovers
+            // an EMPTY journal at position 0 — both sides restart together, so the
+            // intermediate state is consistent and never fabricates items.
+            self.data.wait_for_sync().await.map_err(Error::Runtime)?;
+            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+            self.offsets.stage_remove(&mut batch).await?;
+            batch.remove(&self.data_partition, None);
+            batch.apply_sync().await.map_err(Error::Runtime)?;
 
-        self.blobs
-            .finish_clear(position_to_blob(new_size, self.items_per_blob.get()))
-            .await?;
-        self.offsets.finish_clear(new_size).await?;
+            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
+            self.offsets.finish_recreate(new_size, &mut batch).await?;
+            let (raw, size) = self
+                .context
+                .open(&self.data_partition, BLOB_NAME)
+                .await
+                .map_err(Error::Runtime)?;
+            assert_eq!(size, 0, "the applied removal emptied the partition");
+            batch.sync(&raw);
+            self.data = Writer::new(raw, 0, self.write_buffer.get(), self.page_cache.clone())
+                .await
+                .map_err(Error::Runtime)?;
+            batch.apply_sync().await.map_err(Error::Runtime)?;
+        }
+
         self.bounds = new_size..new_size;
-        self.dirty_from_blob = None;
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        self.dirty = false;
+        self.metrics.update(self.bounds.end, self.bounds.start);
         Ok(())
-    }
-
-    /// Verify the offsets journal against the data blobs and recover the journal bounds
-    /// (`pruning_boundary..size`). Blob-index contiguity is enforced by [Writable::recover].
-    ///
-    /// Recovery is verification, not repair: every mutation that makes either side durable
-    /// stages both sides in ONE batch. `sync` and `prune` stage the data blobs, the offsets
-    /// journal, and the boundary record together, `rewind` stages both truncations together,
-    /// and every blob rollover stages the filled blobs, the successor creations, and the
-    /// entries that filled them together. No crash can leave the durable offsets entries and
-    /// the durable data bytes describing different histories, so the byte length of every
-    /// retained data blob must EXACTLY match the frame end recorded by its last offsets entry
-    /// (zero for a blob with no entries: the tail created at rollover or recovered from a
-    /// clear). Any mismatch is corruption. No frame is ever scanned or decoded.
-    async fn recover_bounds(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
-        offsets: &fixed::Journal<E, u64>,
-        items_per_blob: u64,
-    ) -> Result<Range<u64>, Error> {
-        let offsets_bounds = offsets.pruning_boundary()..offsets.size();
-
-        // With no data blobs the offsets journal must be empty: entries become durable only
-        // in a batch that also captures the data bytes they index, and the only path that
-        // removes every retained data blob (a clear) rewinds the offsets journal in the same
-        // batch.
-        let Some(&oldest_blob) = pending.keys().next() else {
-            if !offsets_bounds.is_empty() {
-                return Err(Error::Corruption(format!(
-                    "offsets journal has entries {}..{} but no data blobs exist",
-                    offsets_bounds.start, offsets_bounds.end
-                )));
-            }
-            let size = offsets_bounds.end;
-            return Ok(size..size);
-        };
-
-        // The two sides prune in one batch, so their retained ranges must start in the same
-        // blob: offsets ending behind the oldest data blob, or starting in a different blob
-        // than the data, cannot arise and are corruption.
-        let data_oldest_pos = blob_first_position(oldest_blob, items_per_blob)?;
-        if offsets_bounds.end < data_oldest_pos {
-            return Err(Error::Corruption(format!(
-                "offsets journal size {} is behind data oldest position {data_oldest_pos}",
-                offsets_bounds.end
-            )));
-        }
-        let offsets_start_blob = position_to_blob(offsets_bounds.start, items_per_blob);
-        if offsets_start_blob != oldest_blob {
-            return Err(Error::Corruption(format!(
-                "offsets start blob {offsets_start_blob} does not match \
-                 oldest data blob {oldest_blob}"
-            )));
-        }
-
-        // Verify each retained blob's byte length: a blob with entries must end exactly at its
-        // last entry (all last entries served by one batched offsets read), and a blob without
-        // entries must be empty.
-        let mut positions = Vec::with_capacity(pending.len());
-        let mut indexed: Vec<(u64, u64)> = Vec::with_capacity(pending.len());
-        for (&blob, writer) in pending {
-            let blob_first = blob_first_position(blob, items_per_blob)?;
-            if blob_first.max(offsets_bounds.start) >= offsets_bounds.end {
-                if writer.size() != 0 {
-                    return Err(Error::Corruption(format!(
-                        "data blob {blob} holds {} bytes but has no offsets entries",
-                        writer.size()
-                    )));
-                }
-                continue;
-            }
-            // The blob's last position may exceed `u64::MAX` near the top of the position
-            // space; the entry range cap makes saturation exact.
-            let blob_last = blob_first.saturating_add(items_per_blob - 1);
-            positions.push(blob_last.min(offsets_bounds.end - 1));
-            indexed.push((blob, writer.size()));
-        }
-        if !positions.is_empty() {
-            let entries = offsets.reader().read_many_inner(&positions).await?;
-            for (&(blob, actual), &expected) in indexed.iter().zip(&entries) {
-                if actual != expected {
-                    return Err(Error::Corruption(format!(
-                        "data blob {blob} holds {actual} bytes but its entries end at {expected}"
-                    )));
-                }
-            }
-        }
-
-        Ok(offsets_bounds)
     }
 }
 
@@ -1710,9 +1617,9 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
         let reader = self.reader();
-        let states = reader.replay_states(start_pos, buffer).await?;
+        let state = reader.replay_state(start_pos, buffer).await?;
 
-        Ok(super::replay_stream_from_states(states))
+        Ok(super::replay_stream(state))
     }
 }
 
@@ -1768,7 +1675,7 @@ impl<E: Context, V: CodecShared> authenticated::Inner<E> for Journal<E, V> {
     }
 
     fn context(&self) -> &E {
-        self.blobs.context()
+        Self::context(self)
     }
 
     async fn sync_into(&mut self, batch: &mut E::Batch) -> Result<(), Error> {
@@ -1785,103 +1692,26 @@ impl<E: Context, V: CodecShared> authenticated::Inner<E> for Journal<E, V> {
 }
 
 #[cfg(test)]
-impl<E: Context, V: CodecShared> Journal<E, V> {
-    /// Test helper: Prune the data blobs directly (simulates crash scenario).
-    pub(crate) async fn test_prune_data(&mut self, min_blob: u64) -> Result<bool, Error> {
-        let min_blob = min_blob.min(self.blobs.tail_blob_index());
-        if min_blob <= self.blobs.oldest_blob_index() {
-            return Ok(false);
-        }
-        self.blobs.prune(min_blob).await?;
-        Ok(true)
-    }
-
-    /// Test helper: Prune the internal offsets journal directly (simulates crash scenario).
-    pub(crate) async fn test_prune_offsets(&mut self, position: u64) -> Result<bool, Error> {
-        self.offsets.prune(position).await
-    }
-
-    /// Test helper: Durably rewind the internal offsets journal (simulates crash scenario).
-    pub(crate) async fn test_rewind_offsets(&mut self, position: u64) -> Result<(), Error> {
-        self.offsets.rewind(position).await?;
-        self.offsets.sync().await
-    }
-
-    /// Test helper: Rewind the data blobs to the item at `position` (simulates crash scenario).
-    pub(crate) async fn test_rewind_data_to_position(
-        &mut self,
-        position: u64,
-    ) -> Result<(), Error> {
-        let items_per_blob = self.items_per_blob.get();
-        let offset = if position.is_multiple_of(items_per_blob) || position == self.bounds.start {
-            0
-        } else {
-            self.offsets.read(position - 1).await?
-        };
-        let blob = position_to_blob(position, items_per_blob);
-        if blob == self.blobs.tail_blob_index() {
-            self.blobs.rewind_tail(offset).await
-        } else {
-            self.blobs.rewind_into_sealed(blob, offset).await
-        }
-    }
-
-    /// Test helper: Append directly to the data blobs without indexing (simulates crash
-    /// scenario). The target must be the tail blob or a newer one (created as an orphan).
-    pub(crate) async fn test_append_data(
-        &mut self,
-        blob: u64,
-        item: V,
-    ) -> Result<(u64, u32), Error> {
-        let mut encoded = Vec::new();
-        encode_frame_into(self.compression, &item, &mut encoded)?;
-        let item_len = encoded.len() as u32;
-
-        let tail_blob = self.blobs.tail_blob_index();
-        if blob == tail_blob {
-            let writer = self.blobs.tail_writer();
-            let offset = writer.size();
-            writer.append(&encoded).await.map_err(Error::Runtime)?;
-            return Ok((offset, item_len));
-        }
-        assert!(blob > tail_blob, "cannot append to a sealed blob");
-        let mut writer = self.blobs.open_blob(blob).await?;
-        let offset = writer.size();
-        writer.append(&encoded).await.map_err(Error::Runtime)?;
-        writer.sync().await.map_err(Error::Runtime)?;
-        Ok((offset, item_len))
-    }
-
-    /// Test helper: Sync the data tail.
-    pub(crate) async fn test_sync_data(&mut self) -> Result<(), Error> {
-        self.blobs.sync_from(self.blobs.tail_blob_index()).await
-    }
-
-    /// Test helper: Sync one data blob.
-    pub(crate) async fn test_sync_data_blob(&mut self, blob: u64) -> Result<(), Error> {
-        self.blobs.sync_blob(blob).await
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::{CacheRef, Writer},
-        deterministic, Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
+        deterministic, Batchable as _, BufferPooler, Metrics as _, Runner, Spawner as _, Storage,
+        Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
     use futures::{FutureExt as _, StreamExt as _};
     use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
-    const PAGE_CACHE_SIZE: usize = 2;
     // Larger page sizes for tests that need more buffer space.
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
+
+    /// The largest position the offsets journal can represent in bytes.
+    const MAX_POSITION: u64 = u64::MAX / 8;
 
     /// Extract a metric counter's value from encoded metrics output.
     fn counter(buffer: &str, name: &str) -> u64 {
@@ -1893,17 +1723,50 @@ mod tests {
             .expect("counter missing")
     }
 
+    fn test_cfg(
+        pooler: &impl BufferPooler,
+        partition: &str,
+        page_size: NonZeroU16,
+        pages: usize,
+    ) -> Config<()> {
+        Config {
+            partition: partition.into(),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(pooler, page_size, NZUsize!(pages)),
+            write_buffer: NZUsize!(1024),
+        }
+    }
+
+    /// The generic suite over the variable journal.
+    #[test_traced]
+    fn test_variable_journal_contiguous_suite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            run_contiguous_tests(move |test_name: String, idx: usize| {
+                let label = test_name.replace('-', "_");
+                let context = context
+                    .child("test")
+                    .with_attribute("name", &label)
+                    .with_attribute("index", idx);
+                async move {
+                    let cfg =
+                        test_cfg(&context, &format!("suite-{test_name}"), LARGE_PAGE_SIZE, 10);
+                    Journal::<_, u64>::init(context, cfg).await
+                }
+                .boxed()
+            })
+            .await;
+        });
+    }
+
     #[test_traced]
     fn test_variable_append_many_compressed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "append-many-compressed".into(),
-                items_per_section: NZU64!(3),
                 compression: Some(1),
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
+                ..test_cfg(&context, "append-many-compressed", SMALL_PAGE_SIZE, 2)
             };
             let mut journal = Journal::<_, FixedBytes<32>>::init(context.child("journal"), cfg)
                 .await
@@ -1927,16 +1790,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_append_many_exceeding_write_buffer_reopens_across_sections() {
+    fn test_variable_append_many_exceeding_write_buffer_reopens() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "append-many-exceeds-buffer".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(512),
+                ..test_cfg(&context, "append-many-exceeds-buffer", SMALL_PAGE_SIZE, 2)
             };
             let items = (0..13)
                 .map(|i| FixedBytes::new([i as u8; 300]))
@@ -1973,88 +1832,22 @@ mod tests {
         });
     }
 
+    /// A journal sized at u64::MAX (or beyond the offsets journal's byte representability) is
+    /// rejected before any mutation.
     #[test_traced]
-    fn test_variable_init_at_max_size_rejected() {
+    fn test_variable_init_at_size_overflow_rejected() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-max".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "init-at-max", SMALL_PAGE_SIZE, 2);
 
-            // The internal offsets journal rejects a maximal size, so init_at_size propagates it.
             assert!(matches!(
-                Journal::<_, u64>::init_at_size(context.child("max"), cfg, u64::MAX).await,
+                Journal::<_, u64>::init_at_size(context.child("max"), cfg.clone(), u64::MAX).await,
                 Err(Error::SizeOverflow)
             ));
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_append_size_overflow() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "append-size-overflow".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize one item shy of the maximum size.
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("near_max"), cfg, u64::MAX - 1)
-                    .await
-                    .unwrap();
-
-            // The first append fills the last representable position.
-            assert_eq!(journal.append(&7).await.unwrap(), u64::MAX - 1);
-            assert_eq!(journal.size(), u64::MAX);
-
-            // The next append would overflow the size; it must return a recoverable error
-            // rather than panicking.
-            assert!(matches!(journal.append(&8).await, Err(Error::SizeOverflow)));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_replay_near_max_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "replay-near-max-size".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("near_max"), cfg, u64::MAX - 1)
-                    .await
-                    .unwrap();
-            assert_eq!(journal.append(&7).await.unwrap(), u64::MAX - 1);
-
-            {
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(u64::MAX - 1, NZUsize!(20)).await.unwrap();
-                futures::pin_mut!(stream);
-                let (pos, item) = stream.next().await.unwrap().unwrap();
-                assert_eq!(pos, u64::MAX - 1);
-                assert_eq!(item, 7);
-                assert!(stream.next().await.is_none());
-            }
-
-            journal.destroy().await.unwrap();
+            assert!(matches!(
+                Journal::<_, u64>::init_at_size(context.child("over"), cfg, MAX_POSITION + 1).await,
+                Err(Error::OffsetOverflow)
+            ));
         });
     }
 
@@ -2064,14 +1857,7 @@ mod tests {
         // Positions that fail validation are misses rather than errors.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "read-many-sync".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(64)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "read-many-sync", LARGE_PAGE_SIZE, 64);
             let items = (0..13)
                 .map(|i| FixedBytes::new([i as u8; 300]))
                 .collect::<Vec<_>>();
@@ -2092,9 +1878,8 @@ mod tests {
                 assert_eq!(item.as_ref().expect("cached position is served"), expected);
             }
 
-            // An out-of-range position is a miss, not an error. Positions grouped with it
-            // (same offsets blob) are unaffected: validation trims the out-of-range suffix
-            // instead of poisoning the group.
+            // An out-of-range position is a miss, not an error, and does not poison the rest
+            // of the batch.
             let served = reader.try_read_many_sync(&[9, 13]);
             assert!(served[0].is_some());
             assert!(served[1].is_none());
@@ -2110,14 +1895,7 @@ mod tests {
     fn test_variable_read_many_rejects_unsorted_positions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "read-many-unsorted".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "read-many-unsorted", SMALL_PAGE_SIZE, 2);
             let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
@@ -2137,14 +1915,7 @@ mod tests {
         // Duplicates are not strictly increasing either.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "read-many-duplicate".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "read-many-duplicate", SMALL_PAGE_SIZE, 2);
             let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
@@ -2164,14 +1935,7 @@ mod tests {
         // items as read_many, cold and warm.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "read-many-probe-complete".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "read-many-probe-complete", SMALL_PAGE_SIZE, 2);
             let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
@@ -2204,24 +1968,14 @@ mod tests {
         });
     }
 
+    /// Completing a probe miss whose frame start was already resolved must not consult the
+    /// offsets journal again.
     #[test_traced]
-    fn test_variable_read_many_reuses_probed_offset() {
-        // read_many's sync pass resolves frame offsets even when the frame itself misses. The
-        // completion must reuse them instead of consulting the offsets journal again.
+    fn test_variable_fetch_misses_reuses_resolved_offset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Sections of 128 make section 0's offsets exactly fill two flushed pages, so a
-            // section-0 offset lookup can genuinely miss (a sealed blob serves a partial
-            // trailing page from memory, never the page cache).
-            let cfg = Config {
-                partition: "read-many-offset-reuse".into(),
-                items_per_section: NZU64!(128),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(4)),
-                write_buffer: NZUsize!(1024),
-            };
-            let appended = (0..140)
+            let cfg = test_cfg(&context, "fetch-miss-offset-reuse", SMALL_PAGE_SIZE, 4);
+            let appended = (0..40)
                 .map(|i| FixedBytes::new([i as u8; 300]))
                 .collect::<Vec<_>>();
             let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
@@ -2231,33 +1985,22 @@ mod tests {
             journal.sync().await.unwrap();
             let reader = journal.snapshot().await.unwrap();
 
-            // Churn the 4-page pool with section-1 frames (five data pages) so every
-            // section-0 page is evicted, then warm the offsets page shared by positions
-            // 0..64 without touching position 0's frame page (302-byte frames put frame 0
-            // in page 0 and frame 4 in page 2).
-            reader
-                .read_many(&(128..136).collect::<Vec<u64>>())
+            // Present a miss carrying its frame start: the completion must serve it from the
+            // data blob alone (offsets counters unchanged).
+            let offset = reader.frame_start(5).await.unwrap();
+            let before = context.encode();
+            let items = reader
+                .fetch_misses(&[Miss {
+                    position: 5,
+                    offset: Some(offset),
+                }])
                 .await
                 .unwrap();
-            reader.read(4).await.unwrap();
-
-            // The sync pass resolves position 0's offset but cannot serve its frame.
-            let (items, misses) = reader.probe_parts(&[0]);
-            assert!(items[0].is_none());
-            assert_eq!(misses[0].offset, Some(0));
-
-            // read_many consults the offsets journal only in its sync pass, and only for
-            // position 0's own entry (the frame start is 0 because position 0 opens its blob).
-            // Completion reuses the carried start rather than resolving it again.
-            let before = context.encode();
-            assert_eq!(
-                reader.read_many(&[0]).await.unwrap(),
-                vec![appended[0].clone()]
-            );
+            assert_eq!(items, vec![appended[5].clone()]);
             let after = context.encode();
             assert_eq!(
                 counter(&after, "offsets_items_read_total"),
-                counter(&before, "offsets_items_read_total") + 1
+                counter(&before, "offsets_items_read_total")
             );
             drop(reader);
 
@@ -2269,14 +2012,12 @@ mod tests {
     fn test_variable_read_many_consecutive_after_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "read-many-consecutive-after-reopen".into(),
-                items_per_section: NZU64!(20),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(
+                &context,
+                "read-many-consecutive-after-reopen",
+                SMALL_PAGE_SIZE,
+                2,
+            );
 
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
@@ -2305,26 +2046,17 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_read_many_scattered_single_runs_across_blobs() {
-        // Read a batch where cache hits are interleaved with non-consecutive misses spanning
-        // several blobs. The misses split into many small runs that are fetched separately, and
-        // each run's items must land in the correct result slots between the cached items. Every
-        // item's payload encodes its position, so a wrong run boundary or a misplaced result
-        // fails the value assertions.
+    fn test_variable_read_many_scattered_runs() {
+        // Read a batch where cache hits are interleaved with non-consecutive misses. The misses
+        // split into runs that are fetched separately, and each run's items must land in the
+        // correct result slots between the cached items. Every item's payload encodes its
+        // position, so a wrong run boundary or a misplaced result fails the value assertions.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "read-many-scattered-runs".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "read-many-scattered-runs", SMALL_PAGE_SIZE, 16);
 
-            // Each item's frame is 302 bytes, so a 5-item blob spans two full 512-byte pages plus
-            // a partial page. Full pages are served through the page cache and go cold on reopen,
-            // which is what lets this test stage misses at all.
+            // Each item's frame is 302 bytes, so full pages go cold on reopen with a fresh
+            // page cache, which is what lets this test stage misses at all.
             let items = (0..30)
                 .map(|i| FixedBytes::new([i as u8; 300]))
                 .collect::<Vec<_>>();
@@ -2338,7 +2070,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Reopen with a fresh page cache so sealed-blob full pages are cold.
+            // Reopen with a fresh page cache so full pages are cold, then warm two islands.
             let cfg = Config {
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
                 ..cfg
@@ -2347,42 +2079,32 @@ mod tests {
                 .await
                 .unwrap();
             let reader = journal.snapshot().await.unwrap();
-
-            // Warm blobs 1 (positions 5..10) and 3 (positions 15..20) with one read each. The
-            // faulted pages cover the neighboring positions asserted below.
             reader.read(6).await.unwrap();
             reader.read(16).await.unwrap();
 
-            // Prove the interleave the batch will see: warm-blob positions are sync hits, and the
-            // scattered positions in blobs 0, 2, and 4 are misses. The hit pass in read_many runs
-            // before any miss I/O, so this is exactly the hit/miss split the call resolves.
-            for hit in [5, 6, 15, 17] {
-                assert!(reader.try_read_sync(hit).is_some(), "position {hit}");
-            }
-            let misses = [0, 3, 10, 12, 20, 21, 23];
-            for miss in misses {
-                assert!(reader.try_read_sync(miss).is_none(), "position {miss}");
-            }
-
-            // The misses decompose into runs [0], [3], [10], [12], [20, 21], [23]: four single-item
-            // runs and one consecutive pair across three blobs, with hits interleaved between them.
+            // Derive the hit/miss split the batch will see (read_many's sync pass is exactly
+            // this probe), then check the batch's values and accounting against it.
             let positions = [0, 3, 5, 6, 10, 12, 15, 17, 20, 21, 23];
+            let served = reader.try_read_many_sync(&positions);
+            let hits = served.iter().filter(|item| item.is_some()).count() as u64;
+            let misses = positions.len() as u64 - hits;
+            assert!(misses > 0, "some positions must be cold");
+            assert!(hits > 0, "some positions must be warm");
+
             let expected: Vec<_> = positions
                 .iter()
                 .map(|&p| items[p as usize].clone())
                 .collect();
             let before = context.encode();
             assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
-
-            // The batch's hit/miss accounting must match the staged interleave exactly.
             let after = context.encode();
             assert_eq!(
                 counter(&after, "second_cache_hits") - counter(&before, "second_cache_hits"),
-                4
+                hits
             );
             assert_eq!(
                 counter(&after, "second_cache_misses") - counter(&before, "second_cache_misses"),
-                misses.len() as u64
+                misses
             );
 
             // A second pass serves the now-cached positions through the hit path and must agree.
@@ -2403,163 +2125,49 @@ mod tests {
         });
     }
 
-    /// Test that complete offsets partition loss after pruning is detected as unrecoverable.
-    ///
-    /// When the offsets partition is completely lost and the data has been pruned, we cannot
-    /// rebuild the index with correct position alignment (would require creating placeholder blobs).
-    /// This is a genuine external failure that should be detected and reported clearly.
     #[test_traced]
-    fn test_variable_offsets_partition_loss_after_prune_unrecoverable() {
+    fn test_variable_replay() {
+        const ITEMS: u64 = 703;
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "offsets-loss-after-prune".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // === Phase 1: Create journal with data and prune ===
+            let cfg = test_cfg(&context, "replay", SMALL_PAGE_SIZE, 4);
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
-            // Append 40 items across 4 blobs (0-3)
-            for i in 0..40u64 {
-                journal.append(&(i * 100)).await.unwrap();
+            for i in 0u64..ITEMS {
+                let pos = journal.append(&(i * 3)).await.unwrap();
+                assert_eq!(pos, i);
             }
 
-            // Prune to position 20 (removes blobs 0-1, keeps blobs 2-3)
-            journal.prune(20).await.unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.start, 20);
-            assert_eq!(bounds.end, 40);
-
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // === Phase 2: Simulate complete offsets partition loss ===
-            // Remove both the offsets data partition and its metadata partition
-            context
-                .remove(&format!("{}-blobs", cfg.offsets_partition()), None)
-                .await
-                .expect("Failed to remove offsets blobs partition");
-            context
-                .remove(&format!("{}-metadata", cfg.offsets_partition()), None)
-                .await
-                .expect("Failed to remove offsets metadata partition");
-
-            // === Phase 3: Verify this is detected as unrecoverable ===
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Test replay behavior for variable-length items.
-    #[test_traced]
-    fn test_variable_replay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "replay".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize journal
-            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
-
-            // Append 40 items across 4 blobs (0-3)
-            for i in 0..40u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-
-            // Test 1: Full replay
+            // Replay should return all items.
             {
                 let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(0, NZUsize!(20)).await.unwrap();
+                let stream = reader.replay(0, NZUsize!(1024)).await.unwrap();
+                let mut count = 0u64;
                 futures::pin_mut!(stream);
-                for i in 0..40u64 {
-                    let (pos, item) = stream.next().await.unwrap().unwrap();
-                    assert_eq!(pos, i);
-                    assert_eq!(item, i * 100);
+                while let Some(result) = stream.next().await {
+                    let (pos, item) = result.unwrap();
+                    assert_eq!(pos * 3, item, "pos={pos}");
+                    count += 1;
                 }
-                assert!(stream.next().await.is_none());
+                assert_eq!(count, ITEMS);
             }
 
-            // Test 2: Partial replay from middle of blob
+            // A partial replay starts mid-journal (mid-page and mid-frame).
             {
+                const START_POS: u64 = 53;
                 let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(15, NZUsize!(20)).await.unwrap();
+                let stream = reader.replay(START_POS, NZUsize!(64)).await.unwrap();
+                let mut count = 0;
                 futures::pin_mut!(stream);
-                for i in 15..40u64 {
-                    let (pos, item) = stream.next().await.unwrap().unwrap();
-                    assert_eq!(pos, i);
-                    assert_eq!(item, i * 100);
+                while let Some(result) = stream.next().await {
+                    let (pos, item) = result.unwrap();
+                    assert!(pos >= START_POS);
+                    assert_eq!(pos * 3, item);
+                    count += 1;
                 }
-                assert!(stream.next().await.is_none());
-            }
-
-            // Test 3: Partial replay from blob boundary
-            {
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(20, NZUsize!(20)).await.unwrap();
-                futures::pin_mut!(stream);
-                for i in 20..40u64 {
-                    let (pos, item) = stream.next().await.unwrap().unwrap();
-                    assert_eq!(pos, i);
-                    assert_eq!(item, i * 100);
-                }
-                assert!(stream.next().await.is_none());
-            }
-
-            // Test 4: Prune and verify replay from pruned
-            journal.prune(20).await.unwrap();
-            {
-                let reader = journal.snapshot().await.unwrap();
-                let res = reader.replay(0, NZUsize!(20)).await;
-                assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
-            }
-            {
-                let reader = journal.snapshot().await.unwrap();
-                let res = reader.replay(19, NZUsize!(20)).await;
-                assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
-            }
-
-            // Test 5: Replay from exactly at pruning boundary after prune
-            {
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(20, NZUsize!(20)).await.unwrap();
-                futures::pin_mut!(stream);
-                for i in 20..40u64 {
-                    let (pos, item) = stream.next().await.unwrap().unwrap();
-                    assert_eq!(pos, i);
-                    assert_eq!(item, i * 100);
-                }
-                assert!(stream.next().await.is_none());
-            }
-
-            // Test 6: Replay from the end
-            {
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(40, NZUsize!(20)).await.unwrap();
-                futures::pin_mut!(stream);
-                assert!(stream.next().await.is_none());
-            }
-
-            // Test 7: Replay beyond the end (should error)
-            {
-                let reader = journal.snapshot().await.unwrap();
-                let res = reader.replay(41, NZUsize!(20)).await;
-                assert!(matches!(
-                    res,
-                    Err(crate::journal::Error::ItemOutOfRange(41))
-                ));
+                assert_eq!(count, ITEMS - START_POS);
             }
 
             journal.destroy().await.unwrap();
@@ -2570,194 +2178,70 @@ mod tests {
     fn test_variable_replay_stops_after_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "replay-stops-after-error".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
+            let cfg = test_cfg(&context, "replay-error", SMALL_PAGE_SIZE, 2);
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-            for i in 0..30u64 {
-                journal.append(&(i * 100)).await.unwrap();
+
+            for i in 0u64..300 {
+                journal.append(&i).await.unwrap();
             }
             journal.sync().await.unwrap();
+            drop(journal);
 
-            let (blob, _) = context
-                .open(&cfg.data_partition(), &1u64.to_be_bytes())
+            // Reopen with a fresh page cache so replay must hit storage, then inject read
+            // faults: the stream must surface the error once and terminate.
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                ..cfg
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            blob.write_at_sync(0, vec![0xFF; 1]).await.unwrap();
+            let reader = journal.snapshot().await.unwrap();
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                read_rate: Some(1.0),
+                ..Default::default()
+            };
+            let stream = reader.replay(0, NZUsize!(1024)).await.unwrap();
+            futures::pin_mut!(stream);
 
-            {
-                let cache = CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10));
-                let mut writers = Vec::new();
-                for blob_index in 0..3u64 {
-                    let (blob, size) = context
-                        .open(&cfg.data_partition(), &blob_index.to_be_bytes())
-                        .await
-                        .unwrap();
-                    writers.push(
-                        Writer::new(blob, size, cfg.write_buffer.get(), cache.clone())
-                            .await
-                            .unwrap(),
-                    );
-                }
+            assert!(matches!(
+                stream.next().await.unwrap(),
+                Err(Error::Runtime(_))
+            ));
+            assert!(stream.next().await.is_none());
 
-                let mut states = Vec::new();
-                for (blob_index, writer) in writers.iter().enumerate() {
-                    let blob = blob_index as u64;
-                    states.push(ReplayState::<_, u64> {
-                        blob,
-                        replay: Blob::Writer(writer).replay_from(0, NZUsize!(1024)).unwrap(),
-                        budget: 1024,
-                        pos: blob * 10,
-                        end_pos: (blob + 1) * 10,
-                        offset: 0,
-                        codec_config: (),
-                        compressed: false,
-                        _marker: PhantomData,
-                    });
-                }
-
-                let stream = crate::journal::contiguous::replay_stream_from_states(states);
-                futures::pin_mut!(stream);
-
-                for i in 0..10u64 {
-                    let (pos, item) = stream.next().await.unwrap().unwrap();
-                    assert_eq!(pos, i);
-                    assert_eq!(item, i * 100);
-                }
-                assert!(matches!(
-                    stream.next().await.unwrap(),
-                    Err(Error::Corruption(_))
-                ));
-                assert!(stream.next().await.is_none());
-            }
-
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             journal.destroy().await.unwrap();
         });
     }
 
-    #[test_traced]
-    fn test_variable_contiguous() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            run_contiguous_tests(
-                move |test_name: String, idx: usize| {
-                    let label = test_name.replace('-', "_");
-                    let context = context
-                        .child("test")
-                        .with_attribute("name", &label)
-                        .with_attribute("index", idx);
-                    async move {
-                        let cfg = Config {
-                            partition: format!("generic-test-{test_name}"),
-                            items_per_section: NZU64!(10),
-                            compression: None,
-                            codec_config: (),
-                            page_cache: CacheRef::from_pooler(
-                                &context,
-                                LARGE_PAGE_SIZE,
-                                NZUsize!(10),
-                            ),
-                            write_buffer: NZUsize!(1024),
-                        };
-                        Journal::<_, u64>::init(context, cfg).await
-                    }
-                    .boxed()
-                },
-                // Pruning is section-aligned (10 items per section).
-                |n| n / 10 * 10,
-            )
-            .await;
-        });
-    }
-
-    /// Test multiple sequential prunes with Variable-specific guarantees.
+    /// Pruning is exact at every step, and everything stays readable at or above the boundary.
     #[test_traced]
     fn test_variable_multiple_sequential_prunes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "sequential-prunes".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
+            let cfg = test_cfg(&context, "sequential-prunes", LARGE_PAGE_SIZE, 10);
             let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
 
-            // Append items across 4 blobs: [0-9], [10-19], [20-29], [30-39]
             for i in 0..40u64 {
                 journal.append(&(i * 100)).await.unwrap();
             }
+            assert_eq!(journal.bounds(), 0..40);
 
-            // Initial state: all items accessible
-            let bounds = journal.bounds();
-            assert_eq!(bounds.start, 0);
-            assert_eq!(bounds.end, 40);
+            for boundary in [7u64, 19, 33] {
+                assert!(journal.prune(boundary).await.unwrap());
+                assert_eq!(journal.bounds(), boundary..40);
+                assert!(matches!(
+                    journal.read(boundary - 1).await,
+                    Err(Error::ItemPruned(_))
+                ));
+                assert_eq!(journal.read(boundary).await.unwrap(), boundary * 100);
+                assert_eq!(journal.read(39).await.unwrap(), 3900);
+            }
 
-            // First prune: remove blob 0 (positions 0-9)
-            let pruned = journal.prune(10).await.unwrap();
-            assert!(pruned);
-
-            // Variable-specific guarantee: oldest is EXACTLY at blob boundary
-            assert_eq!(journal.bounds().start, 10);
-
-            // Items 0-9 should be pruned, 10+ should be accessible
-            assert!(matches!(
-                journal.read(0).await,
-                Err(crate::journal::Error::ItemPruned(_))
-            ));
-            assert_eq!(journal.read(10).await.unwrap(), 1000);
-            assert_eq!(journal.read(19).await.unwrap(), 1900);
-
-            // Second prune: remove blob 1 (positions 10-19)
-            let pruned = journal.prune(20).await.unwrap();
-            assert!(pruned);
-
-            // Variable-specific guarantee: oldest is EXACTLY at blob boundary
-            assert_eq!(journal.bounds().start, 20);
-
-            // Items 0-19 should be pruned, 20+ should be accessible
-            assert!(matches!(
-                journal.read(10).await,
-                Err(crate::journal::Error::ItemPruned(_))
-            ));
-            assert!(matches!(
-                journal.read(19).await,
-                Err(crate::journal::Error::ItemPruned(_))
-            ));
-            assert_eq!(journal.read(20).await.unwrap(), 2000);
-            assert_eq!(journal.read(29).await.unwrap(), 2900);
-
-            // Third prune: remove blob 2 (positions 20-29)
-            let pruned = journal.prune(30).await.unwrap();
-            assert!(pruned);
-
-            // Variable-specific guarantee: oldest is EXACTLY at blob boundary
-            assert_eq!(journal.bounds().start, 30);
-
-            // Items 0-29 should be pruned, 30+ should be accessible
-            assert!(matches!(
-                journal.read(20).await,
-                Err(crate::journal::Error::ItemPruned(_))
-            ));
-            assert!(matches!(
-                journal.read(29).await,
-                Err(crate::journal::Error::ItemPruned(_))
-            ));
-            assert_eq!(journal.read(30).await.unwrap(), 3000);
-            assert_eq!(journal.read(39).await.unwrap(), 3900);
-
-            // Size should still be 40 (pruning doesn't affect size)
+            // Size is unaffected by pruning.
             assert_eq!(journal.size(), 40);
 
             journal.destroy().await.unwrap();
@@ -2769,512 +2253,350 @@ mod tests {
     fn test_variable_prune_all_then_reinit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "prune-all-reinit".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "prune-all-reinit", LARGE_PAGE_SIZE, 10);
 
-            // === Phase 1: Create journal and append data ===
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-
             for i in 0..100u64 {
                 journal.append(&(i * 100)).await.unwrap();
             }
 
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 100);
-            assert_eq!(bounds.start, 0);
-
-            // === Phase 2: Prune all data ===
             let pruned = journal.prune(100).await.unwrap();
             assert!(pruned);
-
-            // All data is pruned - no items remain
             let bounds = journal.bounds();
             assert_eq!(bounds.end, 100);
             assert!(bounds.is_empty());
-
-            // All reads should fail with ItemPruned
-            for i in 0..100 {
-                assert!(matches!(
-                    journal.read(i).await,
-                    Err(crate::journal::Error::ItemPruned(_))
-                ));
-            }
+            assert!(matches!(journal.read(99).await, Err(Error::ItemPruned(99))));
 
             journal.sync().await.unwrap();
             drop(journal);
 
-            // === Phase 3: Re-init and verify position preserved ===
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            let bounds = journal.bounds();
+            assert_eq!(bounds.end, 100);
+            assert!(bounds.is_empty());
+
+            // Next append should get position 100.
+            journal.append(&10000).await.unwrap();
+            assert_eq!(journal.bounds(), 100..101);
+            assert_eq!(journal.read(100).await.unwrap(), 10000);
+            assert!(matches!(journal.read(99).await, Err(Error::ItemPruned(99))));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The directed boundary test: prune mid-journal, the boundary is exact and persists
+    /// across a restart once synced; an unsynced prune regresses across a crash and can be
+    /// re-applied.
+    #[test_traced]
+    fn test_variable_prune_boundary_persistence_and_regression() {
+        let executor = deterministic::Runner::default();
+        let (_, state) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context, "prune-regression", SMALL_PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..200u64 {
+                journal.append(&i).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // A committed prune to an arbitrary position: the boundary is exact.
+            assert!(journal.prune(37).await.unwrap());
+            assert_eq!(journal.bounds(), 37..200);
+
+            // Stage a further prune whose commit never lands: the floors advance in RAM but
+            // the crash below discards them.
+            let mut batch = journal.context().batch().await.unwrap();
+            assert!(journal.prune_into(150, &mut batch).await.unwrap());
+            assert_eq!(journal.bounds(), 150..200);
+            drop(batch);
+        });
+
+        deterministic::Runner::from(state).start(|context| async move {
+            let cfg = test_cfg(&context, "prune-regression", SMALL_PAGE_SIZE, 4);
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
-            // Size should be preserved, but no items remain
+            // The unsynced prune regressed to the last committed boundary.
+            assert_eq!(journal.bounds(), 37..200);
+            assert_eq!(journal.read(37).await.unwrap(), 37);
+
+            // Re-pruning after the regression works and is exact.
+            assert!(journal.prune(150).await.unwrap());
+            assert_eq!(journal.bounds(), 150..200);
+            assert!(matches!(
+                journal.read(149).await,
+                Err(Error::ItemPruned(149))
+            ));
+            assert_eq!(journal.read(150).await.unwrap(), 150);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The directed reconciliation test: a commit adopts the DATA blob's pruned floor between
+    /// the two prunes inside `prune_into`, then a crash discards the offsets journal's floor.
+    /// Init must treat the more advanced data floor as authoritative and re-prune the laggard
+    /// offsets journal to the exact boundary.
+    #[test_traced]
+    fn test_variable_crash_between_data_and_offsets_prune() {
+        const MIN: u64 = 63;
+        let executor = deterministic::Runner::default();
+        let (_, state) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context, "prune-crash-window", SMALL_PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..100u64 {
+                journal.append(&i).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Plant the adopted (data-ahead, offsets-behind) state: prune ONLY the data blob
+            // to MIN's frame start and commit it, exactly what a commit landing between the
+            // two native prunes inside `prune_into` adopts. The crash below then discards
+            // everything after that commit.
+            let offset = journal.offsets.read(MIN - 1).await.unwrap();
+            journal.data.prune(offset).await.unwrap();
+            journal.data.sync().await.unwrap();
+        });
+
+        deterministic::Runner::from(state).start(|context| async move {
+            let cfg = test_cfg(&context, "prune-crash-window", SMALL_PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Init reconciled: the data floor named the boundary and the offsets journal was
+            // re-pruned to it.
+            assert_eq!(journal.bounds(), MIN..100);
+            assert_eq!(journal.offsets.pruning_boundary(), MIN);
+            assert!(matches!(
+                journal.read(MIN - 1).await,
+                Err(Error::ItemPruned(_))
+            ));
+            for i in MIN..100 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+
+            // The reconciled image is durable: a plain reopen agrees.
+            journal.sync().await.unwrap();
+            drop(journal);
+            let journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), MIN..100);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Reconciliation at the far edge: the data blob's floor advanced past EVERY retained
+    /// entry (a full prune whose offsets side never committed). Init empties the journal at
+    /// its size.
+    #[test_traced]
+    fn test_variable_crash_data_fully_pruned_offsets_not() {
+        let executor = deterministic::Runner::default();
+        let (_, state) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context, "prune-crash-full", SMALL_PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..50u64 {
+                journal.append(&i).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let offset = journal.offsets.read(49).await.unwrap();
+            journal.data.prune(offset).await.unwrap();
+            journal.data.sync().await.unwrap();
+        });
+
+        deterministic::Runner::from(state).start(|context| async move {
+            let cfg = test_cfg(&context, "prune-crash-full", SMALL_PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
             let bounds = journal.bounds();
-            assert_eq!(bounds.end, 100);
+            assert_eq!(bounds, 50..50);
             assert!(bounds.is_empty());
 
-            // All reads should still fail
-            for i in 0..100 {
-                assert!(matches!(
-                    journal.read(i).await,
-                    Err(crate::journal::Error::ItemPruned(_))
-                ));
-            }
-
-            // === Phase 4: Append new data ===
-            // Next append should get position 100
-            journal.append(&10000).await.unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 101);
-            // Now we have one item at position 100
-            assert_eq!(bounds.start, 100);
-
-            // Can read the new item
-            assert_eq!(journal.read(100).await.unwrap(), 10000);
-
-            // Old positions still fail
-            assert!(matches!(
-                journal.read(99).await,
-                Err(crate::journal::Error::ItemPruned(_))
-            ));
+            // Appends continue from the recovered size.
+            assert_eq!(journal.append(&50).await.unwrap(), 50);
+            assert_eq!(journal.read(50).await.unwrap(), 50);
 
             journal.destroy().await.unwrap();
         });
     }
 
-    /// Data blobs pruned ahead of the offsets journal is not a reachable crash state (prune
-    /// stages both sides' removals and the boundary record in one batch): corruption.
+    /// A data floor that falls inside a frame is not a state any prune produces: corruption.
     #[test_traced]
-    fn test_variable_recovery_data_pruned_ahead_of_offsets_is_corruption() {
+    fn test_variable_data_floor_mid_frame_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with data ===
-            let cfg = Config {
-                partition: "recovery-prune-crash".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append 40 items across 4 blobs to both journals
-            for i in 0..40u64 {
-                variable.append(&(i * 100)).await.unwrap();
-            }
-
-            // Prune to position 10 normally (both data and offsets journals pruned)
-            variable.prune(10).await.unwrap();
-            assert_eq!(variable.bounds().start, 10);
-
-            // Prune the data blobs ahead of the offsets journal (impossible state: prune
-            // stages both sides' removals in one batch).
-            variable.test_prune_data(2).await.unwrap();
-
-            variable.sync().await.unwrap();
-            drop(variable);
-
-            // === Verify corruption detected ===
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Test recovery detects corruption when offsets journal pruned ahead of data blobs.
-    ///
-    /// Simulates an impossible state (offsets journal pruned more than data blobs) which
-    /// should never happen due to write ordering. Verifies that init() returns corruption error.
-    #[test_traced]
-    fn test_variable_recovery_offsets_ahead_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with data ===
-            let cfg = Config {
-                partition: "recovery-offsets-ahead".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append 40 items across 4 blobs to both journals
-            for i in 0..40u64 {
-                variable.append(&(i * 100)).await.unwrap();
-            }
-
-            // Prune offsets journal ahead of data blobs (impossible state)
-            variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
-            variable.test_prune_data(1).await.unwrap(); // Only prune data blobs to blob 1 (position 10)
-
-            variable.sync().await.unwrap();
-            drop(variable);
-
-            // === Verify corruption detected ===
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Offsets journal is empty but in a different blob than data. This is an impossible state:
-    /// both journals are always created in the same blob by init or init_at_size.
-    #[test_traced]
-    fn test_variable_recovery_offsets_empty_different_blob_is_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "offsets-empty-diff-blob".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
+            let cfg = test_cfg(&context, "floor-mid-frame", SMALL_PAGE_SIZE, 4);
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-
-            for i in 0..15u64 {
-                journal.append(&(i * 100)).await.unwrap();
+            for i in 0..20u64 {
+                journal.append(&i).await.unwrap();
             }
             journal.sync().await.unwrap();
 
-            // Clear offsets to blob 2 (position 20) while data starts at blob 0.
-            // This puts them in different blobs with offsets empty (bounds 20..20).
-            journal.offsets.clear_to_size(20).await.unwrap();
+            // Prune the data blob to one byte short of a frame boundary and commit it.
+            let offset = journal.offsets.read(9).await.unwrap();
+            journal.data.prune(offset - 1).await.unwrap();
+            journal.data.sync().await.unwrap();
             drop(journal);
 
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
-    /// Offsets journal ends before data oldest position (offsets_bounds.end < data_oldest_pos).
-    /// This is an impossible/corrupted state.
+    /// An unsynced append is discarded by a crash while synced items survive, and the journal
+    /// recovers cleanly (both blobs regress to the same commit).
     #[test_traced]
-    fn test_variable_recovery_offsets_end_behind_data_oldest_is_corruption() {
+    fn test_variable_crash_discards_unsynced_appends() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "offsets-end-behind-data-oldest".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
+        let (_, state) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context, "crash-unsynced", SMALL_PAGE_SIZE, 4);
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-
-            for i in 0..15u64 {
-                journal.append(&(i * 100)).await.unwrap();
+            for i in 0u64..10 {
+                journal.append(&i).await.unwrap();
             }
             journal.sync().await.unwrap();
+            for i in 10u64..20 {
+                journal.append(&i).await.unwrap();
+            }
+            // No sync for the second half.
+        });
 
-            // Prune data to blob 1 (position 10), but rewind offsets to 5 (so offsets_bounds is 0..5).
-            // offsets_bounds.end = 5 < data_oldest_pos = 10.
-            journal.test_prune_data(1).await.unwrap();
-            journal.test_rewind_offsets(5).await.unwrap();
-            drop(journal);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+        deterministic::Runner::from(state).start(|context| async move {
+            let cfg = test_cfg(&context, "crash-unsynced", SMALL_PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 10);
+            for i in 0u64..10 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            // Appends continue from the recovered size.
+            let pos = journal.append(&10).await.unwrap();
+            assert_eq!(pos, 10);
+            journal.destroy().await.unwrap();
         });
     }
 
-    /// Offsets start is mid-blob ahead of data's blob-aligned start, but in the same
-    /// blob. This is the valid state left by init_at_size.
+    /// Trailing data bytes past the last offsets entry are corruption.
     #[test_traced]
-    fn test_variable_recovery_offsets_start_mid_blob_ahead_of_data() {
+    fn test_variable_trailing_data_garbage_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "offsets-mid-blob-ahead".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // init_at_size(7) creates offsets starting at position 7 (mid-blob 0), while
-            // data's first blob is blob 0 (position 0). offsets.start > data_oldest_pos
-            // but same blob.
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+            let cfg = test_cfg(&context, "trailing-garbage", SMALL_PAGE_SIZE, 4);
+            {
+                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
-            for i in 0..5u64 {
-                journal.append(&(i * 100)).await.unwrap();
+                journal.append(&7).await.unwrap();
+                journal.sync().await.unwrap();
             }
-            journal.sync().await.unwrap();
-            drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+            let (blob, size) = context
+                .open("trailing-garbage_data", super::BLOB_NAME)
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds(), 7..12);
-            assert_eq!(journal.read(7).await.unwrap(), 0);
-            assert_eq!(journal.read(11).await.unwrap(), 400);
-            journal.destroy().await.unwrap();
-        });
-    }
+            blob.write_at_sync(size, vec![0u8; 3]).await.unwrap();
 
-    /// Data bytes past the last offsets entry cannot survive a crash (every mutation stages
-    /// both sides in one batch), so a planted unindexed data suffix is corruption.
-    #[test_traced]
-    fn test_variable_recovery_unindexed_data_suffix_is_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-append-crash".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append 15 items to both journals (fills blob 0, partial blob 1)
-            for i in 0..15u64 {
-                variable.append(&(i * 100)).await.unwrap();
-            }
-
-            assert_eq!(variable.size(), 15);
-
-            // Manually append 5 more items directly to data blobs only: the offsets journal
-            // keeps 15 entries while the data blob holds 20 items' bytes.
-            for i in 15..20u64 {
-                variable.test_append_data(1, i * 100).await.unwrap();
-            }
-
-            variable.sync().await.unwrap();
-            drop(variable);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
-    /// Durable data with no offsets entries at all cannot arise from a crash: corruption.
+    /// A data blob shorter than the last offsets entry is corruption.
     #[test_traced]
-    fn test_variable_recovery_fully_unindexed_data_is_corruption() {
+    fn test_variable_short_data_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-overlong-data-blob".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "short-data", SMALL_PAGE_SIZE, 4);
+            {
+                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..5u64 {
+                    journal.append(&i).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+            }
 
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+            let (blob, size) = context
+                .open("short-data_data", super::BLOB_NAME)
                 .await
                 .unwrap();
+            blob.resize(size - 1).await.unwrap();
+            blob.sync().await.unwrap();
 
-            for i in 0..11u64 {
-                journal.test_append_data(0, i * 100).await.unwrap();
-            }
-            journal.test_sync_data().await.unwrap();
-            drop(journal);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
-    /// Filling a blob makes it (and its offsets entries) durable at rollover, so a crash
-    /// loses only the unsynced partial tail, never a filled blob.
+    /// Data bytes with no offsets journal at all (e.g. the offsets partition was lost) are
+    /// corruption, not silently re-indexed.
     #[test_traced]
-    fn test_variable_recovery_rollover_makes_filled_blobs_durable() {
-        let executor = deterministic::Runner::default();
-        let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let cfg = Config::<()> {
-                partition: "recovery-rollover-durable".into(),
-                items_per_section: NZU64!(2),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Fill blobs 0 and 1 (positions 0..4) and stage one unsynced item in blob 2,
-            // then crash without ever calling sync.
-            for i in 0..5u64 {
-                assert_eq!(journal.append(&(i * 100)).await.unwrap(), i);
-            }
-        });
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = Config::<()> {
-                partition: "recovery-rollover-durable".into(),
-                items_per_section: NZU64!(2),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::<_, u64>::init(context.child("recovered"), cfg.clone())
-                .await
-                .unwrap();
-            // The filled blobs survived (synced at rollover). The partial tail item vanished.
-            assert_eq!(journal.bounds(), 0..4);
-            for i in 0..4u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
-            }
-            assert_eq!(journal.append(&42).await.unwrap(), 4);
-            assert_eq!(journal.read(4).await.unwrap(), 42);
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// The oldest data blob emptied in place, a newer blob still holding durable items, and
-    /// the offsets journal removed wholesale: external tampering no crash can produce. The
-    /// orphaned data no longer matches the (empty) offsets journal, so init reports
-    /// corruption instead of silently discarding acknowledged items.
-    #[test_traced]
-    fn test_variable_recovery_empty_oldest_blob_orphaned_newer_blob() {
+    fn test_variable_offsets_partition_loss_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-empty-oldest-blob".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Durably persist blobs 0 and 1 (positions 0..20).
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..20u64 {
-                journal.append(&(i * 100)).await.unwrap();
+            let cfg = test_cfg(&context, "offsets-loss", SMALL_PAGE_SIZE, 4);
+            {
+                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..5u64 {
+                    journal.append(&i).await.unwrap();
+                }
+                journal.sync().await.unwrap();
             }
-            journal.sync().await.unwrap();
-            drop(journal);
 
-            // Empty the oldest data blob in place, leaving blob 1's items orphaned past the
-            // gap, then drop the offsets journal so recovery rebuilds from the data alone.
-            let data_partition = cfg.data_partition();
-            let mut names = context.scan(&data_partition).await.unwrap();
-            names.sort();
-            assert_eq!(names.len(), 3);
-            let (blob0, size0) = context.open(&data_partition, &names[0]).await.unwrap();
-            assert!(size0 > 0, "blob 0 should start durable");
-            blob0.resize(0).await.unwrap();
-            blob0.sync().await.unwrap();
-            context
-                .remove(&format!("{}-blobs", cfg.offsets_partition()), None)
-                .await
-                .unwrap();
-            context
-                .remove(&format!("{}-metadata", cfg.offsets_partition()), None)
-                .await
-                .unwrap();
+            context.remove("offsets-loss_offsets", None).await.unwrap();
 
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
-    /// An offsets journal durably rewound without the data-side truncation (planted with a
-    /// direct offsets rewind — `rewind` stages both truncations in one batch, so no crash can
-    /// produce this) is corruption.
+    /// A partial (non-multiple-of-8) offsets blob is corruption, surfaced by the offsets
+    /// journal's own init.
     #[test_traced]
-    fn test_variable_recovery_offsets_rewound_behind_data_is_corruption() {
+    fn test_variable_partial_offsets_entry_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with data across multiple blobs ===
-            let cfg = Config {
-                partition: "recovery-rewind-crash".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append 25 items across 3 blobs (blob 0: 0-9, blob 1: 10-19, blob 2: 20-24)
-            for i in 0..25u64 {
-                variable.append(&(i * 100)).await.unwrap();
+            let cfg = test_cfg(&context, "partial-offsets", SMALL_PAGE_SIZE, 4);
+            {
+                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..5u64 {
+                    journal.append(&i).await.unwrap();
+                }
+                journal.sync().await.unwrap();
             }
 
-            assert_eq!(variable.size(), 25);
-
-            // Durably keep offsets for positions 0-4, while data still contains all 25 items.
-            variable.test_rewind_offsets(5).await.unwrap();
-            drop(variable);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Data durably rewound without the offsets-side truncation (planted with a direct data
-    /// rewind — no crash can produce this) is corruption.
-    #[test_traced]
-    fn test_variable_recovery_data_rewound_behind_offsets_is_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-offsets-ahead-tail".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+            let (blob, size) = context
+                .open("partial-offsets_offsets", b"journal")
                 .await
                 .unwrap();
+            blob.write_at_sync(size, vec![0u8; 4]).await.unwrap();
 
-            for i in 0..20u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            // Durably rewind the DATA to position 12: the offsets journal (ending at 20) is
-            // now ahead of the durable data.
-            journal.test_rewind_data_to_position(12).await.unwrap();
-            journal.test_sync_data().await.unwrap();
-            drop(journal);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -3283,2028 +2605,493 @@ mod tests {
     fn test_variable_rewind_sync_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "rewind-sync-reopen".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
+            let cfg = test_cfg(&context, "rewind-reopen", SMALL_PAGE_SIZE, 4);
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-
             for i in 0..25u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            journal.rewind(12).await.unwrap();
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 0..12);
-            for i in 0..12u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
-            }
-            assert!(matches!(
-                journal.read(12).await,
-                Err(Error::ItemOutOfRange(12))
-            ));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Data durably rewound to exactly a blob boundary without the offsets-side truncation
-    /// (planted directly — no crash can produce this) is corruption.
-    #[test_traced]
-    fn test_variable_recovery_boundary_data_rewound_is_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-boundary-data-rewind".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            for i in 0..20u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            journal.test_rewind_data_to_position(10).await.unwrap();
-            journal.test_sync_data().await.unwrap();
-            drop(journal);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// An interior data blob shorter than its offsets entries claim holds acknowledged data
-    /// that no longer exists: corruption.
-    #[test_traced]
-    fn test_variable_recovery_short_interior_data_blob_is_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-short-blob-after-anchor".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            for i in 0..25u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            // The end of position 11's frame within blob 1.
-            let offset = {
-                let offsets = journal.offsets.snapshot().await.unwrap();
-                offsets.read(11).await.unwrap()
-            };
-            drop(journal);
-
-            // Truncate blob 1 in place (keeping blob 2) by reopening its blob directly.
-            let (blob, size) = context
-                .open(&cfg.data_partition(), &1u64.to_be_bytes())
-                .await
-                .unwrap();
-            let mut writer = Writer::new(blob, size, 1024, cfg.page_cache.clone())
-                .await
-                .unwrap();
-            writer.resize(offset).await.unwrap();
-            writer.sync().await.unwrap();
-            drop(writer);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// A partial trailing offsets entry cannot arise from a crash and is corruption.
-    #[test_traced]
-    fn test_variable_init_rejects_partial_offsets_entry() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "offsets-init-repair-sync".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-            let offsets_blob_partition = format!("{}-blobs", cfg.offsets_partition());
-            let expected_size = 2 * std::mem::size_of::<u64>() as u64;
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            journal.append(&10).await.unwrap();
-            journal.append(&20).await.unwrap();
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Durably extend the offsets blob by one byte (a partial entry).
-            let (blob, raw_size) = context
-                .open(&offsets_blob_partition, &0u64.to_be_bytes())
-                .await
-                .unwrap();
-            assert_eq!(raw_size, expected_size);
-            blob.write_at_sync(raw_size, vec![0u8]).await.unwrap();
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Durable garbage bytes past the last offsets entry cannot arise from a crash: corruption.
-    #[test_traced]
-    fn test_variable_init_rejects_trailing_data_garbage() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "data-init-repair-sync".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-            let data_partition = cfg.data_partition();
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            journal.append(&10).await.unwrap();
-            journal.append(&20).await.unwrap();
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let (blob, raw_size) = context
-                .open(&data_partition, &0u64.to_be_bytes())
-                .await
-                .unwrap();
-            let mut append = Writer::new(
-                blob,
-                raw_size,
-                2048,
-                CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-            )
-            .await
-            .unwrap();
-            append.append(&[0xFF, 0xFF]).await.unwrap();
-            append.sync().await.unwrap();
-            drop(append);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Durable unindexed data appended after a prune emptied the journal (planted with direct
-    /// data appends and syncs — no crash can produce it) is corruption.
-    #[test_traced]
-    fn test_variable_recovery_empty_offsets_after_prune_and_append() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-empty-after-prune".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // === Phase 1: Create journal with one full blob ===
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append 10 items (positions 0-9), fills blob 0
-            for i in 0..10u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 10);
-            assert_eq!(bounds.start, 0);
-
-            // === Phase 2: Prune to create empty journal ===
-            journal.prune(10).await.unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 10);
-            assert!(bounds.is_empty()); // Empty!
-
-            // === Phase 3: Append directly to data blobs to simulate crash ===
-            // Manually append to data blobs only (bypassing Variable's append logic)
-            // This simulates the case where data was synced but offsets wasn't
-            for i in 10..20u64 {
-                journal.test_append_data(1, i * 100).await.unwrap();
-            }
-            // Sync the data blobs (blob 1)
-            journal.test_sync_data().await.unwrap();
-            // Do NOT sync offsets journal - simulates crash before offsets.sync()
-
-            // Close without syncing offsets
-            drop(journal);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// `sync` persists data and offsets in one batch, so a crash right after it loses nothing.
-    #[test_traced]
-    fn test_variable_concurrent_sync_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "concurrent-sync-recovery".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append items across a blob boundary
-            for i in 0..15u64 {
-                journal.append(&(i * 100)).await.unwrap();
+                journal.append(&(i * 10)).await.unwrap();
             }
 
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Data should be intact and offsets rebuilt
-            assert_eq!(journal.size(), 15);
-            for i in 0..15u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_recovery_from_mid_blob_durable_anchor() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "mid-blob-durable-anchor".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
-            assert_eq!(journal.append(&700).await.unwrap(), 7);
-            journal.sync().await.unwrap();
-
-            for i in 1..6u64 {
-                assert_eq!(journal.append(&(700 + i)).await.unwrap(), 7 + i);
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 7..13);
-            for i in 0..6u64 {
-                assert_eq!(journal.read(7 + i).await.unwrap(), 700 + i);
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_rejects_conflicting_offsets_partitions() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-conflicting-offsets".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-            let legacy_partition = cfg.offsets_partition();
-            let blobs_partition = format!("{legacy_partition}-blobs");
-
-            for partition in [&legacy_partition, &blobs_partition] {
-                let (blob, _) = context.open(partition, &0u64.to_be_bytes()).await.unwrap();
-                blob.write_at_sync(0, vec![0]).await.unwrap();
-            }
-
-            let result = Journal::<_, u64>::init_at_size(context.child("storage"), cfg, 7).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-
-            // The consistency check must fail before staging a reset, which would erase the
-            // conflicting partitions and their corruption evidence.
-            assert_eq!(context.scan(&legacy_partition).await.unwrap().len(), 1);
-            assert_eq!(context.scan(&blobs_partition).await.unwrap().len(), 1);
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_zero() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-zero".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 0)
-                    .await
-                    .unwrap();
-
-            // Size should be 0
-            assert_eq!(journal.size(), 0);
-
-            // No oldest retained position (empty journal)
-            assert!(journal.bounds().is_empty());
-
-            // Next append should get position 0
-            let pos = journal.append(&100).await.unwrap();
-            assert_eq!(pos, 0);
-            assert_eq!(journal.size(), 1);
-            assert_eq!(journal.read(0).await.unwrap(), 100);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_blob_boundary() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-boundary".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize at position 10 (exactly at blob 1 boundary with items_per_section=5)
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 10)
-                    .await
-                    .unwrap();
-
-            // Size should be 10
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 10);
-
-            // No data yet, so no oldest retained position
-            assert!(bounds.is_empty());
-
-            // Next append should get position 10
-            let pos = journal.append(&1000).await.unwrap();
-            assert_eq!(pos, 10);
-            assert_eq!(journal.size(), 11);
-            assert_eq!(journal.read(10).await.unwrap(), 1000);
-
-            // Can continue appending
-            let pos = journal.append(&1001).await.unwrap();
-            assert_eq!(pos, 11);
-            assert_eq!(journal.read(11).await.unwrap(), 1001);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_mid_blob() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-mid".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize at position 7 (middle of blob 1 with items_per_section=5)
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
-
-            // Size should be 7
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 7);
-
-            // No data yet, so no oldest retained position
-            assert!(bounds.is_empty());
-
-            // Next append should get position 7
-            let pos = journal.append(&700).await.unwrap();
-            assert_eq!(pos, 7);
-            assert_eq!(journal.size(), 8);
-            assert_eq!(journal.read(7).await.unwrap(), 700);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_persistence() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-persist".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize at position 15
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
-                    .await
-                    .unwrap();
-
-            // Append some items
-            for i in 0..5u64 {
-                let pos = journal.append(&(1500 + i)).await.unwrap();
-                assert_eq!(pos, 15 + i);
-            }
-
+            // Rewind mid-journal, then append: positions continue from the rewind point.
+            journal.rewind(20).await.unwrap();
             assert_eq!(journal.size(), 20);
-
-            // Sync and reopen
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Size and data should be preserved
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 20);
-            assert_eq!(bounds.start, 15);
-
-            // Verify data
-            for i in 0..5u64 {
-                assert_eq!(journal.read(15 + i).await.unwrap(), 1500 + i);
-            }
-
-            // Can continue appending
-            let pos = journal.append(&9999).await.unwrap();
+            let pos = journal.append(&12345).await.unwrap();
             assert_eq!(pos, 20);
-            assert_eq!(journal.read(20).await.unwrap(), 9999);
+            assert_eq!(journal.read(20).await.unwrap(), 12345);
 
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_persistence_without_data() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-persist-empty".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize at position 15
-            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
-                .await
-                .unwrap();
-
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 15);
-            assert!(bounds.is_empty());
-
-            // Drop without writing any data
+            // Rewind again and reopen: the rewind is durable at return, no sync needed.
+            journal.rewind(5).await.unwrap();
             drop(journal);
-
-            // Reopen and verify size persisted
-            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 15);
-            assert!(bounds.is_empty());
-
-            // Can append starting at position 15
-            let pos = journal.append(&1500).await.unwrap();
-            assert_eq!(pos, 15);
-            assert_eq!(journal.read(15).await.unwrap(), 1500);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_clears_existing_data() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-clears-existing".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..12u64 {
-                journal.append(&(100 + i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
-            assert_eq!(journal.bounds(), 7..7);
-            assert_eq!(journal.append(&700).await.unwrap(), 7);
-            journal.sync().await.unwrap();
-            drop(journal);
-
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds(), 7..8);
-            assert_eq!(journal.read(7).await.unwrap(), 700);
-            assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
-            assert!(matches!(
-                journal.read(8).await,
-                Err(Error::ItemOutOfRange(8))
-            ));
+            assert_eq!(journal.size(), 5);
+            for i in 0u64..5 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 10);
+            }
 
             journal.destroy().await.unwrap();
         });
     }
 
+    /// A rewind is durable and atomic when it returns: a crash right after recovers the
+    /// rewound journal (both blobs truncated together).
     #[test_traced]
-    fn test_init_at_size_stages_reset_before_clearing_data() {
-        let partition = "init-at-size-stage-before-clear-failure".to_string();
+    fn test_variable_rewind_durable_across_crash() {
         let executor = deterministic::Runner::default();
-        let ((), checkpoint) = executor.start_and_recover({
-            let partition = partition.clone();
-            |context| async move {
-                let cfg = Config {
-                    partition,
-                    items_per_section: NZU64!(5),
-                    compression: None,
-                    codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                    write_buffer: NZUsize!(1024),
-                };
+        let (_, state) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context, "rewind-crash", SMALL_PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..10u64 {
+                journal.append(&i).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            journal.rewind(4).await.unwrap();
+            // No sync: rewind itself must have committed the truncations.
+        });
 
+        deterministic::Runner::from(state).start(|context| async move {
+            let cfg = test_cfg(&context, "rewind-crash", SMALL_PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 4);
+            for i in 0u64..4 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            let pos = journal.append(&100).await.unwrap();
+            assert_eq!(pos, 4);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_init_at_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "init-at-size", SMALL_PAGE_SIZE, 4);
+
+            // Init at an arbitrary position: empty, and the next append lands there.
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 37)
+                    .await
+                    .unwrap();
+            let bounds = journal.bounds();
+            assert!(bounds.is_empty());
+            assert_eq!(bounds.start, 37);
+            assert!(matches!(journal.read(36).await, Err(Error::ItemPruned(36))));
+
+            let pos = journal.append(&37).await.unwrap();
+            assert_eq!(pos, 37);
+            assert_eq!(journal.read(37).await.unwrap(), 37);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // The cleared image persists across a plain reopen.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 37..38);
+            assert_eq!(journal.read(37).await.unwrap(), 37);
+            drop(journal);
+
+            // Re-initializing at a LOWER size than the boundary recreates both partitions.
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("third"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            let bounds = journal.bounds();
+            assert!(bounds.is_empty());
+            assert_eq!(bounds.start, 7);
+            let pos = journal.append(&7).await.unwrap();
+            assert_eq!(pos, 7);
+            journal.destroy().await.unwrap();
+
+            // Init at size zero behaves like a fresh journal.
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("fourth"), cfg.clone(), 0)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+            let pos = journal.append(&0).await.unwrap();
+            assert_eq!(pos, 0);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The cleared image persists across a reopen even when nothing is ever appended.
+    #[test_traced]
+    fn test_variable_init_at_size_persists_without_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "init-at-size-empty", SMALL_PAGE_SIZE, 4);
+            {
+                let journal =
+                    Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 53)
+                        .await
+                        .unwrap();
+                assert_eq!(journal.bounds(), 53..53);
+            }
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 53..53);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The cleared image is durable when `init_at_size` returns: a crash immediately after
+    /// recovers the cleared journal.
+    #[test_traced]
+    fn test_variable_init_at_size_durable_without_sync() {
+        let executor = deterministic::Runner::default();
+        let (_, state) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context, "init-at-size-crash", SMALL_PAGE_SIZE, 4);
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 53)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 53..53);
+            // No sync: init_at_size itself must have committed the image.
+        });
+
+        deterministic::Runner::from(state).start(|context| async move {
+            let cfg = test_cfg(&context, "init-at-size-crash", SMALL_PAGE_SIZE, 4);
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 53..53);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// init_at_size discards existing data wholesale.
+    #[test_traced]
+    fn test_variable_init_at_size_clears_existing_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "init-at-size-clears", SMALL_PAGE_SIZE, 4);
+            {
                 let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
-                for i in 0..12u64 {
-                    journal.append(&(100 + i)).await.unwrap();
+                for i in 0..25u64 {
+                    journal.append(&i).await.unwrap();
                 }
                 journal.sync().await.unwrap();
-                drop(journal);
-
-                *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    sync_rate: Some(1.0),
-                    ..Default::default()
-                };
-                assert!(
-                    Journal::<_, u64>::init_at_size(context.child("reset"), cfg, 7)
-                        .await
-                        .is_err()
-                );
             }
-        });
 
-        deterministic::Runner::from(checkpoint).start(move |context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let cfg = Config {
-                partition,
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 0..12);
-            for i in 0..12u64 {
-                assert_eq!(journal.read(i).await.unwrap(), 100 + i);
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("second"), cfg.clone(), 100)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 100..100);
+            for i in [0u64, 24, 99] {
+                assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
             }
+            let pos = journal.append(&100).await.unwrap();
+            assert_eq!(pos, 100);
+            assert_eq!(journal.read(100).await.unwrap(), 100);
 
             journal.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
-    fn test_init_at_size_recovers_staged_reset_crash_points() {
+    fn test_variable_init_at_size_prune_and_append() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for (index, clear_data) in [false, true].into_iter().enumerate() {
-                let cfg = Config {
-                    partition: format!("init-at-size-staged-reset-crash-{index}"),
-                    items_per_section: NZU64!(5),
-                    compression: None,
-                    codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                    write_buffer: NZUsize!(1024),
-                };
-
-                let mut journal = Journal::<_, u64>::init(
-                    context.child("first").with_attribute("index", index),
-                    cfg.clone(),
-                )
-                .await
-                .unwrap();
-                for i in 0..12u64 {
-                    journal.append(&(100 + i)).await.unwrap();
-                }
-                journal.sync().await.unwrap();
-                drop(journal);
-
-                let offsets_cfg = fixed::Config {
-                    partition: cfg.offsets_partition(),
-                    items_per_blob: cfg.items_per_section,
-                    page_cache: cfg.page_cache.clone(),
-                    write_buffer: cfg.write_buffer,
-                };
-                // Simulate a crash right after `init_at_size(7)`'s batch landed: both blob
-                // partitions removed and the offsets boundary recorded, before any tail blob
-                // was recreated (with_tail=false) or after the empty offsets tail was
-                // recreated (with_tail=true).
-                let intent_ctx = context.child("intent").with_attribute("index", index);
-                let mut checkpoint = super::super::checkpoint::Checkpoint::open(
-                    intent_ctx.child("meta"),
-                    &offsets_cfg.partition,
-                )
-                .await
-                .unwrap();
-                checkpoint.set_boundary_hint(7).await.unwrap();
-                drop(checkpoint);
-                Partition::<deterministic::Context>::remove_all(&context, &cfg.data_partition())
-                    .await
-                    .unwrap();
-                Partition::<deterministic::Context>::remove_all(
-                    &context,
-                    &format!("{}-blobs", offsets_cfg.partition),
-                )
-                .await
-                .unwrap();
-                if clear_data {
-                    let (blob, _) = context
-                        .open(
-                            &format!("{}-blobs", offsets_cfg.partition),
-                            &1u64.to_be_bytes(),
-                        )
-                        .await
-                        .unwrap();
-                    blob.sync().await.unwrap();
-                    drop(blob);
-                }
-
-                let mut journal = Journal::<_, u64>::init(
-                    context.child("recover").with_attribute("index", index),
-                    cfg.clone(),
-                )
-                .await
-                .unwrap();
-                assert_eq!(journal.bounds(), 7..7);
-                assert_eq!(journal.append(&700).await.unwrap(), 7);
-                journal.sync().await.unwrap();
-                drop(journal);
-
-                let journal = Journal::<_, u64>::init(
-                    context.child("reopen").with_attribute("index", index),
-                    cfg.clone(),
-                )
-                .await
-                .unwrap();
-                assert_eq!(journal.bounds(), 7..8);
-                assert_eq!(journal.read(7).await.unwrap(), 700);
-
-                journal.destroy().await.unwrap();
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_overwrites_pending_clear_target() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-overwrites-pending-target".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..12u64 {
-                journal.append(&(100 + i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Plant a stale mid-blob boundary record (behind the live blob state): the reset
-            // must overwrite it along with everything else.
-            let offsets_cfg = fixed::Config {
-                partition: cfg.offsets_partition(),
-                items_per_blob: cfg.items_per_section,
-                page_cache: cfg.page_cache.clone(),
-                write_buffer: cfg.write_buffer,
-            };
-            let stale_ctx = context.child("stale");
-            let mut checkpoint = super::super::checkpoint::Checkpoint::open(
-                stale_ctx.child("meta"),
-                &offsets_cfg.partition,
-            )
-            .await
-            .unwrap();
-            checkpoint.set_boundary_hint(3).await.unwrap();
-            drop(checkpoint);
-
-            // init_at_size(10) overwrites the stale record and resets to 10.
+            let cfg = test_cfg(&context, "init-at-size-prune", SMALL_PAGE_SIZE, 4);
             let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 10)
-                    .await
-                    .unwrap();
-            assert_eq!(journal.bounds(), 10..10);
-            assert_eq!(journal.append(&700).await.unwrap(), 10);
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Reopen: target 10 (not 5) persisted and no stale data was replayed.
-            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 10..11);
-            assert_eq!(journal.read(10).await.unwrap(), 700);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_discards_same_blob_stale_data() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-discards-same-blob-stale-data".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 5)
-                    .await
-                    .unwrap();
-            for i in 0..4u64 {
-                assert_eq!(journal.append(&(500 + i)).await.unwrap(), 5 + i);
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
-                .await
-                .unwrap();
-            drop(journal);
-
-            let mut journal = Journal::<_, u64>::init(context.child("after_reset"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 7..7);
-            assert!(matches!(
-                journal.read(7).await,
-                Err(Error::ItemOutOfRange(7))
-            ));
-
-            assert_eq!(journal.append(&700).await.unwrap(), 7);
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init(context.child("after_append"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 7..8);
-            assert_eq!(journal.read(7).await.unwrap(), 700);
-            assert!(matches!(
-                journal.read(8).await,
-                Err(Error::ItemOutOfRange(8))
-            ));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test init_at_size with mid-blob value persists correctly across restart.
-    #[test_traced]
-    fn test_init_at_size_mid_blob_persistence() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-mid-blob".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize at position 7 (mid-blob, 7 % 5 = 2)
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 100)
                     .await
                     .unwrap();
 
-            // Append 3 items at positions 7, 8, 9 (fills rest of blob 1)
-            for i in 0..3u64 {
-                let pos = journal.append(&(700 + i)).await.unwrap();
-                assert_eq!(pos, 7 + i);
-            }
-
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 10);
-            assert_eq!(bounds.start, 7);
-
-            // Sync and reopen
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Reopen
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Size and bounds.start should be preserved correctly
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 10);
-            assert_eq!(bounds.start, 7);
-
-            // Verify data
-            for i in 0..3u64 {
-                assert_eq!(journal.read(7 + i).await.unwrap(), 700 + i);
-            }
-
-            // Positions before 7 should be pruned
-            assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test init_at_size mid-blob with data spanning multiple blobs.
-    #[test_traced]
-    fn test_init_at_size_mid_blob_multi_blob_persistence() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-multi-blob".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize at position 7 (mid-blob)
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
-
-            // Append 8 items: positions 7-14 (blob 1: 3 items, blob 2: 5 items)
-            for i in 0..8u64 {
-                let pos = journal.append(&(700 + i)).await.unwrap();
-                assert_eq!(pos, 7 + i);
-            }
-
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 15);
-            assert_eq!(bounds.start, 7);
-
-            // Sync and reopen
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Reopen
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Verify state preserved
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 15);
-            assert_eq!(bounds.start, 7);
-
-            // Verify all data
-            for i in 0..8u64 {
-                assert_eq!(journal.read(7 + i).await.unwrap(), 700 + i);
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Removing every data blob while the offsets journal still holds entries cannot arise
-    /// from a crash (the tail blob always exists): corruption.
-    #[test_traced]
-    fn test_variable_recovery_missing_data_blobs_is_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "align-journals-mid-blob-pruning-boundary".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..7u64 {
-                journal.append(&(100 + i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            Partition::<deterministic::Context>::remove_all(&context, &cfg.data_partition())
-                .await
-                .unwrap();
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Test crash recovery: init_at_size + append + crash with data synced but offsets not.
-    #[test_traced]
-    fn test_init_at_size_crash_data_synced_offsets_not() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-crash-recovery".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize at position 7 (mid-blob)
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
-
-            // Append 3 items
-            for i in 0..3u64 {
-                journal.append(&(700 + i)).await.unwrap();
-            }
-
-            // The appends filled blob 1, so the rollover already made both the data and its
-            // offsets entries durable. Crash without an explicit sync.
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Verify recovery
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 10);
-            assert_eq!(bounds.start, 7);
-
-            // Verify data is accessible
-            for i in 0..3u64 {
-                assert_eq!(journal.read(7 + i).await.unwrap(), 700 + i);
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_prune_does_not_move_oldest_retained_backwards() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "prune-no-backwards".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
-
-            // Append a few items at positions 7..9
-            for i in 0..3u64 {
-                let pos = journal.append(&(700 + i)).await.unwrap();
-                assert_eq!(pos, 7 + i);
-            }
-            assert_eq!(journal.bounds().start, 7);
-
-            // Prune to a position within the same blob should not move bounds.start backwards.
-            journal.prune(8).await.unwrap();
-            assert_eq!(journal.bounds().start, 7);
-            assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
-            assert_eq!(journal.read(7).await.unwrap(), 700);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Near-max positions: data made durable without its offsets entry (planted with a direct
-    /// blob sync) is corruption, with no overflow in the verification arithmetic.
-    #[test_traced]
-    fn test_variable_recovery_near_max_data_synced_offsets_not() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "near-max-data-synced-offsets-not".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), u64::MAX - 1)
-                    .await
-                    .unwrap();
-            assert_eq!(journal.append(&7).await.unwrap(), u64::MAX - 1);
-            journal
-                .test_sync_data_blob(position_to_blob(u64::MAX - 1, cfg.items_per_section.get()))
-                .await
-                .unwrap();
-            drop(journal);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_large_offset() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-large".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize at a large position (position 1000)
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 1000)
-                    .await
-                    .unwrap();
-
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 1000);
-            // No data yet, so no oldest retained position
-            assert!(bounds.is_empty());
-
-            // Next append should get position 1000
-            let pos = journal.append(&100000).await.unwrap();
-            assert_eq!(pos, 1000);
-            assert_eq!(journal.read(1000).await.unwrap(), 100000);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_init_at_size_prune_and_append() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-at-size-prune".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize at position 20
-            let mut journal =
-                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 20)
-                    .await
-                    .unwrap();
-
-            // Append items 20-29
-            for i in 0..10u64 {
-                journal.append(&(2000 + i)).await.unwrap();
-            }
-
-            assert_eq!(journal.size(), 30);
-
-            // Prune to position 25
-            journal.prune(25).await.unwrap();
-
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 30);
-            assert_eq!(bounds.start, 25);
-
-            // Verify remaining items are readable
-            for i in 25..30u64 {
-                assert_eq!(journal.read(i).await.unwrap(), 2000 + (i - 20));
-            }
-
-            // Continue appending
-            let pos = journal.append(&3000).await.unwrap();
-            assert_eq!(pos, 30);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `init_sync` when there is no existing data on disk.
-    #[test_traced]
-    fn test_init_sync_no_existing_data() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-fresh-start".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            // Initialize journal with sync boundaries when no existing data exists
-            let lower_bound = 10;
-            let upper_bound = 26;
-            let mut journal = Journal::init_sync(
-                context.child("storage"),
-                cfg.clone(),
-                lower_bound..upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal with sync boundaries");
-
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, lower_bound);
-            assert!(bounds.is_empty());
-
-            // Append items using the contiguous API
-            let pos1 = journal.append(&42u64).await.unwrap();
-            assert_eq!(pos1, lower_bound);
-            assert_eq!(journal.read(pos1).await.unwrap(), 42u64);
-
-            let pos2 = journal.append(&43u64).await.unwrap();
-            assert_eq!(pos2, lower_bound + 1);
-            assert_eq!(journal.read(pos2).await.unwrap(), 43u64);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `init_sync` when there is existing data that overlaps with the sync target range.
-    #[test_traced]
-    fn test_init_sync_existing_data_overlap() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-overlap".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            // Create initial journal with data in multiple blobs
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.child("storage"), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
-
-            // Add data at positions 0-19 (blobs 0-3 with items_per_section=5)
-            for i in 0..20u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Initialize with sync boundaries that overlap with existing data
-            // lower_bound: 8 (blob 1), upper_bound: 31 (last location 30, blob 6)
-            let lower_bound = 8;
-            let upper_bound = 31;
-            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.child("storage"),
-                cfg.clone(),
-                lower_bound..upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal with overlap");
-
-            assert_eq!(journal.size(), 20);
-
-            // Verify oldest retained is pruned to lower_bound's blob boundary (5)
-            assert_eq!(journal.bounds().start, 5); // Blob 1 starts at position 5
-
-            // Verify data integrity: positions before 5 are pruned
-            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(4).await, Err(Error::ItemPruned(_))));
-
-            // Positions 5-19 should be accessible
-            assert_eq!(journal.read(5).await.unwrap(), 500);
-            assert_eq!(journal.read(8).await.unwrap(), 800);
-            assert_eq!(journal.read(19).await.unwrap(), 1900);
-
-            // Position 20+ should not exist yet
-            assert!(matches!(
-                journal.read(20).await,
-                Err(Error::ItemOutOfRange(_))
-            ));
-
-            // Assert journal can accept new items
-            let pos = journal.append(&999).await.unwrap();
-            assert_eq!(pos, 20);
-            assert_eq!(journal.read(20).await.unwrap(), 999);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `init_sync` with invalid parameters.
-    #[should_panic]
-    #[test_traced]
-    fn test_init_sync_invalid_parameters() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-invalid".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            #[allow(clippy::reversed_empty_ranges)]
-            let _result = Journal::<deterministic::Context, u64>::init_sync(
-                context.child("storage"),
-                cfg,
-                10..5, // invalid range: lower > upper
-            )
-            .await;
-        });
-    }
-
-    /// Test `init_sync` when existing data exactly matches the sync range.
-    #[test_traced]
-    fn test_init_sync_existing_data_exact_match() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
-            let cfg = Config {
-                partition: "test-exact-match".into(),
-                items_per_section,
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            // Create initial journal with data exactly matching sync range
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.child("storage"), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
-
-            // Add data at positions 0-19 (blobs 0-3 with items_per_section=5)
-            for i in 0..20u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Initialize with sync boundaries that exactly match existing data
-            let lower_bound = 5; // blob 1
-            let upper_bound = 20; // blob 3
-            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.child("storage"),
-                cfg.clone(),
-                lower_bound..upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal with exact match");
-
-            assert_eq!(journal.size(), 20);
-
-            // Verify pruning to lower bound (blob 1 boundary = position 5)
-            assert_eq!(journal.bounds().start, 5); // Blob 1 starts at position 5
-
-            // Verify positions before 5 are pruned
-            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(4).await, Err(Error::ItemPruned(_))));
-
-            // Positions 5-19 should be accessible
-            assert_eq!(journal.read(5).await.unwrap(), 500);
-            assert_eq!(journal.read(10).await.unwrap(), 1000);
-            assert_eq!(journal.read(19).await.unwrap(), 1900);
-
-            // Position 20+ should not exist yet
-            assert!(matches!(
-                journal.read(20).await,
-                Err(Error::ItemOutOfRange(_))
-            ));
-
-            // Assert journal can accept new operations
-            let pos = journal.append(&999).await.unwrap();
-            assert_eq!(pos, 20);
-            assert_eq!(journal.read(20).await.unwrap(), 999);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `init_sync` when existing data exceeds the sync target range.
-    /// This tests that ItemOutOfRange is returned when existing data goes beyond the upper bound.
-    #[test_traced]
-    fn test_init_sync_existing_data_exceeds_upper_bound() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
-            let cfg = Config {
-                partition: "test-unexpected-data".into(),
-                items_per_section,
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            // Create initial journal with data beyond sync range
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.child("initial"), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
-
-            // Add data at positions 0-29 (blobs 0-5 with items_per_section=5)
-            for i in 0..30u64 {
-                journal.append(&(i * 1000)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Initialize with sync boundaries that are exceeded by existing data
-            let lower_bound = 8; // blob 1
-            for (i, upper_bound) in (9..29).enumerate() {
-                let result = Journal::<deterministic::Context, u64>::init_sync(
-                    context.child("sync").with_attribute("index", i),
-                    cfg.clone(),
-                    lower_bound..upper_bound,
-                )
-                .await;
-
-                // Should return ItemOutOfRange error since data exists beyond upper_bound
-                assert!(matches!(result, Err(Error::ItemOutOfRange(_))));
-            }
-        });
-    }
-
-    /// Test `init_sync` repairs an empty journal recovered at a stale position beyond the range.
-    #[test_traced]
-    fn test_init_sync_empty_stale_position_beyond_upper_bound() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-empty-stale-position".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            let stale_size = 30;
-            let journal = Journal::<deterministic::Context, u64>::init_at_size(
-                context.child("first"),
-                cfg.clone(),
-                stale_size,
-            )
-            .await
-            .expect("Failed to create stale empty journal");
-            assert_eq!(journal.size(), stale_size);
-            assert!(journal.bounds().is_empty());
-            drop(journal);
-
-            let lower_bound = 10;
-            let upper_bound = 26;
-            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.child("second"),
-                cfg.clone(),
-                lower_bound..upper_bound,
-            )
-            .await
-            .expect("Failed to repair stale empty journal");
-
-            assert_eq!(journal.size(), lower_bound);
-            assert!(journal.bounds().is_empty());
-
-            let pos = journal.append(&999).await.unwrap();
-            assert_eq!(pos, lower_bound);
-            assert_eq!(journal.read(pos).await.unwrap(), 999);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `init_sync` repairs an empty journal recovered after a `clear_to_size` crash.
-    #[test_traced]
-    fn test_init_sync_recovers_from_stale_clear_to_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-stale-clear-to-size".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            let mut journal = Journal::<deterministic::Context, u64>::init_at_size(
-                context.child("first"),
-                cfg.clone(),
-                9,
-            )
-            .await
-            .expect("Failed to create stale empty journal");
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Simulate clear_to_size(7) crashing after clearing data, but before offsets were
-            // re-cleared. Recovery will initially see the old empty offsets boundary at 9.
-            match context.remove(&cfg.data_partition(), None).await {
-                Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
-                Err(error) => panic!("failed to clear data partition: {error}"),
-            }
-
-            let lower_bound = 7;
-            let upper_bound = 20;
-            let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.child("second"),
-                cfg.clone(),
-                lower_bound..upper_bound,
-            )
-            .await
-            .expect("Failed to repair stale empty journal");
-
-            assert_eq!(journal.size(), lower_bound);
-            let bounds = journal.bounds();
-            assert!(bounds.is_empty());
-            assert_eq!(bounds.start, lower_bound);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `init_sync` when all existing data is stale (before lower bound).
-    #[test_traced]
-    fn test_init_sync_existing_data_stale() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
-            let cfg = Config {
-                partition: "test-stale".into(),
-                items_per_section,
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            // Create initial journal with stale data
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.child("first"), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
-
-            // Add data at positions 0-9 (blobs 0-1 with items_per_section=5)
-            for i in 0..10u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Initialize with sync boundaries beyond all existing data
-            let lower_bound = 15; // blob 3
-            let upper_bound = 26; // last element in blob 5
-            let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.child("second"),
-                cfg.clone(),
-                lower_bound..upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal with stale data");
-
-            assert_eq!(journal.size(), 15);
-
-            // Verify fresh journal (all old data destroyed, starts at position 15)
-            assert!(journal.bounds().is_empty());
-
-            // Verify old positions don't exist
-            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(9).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(14).await, Err(Error::ItemPruned(_))));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `init_sync` with blob boundary edge cases.
-    #[test_traced]
-    fn test_init_sync_blob_boundaries() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
-            let cfg = Config {
-                partition: "test-boundaries".into(),
-                items_per_section,
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            // Create journal with data at blob boundaries
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.child("storage"), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
-
-            // Add data at positions 0-24 (blobs 0-4 with items_per_section=5)
-            for i in 0..25u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Test sync boundaries exactly at blob boundaries
-            let lower_bound = 15; // Exactly at blob boundary (15/5 = 3)
-            let upper_bound = 25; // Last element exactly at blob boundary (24/5 = 4)
-            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.child("storage"),
-                cfg.clone(),
-                lower_bound..upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal at boundaries");
-
-            assert_eq!(journal.size(), 25);
-
-            // Verify oldest retained is at blob 3 boundary (position 15)
-            assert_eq!(journal.bounds().start, 15);
-
-            // Verify positions before 15 are pruned
-            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(14).await, Err(Error::ItemPruned(_))));
-
-            // Verify positions 15-24 are accessible
-            assert_eq!(journal.read(15).await.unwrap(), 1500);
-            assert_eq!(journal.read(20).await.unwrap(), 2000);
-            assert_eq!(journal.read(24).await.unwrap(), 2400);
-
-            // Position 25+ should not exist yet
-            assert!(matches!(
-                journal.read(25).await,
-                Err(Error::ItemOutOfRange(_))
-            ));
-
-            // Assert journal can accept new operations
-            let pos = journal.append(&999).await.unwrap();
-            assert_eq!(pos, 25);
-            assert_eq!(journal.read(25).await.unwrap(), 999);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `init_sync` when range.start and range.end-1 are in the same blob.
-    #[test_traced]
-    fn test_init_sync_same_blob_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
-            let cfg = Config {
-                partition: "test-same-blob".into(),
-                items_per_section,
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            // Create journal with data in multiple blobs
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.child("storage"), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
-
-            // Add data at positions 0-14 (blobs 0-2 with items_per_section=5)
-            for i in 0..15u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Test sync boundaries within the same blob
-            let lower_bound = 10; // operation 10 (blob 2: 10/5 = 2)
-            let upper_bound = 15; // Last operation 14 (blob 2: 14/5 = 2)
-            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.child("storage"),
-                cfg.clone(),
-                lower_bound..upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal with same-blob bounds");
-
-            assert_eq!(journal.size(), 15);
-
-            // Both operations are in blob 2, so blobs 0, 1 should be pruned, blob 2 retained
-            // Oldest retained position should be at blob 2 boundary (position 10)
-            assert_eq!(journal.bounds().start, 10);
-
-            // Verify positions before 10 are pruned
-            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(9).await, Err(Error::ItemPruned(_))));
-
-            // Verify positions 10-14 are accessible
-            assert_eq!(journal.read(10).await.unwrap(), 1000);
-            assert_eq!(journal.read(11).await.unwrap(), 1100);
-            assert_eq!(journal.read(14).await.unwrap(), 1400);
-
-            // Position 15+ should not exist yet
-            assert!(matches!(
-                journal.read(15).await,
-                Err(Error::ItemOutOfRange(_))
-            ));
-
-            // Assert journal can accept new operations
-            let pos = journal.append(&999).await.unwrap();
-            assert_eq!(pos, 15);
-            assert_eq!(journal.read(15).await.unwrap(), 999);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test contiguous variable journal with items_per_section=1.
-    ///
-    /// This is a regression test for a bug where reading from size()-1 fails
-    /// when using items_per_section=1, particularly after pruning and restart.
-    #[test_traced]
-    fn test_single_item_per_blob() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "single-item-per-blob".into(),
-                items_per_section: NZU64!(1),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // === Test 1: Basic single item operation ===
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Verify empty state
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 0);
-            assert!(bounds.is_empty());
-
-            // Append 1 item (value = position * 100, so position 0 has value 0)
-            let pos = journal.append(&0).await.unwrap();
-            assert_eq!(pos, 0);
-            assert_eq!(journal.size(), 1);
-
-            // Sync
-            journal.sync().await.unwrap();
-
-            // Read from size() - 1
-            let value = journal.read(journal.size() - 1).await.unwrap();
-            assert_eq!(value, 0);
-
-            // === Test 2: Multiple items with single item per blob ===
-            for i in 1..10u64 {
-                let pos = journal.append(&(i * 100)).await.unwrap();
+            for i in 100u64..120 {
+                let pos = journal.append(&i).await.unwrap();
                 assert_eq!(pos, i);
-                assert_eq!(journal.size(), i + 1);
-
-                // Verify we can read the just-appended item at size() - 1
-                let value = journal.read(journal.size() - 1).await.unwrap();
-                assert_eq!(value, i * 100);
             }
 
-            // Verify all items can be read
-            for i in 0..10u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            // Prune within the appended range: exact boundary.
+            assert!(journal.prune(110).await.unwrap());
+            assert_eq!(journal.bounds(), 110..120);
+            assert!(matches!(
+                journal.read(109).await,
+                Err(Error::ItemPruned(109))
+            ));
+            assert_eq!(journal.read(110).await.unwrap(), 110);
+
+            // Replay from the boundary.
+            {
+                let reader = journal.snapshot().await.unwrap();
+                let stream = reader.replay(110, NZUsize!(1024)).await.unwrap();
+                futures::pin_mut!(stream);
+                let mut count = 0;
+                while let Some(result) = stream.next().await {
+                    let (pos, item) = result.unwrap();
+                    assert_eq!(pos, item);
+                    count += 1;
+                }
+                assert_eq!(count, 10);
             }
-
-            journal.sync().await.unwrap();
-
-            // === Test 3: Pruning with single item per blob ===
-            // Prune to position 5 (removes positions 0-4)
-            let pruned = journal.prune(5).await.unwrap();
-            assert!(pruned);
-
-            // Size should still be 10
-            assert_eq!(journal.size(), 10);
-
-            // bounds.start should be 5
-            assert_eq!(journal.bounds().start, 5);
-
-            // Reading from bounds.end - 1 (position 9) should still work
-            let value = journal.read(journal.size() - 1).await.unwrap();
-            assert_eq!(value, 900);
-
-            // Reading from pruned positions should return ItemPruned
-            for i in 0..5 {
-                assert!(matches!(
-                    journal.read(i).await,
-                    Err(crate::journal::Error::ItemPruned(_))
-                ));
-            }
-
-            // Reading from retained positions should work
-            for i in 5..10u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
-            }
-
-            // Append more items after pruning
-            for i in 10..15u64 {
-                let pos = journal.append(&(i * 100)).await.unwrap();
-                assert_eq!(pos, i);
-
-                // Verify we can read from size() - 1
-                let value = journal.read(journal.size() - 1).await.unwrap();
-                assert_eq!(value, i * 100);
-            }
-
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // === Test 4: Restart persistence with single item per blob ===
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Verify size is preserved
-            assert_eq!(journal.size(), 15);
-
-            // Verify bounds.start is preserved
-            assert_eq!(journal.bounds().start, 5);
-
-            // Reading from bounds.end - 1 should work after restart
-            let value = journal.read(journal.size() - 1).await.unwrap();
-            assert_eq!(value, 1400);
-
-            // Reading all retained positions should work
-            for i in 5..15u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
-            }
-
-            journal.destroy().await.unwrap();
-
-            // === Test 5: Restart after pruning with non-zero index (KEY SCENARIO) ===
-            // Fresh journal for this test
-            let mut journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append 10 items (positions 0-9)
-            for i in 0..10u64 {
-                journal.append(&(i * 1000)).await.unwrap();
-            }
-
-            // Prune to position 5 (removes positions 0-4)
-            journal.prune(5).await.unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 10);
-            assert_eq!(bounds.start, 5);
-
-            // Sync and restart
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Re-open journal
-            let journal = Journal::<_, u64>::init(context.child("fourth"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Verify state after restart
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 10);
-            assert_eq!(bounds.start, 5);
-
-            // KEY TEST: Reading from bounds.end - 1 (position 9) should work
-            let value = journal.read(journal.size() - 1).await.unwrap();
-            assert_eq!(value, 9000);
-
-            // Verify all retained positions (5-9) work
-            for i in 5..10u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 1000);
-            }
-
-            journal.destroy().await.unwrap();
-
-            // === Test 6: Prune all items (edge case) ===
-            // This tests the scenario where prune removes everything.
-            // Callers must check bounds().is_empty() before reading.
-            let mut journal = Journal::<_, u64>::init(context.child("fifth"), cfg.clone())
-                .await
-                .unwrap();
-
-            for i in 0..5u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            // Prune all items
-            journal.prune(5).await.unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 5); // Size unchanged
-            assert!(bounds.is_empty()); // All pruned
-
-            // bounds.end - 1 = 4, but position 4 is pruned
-            let result = journal.read(journal.size() - 1).await;
-            assert!(matches!(result, Err(crate::journal::Error::ItemPruned(4))));
-
-            // After appending, reading works again
-            journal.append(&500).await.unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.start, 5);
-            assert_eq!(journal.read(bounds.end - 1).await.unwrap(), 500);
 
             journal.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
-    fn test_variable_journal_clear_to_size() {
+    fn test_variable_clear_to_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "clear-test".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
+            let cfg = test_cfg(&context, "clear-test", LARGE_PAGE_SIZE, 10);
             let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
                 .await
                 .unwrap();
 
-            // Append 25 items (spanning multiple blobs)
             for i in 0..25u64 {
                 journal.append(&(i * 100)).await.unwrap();
             }
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 25);
-            assert_eq!(bounds.start, 0);
             journal.sync().await.unwrap();
 
-            // Clear to position 100, effectively resetting the journal
+            // Clear forward: in-place, resetting the journal to an empty image at 100.
             journal.clear_to_size(100).await.unwrap();
             let bounds = journal.bounds();
-            assert_eq!(bounds.end, 100);
-            assert!(bounds.is_empty());
-
-            // Old positions should fail
+            assert_eq!(bounds, 100..100);
             for i in 0..25 {
-                assert!(matches!(
-                    journal.read(i).await,
-                    Err(crate::journal::Error::ItemPruned(_))
-                ));
+                assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
             }
 
-            // Verify size persists after restart without writing any data
+            // The cleared size persists across a restart without any appends.
             drop(journal);
             let mut journal =
                 Journal::<_, u64>::init(context.child("journal_after_clear"), cfg.clone())
                     .await
                     .unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 100);
-            assert!(bounds.is_empty());
+            assert_eq!(journal.bounds(), 100..100);
 
-            // Append new data starting at position 100
+            // Append new data starting at position 100.
             for i in 100..105u64 {
                 let pos = journal.append(&(i * 100)).await.unwrap();
                 assert_eq!(pos, i);
             }
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 105);
-            assert_eq!(bounds.start, 100);
-
-            // New positions should be readable
+            assert_eq!(journal.bounds(), 100..105);
             for i in 100..105u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
+            journal.sync().await.unwrap();
 
-            // Sync and re-init to verify persistence
+            // Prune, then clear BELOW the boundary: both partitions are recreated.
+            journal.prune(103).await.unwrap();
+            assert_eq!(journal.bounds(), 103..105);
+            journal.clear_to_size(3).await.unwrap();
+            assert_eq!(journal.bounds(), 3..3);
+            let pos = journal.append(&333).await.unwrap();
+            assert_eq!(pos, 3);
             journal.sync().await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.child("journal_reopened"), cfg)
+            // All of it persists across a reopen.
+            let mut journal = Journal::<_, u64>::init(context.child("journal_reopened"), cfg)
                 .await
                 .unwrap();
+            assert_eq!(journal.bounds(), 3..4);
+            assert_eq!(journal.read(3).await.unwrap(), 333);
 
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 105);
-            assert_eq!(bounds.start, 100);
-            for i in 100..105u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            // Clearing to u64::MAX is rejected.
+            assert!(matches!(
+                journal.clear_to_size(u64::MAX).await,
+                Err(Error::SizeOverflow)
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The cleared image (both clear paths) is durable when `clear_to_size` returns.
+    #[test_traced]
+    fn test_variable_clear_to_size_durable_without_sync() {
+        let executor = deterministic::Runner::default();
+        let (_, state) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context, "clear-crash", SMALL_PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..10u64 {
+                journal.append(&i).await.unwrap();
             }
+            journal.sync().await.unwrap();
+            journal.prune(8).await.unwrap();
+
+            // In-place clear (target above the boundary), then a below-boundary clear.
+            journal.clear_to_size(20).await.unwrap();
+            assert_eq!(journal.bounds(), 20..20);
+            journal.clear_to_size(5).await.unwrap();
+            assert_eq!(journal.bounds(), 5..5);
+            // No sync: the crash below must still recover the cleared journal.
+        });
+
+        deterministic::Runner::from(state).start(|context| async move {
+            let cfg = test_cfg(&context, "clear-crash", SMALL_PAGE_SIZE, 4);
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 5..5);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sync_no_existing_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "init-sync-fresh", SMALL_PAGE_SIZE, 4);
+
+            // Fresh journal with range starting at zero: nothing to do.
+            let journal = Journal::<_, u64>::init_sync(context.child("zero"), cfg.clone(), 0..10)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+            journal.destroy().await.unwrap();
+
+            // Fresh journal with a nonzero range start: cleared to the start.
+            let mut journal =
+                Journal::<_, u64>::init_sync(context.child("five"), cfg.clone(), 5..10)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 5..5);
+            assert_eq!(journal.append(&5).await.unwrap(), 5);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sync_existing_data_overlap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "init-sync-overlap", SMALL_PAGE_SIZE, 4);
+            {
+                let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..8u64 {
+                    journal.append(&i).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+            }
+
+            // Overlapping range: retained data is pruned exactly to the range start.
+            let mut journal =
+                Journal::<_, u64>::init_sync(context.child("sync"), cfg.clone(), 3..20)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 3..8);
+            for i in 3..8u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            assert!(matches!(journal.read(2).await, Err(Error::ItemPruned(2))));
+            assert_eq!(journal.append(&8).await.unwrap(), 8);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "range must not be empty")]
+    fn test_init_sync_rejects_empty_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "init-sync-empty-range", SMALL_PAGE_SIZE, 4);
+            let _ = Journal::<_, u64>::init_sync(context, cfg, 5..5).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sync_existing_data_exact_match_and_beyond() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "init-sync-exact", SMALL_PAGE_SIZE, 4);
+            {
+                let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..10u64 {
+                    journal.append(&i).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+            }
+
+            // Existing size == range.end is accepted.
+            let journal = Journal::<_, u64>::init_sync(context.child("exact"), cfg.clone(), 4..10)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 4..10);
+            drop(journal);
+
+            // Existing data beyond range.end is rejected.
+            let result =
+                Journal::<_, u64>::init_sync(context.child("beyond"), cfg.clone(), 4..9).await;
+            assert!(matches!(result, Err(Error::ItemOutOfRange(10))));
+
+            // Clean up through a plain init.
+            let journal = Journal::<_, u64>::init(context.child("cleanup"), cfg)
+                .await
+                .unwrap();
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sync_existing_data_stale() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "init-sync-stale", SMALL_PAGE_SIZE, 4);
+            {
+                let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..5u64 {
+                    journal.append(&i).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+            }
+
+            // All existing data precedes the range: reset to the range start.
+            let mut journal =
+                Journal::<_, u64>::init_sync(context.child("sync"), cfg.clone(), 10..20)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 10..10);
+            assert_eq!(journal.append(&10).await.unwrap(), 10);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A stale empty journal ahead of the requested range start (even beyond the range end,
+    /// e.g. after a crashed clear_to_size) is re-cleared to the range start.
+    #[test_traced]
+    fn test_init_sync_stale_empty_position() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "init-sync-stale-empty", SMALL_PAGE_SIZE, 4);
+            {
+                let journal =
+                    Journal::<_, u64>::init_at_size(context.child("seed"), cfg.clone(), 30)
+                        .await
+                        .unwrap();
+                assert_eq!(journal.bounds(), 30..30);
+            }
+
+            let mut journal =
+                Journal::<_, u64>::init_sync(context.child("sync"), cfg.clone(), 7..20)
+                    .await
+                    .unwrap();
+            let bounds = journal.bounds();
+            assert!(bounds.is_empty());
+            assert_eq!(bounds.start, 7);
+            assert_eq!(journal.append(&7).await.unwrap(), 7);
 
             journal.destroy().await.unwrap();
         });
@@ -5314,14 +3101,7 @@ mod tests {
     fn test_variable_journal_metrics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "metrics".into(),
-                items_per_section: NZU64!(2),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "metrics", PAGE_SIZE, 10);
             let mut journal = Journal::<_, u64>::init(context.child("variable_metrics"), cfg)
                 .await
                 .unwrap();
@@ -5357,9 +3137,8 @@ mod tests {
                 "variable_metrics_sync_duration_count 1",
                 "variable_metrics_cache_hits_total 4",
                 "variable_metrics_cache_misses_total 0",
-                "variable_metrics_data_tracked",
                 "variable_metrics_offsets_size 4",
-                "variable_metrics_offsets_blobs_tracked",
+                "variable_metrics_offsets_pruning_boundary 2",
             ] {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }
@@ -5373,16 +3152,7 @@ mod tests {
         // Reads served from storage record a read_duration sample; cache hits do not.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Blobs span multiple full pages so their data must go through the (evictable)
-            // page cache rather than staying resident in each blob's partial tail page.
-            let cfg = Config {
-                partition: "miss".into(),
-                items_per_section: NZU64!(50),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "miss", PAGE_SIZE, 10);
             let mut journal = Journal::<_, u64>::init(context.child("miss"), cfg)
                 .await
                 .unwrap();
@@ -5406,87 +3176,47 @@ mod tests {
         });
     }
 
+    /// Snapshots freeze their bounds: appends and rewinds after the snapshot do not move it,
+    /// and unpruned positions stay readable.
     #[test_traced]
-    fn test_variable_snapshot_frozen_across_roll() {
+    fn test_variable_snapshot_frozen_across_appends() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "snapshot-frozen".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "snapshot-frozen", LARGE_PAGE_SIZE, 10);
             let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
-            for i in 0..7u64 {
+            for i in 0..20u64 {
                 journal.append(&(i * 100)).await.unwrap();
             }
 
             let snapshot = journal.snapshot().await.unwrap();
-            assert_eq!(snapshot.bounds(), 0..7);
+            assert_eq!(snapshot.bounds(), 0..20);
 
-            // Appending past the blob boundary rolls the snapshot's tail blob into
-            // history; the snapshot keeps reading it through its own handle.
-            for i in 7..23u64 {
+            // Concurrent appends are invisible to the snapshot.
+            for i in 20u64..40 {
                 journal.append(&(i * 100)).await.unwrap();
             }
-            assert_eq!(snapshot.bounds(), 0..7);
-            for i in 0..7u64 {
-                assert_eq!(snapshot.read(i).await.unwrap(), i * 100);
-            }
+            assert_eq!(snapshot.bounds(), 0..20);
             assert!(matches!(
-                snapshot.read(7).await,
-                Err(Error::ItemOutOfRange(7))
+                snapshot.read(20).await,
+                Err(Error::ItemOutOfRange(20))
             ));
-
-            let fresh = journal.snapshot().await.unwrap();
-            assert_eq!(fresh.bounds(), 0..23);
-            assert_eq!(fresh.read(22).await.unwrap(), 2200);
-
-            drop(snapshot);
-            drop(fresh);
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_prune_under_snapshot() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "snapshot-prune".into(),
-                items_per_section: NZU64!(5),
-                compression: Some(3),
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
-                .await
-                .unwrap();
-            for i in 0..17u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            let snapshot = journal.snapshot().await.unwrap();
-            assert!(journal.prune(12).await.unwrap());
-
-            // The straggler reads the pruned range through its own handles.
-            assert_eq!(snapshot.bounds(), 0..17);
-            for i in 0..17u64 {
+            for i in 0u64..20 {
                 assert_eq!(snapshot.read(i).await.unwrap(), i * 100);
             }
-            assert_eq!(
-                snapshot.read_many(&[1, 2, 3, 11, 16]).await.unwrap(),
-                vec![100, 200, 300, 1100, 1600]
-            );
+
+            // A prune below the snapshot's range freezes the snapshot's BOUNDS, but the
+            // pruned bytes are gone at the blob level: only unpruned positions are guaranteed
+            // readable through the snapshot.
+            journal.prune(10).await.unwrap();
+            assert_eq!(snapshot.bounds(), 0..20);
+            for i in 10u64..20 {
+                assert_eq!(snapshot.read(i).await.unwrap(), i * 100);
+            }
 
             let fresh = journal.snapshot().await.unwrap();
-            assert_eq!(fresh.bounds(), 10..17);
+            assert_eq!(fresh.bounds(), 10..40);
             assert!(matches!(fresh.read(3).await, Err(Error::ItemPruned(3))));
 
             drop(snapshot);
@@ -5499,14 +3229,7 @@ mod tests {
     fn test_variable_snapshots_readable_during_concurrent_appends() {
         let executor = deterministic::Runner::seeded(7);
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "snapshot-concurrent".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "snapshot-concurrent", LARGE_PAGE_SIZE, 10);
             let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
@@ -5541,18 +3264,12 @@ mod tests {
         });
     }
 
+    /// Replay through a stale snapshot observes the snapshot's frozen bounds.
     #[test_traced]
     fn test_variable_replay_from_stale_snapshot() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "snapshot-replay".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
+            let cfg = test_cfg(&context, "snapshot-replay", LARGE_PAGE_SIZE, 10);
             let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
@@ -5560,197 +3277,103 @@ mod tests {
                 journal.append(&(i * 100)).await.unwrap();
             }
 
-            // Positions 5..7 live in the snapshot's tail blob.
             let snapshot = journal.snapshot().await.unwrap();
-            assert_eq!(snapshot.bounds(), 0..7);
-
-            // Roll the snapshot's tail into history, then prune both of its blobs away.
-            for i in 7..23u64 {
+            for i in 7u64..20 {
                 journal.append(&(i * 100)).await.unwrap();
             }
-            assert!(journal.prune(12).await.unwrap());
 
             {
                 let stream = snapshot.replay(0, NZUsize!(1024)).await.unwrap();
                 futures::pin_mut!(stream);
-                let mut expected = 0u64;
+                let mut count = 0u64;
                 while let Some(result) = stream.next().await {
                     let (pos, item) = result.unwrap();
-                    assert_eq!(pos, expected);
                     assert_eq!(item, pos * 100);
-                    expected += 1;
+                    count += 1;
                 }
-                assert_eq!(expected, 7);
+                assert_eq!(count, 7);
             }
-
             drop(snapshot);
+
             journal.destroy().await.unwrap();
         });
     }
 
-    /// A journal written before eager tail creation can end with a full newest blob and no
-    /// successor file; recovery opens the missing tail.
+    /// Interleave appends, exact prunes, and syncs over many cycles, then reopen: both blobs'
+    /// committed state must recover cleanly whatever the floors' page phase.
     #[test_traced]
-    fn test_variable_recovery_full_newest_blob_without_successor() {
+    fn test_variable_many_prune_sync_cycles_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-full-newest-no-successor".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
+            let cfg = test_cfg(&context, "prune-cycles", PAGE_SIZE, 4);
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-            for i in 0..10u64 {
-                journal.append(&(i * 100)).await.unwrap();
+            let mut appended = 0u64;
+            for i in 0..100u64 {
+                for _ in 0..19 {
+                    journal.append(&appended).await.unwrap();
+                    appended += 1;
+                }
+                journal.prune((i * 19).min(appended)).await.unwrap();
             }
             journal.sync().await.unwrap();
             drop(journal);
-
-            // Remove the empty tail blob, leaving only the full blob 0 (the layout written
-            // before eager tail creation).
-            let data_partition = cfg.data_partition();
-            context
-                .remove(&data_partition, Some(&1u64.to_be_bytes()))
-                .await
-                .unwrap();
 
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds(), 0..10);
-            for i in 0..10u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
-            }
-            assert_eq!(journal.append(&1000).await.unwrap(), 10);
-            assert_eq!(journal.read(10).await.unwrap(), 1000);
+            assert_eq!(journal.bounds(), 99 * 19..100 * 19);
 
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// `rewind` stages both truncations in one batch, so an offsets journal durably rewound
-    /// mid-blob without the data truncation (planted directly) is corruption.
-    #[test_traced]
-    fn test_variable_rewind_offsets_only_is_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "rewind-crash-offsets-only".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..25u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            // Truncate the offsets journal durably while the data keeps all 25 items.
-            journal.test_rewind_offsets(12).await.unwrap();
-            drop(journal);
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Retained data blobs must be contiguous; recovery rejects a missing interior blob.
-    #[test_traced]
-    fn test_variable_recovery_rejects_gap_in_retained_blobs() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-gap-in-retained-blobs".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..25u64 {
-                journal.append(&(i * 100)).await.unwrap();
+            // Fully prune, append into the floor's page, and sync: the next reopen must
+            // still verify and reconcile cleanly.
+            journal.prune(appended).await.unwrap();
+            assert!(journal.bounds().is_empty());
+            for _ in 0..3 {
+                journal.append(&appended).await.unwrap();
+                appended += 1;
             }
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Remove blob 1, leaving a gap in the retained data blobs.
-            context
-                .remove(&cfg.data_partition(), Some(&1u64.to_be_bytes()))
+            let journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
-
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Drive a rewind plus a rollover-crossing unsynced append through a crash: recovery lands
-    /// on the rewound prefix plus the blob sealed at rollover.
-    fn variable_rewind_rollover_crash(runner: deterministic::Runner) {
-        fn test_cfg(context: &deterministic::Context) -> Config<()> {
-            Config {
-                partition: "rewind-rollover-crash".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            }
-        }
-
-        let (_, checkpoint) = runner.start_and_recover(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Durably persist 25 items, rewind to 15 (immediately durable), then append 8
-            // replacement items without syncing: the rollover at position 20 seals blob 1
-            // durably while positions 20..23 stay unsynced in blob 2.
-            for i in 0..25u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            journal.rewind(15).await.unwrap();
-            for i in 15..23u64 {
-                journal.append(&(i * 1000)).await.unwrap();
-            }
-        });
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_cfg(&context);
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 0..20);
-            for i in 0..15u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
-            }
-            for i in 15..20u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 1000);
-            }
+            assert_eq!(journal.bounds(), 100 * 19..100 * 19 + 3);
             journal.destroy().await.unwrap();
         });
     }
 
+    /// Append many across page boundaries in one call, including the nested shape and
+    /// prepared appends.
     #[test_traced]
-    fn test_variable_rewind_rollover_crash() {
-        variable_rewind_rollover_crash(deterministic::Runner::default());
+    fn test_variable_append_many_shapes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, "append-shapes", PAGE_SIZE, 4);
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            let first: Vec<u64> = (0u64..75).collect();
+            let second: Vec<u64> = (75u64..100).collect();
+            let pos = journal
+                .append_many(Many::Nested(&[&first, &second]))
+                .await
+                .unwrap();
+            assert_eq!(pos, 99);
+
+            // Prepared appends land identically.
+            let third: Vec<u64> = (100u64..110).collect();
+            let prepared = journal.prepare_append(Many::Flat(&third)).unwrap();
+            let pos = journal.append_prepared(prepared).await.unwrap();
+            assert_eq!(pos, 109);
+
+            for i in 0u64..110 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+
+            journal.destroy().await.unwrap();
+        });
     }
 }

@@ -158,7 +158,7 @@ pub(crate) mod test {
         deterministic::{self, Context},
         BufferPooler, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, TestRng, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, TestRng, NZU16};
     use rand::Rng;
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: u16 = 103;
@@ -184,7 +184,6 @@ pub(crate) mod test {
             },
             journal_config: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
-                items_per_section: NZU64!(14), // intentionally small and janky size
                 write_buffer: NZUsize!(64),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),

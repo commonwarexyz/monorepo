@@ -439,7 +439,10 @@ where
             H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
 
         let target_db = H::apply_ops(target_db, original_ops.clone(), None).await;
-        let sync_db = H::apply_ops(sync_db, original_ops, None).await;
+        let mut sync_db = H::apply_ops(sync_db, original_ops, None).await;
+        // Persist before dropping: reusing existing on-disk state requires durable state (an
+        // unsynced drop forfeits buffered data).
+        H::db_sync(&mut sync_db).await;
         drop(sync_db);
 
         let last_op = H::create_ops_seeded(1, 1);
@@ -494,7 +497,10 @@ where
             H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
 
         let target_db = H::apply_ops(target_db, target_ops.clone(), None).await;
-        let sync_db = H::apply_ops(sync_db, target_ops, None).await;
+        let mut sync_db = H::apply_ops(sync_db, target_ops, None).await;
+        // Persist before dropping: reusing existing on-disk state requires durable state (an
+        // unsynced drop forfeits buffered data).
+        H::db_sync(&mut sync_db).await;
         drop(sync_db);
 
         let root = H::db_root(&target_db);
@@ -791,8 +797,6 @@ pub(crate) mod harnesses {
         suffix: &str,
         pooler: &(impl BufferPooler + Metrics),
     ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
-        const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
-
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
@@ -804,7 +808,6 @@ pub(crate) mod harnesses {
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
-                items_per_section: ITEMS_PER_SECTION,
                 compression: None,
                 codec_config: ((0..=10000).into(), ()),
                 page_cache,
@@ -1108,7 +1111,6 @@ mod compact_variable_mmr {
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{suffix}"),
-                items_per_section: NZU64!(7),
                 compression: None,
                 codec_config: ((0..=10000).into(), ()),
                 page_cache,
@@ -1125,7 +1127,6 @@ mod compact_variable_mmr {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: format!("compact-{suffix}-witness"),
-                items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1742,8 +1743,7 @@ mod compact_variable_mmr {
             let suffix = format!("compact-keyless-pruned-{}", context.next_u64());
 
             // Seed the client partition with several commits, then prune its witness journal.
-            let mut client_cfg = client_config(&suffix, &context);
-            client_cfg.witness.items_per_section = NZU64!(1);
+            let client_cfg = client_config(&suffix, &context);
             let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
                 .await
                 .unwrap();
@@ -1917,7 +1917,6 @@ mod compact_variable_mmb {
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{suffix}"),
-                items_per_section: NZU64!(7),
                 compression: None,
                 codec_config: ((0..=10000).into(), ()),
                 page_cache,
@@ -1934,7 +1933,6 @@ mod compact_variable_mmb {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: format!("compact-{suffix}-witness"),
-                items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),

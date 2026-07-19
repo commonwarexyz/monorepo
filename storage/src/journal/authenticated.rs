@@ -445,7 +445,7 @@ where
     /// first touch of its blob, and each prune stages the durability that justifies it.
     ///
     /// # Returns
-    /// The new pruning boundary (which may be less than the requested `prune_loc`) and
+    /// The new pruning boundary (the requested `prune_loc` capped to the journal's size) and
     /// whether a prune was staged.
     pub(crate) async fn prune_into(
         &mut self,
@@ -1710,7 +1710,7 @@ mod tests {
             .await
             .unwrap();
 
-            // Add operations and a commit at position 10 (past first section boundary of 7)
+            // Add operations and a commit at position 10
             for i in 0..10 {
                 journal.append(&create_operation::<F>(i)).await.unwrap();
             }
@@ -1750,7 +1750,7 @@ mod tests {
             .await
             .unwrap();
 
-            // Add operations with a commit at position 5 (in section 0: 0-6)
+            // Add operations with a commit at position 5
             for i in 0..5 {
                 journal.append(&create_operation::<F>(i)).await.unwrap();
             }
@@ -1810,7 +1810,7 @@ mod tests {
             .await
             .unwrap();
 
-            // Add operations with a commit at position 5 (in section 0: 0-6)
+            // Add operations with a commit at position 5
             for i in 0..5 {
                 journal.append(&create_operation::<F>(i)).await.unwrap();
             }
@@ -2124,8 +2124,8 @@ mod tests {
 
         let boundary = journal.prune(Location::<F>::new(50)).await.unwrap();
 
-        // Boundary should be <= requested location (may align to section boundary)
-        assert!(boundary <= Location::<F>::new(50));
+        // Pruning is exact: the boundary is the requested location.
+        assert_eq!(boundary, Location::<F>::new(50));
     }
 
     #[test_traced("INFO")]
@@ -2158,8 +2158,8 @@ mod tests {
         assert!(!bounds.is_empty());
         assert_eq!(actual, bounds.start);
 
-        // Actual may be <= requested due to section alignment
-        assert!(actual <= requested);
+        // Pruning is exact: the boundary is the requested location.
+        assert_eq!(actual, requested);
     }
 
     #[test_traced("INFO")]
@@ -2270,12 +2270,11 @@ mod tests {
 
         let pruned_boundary = journal.prune(Location::<F>::new(50)).await.unwrap();
 
-        // Should match the pruned boundary (may be <= 50 due to section alignment)
+        // Pruning is exact: the boundary is the requested location.
         let bounds = journal.bounds();
         assert!(!bounds.is_empty());
         assert_eq!(bounds.start, pruned_boundary);
-        // Should be <= requested location (50)
-        assert!(pruned_boundary <= 50);
+        assert_eq!(pruned_boundary, 50);
         journal.destroy().await.unwrap();
     }
 
@@ -2345,8 +2344,8 @@ mod tests {
         assert!(!bounds.is_empty());
         assert_eq!(pruned_boundary, bounds.start);
 
-        // Verify boundary is at or before requested (due to section alignment)
-        assert!(pruned_boundary <= Location::<F>::new(25));
+        // Pruning is exact: the boundary is the requested location.
+        assert_eq!(pruned_boundary, Location::<F>::new(25));
 
         // Verify operation count is unchanged
         assert_eq!(journal.size(), 51);

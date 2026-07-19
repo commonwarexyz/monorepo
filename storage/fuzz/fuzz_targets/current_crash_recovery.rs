@@ -45,10 +45,6 @@ fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=16)
 }
 
-fn bounded_items_per_blob(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
 fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=MAX_WRITE_BUF)
 }
@@ -75,8 +71,6 @@ struct FuzzInput {
     page_size: u16,
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    #[arbitrary(with = bounded_items_per_blob)]
-    log_items_per_blob: u64,
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
     #[arbitrary(with = bounded_nonzero_rate)]
@@ -91,7 +85,6 @@ fn make_config(
     suffix: &str,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
-    log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<TwoCap, ((), ()), Sequential> {
     let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
@@ -105,7 +98,6 @@ fn make_config(
         },
         journal_config: VConfig {
             partition: format!("crash-log-{suffix}"),
-            items_per_section: NZU64!(log_items_per_blob),
             write_buffer,
             compression: None,
             codec_config: ((), ()),
@@ -182,7 +174,6 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
 
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
-    let log_items_per_blob = input.log_items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let sync_failure_rate = input.sync_failure_rate;
     let write_failure_rate = input.write_failure_rate;
@@ -200,14 +191,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             let mut db: Db<F> = Db::init(
                 ctx.child("db"),
-                make_config(
-                    &ctx,
-                    &suffix,
-                    page_size,
-                    page_cache_size,
-                    log_items_per_blob,
-                    write_buffer,
-                ),
+                make_config(&ctx, &suffix, page_size, page_cache_size, write_buffer),
             )
             .await
             .unwrap();
@@ -281,14 +265,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
 
             let mut db: Db<F> = Db::init(
                 ctx.child("recovered"),
-                make_config(
-                    &ctx,
-                    &suffix,
-                    page_size,
-                    page_cache_size,
-                    log_items_per_blob,
-                    write_buffer,
-                ),
+                make_config(&ctx, &suffix, page_size, page_cache_size, write_buffer),
             )
             .await
             .expect("recovery must succeed");

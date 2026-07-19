@@ -1586,7 +1586,7 @@ mod tests {
             },
             translator::TwoCap,
         };
-        use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
+        use commonware_utils::{sequence::U64, NZUsize, NZU16};
         use rstest::rstest;
         use std::{fmt::Debug, marker::PhantomData};
 
@@ -1726,7 +1726,6 @@ mod tests {
         ) -> VariableJournalConfig<C> {
             VariableJournalConfig {
                 partition: format!("initial-target-{suffix}-log"),
-                items_per_section: NZU64!(7),
                 compression: None,
                 codec_config,
                 page_cache: page_cache(context),

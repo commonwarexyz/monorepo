@@ -8,19 +8,17 @@ use commonware_runtime::{
     conformance::{StorageConformance, StorageWorkload},
     BufferPooler, Supervisor as _,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use commonware_utils::{NZUsize, NZU16};
+use core::num::{NonZeroU16, NonZeroUsize};
 use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
-const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(64);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 fn config(seed: u64, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
     Config {
         partition: format!("queue-conformance-{seed}"),
-        items_per_section: ITEMS_PER_SECTION,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
         compression: None,

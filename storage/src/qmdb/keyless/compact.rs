@@ -596,7 +596,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::U64, NZUsize, NZU16};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256, (), Sequential>;
@@ -607,7 +607,6 @@ mod tests {
     fn witness_config(partition: &str, pooler: &impl BufferPooler) -> variable::Config<()> {
         variable::Config {
             partition: format!("{partition}-witness"),
-            items_per_section: NZU64!(64),
             compression: None,
             codec_config: (),
             page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
@@ -1583,10 +1582,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_prune_then_rewind() {
         deterministic::Runner::default().start(|context| async move {
-            // One entry per section so pruning takes effect at entry granularity (pruning is
-            // section-aligned and never drops a partial section).
-            let mut witness_cfg = witness_config("keyless-prune-rewind", &context);
-            witness_cfg.items_per_section = NZU64!(1);
+            let witness_cfg = witness_config("keyless-prune-rewind", &context);
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
             let mut db: TestDb<mmr::Family> =
                 Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())

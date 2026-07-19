@@ -3,10 +3,9 @@
 //! Fuzz target contiguous journal crash recovery.
 //!
 //! A journal is an append-only log of items. Appends are buffered; `sync` pushes data
-//! to storage (and every filled blob commits atomically at rollover), and an unclean shutdown
-//! loses anything not yet durable. The backend restores every blob to exactly its last-synced
-//! state, so on the next `init()` the journal recovers a consistent state by verification.
-//! This target tests recovering after storage faults.
+//! to storage, and an unclean shutdown loses anything not yet durable. The backend restores
+//! every blob to exactly its last-synced state, so on the next `init()` the journal recovers
+//! a consistent state by verification. This target tests recovering after storage faults.
 //!
 //! # Cycles
 //!
@@ -18,7 +17,7 @@
 //!   4. Drop the journal without a clean shutdown: the crash. Unsynced data is lost.
 //!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
-//! the same journal is the point: pruning-metadata and section-layout bugs often need a
+//! the same journal is the point: pruning-metadata and floor-reconciliation bugs often need a
 //! recover-then-mutate-then-recover sequence to appear, not just a single crash.
 //!
 //! # Expected
@@ -53,7 +52,7 @@ use commonware_storage::journal::{
     },
     Error,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -90,10 +89,6 @@ fn bounded_page_size(u: &mut Unstructured<'_>) -> arbitrary::Result<u16> {
 
 fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
     u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
-    u.int_in_range(1..=64)
 }
 
 fn bounded_write_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
@@ -157,9 +152,6 @@ struct FuzzInput {
     /// Number of pages in the buffer pool cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    /// Items per section/blob.
-    #[arbitrary(with = bounded_items_per_section)]
-    items_per_section: u64,
     /// Write buffer size.
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
@@ -188,7 +180,6 @@ struct FuzzInput {
 struct Params {
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
-    items_per_section: u64,
     write_buffer: NonZeroUsize,
     write_rate: f64,
     partial_write_rate: f64,
@@ -231,15 +222,11 @@ struct Expected {
 }
 
 impl Expected {
-    /// Successful append: not durable until the next sync, EXCEPT filled blobs — every blob
-    /// rollover commits the filled blob (and, for the variable journal, its offsets entries)
-    /// atomically before the append returns, so the durable floor rises to the last blob
-    /// boundary.
-    fn appended(&mut self, item: Item, items_per_section: u64) {
+    /// Successful append: not durable until the next sync.
+    fn appended(&mut self, item: Item) {
         self.values.push(item);
         let size = self.values.len() as u64;
         self.max_size = self.max_size.max(size);
-        self.durable_len = self.durable_len.max(size - size % items_per_section);
     }
 
     /// Failed append: the item may have partially persisted, so only raise the ceiling.
@@ -261,14 +248,15 @@ impl Expected {
         self.max_size = self.max_size.max(prev_size);
     }
 
-    /// Successful prune durably deletes whole sections, so recovery can never reopen below
-    /// `boundary`; pin it exactly. (The boundary only moves forward.)
+    /// A successful prune commits the boundary before returning, so recovery can never
+    /// reopen below `boundary`; pin it exactly. (The boundary only moves forward.)
     fn pruned(&mut self, boundary: u64) {
         self.durable_prune = boundary;
         self.max_prune = boundary;
     }
 
-    /// Failed prune may have deleted sections (oldest-first) up to `ceiling`, but not certain.
+    /// A failed prune may have committed a boundary up to `ceiling` (a commit can adopt the
+    /// pruned floors early), but nothing is certain.
     fn prune_failed(&mut self, ceiling: u64) {
         self.max_prune = self.max_prune.max(ceiling);
     }
@@ -384,7 +372,6 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
         VariableConfig {
             partition: partition.into(),
-            items_per_section: NZU64!(params.items_per_section),
             compression: None,
             codec_config: (),
             page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
@@ -604,7 +591,6 @@ async fn run_ops<J: FuzzJournal>(
     journal: &mut J,
     expected: &mut Expected,
     ops: &[JournalOperation],
-    params: Params,
 ) {
     for op in ops {
         let should_continue = match op {
@@ -614,7 +600,7 @@ async fn run_ops<J: FuzzJournal>(
                 match journal.append(item.clone()).await {
                     Ok(pos) => {
                         assert_eq!(pos, size_before, "append returned non-contiguous position");
-                        expected.appended(item, params.items_per_section);
+                        expected.appended(item);
                         true
                     }
                     Err(_) => {
@@ -691,11 +677,8 @@ async fn run_ops<J: FuzzJournal>(
                         true
                     }
                     Err(_) => {
-                        // A failed prune advances the boundary at most to the section floor.
-                        let capped = (*min_pos).min(size);
-                        let section_floor =
-                            capped / params.items_per_section * params.items_per_section;
-                        expected.prune_failed(section_floor);
+                        // A failed prune advances the boundary at most to the capped target.
+                        expected.prune_failed((*min_pos).min(size));
                         false
                     }
                 }
@@ -768,7 +751,7 @@ where
 
         // Faults on for the operation phase; returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
-        run_ops(&mut journal, &mut expected, &ops, params).await;
+        run_ops(&mut journal, &mut expected, &ops).await;
         expected
     })
 }
@@ -796,7 +779,6 @@ where
     let params = Params {
         page_size: NonZeroU16::new(input.page_size).unwrap(),
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
-        items_per_section: input.items_per_section,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
         write_rate: input.write_failure_rate,
         partial_write_rate: input.partial_write_rate,
@@ -850,7 +832,7 @@ where
             .await
             .expect("final append");
         assert_eq!(pos, size);
-        expected.appended(sentinel.clone(), params.items_per_section);
+        expected.appended(sentinel.clone());
         journal.sync().await.expect("final sync");
         expected.synced(journal.bounds());
         drop(journal);

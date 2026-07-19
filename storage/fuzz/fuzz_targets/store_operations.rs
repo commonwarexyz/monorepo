@@ -10,7 +10,7 @@ use commonware_storage::{
     qmdb::store::db::{Config, Db},
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 use std::{collections::BTreeMap, num::NonZeroU16};
 
@@ -103,7 +103,6 @@ fn test_config(
             write_buffer: NZUsize!(1024),
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
-            items_per_section: NZU64!(7),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         },
         translator: TwoCap,

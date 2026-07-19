@@ -13,16 +13,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// for each invocation. Use both to create unique contexts/partitions to avoid
 /// metric name collisions (the deterministic runtime panics on duplicate metrics).
 ///
-/// `boundary` maps a prune target to the pruning boundary the backend guarantees after
-/// `prune(target)` from an unpruned journal: section-aligned for the variable journal, the
-/// identity for the fixed journal (native pruning is exact).
-///
-/// # Assumptions
-///
-/// These tests assume section-based journals are configured with **10 items per section**.
-/// Some tests rely on this value for boundary calculations and pruning behavior.
+/// Both backends prune exactly, so every test asserts that the pruning boundary IS the
+/// requested position.
 #[boxed]
-pub(super) async fn run_contiguous_tests<F, J>(factory: F, boundary: fn(u64) -> u64)
+pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
     F: Fn(String, usize) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
@@ -35,7 +29,7 @@ where
 
     test_empty_journal_bounds(&indexed_factory).await;
     test_bounds_with_items(&indexed_factory).await;
-    test_bounds_after_prune(&indexed_factory, boundary).await;
+    test_bounds_after_prune(&indexed_factory).await;
     test_append_and_size(&indexed_factory).await;
     test_sequential_appends(&indexed_factory).await;
     test_replay_from_start(&indexed_factory).await;
@@ -45,32 +39,32 @@ where
     test_prune_retains_size(&indexed_factory).await;
     test_through_trait(&indexed_factory).await;
     test_replay_after_prune(&indexed_factory).await;
-    test_prune_then_append(&indexed_factory, boundary).await;
+    test_prune_then_append(&indexed_factory).await;
     test_position_stability(&indexed_factory).await;
     test_sync_behavior(&indexed_factory).await;
     test_replay_on_empty(&indexed_factory).await;
     test_replay_at_exact_size(&indexed_factory).await;
-    test_multiple_prunes(&indexed_factory, boundary).await;
+    test_multiple_prunes(&indexed_factory).await;
     test_prune_beyond_size(&indexed_factory).await;
     test_persistence_basic(&indexed_factory).await;
-    test_persistence_after_prune(&indexed_factory, boundary).await;
+    test_persistence_after_prune(&indexed_factory).await;
     test_read_by_position(&indexed_factory).await;
     test_read_many(&indexed_factory).await;
     test_read_out_of_range(&indexed_factory).await;
-    test_read_after_prune(&indexed_factory, boundary).await;
+    test_read_after_prune(&indexed_factory).await;
     test_rewind_to_middle(&indexed_factory).await;
     test_rewind_to_zero(&indexed_factory).await;
     test_rewind_current_size(&indexed_factory).await;
     test_rewind_invalid_forward(&indexed_factory).await;
-    test_rewind_invalid_pruned(&indexed_factory, boundary).await;
+    test_rewind_invalid_pruned(&indexed_factory).await;
     test_rewind_then_append(&indexed_factory).await;
     test_rewind_zero_then_append(&indexed_factory).await;
-    test_rewind_after_prune(&indexed_factory, boundary).await;
-    test_section_boundary_behavior(&indexed_factory, boundary).await;
+    test_rewind_after_prune(&indexed_factory).await;
+    test_prune_rewind_boundary_interplay(&indexed_factory).await;
     test_destroy_and_reinit(&indexed_factory).await;
     test_append_many_empty(&indexed_factory).await;
     test_append_many_basic(&indexed_factory).await;
-    test_append_many_across_sections(&indexed_factory).await;
+    test_append_many_large(&indexed_factory).await;
     test_append_many_then_append(&indexed_factory).await;
     test_append_many_single_item(&indexed_factory).await;
 }
@@ -110,14 +104,13 @@ where
 }
 
 /// Test that bounds updates after pruning.
-async fn test_bounds_after_prune<F, J>(factory: &F, boundary: fn(u64) -> u64)
+async fn test_bounds_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
 {
     let mut journal = factory("bounds-after-prune".into()).await.unwrap();
 
-    // Append items across multiple sections
     for i in 0..30 {
         journal.append(&(i * 100)).await.unwrap();
     }
@@ -127,32 +120,25 @@ where
     assert_eq!(bounds.start, 0);
     assert_eq!(bounds.end, 30);
 
-    // Prune the first items: the boundary advances per the backend's alignment.
+    // Prune the first items: the boundary is exactly the requested position.
     journal.prune(10).await.unwrap();
-    let bounds = journal.bounds();
-    assert_eq!(bounds.start, boundary(10));
-    assert_eq!(bounds.end, 30);
+    assert_eq!(journal.bounds(), 10..30);
 
     // Prune more
     journal.prune(25).await.unwrap();
-    let bounds = journal.bounds();
-    assert_eq!(bounds.start, boundary(25));
-    assert_eq!(bounds.end, 30);
+    assert_eq!(journal.bounds(), 25..30);
 
     // Prune all
     journal.prune(30).await.unwrap();
     let bounds = journal.bounds();
-    assert_eq!(bounds.start, boundary(30));
-    assert_eq!(bounds.end, 30);
-    assert_eq!(bounds.is_empty(), boundary(30) == 30);
+    assert_eq!(bounds, 30..30);
+    assert!(bounds.is_empty());
 
     // Drop and reopen: the synced boundary must persist.
     journal.sync().await.unwrap();
     drop(journal);
     let journal = factory("bounds-after-prune".into()).await.unwrap();
-    let bounds = journal.bounds();
-    assert_eq!(bounds.start, boundary(30));
-    assert_eq!(bounds.end, 30);
+    assert_eq!(journal.bounds(), 30..30);
     journal.destroy().await.unwrap();
 }
 
@@ -181,7 +167,7 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test appending many items across section boundaries.
+/// Test appending many items.
 async fn test_sequential_appends<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -396,8 +382,7 @@ where
     journal.prune(10).await.unwrap();
 
     {
-        // Replay from a position that may or may not be pruned (section-aligned)
-        // We replay from position 10 which should be safe
+        // Replay from the pruning boundary.
         let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
         futures::pin_mut!(stream);
 
@@ -420,23 +405,22 @@ where
 ///
 /// Verifies that positions continue consecutively increasing even after
 /// pruning all retained items.
-async fn test_prune_then_append<F, J>(factory: &F, boundary: fn(u64) -> u64)
+async fn test_prune_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
 {
     let mut journal = factory("prune-then-append".into()).await.unwrap();
 
-    // Append exactly one section (10 items)
     for i in 0..10u64 {
         journal.append(&i).await.unwrap();
     }
 
-    // Prune all items: the boundary advances per the backend's alignment.
+    // Prune all items: the journal empties at position 10.
     journal.prune(10).await.unwrap();
     let bounds = journal.bounds();
-    assert_eq!(bounds.start, boundary(10));
-    assert_eq!(bounds.is_empty(), boundary(10) == 10);
+    assert_eq!(bounds.start, 10);
+    assert!(bounds.is_empty());
 
     // Append new items after pruning - position should continue from 10
     let pos = journal.append(&999).await.unwrap();
@@ -574,7 +558,7 @@ where
 }
 
 /// Test multiple prunes with same min_position for idempotency.
-async fn test_multiple_prunes<F, J>(factory: &F, boundary: fn(u64) -> u64)
+async fn test_multiple_prunes<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
@@ -589,7 +573,7 @@ where
     let pruned1 = journal.prune(10).await.unwrap();
     let pruned2 = journal.prune(10).await.unwrap();
 
-    assert_eq!(pruned1, boundary(10) > 0);
+    assert!(pruned1);
     assert!(!pruned2); // Second prune should return false (nothing to prune)
 
     assert_eq!(journal.bounds().end, 20);
@@ -679,7 +663,7 @@ where
 }
 
 /// Test persistence after pruning: append, prune, close, re-open, verify pruned state.
-async fn test_persistence_after_prune<F, J>(factory: &F, boundary: fn(u64) -> u64)
+async fn test_persistence_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
@@ -696,7 +680,7 @@ where
 
         // Prune first 10 items
         let pruned = journal.prune(10).await.unwrap();
-        assert_eq!(pruned, boundary(10) > 0);
+        assert!(pruned);
 
         assert_eq!(journal.bounds().end, 25);
 
@@ -708,16 +692,15 @@ where
         let mut journal = factory(test_name.clone()).await.unwrap();
 
         // size should still be 25
-        assert_eq!(journal.bounds().end, 25);
-        assert_eq!(journal.bounds().start, boundary(10));
+        assert_eq!(journal.bounds(), 10..25);
 
         // Verify pruned positions cannot be read
-        for i in 0..boundary(10) {
+        for i in 0..10 {
             assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
         }
 
         // Verify non-pruned positions can be read
-        for i in boundary(10)..25u64 {
+        for i in 10..25u64 {
             assert_eq!(journal.read(i).await.unwrap(), i * 100);
         }
 
@@ -807,7 +790,7 @@ where
 }
 
 /// Test read after pruning.
-pub(super) async fn test_read_after_prune<F, J>(factory: &F, boundary: fn(u64) -> u64)
+pub(super) async fn test_read_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
@@ -821,12 +804,10 @@ where
     journal.prune(10).await.unwrap();
 
     let bounds = journal.bounds();
-    assert_eq!(bounds.start, boundary(10));
-    if bounds.start > 0 {
-        let result = journal.read(bounds.start - 1).await;
-        assert!(matches!(result, Err(Error::ItemPruned(_))));
-    }
-    assert_eq!(journal.read(bounds.start).await.unwrap(), bounds.start);
+    assert_eq!(bounds.start, 10);
+    let result = journal.read(9).await;
+    assert!(matches!(result, Err(Error::ItemPruned(9))));
+    assert_eq!(journal.read(10).await.unwrap(), 10);
 
     journal.destroy().await.unwrap();
 }
@@ -934,7 +915,7 @@ where
 }
 
 /// Test rewind to pruned position
-async fn test_rewind_invalid_pruned<F, J>(factory: &F, boundary: fn(u64) -> u64)
+async fn test_rewind_invalid_pruned<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
@@ -948,12 +929,9 @@ where
     // Prune first 10 items
     journal.prune(10).await.unwrap();
 
-    // Try to rewind below the pruning boundary (invalid). A backend whose boundary stayed at
-    // zero has nothing pruned to rewind into, so the case is vacuous there.
-    if boundary(10) > 5 {
-        let result = journal.rewind(5).await;
-        assert!(matches!(result, Err(Error::ItemPruned(5))));
-    }
+    // Try to rewind below the pruning boundary (invalid).
+    let result = journal.rewind(5).await;
+    assert!(matches!(result, Err(Error::ItemPruned(5))));
 
     journal.destroy().await.unwrap();
 }
@@ -966,12 +944,11 @@ where
 {
     let mut journal = factory("rewind-then-append".into()).await.unwrap();
 
-    // Append across a blob boundary (15 items = 1.5 blobs).
     for i in 0..15u64 {
         journal.append(&i).await.unwrap();
     }
 
-    // Rewind to position 8 (within first section, not at boundary)
+    // Rewind to position 8
     journal.rewind(8).await.unwrap();
 
     // Append should continue from position 8
@@ -1017,7 +994,7 @@ where
 }
 
 /// Test rewinding after pruning to verify correct interaction between operations.
-async fn test_rewind_after_prune<F, J>(factory: &F, boundary: fn(u64) -> u64)
+async fn test_rewind_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
@@ -1028,9 +1005,9 @@ where
         journal.append(&(i * 100)).await.unwrap();
     }
 
-    // Prune the first items: the boundary advances per the backend's alignment.
+    // Prune the first items: the boundary is exact.
     journal.prune(10).await.unwrap();
-    let start = boundary(10);
+    let start = 10;
     assert_eq!(journal.bounds().start, start);
 
     // Rewind to position 20 (still in retained range)
@@ -1044,16 +1021,14 @@ where
         assert_eq!(journal.read(i).await.unwrap(), i * 100);
     }
 
-    // Attempt to rewind to a pruned position should fail (vacuous when nothing is pruned)
-    if start > 5 {
-        let result = journal.rewind(5).await;
-        assert!(matches!(result, Err(Error::ItemPruned(5))));
+    // Attempt to rewind to a pruned position should fail
+    let result = journal.rewind(5).await;
+    assert!(matches!(result, Err(Error::ItemPruned(5))));
 
-        // Verify journal state is unchanged after failed rewind
-        let bounds = journal.bounds();
-        assert_eq!(bounds.end, 20);
-        assert_eq!(bounds.start, start);
-    }
+    // Verify journal state is unchanged after failed rewind
+    let bounds = journal.bounds();
+    assert_eq!(bounds.end, 20);
+    assert_eq!(bounds.start, start);
 
     // Append should continue from position 20
     let pos = journal.append(&999).await.unwrap();
@@ -1064,38 +1039,31 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test behavior at section boundaries (10 items for section-based backends).
-async fn test_section_boundary_behavior<F, J>(factory: &F, boundary: fn(u64) -> u64)
+/// Test the interplay of pruning and rewinding exactly at the boundary: rewinding TO the
+/// pruning boundary empties the journal, and appends continue from there.
+async fn test_prune_rewind_boundary_interplay<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
 {
-    let mut journal = factory("section-boundary".into()).await.unwrap();
+    let mut journal = factory("prune-rewind-boundary".into()).await.unwrap();
 
-    // Append exactly one section worth of items (10 items)
     for i in 0..10u64 {
         let pos = journal.append(&(i * 100)).await.unwrap();
         assert_eq!(pos, i);
     }
-
-    // Verify we're at a section boundary.
     assert_eq!(journal.bounds().end, 10);
 
-    // Append one more item to cross the boundary
     let pos = journal.append(&999).await.unwrap();
     assert_eq!(pos, 10);
     assert_eq!(journal.bounds().end, 11);
 
-    // Prune exactly at the section boundary: 10 is aligned for both backends, so the
-    // boundary lands exactly there when the backend prunes at all.
+    // Prune everything below the last item: the boundary lands exactly there.
     journal.prune(10).await.unwrap();
-    let start = boundary(10);
-    assert_eq!(journal.bounds().start, start);
+    assert_eq!(journal.bounds().start, 10);
 
     // Verify only items at or above the boundary are readable
-    if start > 9 {
-        assert!(matches!(journal.read(9).await, Err(Error::ItemPruned(_))));
-    }
+    assert!(matches!(journal.read(9).await, Err(Error::ItemPruned(_))));
     assert_eq!(journal.read(10).await.unwrap(), 999);
 
     // Append another item to move past the boundary
@@ -1103,19 +1071,18 @@ where
     assert_eq!(pos, 11);
     assert_eq!(journal.bounds().end, 12);
 
-    // Rewind to exactly the section boundary (position 10). When the whole first section was
-    // pruned this leaves bounds 10..10, a fully pruned journal.
+    // Rewind to exactly the pruning boundary: bounds become 10..10, a fully pruned journal.
     journal.rewind(10).await.unwrap();
     let bounds = journal.bounds();
-    assert_eq!(bounds.end, 10);
-    assert_eq!(bounds.is_empty(), start == 10);
+    assert_eq!(bounds, 10..10);
+    assert!(bounds.is_empty());
 
     // Append after rewinding to the boundary should continue from position 10
     let pos = journal.append(&777).await.unwrap();
     assert_eq!(pos, 10);
     assert_eq!(journal.bounds().end, 11);
     assert_eq!(journal.read(10).await.unwrap(), 777);
-    assert_eq!(journal.bounds().start, start);
+    assert_eq!(journal.bounds().start, 10);
 
     journal.destroy().await.unwrap();
 }
@@ -1216,15 +1183,15 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test append_many across section boundaries (10 items for section-based backends).
-async fn test_append_many_across_sections<F, J>(factory: &F)
+/// Test append_many with a large batch.
+async fn test_append_many_large<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
 {
-    let mut journal = factory("append-many-sections".into()).await.unwrap();
+    let mut journal = factory("append-many-large".into()).await.unwrap();
 
-    // Append 25 items in one call, crossing section boundaries at 10 and 20.
+    // Append 25 items in one call.
     let items: Vec<u64> = (0..25).map(|i| i * 10).collect();
     let pos = journal.append_many(Many::Flat(&items)).await.unwrap();
     assert_eq!(pos, 24);
