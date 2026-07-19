@@ -18,6 +18,9 @@ pub struct Blob {
     // we could remove this lock.
     file: Arc<Mutex<fs::File>>,
     pool: BufferPool,
+    // TODO(prune-campaign): persist the floor in the blob header at sync;
+    // this in-RAM floor does not survive reopen yet.
+    floor: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Blob {
@@ -27,6 +30,7 @@ impl Blob {
             name: name.into(),
             file: Arc::new(Mutex::new(file)),
             pool,
+            floor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -119,6 +123,28 @@ impl crate::Blob for Blob {
         let mut file = self.file.lock().await;
         Self::write_at_inner(&mut file, offset, &mut bufs).await?;
         Self::sync_inner(&file, &self.partition, &self.name).await
+    }
+
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        use std::sync::atomic::Ordering;
+        let file = self.file.lock().await;
+        let size = file
+            .metadata()
+            .await
+            .map_err(|e| {
+                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())
+            })?
+            .len()
+            .saturating_sub(Header::DATA_OFFSET_U64);
+        if offset > size {
+            return Err(Error::BlobInsufficientLength);
+        }
+        self.floor.fetch_max(offset, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn floor(&self) -> u64 {
+        self.floor.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

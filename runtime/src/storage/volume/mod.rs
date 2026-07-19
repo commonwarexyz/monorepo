@@ -199,6 +199,7 @@ mod metrics;
 #[cfg(test)]
 mod model;
 mod paging;
+mod prune;
 mod read;
 mod recover;
 mod resize;
@@ -691,6 +692,15 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
     ) -> Result<(), Error> {
         self.write_at(offset, bufs).await?;
         self.sync().await
+    }
+
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        let _write = self.core.write_lock.lock().await;
+        prune::prune_locked(&self.ready, &self.core, offset)
+    }
+
+    fn floor(&self) -> u64 {
+        self.core.inner.lock().floor()
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

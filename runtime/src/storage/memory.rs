@@ -243,6 +243,9 @@ pub struct Blob {
     content: Arc<RwLock<Vec<u8>>>,
     pool: BufferPool,
     crash_log: Option<CrashLog>,
+    // TODO(prune-campaign): persist the floor in the blob header prefix so
+    // it survives reopen, and zero the pruned range.
+    floor: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Blob {
@@ -261,6 +264,7 @@ impl Blob {
             content: Arc::new(RwLock::new(content)),
             pool,
             crash_log,
+            floor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -364,6 +368,20 @@ impl crate::Blob for Blob {
 
         self.write_at(offset, bufs).await?;
         self.sync().await
+    }
+
+    async fn prune(&self, offset: u64) -> Result<(), crate::Error> {
+        use std::sync::atomic::Ordering;
+        let size = self.content.read().len() as u64 - Header::SIZE_U64;
+        if offset > size {
+            return Err(crate::Error::BlobInsufficientLength);
+        }
+        self.floor.fetch_max(offset, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn floor(&self) -> u64 {
+        self.floor.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {

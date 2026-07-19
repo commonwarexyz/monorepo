@@ -18,8 +18,8 @@ use super::{
     chunk::{chunk_of, ChunkCrc, ChunkState, RunMeta},
     paging::{load_committed_page, CrcMemo},
     state::{
-        check_not_removed, chunk_mismatch, ensure_provisioned, BlobCore, BlobInner, Ready,
-        StagedBlob, StagedRun,
+        check_floor, check_not_removed, chunk_mismatch, ensure_provisioned, BlobCore, BlobInner,
+        Ready, StagedBlob, StagedRun,
     },
     BLOCK,
 };
@@ -82,6 +82,7 @@ pub(super) async fn write_locked<S: crate::Storage>(
 ) -> Result<(), Error> {
     ready.check_poisoned()?;
     check_not_removed(blob)?;
+    check_floor(blob, offset)?;
     if data.is_empty() {
         return Ok(());
     }
@@ -144,6 +145,7 @@ pub(super) async fn stage_write<S: crate::Storage>(
 ) -> Result<(), Error> {
     ready.check_poisoned()?;
     check_not_removed(blob)?;
+    check_floor(blob, offset)?;
     if data.is_empty() {
         return Ok(());
     }

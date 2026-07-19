@@ -505,6 +505,15 @@ impl<B: crate::Blob> crate::Blob for YieldingBlob<B> {
         self.sync().await
     }
 
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        pause(&self.active).await;
+        self.inner.prune(offset).await
+    }
+
+    fn floor(&self) -> u64 {
+        self.inner.floor()
+    }
+
     async fn resize(&self, len: u64) -> Result<(), Error> {
         pause(&self.active).await;
         self.inner.resize(len).await

@@ -665,6 +665,13 @@ pub(super) async fn hydrate<S: crate::Storage>(
             msg.into(),
         )
     };
+    // Pruned-floor sanity: chunk-aligned, within the size, below every run.
+    if !entry.floor.is_multiple_of(BLOCK) || entry.floor > entry.size {
+        return Err(corrupt("pruned floor out of range"));
+    }
+    if entry.runs.first().is_some_and(|r| r.logical < entry.floor) {
+        return Err(corrupt("run below the pruned floor"));
+    }
     let mut inner = BlobInner::from_entry(entry);
 
     if let Some(last) = entry_last_chunk(entry) {
@@ -675,15 +682,37 @@ pub(super) async fn hydrate<S: crate::Storage>(
         // Validating it here keeps a corrupt-but-CRC-bound table a loud
         // open error instead of a read-path panic.
         let covered_end = if span == BLOCK { last + 1 } else { last };
-        let mut next = 0;
-        for r in &entry.checksums {
-            if r.first_chunk != next {
-                return Err(corrupt("checksum refs not contiguous"));
+        let floor_chunk = chunk_of(entry.floor);
+        match entry.checksums.first() {
+            // No refs: legal only when nothing above the floor needs one
+            // (the sole backed chunk is the partial frontier at the floor).
+            None => {
+                if covered_end > floor_chunk {
+                    return Err(corrupt("checksum coverage mismatch"));
+                }
             }
-            next += r.count as u64;
-        }
-        if next != covered_end {
-            return Err(corrupt("checksum coverage mismatch"));
+            // Refs cover [first ref, covered_end) contiguously, starting at
+            // or below the floor chunk (a straddling ref keeps serving with
+            // its low values unused), with no ref wholly below the floor
+            // (capture drops those with their extents).
+            Some(first) => {
+                if first.first_chunk > floor_chunk {
+                    return Err(corrupt("checksum refs start above the floor"));
+                }
+                let mut next = first.first_chunk;
+                for r in &entry.checksums {
+                    if r.first_chunk != next {
+                        return Err(corrupt("checksum refs not contiguous"));
+                    }
+                    next += r.count as u64;
+                    if next <= floor_chunk {
+                        return Err(corrupt("checksum ref wholly below the floor"));
+                    }
+                }
+                if next != covered_end {
+                    return Err(corrupt("checksum coverage mismatch"));
+                }
+            }
         }
 
         // Chunks recovery itself CRC-checked while verifying the adopted

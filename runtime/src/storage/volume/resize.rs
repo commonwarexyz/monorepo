@@ -7,7 +7,7 @@ use super::{
     alloc::{block_align, Extent},
     chunk::{chunk_of, ChunkCrc, ChunkState},
     paging::CrcMemo,
-    state::{check_not_removed, chunk_mismatch, BlobCore, Ready},
+    state::{check_floor, check_not_removed, chunk_mismatch, BlobCore, Ready},
     write::write_locked,
     BLOCK,
 };
@@ -77,6 +77,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
 ) -> Result<(), Error> {
     ready.check_poisoned()?;
     check_not_removed(blob)?;
+    check_floor(blob, len)?;
     // Chunk-end representability, as in `write_locked`.
     if len > u64::MAX - BLOCK {
         return Err(Error::OffsetOverflow);

@@ -274,6 +274,20 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     #[tracing::instrument(
+        name = "runtime.storage.blob.prune",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, offset = offset)
+    )]
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        self.inner.prune(offset).await
+    }
+
+    fn floor(&self) -> u64 {
+        self.inner.floor()
+    }
+
+    #[tracing::instrument(
         name = "runtime.storage.blob.resize",
         level = "info",
         skip_all,

@@ -24,6 +24,7 @@ use super::{
 };
 use crate::{Blob as _, Error, IoBuf, IoBufsMut};
 use commonware_cryptography::Crc32;
+use commonware_formatting::hex;
 
 /// Cap on one coalesced inner read issued by [`read_verified`].
 const MAX_READ_SPAN: u64 = 1 << 20;
@@ -324,6 +325,13 @@ pub(super) async fn read_verified<S: crate::Storage>(
             let mut inner = blob.inner.lock();
             if end > inner.size() {
                 return Err(Error::BlobInsufficientLength);
+            }
+            if offset < inner.floor() {
+                return Err(Error::OffsetPruned(
+                    blob.partition.clone(),
+                    hex(&blob.name),
+                    inner.floor(),
+                ));
             }
             if len == 0 {
                 return Ok(caller.take().map_or_else(IoBufsMut::default, |mut bufs| {

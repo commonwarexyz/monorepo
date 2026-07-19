@@ -302,6 +302,14 @@ mod tests {
             Ok(())
         }
 
+        async fn prune(&self, _offset: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn floor(&self) -> u64 {
+            0
+        }
+
         async fn resize(&self, len: u64) -> Result<(), Error> {
             let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
             self.state.lock().data.resize(len, 0);

@@ -20,11 +20,9 @@
 //! freeze rule in `write`, the lock-free reader protocol in `read`, lazy
 //! committed-CRC loading in `paging`.
 
-#[cfg(test)]
-use super::chunk::chunk_of;
 use super::{
     alloc::{block_align, Allocator, Extent},
-    chunk::{merge_frozen_runs, ChunkCrc, ChunkMap, ChunkState, CrcCache, RunMeta},
+    chunk::{chunk_of, merge_frozen_runs, ChunkCrc, ChunkMap, ChunkState, CrcCache, RunMeta},
     layout::{ChecksumRef, Entry},
     Config, Driver, BLOCK,
 };
@@ -63,6 +61,10 @@ pub(super) struct BlobInner {
     /// Freeze boundary: bytes below are covered by the last confirmed table
     /// or the in-flight snapshot.
     freeze_size: u64,
+    /// Pruned floor: bytes below were dropped, and reads, writes, and
+    /// resizes into them fail. Chunk-aligned, monotonic in RAM (the
+    /// committed floor regresses across a crash to the adopted commit's).
+    floor: u64,
     /// Written runs keyed by logical start; gaps are holes (zeros).
     runs: BTreeMap<u64, RunMeta>,
     /// Checksum state per backed chunk, over the chunk's written span.
@@ -222,6 +224,23 @@ impl BlobInner {
             assert!(logical >= prev_end, "overlapping runs at {logical}");
             prev_end = logical + run.len;
         }
+
+        // Pruned floor: chunk-aligned, within the size, below every run
+        // and every piece of tracked chunk state.
+        assert!(self.floor.is_multiple_of(BLOCK), "unaligned floor");
+        assert!(self.floor <= self.size, "floor beyond size");
+        let floor_chunk = chunk_of(self.floor);
+        if let Some((&first, _)) = self.runs.first_key_value() {
+            assert!(first >= self.floor, "run below the floor");
+        }
+        assert!(
+            self.dirty_chunks.first().is_none_or(|&c| c >= floor_chunk),
+            "dirty chunk below the floor"
+        );
+        assert!(
+            self.overlay.keys().next().is_none_or(|&c| c >= floor_chunk),
+            "overlay entry below the floor"
+        );
 
         // Tail coherence: the buffer always describes the last BACKED
         // chunk's exact span (or is empty when nothing is backed).
@@ -748,6 +767,11 @@ impl BlobInner {
         self.freeze_size
     }
 
+    /// Pruned floor: bytes below were dropped and their reads fail.
+    pub const fn floor(&self) -> u64 {
+        self.floor
+    }
+
     /// Relocation generation (bumped on any relocation/drop of backing).
     pub const fn generation(&self) -> u64 {
         self.generation
@@ -759,7 +783,6 @@ impl BlobInner {
     }
 
     /// Batches currently holding staged state for this blob.
-    #[cfg(test)]
     pub const fn staged_batches(&self) -> usize {
         self.staged_batches
     }
@@ -986,6 +1009,57 @@ impl BlobInner {
         self.committed_entry = Some(entry);
     }
 
+    /// Prune bytes below `floor` (chunk-aligned, above the current floor,
+    /// at most `size`): runs wholly below drop, a straddling run keeps its
+    /// suffix in place, and chunk state, overlay entries, and dirty marks
+    /// below the floor drop. Freed extent pieces join `pending_frees` —
+    /// the last confirmed table still references them, so they release
+    /// only once a commit CAPTURING this blob confirms (the caller marks
+    /// the blob dirty). The generation bumps: in-flight reads against the
+    /// old placement retry, then fail loudly below the new floor.
+    pub fn prune_to(&mut self, floor: u64) {
+        debug_assert!(
+            floor.is_multiple_of(BLOCK) && floor > self.floor && floor <= self.size,
+            "prune floor out of contract"
+        );
+        let kept = self.runs.split_off(&floor);
+        let below = std::mem::replace(&mut self.runs, kept);
+        for (logical, run) in below {
+            if logical + run.len <= floor {
+                self.pending_frees.push(run.extent());
+            } else {
+                // The straddler keeps its suffix: the pruned prefix blocks
+                // free, the rest re-keys at the floor.
+                let cut = floor - logical;
+                self.pending_frees.push(Extent {
+                    offset: run.physical,
+                    len: cut,
+                });
+                self.runs.insert(
+                    floor,
+                    RunMeta {
+                        physical: run.physical + cut,
+                        len: run.len - cut,
+                        capacity: run.capacity - cut,
+                        born: run.born,
+                    },
+                );
+            }
+        }
+        let floor_chunk = chunk_of(floor);
+        self.crcs.truncate_front(floor_chunk);
+        self.overlay.retain(|&chunk, _| chunk >= floor_chunk);
+        self.dirty_chunks = self.dirty_chunks.split_off(&floor_chunk);
+        // No runs survive only when trailing holes reach `size` (sparse
+        // resize): the tail buffer describes no backed chunk anymore.
+        if self.runs.is_empty() {
+            self.tail_chunk = 0;
+            self.tail = Vec::new();
+        }
+        self.generation += 1;
+        self.floor = floor;
+    }
+
     /// Rebuild live state from a committed entry (hydration): runs with
     /// recovered (frozen) birth, merged, and the dense chunk state seeded
     /// all-unverified with CRC values left on disk. The caller verifies
@@ -994,6 +1068,7 @@ impl BlobInner {
         let mut inner = Self {
             size: entry.size,
             freeze_size: entry.size,
+            floor: entry.floor,
             shadow: entry.shadow,
             committed_entry: Some(entry.clone()),
             ..Default::default()
@@ -1597,6 +1672,21 @@ impl StagedBlob {
 pub(super) fn check_not_removed(blob: &BlobCore) -> Result<(), Error> {
     if blob.inner.lock().removed {
         return Err(Error::BlobMissing(blob.partition.clone(), hex(&blob.name)));
+    }
+    Ok(())
+}
+
+/// Reject an operation reaching below the pruned floor: those bytes were
+/// dropped, and serving or mutating them would silently resurrect a
+/// discarded prefix.
+pub(super) fn check_floor(blob: &BlobCore, offset: u64) -> Result<(), Error> {
+    let floor = blob.inner.lock().floor();
+    if offset < floor {
+        return Err(Error::OffsetPruned(
+            blob.partition.clone(),
+            hex(&blob.name),
+            floor,
+        ));
     }
     Ok(())
 }

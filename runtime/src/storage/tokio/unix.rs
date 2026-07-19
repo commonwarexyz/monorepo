@@ -32,6 +32,10 @@ pub struct Blob {
     name: Vec<u8>,
     file: Arc<File>,
     pool: BufferPool,
+    // TODO(prune-campaign): persist the floor in the blob header at sync
+    // and punch the pruned range; this in-RAM floor does not survive
+    // reopen yet.
+    floor: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Blob {
@@ -41,6 +45,7 @@ impl Blob {
             name: name.into(),
             file: Arc::new(file),
             pool,
+            floor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -333,6 +338,27 @@ impl crate::Blob for Blob {
                 .map_err(|_| Error::WriteFailed)?
             }
         }
+    }
+
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        use std::sync::atomic::Ordering;
+        let size = self
+            .file
+            .metadata()
+            .map_err(|e| {
+                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())
+            })?
+            .len()
+            .saturating_sub(Header::DATA_OFFSET_U64);
+        if offset > size {
+            return Err(Error::BlobInsufficientLength);
+        }
+        self.floor.fetch_max(offset, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn floor(&self) -> u64 {
+        self.floor.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

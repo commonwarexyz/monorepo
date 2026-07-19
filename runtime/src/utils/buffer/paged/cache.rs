@@ -650,6 +650,14 @@ mod tests {
             self.sync().await
         }
 
+        async fn prune(&self, _offset: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn floor(&self) -> u64 {
+            0
+        }
+
         async fn resize(&self, _len: u64) -> Result<(), Error> {
             Ok(())
         }
@@ -731,6 +739,14 @@ mod tests {
 
             self.write_at(offset, bufs).await?;
             self.sync().await
+        }
+
+        async fn prune(&self, _offset: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn floor(&self) -> u64 {
+            0
         }
 
         async fn resize(&self, _len: u64) -> Result<(), Error> {
@@ -922,6 +938,14 @@ mod tests {
                 bufs: impl Into<IoBufs> + Send,
             ) -> Result<(), Error> {
                 self.write_at(offset, bufs).await
+            }
+
+            async fn prune(&self, _offset: u64) -> Result<(), Error> {
+                Ok(())
+            }
+
+            fn floor(&self) -> u64 {
+                0
             }
 
             async fn resize(&self, _len: u64) -> Result<(), Error> {

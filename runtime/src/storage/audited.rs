@@ -231,6 +231,19 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.write_at_sync(offset, bufs).await
     }
 
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        self.auditor.event(b"prune", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(offset.to_be_bytes());
+        });
+        self.inner.prune(offset).await
+    }
+
+    fn floor(&self) -> u64 {
+        self.inner.floor()
+    }
+
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.auditor.event(b"resize", |hasher| {
             hasher.update(self.partition.as_bytes());
@@ -475,6 +488,14 @@ mod tests {
                 .lock()
                 .push(bufs.into().chunk_count());
             Ok(())
+        }
+
+        async fn prune(&self, _offset: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn floor(&self) -> u64 {
+            0
         }
 
         async fn resize(&self, _len: u64) -> Result<(), Error> {

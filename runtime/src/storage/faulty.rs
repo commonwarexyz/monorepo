@@ -367,6 +367,17 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         Ok(())
     }
 
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        if self.ctx.should_fail(Op::Write) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.prune(offset).await
+    }
+
+    fn floor(&self) -> u64 {
+        self.inner.floor()
+    }
+
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let (should_fail, partial_rate) = self.ctx.check_resize_fault();
         if should_fail {

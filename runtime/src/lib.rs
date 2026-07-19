@@ -134,6 +134,8 @@ stability_scope!(BETA {
         InvalidChecksum,
         #[error("offset overflow")]
         OffsetOverflow,
+        #[error("offset below the pruned floor {2}: {0}/{1}")]
+        OffsetPruned(String, String, u64),
         #[error("io error: {0}")]
         Io(Arc<IoError>),
         #[error("buffer pool: {0}")]
@@ -816,6 +818,22 @@ stability_scope!(BETA {
         /// });
         /// ```
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
+
+        /// Drop the blob's bytes below `offset`, rounded DOWN to an
+        /// implementation-defined granularity (bytes at and above `offset`
+        /// always survive). Reads, writes, and resizes below the pruned
+        /// floor fail with [`Error::OffsetPruned`]. Pruning is a mutation,
+        /// not a durability point: the floor persists at the next
+        /// [`Blob::sync`], and a crash may regress it to the last synced
+        /// floor — prefix bytes reappear, never the reverse — so callers
+        /// re-prune after recovery. `offset` must not exceed the blob's
+        /// size, and per the writer-exclusivity contract must not race
+        /// writes, resizes, or an open write batch on this blob.
+        fn prune(&self, offset: u64) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// The pruned floor: bytes below it were dropped and their reads
+        /// fail. Zero for a never-pruned blob.
+        fn floor(&self) -> u64;
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

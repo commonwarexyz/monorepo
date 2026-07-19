@@ -57,7 +57,9 @@ use super::{
     commit,
     paging::CrcMemo,
     resize::{read_frontier, FrontierRead},
-    state::{BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob, StagedRun},
+    state::{
+        check_floor, BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob, StagedRun,
+    },
     write::stage_write,
     Blob, BLOCK,
 };
@@ -170,6 +172,7 @@ impl<S: crate::Storage> Batch<S> {
         if len > u64::MAX - BLOCK {
             return Err(Error::OffsetOverflow);
         }
+        check_floor(&blob.core, len)?;
         let ready = self.ready.clone();
         let core = blob.core.clone();
         let staged = self.staged_mut(blob);

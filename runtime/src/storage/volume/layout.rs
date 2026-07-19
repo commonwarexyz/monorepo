@@ -153,6 +153,10 @@ pub(super) struct Entry {
     pub version: u16,
     /// Committed logical size in bytes.
     pub size: u64,
+    /// Pruned floor: bytes below this offset were dropped and their reads
+    /// fail. Chunk-aligned. Runs never start below it, and checksum refs
+    /// cover from at most its chunk.
+    pub floor: u64,
     pub runs: Vec<Run>,
     pub checksums: Vec<ChecksumRef>,
     /// CRC over the written span of the final backed chunk, full or
@@ -202,6 +206,7 @@ impl Entry {
             name,
             version,
             size: 0,
+            floor: 0,
             runs: Vec::new(),
             checksums: Vec::new(),
             tail_crc: 0,
@@ -223,6 +228,7 @@ impl Entry {
         out.put_slice(&self.name);
         out.put_u16(self.version);
         out.put_u64(self.size);
+        out.put_u64(self.floor);
         out.put_u32(self.runs.len() as u32);
         for r in &self.runs {
             out.put_u64(r.logical);
@@ -338,9 +344,10 @@ impl Table {
             let partition = buf.get_u32();
             let name_len = buf.get_u32() as usize;
             let name = take(&mut buf, name_len)?;
-            need(&buf, 14)?;
+            need(&buf, 22)?;
             let version = buf.get_u16();
             let size = buf.get_u64();
+            let floor = buf.get_u64();
             let n_runs = buf.get_u32() as usize;
             let mut runs = Vec::with_capacity(n_runs.min(1024));
             for _ in 0..n_runs {
@@ -379,6 +386,7 @@ impl Table {
                 name,
                 version,
                 size,
+                floor,
                 runs,
                 checksums,
                 tail_crc,
@@ -444,6 +452,7 @@ mod tests {
                     name: b"section-1".to_vec(),
                     version: 0,
                     size: 12345,
+                    floor: 4096,
                     runs: vec![
                         Run {
                             logical: 0,
@@ -471,6 +480,7 @@ mod tests {
                     name: vec![],
                     version: 3,
                     size: 0,
+                    floor: 0,
                     runs: vec![],
                     checksums: vec![],
                     tail_crc: 0,

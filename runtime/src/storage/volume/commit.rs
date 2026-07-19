@@ -541,8 +541,12 @@ async fn plan_refs<S: crate::Storage>(
             let delta = covered_end >= prev_end
                 && prev_refs.len() < MAX_CHECKSUM_REFS
                 && inner.first_dirty_chunk().is_none_or(|c| c >= prev_end);
-            let load = (!delta && inner.crcs().has_unloaded(covered_end.min(prev_end)))
-                .then(|| prev_refs.to_vec());
+            let floor_chunk = chunk_of(inner.floor());
+            let load = (!delta
+                && inner
+                    .crcs()
+                    .has_unloaded(floor_chunk, covered_end.min(prev_end)))
+            .then(|| prev_refs.to_vec());
             Some((delta, prev_end, load))
         }
     };
@@ -625,16 +629,24 @@ fn capture_blob<S: crate::Storage>(
     // caught by the removed check above, so a live capture always
     // carries a plan.
     let RefPlan { delta, prev_end } = plan.expect("live blob carries a ref plan");
+    let floor_chunk = chunk_of(inner.floor());
+    let live_ref = |r: &ChecksumRef| r.first_chunk + r.count as u64 > floor_chunk;
     let prev_refs = inner
         .committed_entry()
         .map_or(&[][..], |e| &e.checksums[..]);
     let (array_start, checksums) = if delta {
-        (prev_end, prev_refs.to_vec())
+        // Refs wholly below the pruned floor drop (their extents supersede
+        // below); a straddling ref stays with its low values unused, so
+        // pruning never rewrites the array.
+        (
+            prev_end,
+            prev_refs.iter().filter(|r| live_ref(r)).copied().collect(),
+        )
     } else {
-        (0, Vec::new())
+        (floor_chunk, Vec::new())
     };
     let cksum_bytes: Vec<u8> = {
-        let mut bytes = Vec::with_capacity(((covered_end - array_start) * 4) as usize);
+        let mut bytes = Vec::with_capacity((covered_end.saturating_sub(array_start) * 4) as usize);
         for c in array_start..covered_end {
             bytes.extend_from_slice(&resolve_crc(inner.crcs(), preloaded, c).to_be_bytes());
         }
@@ -691,7 +703,21 @@ fn capture_blob<S: crate::Storage>(
     let mut superseded: Vec<Extent> = Vec::new();
     superseded.extend(prev_meta.shadow.take());
     let retained = if delta {
-        std::mem::take(&mut prev_meta.checksums)
+        // The same liveness filter as the entry's refs above (meta extents
+        // parallel them): extents of refs dropped below the floor
+        // supersede even in a delta commit.
+        let mut live = Vec::with_capacity(prev_meta.checksums.len());
+        for (r, extent) in prev_refs
+            .iter()
+            .zip(std::mem::take(&mut prev_meta.checksums))
+        {
+            if live_ref(r) {
+                live.push(extent);
+            } else {
+                superseded.push(extent);
+            }
+        }
+        live
     } else {
         superseded.append(&mut prev_meta.checksums);
         Vec::new()
@@ -703,6 +729,7 @@ fn capture_blob<S: crate::Storage>(
         name: blob.name.clone(),
         version: blob.version,
         size: inner.size(),
+        floor: inner.floor(),
         runs,
         checksums, // retained refs (a new delta/full ref is pushed below)
         tail_crc,

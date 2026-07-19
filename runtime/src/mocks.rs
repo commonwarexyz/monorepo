@@ -892,6 +892,14 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         self.inner.sync().await
     }
 
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        self.inner.prune(offset).await
+    }
+
+    fn floor(&self) -> u64 {
+        self.inner.floor()
+    }
+
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.inner.resize(len).await
     }
@@ -1107,6 +1115,14 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         self.inner.write_at_sync(offset, bufs).await
+    }
+
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        self.inner.prune(offset).await
+    }
+
+    fn floor(&self) -> u64 {
+        self.inner.floor()
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

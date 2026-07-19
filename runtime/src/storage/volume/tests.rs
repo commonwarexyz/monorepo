@@ -36,6 +36,105 @@ fn volume_over_memory() -> Volume<memory::Storage> {
     )
 }
 
+/// Native prefix pruning end to end: the floor rounds down to a chunk
+/// boundary, gates reads, writes, and shrinks, is monotonic, persists
+/// across a commit and a clean reopen, regresses to the committed floor
+/// when the pruning commit never lands, and releases the pruned extents
+/// for reuse once the pruning commit confirms (the closing audit proves
+/// no leak).
+#[tokio::test]
+async fn test_volume_prune_end_to_end() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
+    let (blob, _) = volume.open("p", b"journal").await.unwrap();
+    for i in 0..4u64 {
+        blob.write_at(i * BLOCK, IoBuf::from(vec![i as u8 + 1; BLOCK as usize]))
+            .await
+            .unwrap();
+    }
+    blob.sync().await.unwrap();
+    assert_eq!(blob.floor(), 0);
+
+    // Mid-chunk prune rounds DOWN: chunk 1 survives whole.
+    blob.prune(BLOCK + 7).await.unwrap();
+    assert_eq!(blob.floor(), BLOCK);
+    assert!(matches!(
+        blob.read_at(0, 1).await,
+        Err(Error::OffsetPruned(_, _, f)) if f == BLOCK
+    ));
+    let got = blob
+        .read_at(BLOCK, BLOCK as usize)
+        .await
+        .unwrap()
+        .coalesce();
+    assert_eq!(got.as_ref(), &vec![2u8; BLOCK as usize][..]);
+    assert!(matches!(
+        blob.write_at(0, IoBuf::from(vec![9u8; 8])).await,
+        Err(Error::OffsetPruned(..))
+    ));
+    assert!(matches!(
+        blob.resize(BLOCK - 1).await,
+        Err(Error::OffsetPruned(..))
+    ));
+    // Monotonic: pruning below the floor is a no-op, beyond the size errs.
+    blob.prune(4).await.unwrap();
+    assert_eq!(blob.floor(), BLOCK);
+    assert!(blob.prune(5 * BLOCK).await.is_err());
+    audit_volume(&volume, false);
+
+    // The floor persists at the next commit and across a clean reopen.
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(
+        inner.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
+    let (blob, size) = volume.open("p", b"journal").await.unwrap();
+    assert_eq!(size, 4 * BLOCK);
+    assert_eq!(blob.floor(), BLOCK);
+    assert!(matches!(
+        blob.read_at(0, 1).await,
+        Err(Error::OffsetPruned(..))
+    ));
+    let got = blob
+        .read_at(2 * BLOCK, BLOCK as usize)
+        .await
+        .unwrap()
+        .coalesce();
+    assert_eq!(got.as_ref(), &vec![3u8; BLOCK as usize][..]);
+
+    // A prune whose commit never lands regresses to the committed floor.
+    blob.prune(3 * BLOCK).await.unwrap();
+    assert_eq!(blob.floor(), 3 * BLOCK);
+    drop(blob);
+    drop(volume);
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
+    let (blob, _) = volume.open("p", b"journal").await.unwrap();
+    assert_eq!(blob.floor(), BLOCK);
+    let got = blob
+        .read_at(BLOCK, BLOCK as usize)
+        .await
+        .unwrap()
+        .coalesce();
+    assert_eq!(got.as_ref(), &vec![2u8; BLOCK as usize][..]);
+
+    // Confirm a pruning commit and prove the extents recycled: the
+    // quiesced audit asserts exact extent/free-space coverage (no leak).
+    blob.prune(3 * BLOCK).await.unwrap();
+    blob.sync().await.unwrap();
+    assert_eq!(blob.floor(), 3 * BLOCK);
+    audit_volume(&volume, true);
+}
+
 #[tokio::test]
 async fn test_volume_storage_contract() {
     run_storage_tests(volume_over_memory()).await;
@@ -148,6 +247,14 @@ impl crate::Blob for RecordingBlob {
     ) -> Result<(), Error> {
         self.write_at(offset, bufs).await?;
         self.sync().await
+    }
+
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        self.inner.prune(offset).await
+    }
+
+    fn floor(&self) -> u64 {
+        self.inner.floor()
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -438,6 +545,14 @@ impl crate::Blob for TearingBlob {
     ) -> Result<(), Error> {
         self.write_at(offset, bufs).await?;
         self.sync().await
+    }
+
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        self.inner.prune(offset).await
+    }
+
+    fn floor(&self) -> u64 {
+        self.inner.floor()
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -2063,6 +2178,14 @@ impl<B: crate::Blob> crate::Blob for GatedBlob<B> {
     ) -> Result<(), Error> {
         self.write_at(offset, bufs).await?;
         self.sync().await
+    }
+
+    async fn prune(&self, offset: u64) -> Result<(), Error> {
+        self.inner.prune(offset).await
+    }
+
+    fn floor(&self) -> u64 {
+        self.inner.floor()
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

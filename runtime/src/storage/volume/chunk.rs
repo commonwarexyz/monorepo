@@ -119,9 +119,14 @@ struct CrcPage {
 /// chunk.
 #[derive(Debug)]
 struct Segment {
-    /// Chunk count: the segment covers `[start, start + len)` where
+    /// Chunk count: the segment spans `[start, start + len)` where
     /// `start` is its key in [`ChunkMap::segments`].
     len: u64,
+    /// Chunks below this segment-relative index were pruned out of
+    /// coverage: dead slots whose bits and values are cleared and never
+    /// consulted (the segment covers `[start + lead, start + len)`).
+    /// Monotonic, and always < `len` (a fully dead segment is removed).
+    lead: u64,
     /// Per-chunk unverified bits (set = unverified), so an all-verified
     /// span is provable word-at-a-time (see [`ChunkMap::span_verified`]).
     unverified: BitMap,
@@ -134,6 +139,7 @@ impl Segment {
     fn new(len: u64) -> Self {
         Self {
             len,
+            lead: 0,
             unverified: BitMap::ones(len),
             pages: (0..len.div_ceil(CRC_PAGE_CHUNKS)).map(|_| None).collect(),
         }
@@ -198,6 +204,30 @@ impl Segment {
         }
     }
 
+    /// Kill the first `lead` chunks (prefix prune): their unverified bits
+    /// clear (returning how many were set), their resident values drop,
+    /// and coverage becomes `[start + lead, start + len)`. O(pruned).
+    fn drop_front(&mut self, lead: u64) -> u64 {
+        debug_assert!(self.lead < lead && lead < self.len);
+        let mut cleared = 0;
+        for rel in self.lead..lead {
+            if self.unverified.get(rel) {
+                self.unverified.set(rel, false);
+                cleared += 1;
+            }
+        }
+        // Pages wholly dead drop; the page containing the new lead clears
+        // its dead resident bits (values remain, never consulted).
+        for idx in (self.lead / CRC_PAGE_CHUNKS) as usize..(lead / CRC_PAGE_CHUNKS) as usize {
+            self.pages[idx] = None;
+        }
+        for rel in (lead / CRC_PAGE_CHUNKS * CRC_PAGE_CHUNKS).max(self.lead)..lead {
+            self.clear_resident(rel);
+        }
+        self.lead = lead;
+        cleared
+    }
+
     /// Shrink to `new_len` chunks (0 < `new_len` < `len`).
     fn truncate(&mut self, new_len: u64) {
         debug_assert!(0 < new_len && new_len < self.len);
@@ -255,7 +285,9 @@ impl ChunkMap {
 
     pub fn get(&self, chunk: u64) -> Option<ChunkState> {
         let (&start, seg) = self.segments.range(..=chunk).next_back()?;
-        let rel = chunk.checked_sub(start).filter(|&r| r < seg.len)?;
+        let rel = chunk
+            .checked_sub(start)
+            .filter(|&r| r < seg.len && r >= seg.lead)?;
         Some(ChunkState {
             crc: self.crc_of(seg, rel, chunk),
             verified: !seg.unverified.get(rel),
@@ -284,6 +316,11 @@ impl ChunkMap {
             if end <= next {
                 continue;
             }
+            // Pruned lead slots are not covered (their cleared bits must
+            // not prove them verified).
+            if next < s + seg.lead {
+                return false;
+            }
             if !seg.unverified.is_unset(next - s..(last + 1).min(end) - s) {
                 return false;
             }
@@ -297,6 +334,7 @@ impl ChunkMap {
 
     /// The CRC state of `chunk` at segment-relative index `rel` of `seg`.
     fn crc_of(&self, seg: &Segment, rel: u64, chunk: u64) -> ChunkCrc {
+        debug_assert!(rel >= seg.lead, "pruned chunk consulted");
         if !self.pending.is_empty() && self.pending.contains(&chunk) {
             return ChunkCrc::Pending;
         }
@@ -318,7 +356,7 @@ impl ChunkMap {
         self.segments
             .range(start..=last)
             .flat_map(move |(&s, seg)| {
-                let lo = first.max(s);
+                let lo = first.max(s + seg.lead);
                 let hi = last.min(s + seg.len - 1);
                 (lo..=hi).map(move |chunk| {
                     let rel = chunk - s;
@@ -343,6 +381,7 @@ impl ChunkMap {
         if let Some((&start, seg)) = self.segments.range_mut(..=chunk).next_back() {
             let rel = chunk - start;
             if rel < seg.len {
+                debug_assert!(rel >= seg.lead, "write below the pruned floor");
                 // Replace in place.
                 match (seg.unverified.get(rel), state.verified) {
                     (false, false) => self.unverified += 1,
@@ -397,7 +436,7 @@ impl ChunkMap {
             return;
         };
         let rel = chunk - start;
-        if rel >= seg.len || !seg.unverified.get(rel) {
+        if rel >= seg.len || rel < seg.lead || !seg.unverified.get(rel) {
             return;
         }
         if !self.pending.is_empty() && self.pending.contains(&chunk) {
@@ -417,7 +456,7 @@ impl ChunkMap {
             return;
         };
         let rel = chunk - start;
-        if rel < seg.len && seg.unverified.get(rel) {
+        if rel < seg.len && rel >= seg.lead && seg.unverified.get(rel) {
             seg.unverified.set(rel, false);
             self.unverified -= 1;
         }
@@ -431,7 +470,7 @@ impl ChunkMap {
             .next_back()
             .expect("resident chunk has crc");
         let rel = chunk - start;
-        assert!(rel < seg.len, "resident chunk has crc");
+        assert!(rel < seg.len && rel >= seg.lead, "resident chunk has crc");
         if self.pending.insert(chunk) {
             seg.clear_resident(rel);
         }
@@ -476,6 +515,26 @@ impl ChunkMap {
         }
     }
 
+    /// Drop every chunk below `first_kept` (prefix prune): pending
+    /// membership and resident values go, cleared unverified bits leave
+    /// the running count, and a straddling segment keeps its suffix in
+    /// place behind a dead lead — O(pruned), no re-keying.
+    pub fn truncate_front(&mut self, first_kept: u64) {
+        self.pending = self.pending.split_off(&first_kept);
+        let mut dead: Vec<u64> = Vec::new();
+        for (&start, seg) in self.segments.range_mut(..first_kept) {
+            if start + seg.len <= first_kept {
+                dead.push(start);
+            } else if start + seg.lead < first_kept {
+                self.unverified -= seg.drop_front(first_kept - start);
+            }
+        }
+        for start in dead {
+            let seg = self.segments.remove(&start).expect("listed");
+            self.unverified -= seg.unverified.count_ones();
+        }
+    }
+
     /// Seed dense state for every chunk covered by `runs` (hydration): all
     /// unverified, with CRCs left on disk ([`ChunkCrc::Unloaded`]).
     pub fn seed(&mut self, runs: &BTreeMap<u64, RunMeta>) {
@@ -507,38 +566,52 @@ impl ChunkMap {
         self.unverified += len;
     }
 
-    /// Whether any covered chunk below `end` lacks a resident CRC (its
-    /// value lives only in the committed checksum extents on disk).
+    /// Whether any covered chunk in `[from, end)` lacks a resident CRC
+    /// (its value lives only in the committed checksum extents on disk).
     /// Pending chunks count as resident: their value is derivable from the
     /// overlay. Word-at-a-time, so a fully resident blob scans
     /// chunks/64 words.
-    pub fn has_unloaded(&self, end: u64) -> bool {
+    pub fn has_unloaded(&self, from: u64, end: u64) -> bool {
         for (&start, seg) in &self.segments {
             if start >= end {
                 break;
             }
             let cover = (end - start).min(seg.len);
+            // Slots below the scan start and below the dead lead are not
+            // consulted.
+            let skip = seg.lead.max(from.saturating_sub(start));
             for (idx, page) in seg.pages.iter().enumerate() {
                 let base = idx as u64 * CRC_PAGE_CHUNKS;
                 if base >= cover {
                     break;
                 }
+                if base + CRC_PAGE_CHUNKS <= skip {
+                    continue;
+                }
+                let low = (skip.saturating_sub(base).min(CRC_PAGE_CHUNKS)) as usize;
                 let slots = ((cover - base).min(CRC_PAGE_CHUNKS)) as usize;
+                if low >= slots {
+                    continue;
+                }
                 let Some(page) = page.as_deref() else {
                     // An unallocated page holds no values. Only its pending
                     // chunks (overlay-resident) are covered elsewhere.
-                    let lo = start + base;
-                    if self.pending.range(lo..lo + slots as u64).count() < slots {
+                    let lo = start + base + low as u64;
+                    let hi = start + base + slots as u64;
+                    if self.pending.range(lo..hi).count() < slots - low {
                         return true;
                     }
                     continue;
                 };
-                for word in 0..slots.div_ceil(64) {
-                    let covered = if (word + 1) * 64 <= slots {
+                for word in low / 64..slots.div_ceil(64) {
+                    let mut covered = if (word + 1) * 64 <= slots {
                         u64::MAX
                     } else {
                         (1u64 << (slots % 64)) - 1
                     };
+                    if word * 64 < low {
+                        covered &= !((1u64 << (low % 64)) - 1);
+                    }
                     let mut missing = !page.resident[word] & covered;
                     if missing == 0 {
                         continue;
@@ -571,6 +644,12 @@ impl ChunkMap {
                 seg.len,
                 "unverified bitmap sized to segment"
             );
+            assert!(seg.lead < seg.len, "fully dead segment retained");
+            for rel in 0..seg.lead {
+                assert!(!seg.unverified.get(rel), "dead slot counted unverified");
+                assert!(seg.resident(rel).is_none(), "dead slot holds a value");
+                assert!(!self.pending.contains(&(start + rel)), "dead slot pending");
+            }
             for (_, state) in self.iter_range(start, start + seg.len - 1) {
                 if !state.verified {
                     unverified += 1;
