@@ -115,6 +115,9 @@
 //!   per blob (each pooled fsync covers many syncs, where per-file
 //!   backends pay one flush each).
 //!
+//! The lock inventory and its acquisition order live in the `state`
+//! module's docs.
+//!
 //! ## Why two superblock slots suffice
 //!
 //! An alternative to coalescing is more superblock slots (A/B -> A..G),
