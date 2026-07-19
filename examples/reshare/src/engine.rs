@@ -45,8 +45,8 @@ use tracing::{error, info, warn};
 
 const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
 const DEQUE_SIZE: usize = 10;
-const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
-const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
+const VIEW_RETENTION_TIMEOUT: ViewDelta = ViewDelta::new(256);
+const SYNCER_VIEW_RETENTION_TIMEOUT_MULTIPLIER: u64 = 10;
 const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
 const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
 const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
@@ -272,10 +272,10 @@ where
                 start: marshal::Start::Genesis(genesis),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
-                view_retention_timeout: ViewDelta::new(
-                    ACTIVITY_TIMEOUT
+                view_retention_window: ViewDelta::new(
+                    VIEW_RETENTION_TIMEOUT
                         .get()
-                        .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
+                        .saturating_mul(SYNCER_VIEW_RETENTION_TIMEOUT_MULTIPLIER),
                 ),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 page_cache: page_cache.clone(),

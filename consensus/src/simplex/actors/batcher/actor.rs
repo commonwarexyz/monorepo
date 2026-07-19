@@ -62,7 +62,7 @@ where
     relay: Rl,
     strategy: T,
 
-    activity_timeout: ViewDelta,
+    view_retention_window: ViewDelta,
     skip_timeout: Duration,
     forwarding: ForwardingPolicy,
     epoch: Epoch,
@@ -147,7 +147,7 @@ where
                 relay: cfg.relay,
                 strategy: cfg.strategy,
 
-                activity_timeout: cfg.activity_timeout,
+                view_retention_window: cfg.view_retention_window,
                 skip_timeout: cfg.skip_timeout,
                 forwarding: cfg.forwarding,
                 epoch: cfg.epoch,
@@ -222,7 +222,7 @@ where
         Viewport {
             finalized,
             current,
-            activity_timeout: self.activity_timeout,
+            view_retention_window: self.view_retention_window,
             term_length: self.term_length,
         }
     }
