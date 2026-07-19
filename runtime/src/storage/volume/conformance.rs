@@ -1879,7 +1879,7 @@ async fn poll_n<F: Future<Output = Result<(), Error>> + Unpin>(fut: &mut F, poll
 /// tasks run on the ambient tokio executor, so yielding lets them finish).
 async fn quiesce_confirmed(ready: &Ready<Stack>, confirmed: u64) {
     for _ in 0..1_000_000u32 {
-        if ready.state.lock().confirmed_seq > confirmed {
+        if ready.state.lock().confirmed_seq() > confirmed {
             return;
         }
         tokio::task::yield_now().await;
@@ -1902,7 +1902,7 @@ async fn conformance_cancel_sync() {
         rig.execute(Op::Append(1)).await;
 
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-        let confirmed = ready.state.lock().confirmed_seq;
+        let confirmed = ready.state.lock().confirmed_seq();
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
             let mut fut = Box::pin(rig.blobs[&0].sync());
@@ -1943,7 +1943,7 @@ async fn conformance_cancel_start_sync_handle() {
         let mut rig = Rig::new().await;
         rig.execute(Op::Append(0)).await;
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-        let confirmed = ready.state.lock().confirmed_seq;
+        let confirmed = ready.state.lock().confirmed_seq();
         let handle = rig.blobs[&0].start_sync().await;
         drop(handle);
         quiesce_confirmed(&ready, confirmed).await;
@@ -1964,7 +1964,7 @@ async fn conformance_cancel_start_sync_handle() {
         let mut rig = Rig::new().await;
         rig.execute(Op::Append(0)).await;
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-        let confirmed = ready.state.lock().confirmed_seq;
+        let confirmed = ready.state.lock().confirmed_seq();
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
             let mut handle = Box::pin(rig.blobs[&0].start_sync().await);
@@ -2001,7 +2001,7 @@ async fn conformance_cancel_remove() {
         rig.execute(Op::Append(0)).await;
         rig.execute(Op::Sync(0b001)).await;
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-        let confirmed = ready.state.lock().confirmed_seq;
+        let confirmed = ready.state.lock().confirmed_seq();
         rig.blobs.remove(&0);
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
@@ -2053,7 +2053,7 @@ async fn conformance_cancel_apply_sync() {
         rig.execute(Op::BatchAppend(1)).await;
 
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-        let confirmed = ready.state.lock().confirmed_seq;
+        let confirmed = ready.state.lock().confirmed_seq();
         let batch_rig = rig.batch.take().expect("staged batch");
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
@@ -2101,7 +2101,7 @@ async fn conformance_cancel_apply_queued() {
     // Baseline before anything is in flight: exactly two commits land
     // beyond it (the parked sync's, then the batch's).
     let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-    let confirmed = ready.state.lock().confirmed_seq;
+    let confirmed = ready.state.lock().confirmed_seq();
 
     // Park an unrelated sync at the inner fsync: it holds the commit lock.
     rig.gated.sync_gate.arm();
@@ -2167,7 +2167,7 @@ async fn conformance_cancel_apply_start_sync() {
         rig.execute(Op::BatchAppend(0)).await;
         rig.execute(Op::BatchAppend(1)).await;
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-        let confirmed = ready.state.lock().confirmed_seq;
+        let confirmed = ready.state.lock().confirmed_seq();
         let batch_rig = rig.batch.take().expect("staged batch");
         rig.yields.store(true, Ordering::SeqCst);
         let outcome = {
@@ -2221,7 +2221,7 @@ async fn conformance_cancel_apply_start_sync() {
         rig.execute(Op::BatchAppend(0)).await;
         rig.execute(Op::BatchAppend(1)).await;
         let ready = rig.volume.shared.ready.get().expect("recovered").clone();
-        let confirmed = ready.state.lock().confirmed_seq;
+        let confirmed = ready.state.lock().confirmed_seq();
         let batch_rig = rig.batch.take().expect("staged batch");
         let handle = batch_rig.batch.apply_start_sync().await.expect("publish");
         drop(batch_rig.created);

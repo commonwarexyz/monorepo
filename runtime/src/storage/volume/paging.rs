@@ -111,11 +111,11 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
     loop {
         let (r, verify) = {
             let inner = blob.inner.lock();
-            match inner.crcs.get(chunk).map(|s| s.crc) {
+            match inner.crcs().get(chunk).map(|s| s.crc) {
                 Some(ChunkCrc::Unloaded) => {}
                 _ => return Ok(None),
             }
-            let covering = inner.committed_entry.as_ref().and_then(|e| {
+            let covering = inner.committed_entry().and_then(|e| {
                 e.checksums
                     .iter()
                     .find(|r| r.first_chunk <= chunk && chunk < r.first_chunk + r.count as u64)
@@ -127,7 +127,7 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
                 // reachable disk state.
                 unreachable!("unloaded chunk outside committed checksum coverage")
             };
-            (*r, !inner.crc_guarded.contains(r))
+            (*r, !inner.crc_guarded().contains(r))
         };
         let page = chunk / CRC_PAGE_CHUNKS;
         let w0 = (page * CRC_PAGE_CHUNKS).max(r.first_chunk) - r.first_chunk;
@@ -138,8 +138,7 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
             // A commit swapped the entry mid-read (the extent may have been
             // recycled): retry against the current refs.
             if !inner
-                .committed_entry
-                .as_ref()
+                .committed_entry()
                 .is_some_and(|e| e.checksums.contains(&r))
             {
                 continue;
@@ -148,11 +147,11 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
                 if guard != r.crc {
                     return Err(ref_mismatch(ready, blob, &r));
                 }
-                if !inner.crc_guarded.contains(&r) {
-                    inner.crc_guarded.push(r);
-                }
+                inner.record_guarded(r);
             }
-            inner.crc_cache.insert(r.first_chunk + w0, values.clone());
+            inner
+                .crc_cache_mut()
+                .insert(r.first_chunk + w0, values.clone());
         }
         return Ok(Some((r.first_chunk + w0, values)));
     }
@@ -177,9 +176,7 @@ pub(super) async fn load_committed_refs<S: crate::Storage>(
             return Err(ref_mismatch(ready, blob, r));
         }
         let mut inner = blob.inner.lock();
-        if !inner.crc_guarded.contains(r) {
-            inner.crc_guarded.push(*r);
-        }
+        inner.record_guarded(*r);
         out.push((r.first_chunk, values));
     }
     Ok(out)

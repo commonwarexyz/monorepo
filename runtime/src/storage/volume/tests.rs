@@ -1165,7 +1165,7 @@ async fn test_volume_batch_sync_then_grow_then_stage() {
     let mut expected = vec![0x44u8; 10];
     expected.extend_from_slice(&[0x11u8; 90]);
     expected.extend_from_slice(&[0x33u8; 200]);
-    assert_eq!(blob.core.inner.lock().size, 300, "growth truncated");
+    assert_eq!(blob.core.inner.lock().size(), 300, "growth truncated");
     let got = blob.read_at(0, 300).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
     drop(blob);
@@ -2769,8 +2769,7 @@ fn committed_refs<S: crate::Storage>(blob: &super::Blob<S>) -> Vec<(u64, u32)> {
     blob.core
         .inner
         .lock()
-        .committed_entry
-        .as_ref()
+        .committed_entry()
         .map_or_else(Vec::new, |e| {
             e.checksums
                 .iter()
@@ -2974,7 +2973,7 @@ async fn test_volume_recovery_seeds_verified_chunks() {
         let inner = blob.core.inner.lock();
         for chunk in 0..4u64 {
             assert!(
-                inner.crcs.get(chunk).unwrap().verified,
+                inner.crcs().get(chunk).unwrap().verified,
                 "chunk {chunk} must be seeded verified"
             );
         }
@@ -3220,16 +3219,19 @@ async fn test_volume_read_mixed_coalesces_and_verifies() {
     let (blob, _) = volume.open("p", b"m").await.unwrap();
     {
         let inner = blob.core.inner.lock();
-        assert!(!inner.crcs.get(1).unwrap().verified, "hydrates unverified");
-        inner.crcs.audit();
+        assert!(
+            !inner.crcs().get(1).unwrap().verified,
+            "hydrates unverified"
+        );
+        inner.crcs().audit();
     }
     // Verify chunk 0 in place with a first read (widened to its block).
     let got = blob.read_at(0, 10).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &data[..10]);
     {
         let inner = blob.core.inner.lock();
-        assert!(inner.crcs.get(0).unwrap().verified, "read-verified");
-        assert!(!inner.crcs.get(1).unwrap().verified, "still unverified");
+        assert!(inner.crcs().get(0).unwrap().verified, "read-verified");
+        assert!(!inner.crcs().get(1).unwrap().verified, "still unverified");
     }
 
     // Read chunks 0..4 (mixed verified/unverified) with a caller buffer.
@@ -3258,10 +3260,10 @@ async fn test_volume_read_mixed_coalesces_and_verifies() {
     // Every covered chunk is now verified (and the counts agree).
     let inner = blob.core.inner.lock();
     for chunk in 0..4u64 {
-        assert!(inner.crcs.get(chunk).unwrap().verified, "chunk {chunk}");
+        assert!(inner.crcs().get(chunk).unwrap().verified, "chunk {chunk}");
     }
-    assert!(!inner.crcs.get(4).unwrap().verified, "uncovered stays");
-    inner.crcs.audit();
+    assert!(!inner.crcs().get(4).unwrap().verified, "uncovered stays");
+    inner.crcs().audit();
 }
 
 /// A sub-block read of an unverified chunk widens to the chunk's whole
@@ -3320,7 +3322,7 @@ async fn test_volume_read_widens_unverified_to_block() {
         assert_eq!(new_reads[1].2, BLOCK as usize, "whole chunk span");
     }
     assert!(
-        blob.core.inner.lock().crcs.get(2).unwrap().verified,
+        blob.core.inner.lock().crcs().get(2).unwrap().verified,
         "the widened read verified the chunk"
     );
 
@@ -3363,7 +3365,7 @@ async fn test_volume_chunk_counts_stay_exact() {
     let _ = pool;
     let (blob, _) = volume.open("p", b"c").await.unwrap();
     let audit = |blob: &crate::storage::volume::Blob<memory::Storage>| {
-        blob.core.inner.lock().crcs.audit();
+        blob.core.inner.lock().crcs().audit();
     };
 
     // Fresh writes (verified by construction) and appends.
@@ -3457,16 +3459,16 @@ async fn test_volume_hydrate_reads_only_frontier() {
     }
     {
         let inner = blob.core.inner.lock();
-        let state = inner.crcs.get(0).unwrap();
+        let state = inner.crcs().get(0).unwrap();
         assert_eq!(state.crc, ChunkCrc::Unloaded, "CRC left on disk");
         assert!(!state.verified, "hydrates unverified");
-        let frontier = inner.crcs.get(8).unwrap();
+        let frontier = inner.crcs().get(8).unwrap();
         assert!(frontier.verified, "hydration verifies the frontier");
         assert!(
             matches!(frontier.crc, ChunkCrc::Ready(_)),
             "the frontier CRC is resident"
         );
-        inner.crcs.audit();
+        inner.crcs().audit();
     }
 
     // First read of an unverified chunk: the committed-CRC page load plus
@@ -3475,10 +3477,10 @@ async fn test_volume_hydrate_reads_only_frontier() {
     assert_eq!(got.as_ref(), &[5u8; 10][..]);
     {
         let inner = blob.core.inner.lock();
-        let state = inner.crcs.get(5).unwrap();
+        let state = inner.crcs().get(5).unwrap();
         assert!(state.verified, "the read verified the chunk");
         assert_eq!(state.crc, ChunkCrc::Unloaded, "verification needs no value");
-        inner.crcs.audit();
+        inner.crcs().audit();
     }
 }
 
@@ -3529,11 +3531,11 @@ async fn test_volume_unloaded_crcs_cow_and_full_rewrite() {
             .await
             .unwrap();
         expected[2 * BLOCK as usize + 7..2 * BLOCK as usize + 107].fill(3);
-        blob.core.inner.lock().crcs.audit();
+        blob.core.inner.lock().crcs().audit();
         // Dirt below the covered frontier: the capture rewrites the whole
         // checksum array, reading unloaded values from the old extents.
         blob.sync().await.unwrap();
-        blob.core.inner.lock().crcs.audit();
+        blob.core.inner.lock().crcs().audit();
     }
 
     // Every chunk reads back correctly against the rewritten array.
@@ -3544,7 +3546,7 @@ async fn test_volume_unloaded_crcs_cow_and_full_rewrite() {
     assert_eq!(size, expected.len() as u64);
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
-    blob.core.inner.lock().crcs.audit();
+    blob.core.inner.lock().crcs().audit();
 }
 
 /// A delta append after reopen keeps the retained refs untouched, and a
@@ -3594,8 +3596,7 @@ async fn test_volume_delta_append_over_unloaded_crcs() {
             blob.core
                 .inner
                 .lock()
-                .committed_entry
-                .as_ref()
+                .committed_entry()
                 .unwrap()
                 .checksums
                 .len(),
@@ -3609,7 +3610,7 @@ async fn test_volume_delta_append_over_unloaded_crcs() {
     let (blob, _) = volume.open("p", b"delta").await.unwrap();
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
-    blob.core.inner.lock().crcs.audit();
+    blob.core.inner.lock().crcs().audit();
 }
 
 /// Shrinking a reopened blob truncates its dense chunk state, and the
@@ -3643,11 +3644,11 @@ async fn test_volume_shrink_unloaded_then_regrow() {
     .unwrap();
     let (blob, _) = volume.open("p", b"shrink").await.unwrap();
     blob.resize(2 * BLOCK + 10).await.unwrap();
-    blob.core.inner.lock().crcs.audit();
+    blob.core.inner.lock().crcs().audit();
     blob.write_at(4 * BLOCK, IoBuf::copy_from_slice(&[6u8; 100]))
         .await
         .unwrap();
-    blob.core.inner.lock().crcs.audit();
+    blob.core.inner.lock().crcs().audit();
     blob.sync().await.unwrap();
 
     let mut expected = vec![4u8; 2 * BLOCK as usize + 10];
@@ -3662,7 +3663,7 @@ async fn test_volume_shrink_unloaded_then_regrow() {
     assert_eq!(size, expected.len() as u64);
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
-    blob.core.inner.lock().crcs.audit();
+    blob.core.inner.lock().crcs().audit();
 }
 
 /// Shrinking a REOPENED blob into a hole can make an untouched-since-
@@ -3705,7 +3706,7 @@ async fn test_volume_shrink_unloaded_frontier_then_sync() {
     // the new size lands in the hole above it.
     blob.resize(5000).await.unwrap();
     blob.sync().await.unwrap();
-    blob.core.inner.lock().crcs.audit();
+    blob.core.inner.lock().crcs().audit();
 
     drop(blob);
     drop(volume);
@@ -3747,16 +3748,16 @@ async fn test_volume_capture_merges_frozen_runs() {
             .unwrap();
         expected.extend_from_slice(&piece);
     }
-    assert_eq!(blob.core.inner.lock().runs.len(), 4);
+    assert_eq!(blob.core.inner.lock().runs().len(), 4);
 
     blob.sync().await.unwrap();
     {
         let inner = blob.core.inner.lock();
-        assert_eq!(inner.runs.len(), 1, "capture merges contiguous runs");
-        let run = inner.runs.values().next().unwrap();
+        assert_eq!(inner.runs().len(), 1, "capture merges contiguous runs");
+        let run = inner.runs().values().next().unwrap();
         assert_eq!(run.len, 8 * BLOCK);
         assert_eq!(run.capacity, 8 * BLOCK);
-        let entry = inner.committed_entry.as_ref().unwrap();
+        let entry = inner.committed_entry().unwrap();
         assert_eq!(entry.runs.len(), 1, "the entry encodes the merged run");
     }
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
@@ -3769,7 +3770,7 @@ async fn test_volume_capture_merges_frozen_runs() {
         .unwrap();
     let (blob, size) = volume.open("p", b"m").await.unwrap();
     assert_eq!(size, 8 * BLOCK);
-    assert_eq!(blob.core.inner.lock().runs.len(), 1);
+    assert_eq!(blob.core.inner.lock().runs().len(), 1);
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
 }
@@ -3787,7 +3788,7 @@ async fn test_volume_merge_never_crosses_holes() {
         .await
         .unwrap();
     blob.sync().await.unwrap();
-    assert_eq!(blob.core.inner.lock().runs.len(), 2, "hole stays a hole");
+    assert_eq!(blob.core.inner.lock().runs().len(), 2, "hole stays a hole");
 
     let mut expected = vec![1u8; BLOCK as usize];
     expected.extend_from_slice(&[0u8; BLOCK as usize]);
@@ -3808,18 +3809,18 @@ async fn test_volume_merge_requires_physical_adjacency() {
         .await
         .unwrap();
     blob.sync().await.unwrap();
-    assert_eq!(blob.core.inner.lock().runs.len(), 1);
+    assert_eq!(blob.core.inner.lock().runs().len(), 1);
 
     // Overwrite the frozen middle chunk: relocated by copy-on-write.
     blob.write_at(BLOCK, IoBuf::copy_from_slice(&[6u8; BLOCK as usize]))
         .await
         .unwrap();
     expected[BLOCK as usize..2 * BLOCK as usize].fill(6);
-    assert_eq!(blob.core.inner.lock().runs.len(), 3);
+    assert_eq!(blob.core.inner.lock().runs().len(), 3);
 
     blob.sync().await.unwrap();
     assert_eq!(
-        blob.core.inner.lock().runs.len(),
+        blob.core.inner.lock().runs().len(),
         3,
         "relocated chunk is not physically adjacent to its neighbors"
     );
@@ -3839,7 +3840,7 @@ async fn test_volume_young_runs_merge_only_at_capture() {
         .await
         .unwrap();
     blob.sync().await.unwrap();
-    assert_eq!(blob.core.inner.lock().runs.len(), 1);
+    assert_eq!(blob.core.inner.lock().runs().len(), 1);
 
     // Two contiguous young appends on mutually adjacent fresh extents (the
     // commit's metadata extents separate them from the first run).
@@ -3851,7 +3852,7 @@ async fn test_volume_young_runs_merge_only_at_capture() {
         expected.extend_from_slice(&piece);
     }
     assert_eq!(
-        blob.core.inner.lock().runs.len(),
+        blob.core.inner.lock().runs().len(),
         3,
         "young runs stay unmerged until a capture"
     );
@@ -3860,7 +3861,7 @@ async fn test_volume_young_runs_merge_only_at_capture() {
 
     blob.sync().await.unwrap();
     assert_eq!(
-        blob.core.inner.lock().runs.len(),
+        blob.core.inner.lock().runs().len(),
         2,
         "the capture merges the adjacent young pair"
     );
@@ -3905,13 +3906,13 @@ async fn test_volume_staged_batch_gates_merge_until_reopen() {
     blob.sync().await.unwrap();
     {
         let inner = blob.core.inner.lock();
-        assert_eq!(inner.staged_batches, 1);
-        assert_eq!(inner.runs.len(), 2, "merge is gated by the staged batch");
-        let entry = inner.committed_entry.as_ref().unwrap();
+        assert_eq!(inner.staged_batches(), 1);
+        assert_eq!(inner.runs().len(), 2, "merge is gated by the staged batch");
+        let entry = inner.committed_entry().unwrap();
         assert_eq!(entry.runs.len(), 2, "the entry carries the unmerged runs");
     }
     drop(batch);
-    assert_eq!(blob.core.inner.lock().staged_batches, 0);
+    assert_eq!(blob.core.inner.lock().staged_batches(), 0);
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
     drop(blob);
@@ -3923,7 +3924,7 @@ async fn test_volume_staged_batch_gates_merge_until_reopen() {
         .unwrap();
     let (blob, size) = volume.open("p", b"g").await.unwrap();
     assert_eq!(size, 4 * BLOCK);
-    assert_eq!(blob.core.inner.lock().runs.len(), 1, "hydration merges");
+    assert_eq!(blob.core.inner.lock().runs().len(), 1, "hydration merges");
     let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &expected[..]);
 }
@@ -4432,7 +4433,7 @@ async fn test_volume_resize_trim_detects_rot() {
     // Rot a committed byte of the first chunk through the volume's own
     // file handle (memory blobs are per-handle copies: the volume's handle
     // must see the rot).
-    let phys = blob.core.inner.lock().runs.get(&0).unwrap().physical;
+    let phys = blob.core.inner.lock().runs().get(&0).unwrap().physical;
     blob.ready
         .file
         .write_at(phys + 50, IoBuf::copy_from_slice(&[0xFF]))
@@ -4474,7 +4475,7 @@ async fn test_volume_batch_resize_trim_detects_rot() {
         .await
         .unwrap();
     let (blob, _) = volume.open("p", b"rot").await.unwrap();
-    let phys = blob.core.inner.lock().runs.get(&0).unwrap().physical;
+    let phys = blob.core.inner.lock().runs().get(&0).unwrap().physical;
     blob.ready
         .file
         .write_at(phys + 50, IoBuf::copy_from_slice(&[0xFF]))
@@ -4506,7 +4507,7 @@ async fn test_volume_inplace_gap_write_detects_rot() {
     blob.write_at(5 * BLOCK, IoBuf::copy_from_slice(&[0x22u8; 100]))
         .await
         .unwrap();
-    let phys = blob.core.inner.lock().runs.get(&0).unwrap().physical;
+    let phys = blob.core.inner.lock().runs().get(&0).unwrap().physical;
     blob.ready
         .file
         .write_at(phys + 50, IoBuf::copy_from_slice(&[0xFF]))
@@ -4821,10 +4822,10 @@ async fn test_volume_demote_on_last_handle_drop() {
         let ready = volume.shared.ready.get().unwrap();
         let state = ready.state.lock();
         assert!(
-            !state.open.contains_key(&id),
+            !state.open().contains_key(&id),
             "clean blob must demote on last handle drop"
         );
-        assert!(state.dormant.contains_key(&id), "demoted blob is dormant");
+        assert!(state.dormant().contains_key(&id), "demoted blob is dormant");
     }
 
     // Re-open re-hydrates with intact content.
@@ -4851,7 +4852,7 @@ async fn test_volume_demote_on_last_handle_drop() {
         let ready = volume.shared.ready.get().unwrap();
         let state = ready.state.lock();
         assert!(
-            state.open.contains_key(&id),
+            state.open().contains_key(&id),
             "captured blob must stay hydrated until finalize"
         );
     }
@@ -4861,7 +4862,7 @@ async fn test_volume_demote_on_last_handle_drop() {
         let ready = volume.shared.ready.get().unwrap();
         let state = ready.state.lock();
         assert!(
-            !state.open.contains_key(&id),
+            !state.open().contains_key(&id),
             "finalize demotes the handle-less captured blob"
         );
     }

@@ -115,10 +115,10 @@ fn plan_read(
     if let Some((l, r)) = inner.covering(offset) {
         if !paranoid
             && end <= l + r.len
-            && (inner.crcs.all_verified() || inner.crcs.span_verified(first, last))
+            && (inner.crcs().all_verified() || inner.crcs().span_verified(first, last))
         {
             return Planned::Plan(ReadPlan {
-                generation: inner.generation,
+                generation: inner.generation(),
                 head: Some(ReadGroup {
                     physical: r.physical + (offset - l),
                     logical: offset,
@@ -139,12 +139,7 @@ fn plan_read(
     {
         // The chunk-state walk borrows the map while the committed-CRC
         // cache is consulted mutably (LRU stamps): split the fields.
-        let BlobInner {
-            runs: all_runs,
-            crcs,
-            crc_cache,
-            ..
-        } = inner;
+        let (all_runs, crcs, crc_cache) = inner.plan_parts();
         // Track the covering run alongside the chunk walk: start at the run
         // at or before the first chunk and advance as chunks pass.
         let start = all_runs
@@ -258,7 +253,7 @@ fn plan_read(
         })
         .collect();
     Planned::Plan(ReadPlan {
-        generation: inner.generation,
+        generation: inner.generation(),
         head,
         rest,
         splices,
@@ -273,11 +268,11 @@ fn plan_read(
 /// matching checksum proves the planned content.
 fn publish_read(blob: &BlobCore, generation: u64, checked: &[(u64, u32)], unchecked: bool) -> bool {
     let mut inner = blob.inner.lock();
-    if inner.generation != generation {
+    if inner.generation() != generation {
         return !unchecked;
     }
     for &(chunk, crc) in checked {
-        inner.crcs.mark_verified(chunk, crc);
+        inner.crcs_mut().mark_verified(chunk, crc);
     }
     true
 }
@@ -327,7 +322,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
         let paranoid = invalidated >= GENERATION_RETRY_LIMIT;
         let planned = {
             let mut inner = blob.inner.lock();
-            if end > inner.size {
+            if end > inner.size() {
                 return Err(Error::BlobInsufficientLength);
             }
             if len == 0 {
@@ -448,7 +443,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 }
                 {
                     let inner = blob.inner.lock();
-                    if inner.generation != generation {
+                    if inner.generation() != generation {
                         invalidated += 1;
                         continue 'retry;
                     }
@@ -469,14 +464,14 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 let source = loop {
                     let need_load = {
                         let mut inner = blob.inner.lock();
-                        if inner.generation != generation {
+                        if inner.generation() != generation {
                             invalidated += 1;
                             continue 'retry;
                         }
                         match inner.chunk_span(chunk) {
                             None => break None,
                             Some((phys, span)) => {
-                                let state = inner.crcs.get(chunk).expect("backed chunk has crc");
+                                let state = inner.crcs().get(chunk).expect("backed chunk has crc");
                                 match state.crc {
                                     ChunkCrc::Ready(crc) => {
                                         break Some(Stable::Disk { phys, span, crc })
@@ -496,7 +491,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                                     // CRC is the committed value.
                                     ChunkCrc::Unloaded => {
                                         match window_value(&loaded, chunk)
-                                            .or_else(|| inner.crc_cache.get(chunk))
+                                            .or_else(|| inner.crc_cache_mut().get(chunk))
                                         {
                                             Some(crc) => {
                                                 break Some(Stable::Disk { phys, span, crc })

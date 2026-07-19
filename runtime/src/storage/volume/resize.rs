@@ -26,7 +26,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
     if len > u64::MAX - BLOCK {
         return Err(Error::OffsetOverflow);
     }
-    let old_size = blob.inner.lock().size;
+    let old_size = blob.inner.lock().size();
 
     if len >= old_size {
         // Zero extension: physically zero the backed portion of the
@@ -48,9 +48,9 @@ pub(super) async fn resize_locked<S: crate::Storage>(
         let mut state = ready.state.lock();
         let mut inner = blob.inner.lock();
         // A removal raced the resize: adopt nothing (see `publish_stretch`).
-        if !inner.removed {
-            inner.size = inner.size.max(len);
-            state.dirty.insert(blob.id);
+        if !inner.removed() {
+            inner.grow_to(len);
+            state.mark_dirty(blob.id);
         }
         return Ok(());
     }
@@ -113,7 +113,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
 
             // The last run surviving the shrink (runs at or beyond `len`
             // drop; a run below `len` survives, trimmed to `len - l`).
-            let Some((&l, run)) = inner.runs.range(..len).next_back() else {
+            let Some((&l, run)) = inner.runs().range(..len).next_back() else {
                 break Frontier::Empty;
             };
             let post_len = run.len.min(len - l);
@@ -125,12 +125,12 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             // The tail buffer holding the chunk's full current span needs
             // no read and no re-check (its bytes are the span's
             // authoritative content), trimmed or not.
-            if inner.tail_chunk == chunk && inner.tail.len() as u64 == old_span {
+            if inner.tail_chunk() == chunk && inner.tail().len() as u64 == old_span {
                 if span == old_span {
                     break Frontier::Keep { chunk };
                 }
                 let verified = inner
-                    .crcs
+                    .crcs()
                     .get(chunk)
                     .expect("backed chunk has crc")
                     .verified;
@@ -148,7 +148,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             // to the CHECKED read-back below (correct, one extra read).
             // The staged sibling serves its overlay too because staged
             // chunks are routinely overlay-backed.
-            let state = inner.crcs.get(chunk).expect("backed chunk has crc");
+            let state = inner.crcs().get(chunk).expect("backed chunk has crc");
             match state.crc {
                 ChunkCrc::Ready(expected) => {
                     break Frontier::Read {
@@ -170,7 +170,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                     let known = loaded_crc
                         .filter(|&(c, _)| c == chunk)
                         .map(|(_, crc)| crc)
-                        .or_else(|| inner.crc_cache.get(chunk));
+                        .or_else(|| inner.crc_cache_mut().get(chunk));
                     match known {
                         Some(expected) => {
                             break Frontier::Read {
@@ -198,7 +198,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
         Frontier::Empty => None,
         Frontier::Keep { chunk } => {
             let inner = blob.inner.lock();
-            Some((chunk, inner.tail.clone(), None))
+            Some((chunk, inner.tail().to_vec(), None))
         }
         Frontier::Trim {
             chunk,
@@ -206,7 +206,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             verified,
         } => {
             let inner = blob.inner.lock();
-            let bytes = inner.tail[..span as usize].to_vec();
+            let bytes = inner.tail()[..span as usize].to_vec();
             let state = ChunkState {
                 crc: ChunkCrc::Ready(Crc32::checksum(&bytes)),
                 verified,
@@ -257,24 +257,21 @@ pub(super) async fn resize_locked<S: crate::Storage>(
 
         // A removal raced the resize: adopt nothing (see
         // `publish_stretch`).
-        if inner.removed {
+        if inner.removed() {
             return Ok(());
         }
 
         // Overlay entries do not survive a shrink (spans at and beyond the
         // boundary move); their pending CRCs were finalized above.
-        inner.overlay.clear();
+        inner.clear_overlay();
 
-        let dropped: Vec<u64> = inner.runs.range(len..).map(|(&l, _)| l).collect();
-        for l in dropped {
-            let run = inner.runs.remove(&l).unwrap();
-            inner.pending_frees.push(Extent {
+        for run in inner.split_runs_from(len).into_values() {
+            inner.defer_content_free(Extent {
                 offset: run.physical,
                 len: run.capacity,
             });
         }
-        if let Some((l, _)) = inner.covering(len.saturating_sub(1)).filter(|_| len > 0) {
-            let run = inner.runs.get_mut(&l).unwrap();
+        if let Some((l, mut run)) = inner.covering(len.saturating_sub(1)).filter(|_| len > 0) {
             if l + run.len > len {
                 run.len = len - l;
                 let keep = block_align(run.len);
@@ -284,33 +281,32 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                         len: run.capacity - keep,
                     };
                     run.capacity = keep;
-                    inner.pending_frees.push(trimmed);
+                    inner.defer_content_free(trimmed);
                 }
+                inner.install_run(l, run);
             }
         }
         match tail {
             None => {
-                inner.crcs.clear();
-                inner.dirty_chunks.clear();
-                inner.tail.clear();
-                inner.tail_chunk = 0;
+                inner.crcs_mut().clear();
+                inner.retain_dirty_chunks(|_| false);
+                inner.set_tail(0, Vec::new());
             }
             Some((chunk, bytes, refreshed)) => {
-                inner.crcs.truncate(chunk);
+                inner.crcs_mut().truncate(chunk);
                 if let Some(state) = refreshed {
-                    inner.crcs.insert(chunk, state);
+                    inner.crcs_mut().insert(chunk, state);
                 }
                 // The (possibly newly partial) frontier must re-commit: its
                 // shadow changes even when its bytes do not.
-                inner.dirty_chunks.retain(|&c| c <= chunk);
-                inner.dirty_chunks.insert(chunk);
-                inner.tail_chunk = chunk;
-                inner.tail = bytes;
+                inner.retain_dirty_chunks(|&c| c <= chunk);
+                inner.mark_chunk_dirty(chunk);
+                inner.set_tail(chunk, bytes);
             }
         }
-        inner.generation += 1;
-        inner.size = len;
-        state.dirty.insert(blob.id);
+        inner.bump_generation();
+        inner.set_size(len);
+        state.mark_dirty(blob.id);
     }
     Ok(())
 }

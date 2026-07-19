@@ -169,12 +169,10 @@ impl Metrics {
     /// its file high-water mark first so the gauge never decreases while
     /// the volume is open.
     pub fn observe_state(&self, state: &mut State) {
-        state.file_high_water = state.file_high_water.max(state.alloc.end());
-        let _ = self.file_end_bytes.try_set(state.file_high_water);
-        let _ = self.free_bytes.try_set(state.alloc.free_bytes());
-        let pending: u64 = state.pending_free.iter().map(|(e, _, _)| e.len).sum();
-        let _ = self.pending_free_bytes.try_set(pending);
-        let _ = self.open_blobs.try_set(state.open.len());
-        let _ = self.dormant_blobs.try_set(state.dormant.len());
+        let _ = self.file_end_bytes.try_set(state.high_water());
+        let _ = self.free_bytes.try_set(state.free_bytes());
+        let _ = self.pending_free_bytes.try_set(state.pending_free_bytes());
+        let _ = self.open_blobs.try_set(state.open().len());
+        let _ = self.dormant_blobs.try_set(state.dormant().len());
     }
 }

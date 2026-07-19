@@ -33,10 +33,10 @@
 
 use super::{
     alloc::{block_align, Allocator, Extent},
-    chunk::{chunk_of, merge_frozen_runs, ChunkCrc, ChunkState, RunMeta},
+    chunk::{chunk_of, ChunkCrc, ChunkState},
     layout::{ChecksumRef, Entry, Superblock, Table},
     paging::{decode_crcs, window_value},
-    state::{BlobInner, CommittedMeta, Ready, State},
+    state::{BlobInner, CommittedMeta, Genesis, Ready, State},
     Config, BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error, IoBuf};
@@ -571,33 +571,21 @@ pub(super) async fn recover<S: crate::Storage>(
         fell_back = losing_slot.is_some(),
         "volume recovered"
     );
-    let mut state = State {
+    let mut state = State::boot(Genesis {
         partitions,
-        open: BTreeMap::new(),
-        handles: BTreeMap::new(),
         dormant,
-        alloc: Allocator::rebuild(2 * BLOCK, used),
-        pending_free: Vec::new(),
-        seq: table.seq + 1,
-        snapshot_seq: table.seq,
-        confirmed_seq: table.seq,
-        sacred_slot: slot,
-        table_extent: Some(Extent {
-            offset: sb.table_offset,
-            len: block_align(sb.table_len as u64),
-        }),
         committed_meta,
         recovery_verified,
+        alloc: Allocator::rebuild(2 * BLOCK, used),
+        adopted_seq: table.seq,
+        sacred_slot: slot,
+        table_extent: Extent {
+            offset: sb.table_offset,
+            len: block_align(sb.table_len as u64),
+        },
         next_id: table.next_id,
-        dirty: Default::default(),
-        meta_dirty: false,
-        groups: Vec::new(),
-        encoded: Default::default(),
-        partition_epoch: 0,
-        encoded_epoch: 0,
         provisioned: len,
-        file_high_water: 0,
-    };
+    });
     metrics.observe_state(&mut state);
 
     Ok(Ready {
@@ -651,30 +639,18 @@ async fn init_fresh<S: crate::Storage>(
         offset: table_offset,
         len: block_align(bytes.len() as u64),
     };
-    let mut state = State {
+    let mut state = State::boot(Genesis {
         partitions: BTreeMap::new(),
-        open: BTreeMap::new(),
-        handles: BTreeMap::new(),
         dormant: BTreeMap::new(),
-        alloc: Allocator::rebuild(2 * BLOCK, [table_extent]),
-        pending_free: Vec::new(),
-        seq: 1,
-        snapshot_seq: 0,
-        confirmed_seq: 0,
-        sacred_slot: 0,
-        table_extent: Some(table_extent),
         committed_meta: BTreeMap::new(),
         recovery_verified: BTreeMap::new(),
+        alloc: Allocator::rebuild(2 * BLOCK, [table_extent]),
+        adopted_seq: 0,
+        sacred_slot: 0,
+        table_extent,
         next_id: 0,
-        dirty: Default::default(),
-        meta_dirty: false,
-        groups: Vec::new(),
-        encoded: Default::default(),
-        partition_epoch: 0,
-        encoded_epoch: 0,
         provisioned: 2 * BLOCK + block_align(bytes.len() as u64),
-        file_high_water: 0,
-    };
+    });
     metrics.recoveries.inc();
     metrics.observe_state(&mut state);
     Ok(Ready {
@@ -713,32 +689,7 @@ pub(super) async fn hydrate<S: crate::Storage>(
             msg.into(),
         )
     };
-    let mut inner = BlobInner {
-        size: entry.size,
-        freeze_size: entry.size,
-        shadow: entry.shadow,
-        committed_entry: Some(entry.clone()),
-        ..Default::default()
-    };
-    for r in &entry.runs {
-        inner.runs.insert(
-            r.logical,
-            RunMeta {
-                physical: r.physical,
-                len: r.len,
-                capacity: block_align(r.len),
-                born: 0,
-            },
-        );
-    }
-    // Recovered runs are all frozen (born 0): coalesce contiguous
-    // neighbors. A no-op for entries captured after a merging pass, but an
-    // entry captured while a batch held staged state for its blob (which
-    // gates capture-time merging) can still carry mergeable runs.
-    merge_frozen_runs(&mut inner.runs);
-    // Seed the dense chunk state from the merged runs: every backed chunk
-    // unverified with its CRC left on disk.
-    inner.crcs.seed(&inner.runs);
+    let mut inner = BlobInner::from_entry(entry);
 
     if let Some(last) = entry_last_chunk(entry) {
         let (phys, span) = entry_chunk_span(entry, last).expect("last chunk is backed");
@@ -764,9 +715,9 @@ pub(super) async fn hydrate<S: crate::Storage>(
         // known to match the committed CRCs (nothing can write a dormant
         // blob between recovery and hydration), so first reads skip
         // re-verification.
-        let seeded = ready.state.lock().recovery_verified.remove(&entry.id);
+        let seeded = ready.state.lock().take_recovery_verified(entry.id);
         for chunk in seeded.into_iter().flatten() {
-            inner.crcs.set_verified(chunk);
+            inner.crcs_mut().set_verified(chunk);
         }
 
         // Load + verify the frontier span into the tail buffer. Capture
@@ -781,15 +732,14 @@ pub(super) async fn hydrate<S: crate::Storage>(
             )));
         }
         // Hydration itself verified the frontier chunk (and holds its CRC).
-        inner.crcs.insert(
+        inner.crcs_mut().insert(
             last,
             ChunkState {
                 crc: ChunkCrc::Ready(entry.tail_crc),
                 verified: true,
             },
         );
-        inner.tail_chunk = last;
-        inner.tail = bytes.as_ref().to_vec();
+        inner.set_tail(last, bytes.as_ref().to_vec());
     } else if !entry.checksums.is_empty() {
         // No backed chunks: capture emits no refs.
         return Err(corrupt("checksum refs without backed chunks"));

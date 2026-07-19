@@ -124,11 +124,9 @@ pub(super) async fn write_locked<S: crate::Storage>(
     // removal raced the write, see `publish_stretch`).
     let mut state = ready.state.lock();
     let mut inner = blob.inner.lock();
-    if !inner.removed {
-        if end > inner.size {
-            inner.size = end;
-        }
-        state.dirty.insert(blob.id);
+    if !inner.removed() {
+        inner.grow_to(end);
+        state.mark_dirty(blob.id);
     }
     Ok(())
 }
@@ -299,13 +297,13 @@ async fn plan_stretch<S: crate::Storage>(
                     let writable = match staged {
                         // Base freeze rule: young extents are exempt; otherwise
                         // only bytes at or beyond the freeze boundary.
-                        None => run.born > state.snapshot_seq || cursor >= inner.freeze_size,
+                        None => run.born > state.snapshot_seq() || cursor >= inner.freeze_size(),
                         // Batch placement rule: private extents always; a
                         // published extent only for bytes no snapshot can
                         // capture (at or beyond BOTH the published size and the
                         // freeze boundary; the born exemption does not apply —
                         // young extents are still published to readers).
-                        Some(_) => private || cursor >= inner.size.max(inner.freeze_size),
+                        Some(_) => private || cursor >= inner.size().max(inner.freeze_size()),
                     };
                     if !writable {
                         let (span_physical, span_len) = staged
@@ -331,7 +329,7 @@ async fn plan_stretch<S: crate::Storage>(
                             }
                             None => {
                                 let crc = staged_crc
-                                    .or_else(|| inner.crcs.get(chunk))
+                                    .or_else(|| inner.crcs().get(chunk))
                                     .expect("covered chunk has crc")
                                     .crc;
                                 let expected = match crc {
@@ -347,7 +345,7 @@ async fn plan_stretch<S: crate::Storage>(
                                         let known = loaded_crc
                                             .filter(|&(c, _)| c == chunk)
                                             .map(|(_, crc)| crc)
-                                            .or_else(|| inner.crc_cache.get(chunk));
+                                            .or_else(|| inner.crc_cache_mut().get(chunk));
                                         match known {
                                             Some(expected) => expected,
                                             None => break 'plan Outcome::NeedCrc(chunk),
@@ -357,13 +355,13 @@ async fn plan_stretch<S: crate::Storage>(
                                 CowSource::Disk { expected }
                             }
                         };
-                        let extent = state.alloc.allocate(BLOCK);
+                        let extent = state.allocate(BLOCK);
                         Outcome::Plan(Plan::Cow(Cow {
                             stretch_end: end.min(chunk_start + BLOCK),
                             span_physical,
                             span_len,
                             extent,
-                            seq: state.seq,
+                            seq: state.seq(),
                             source,
                         }))
                     } else {
@@ -408,18 +406,18 @@ async fn plan_stretch<S: crate::Storage>(
                     // be overlapped).
                     let next_backed = staged
                         .map_or_else(
-                            || inner.runs.range(chunk_start..).next().map(|(&l, _)| l),
+                            || inner.runs().range(chunk_start..).next().map(|(&l, _)| l),
                             |st| st.next_backed(&inner, chunk_start),
                         )
                         .unwrap_or(u64::MAX);
                     let stretch_end = end.min(next_backed);
                     let len = block_align(stretch_end - chunk_start);
-                    let extent = state.alloc.allocate(len);
+                    let extent = state.allocate(len);
                     Outcome::Plan(Plan::Fresh(Fresh {
                         stretch_end,
                         extent,
                         chunk_base: chunk_start,
-                        seq: state.seq,
+                        seq: state.seq(),
                     }))
                 }
             }
@@ -760,7 +758,7 @@ async fn materialize_cow<S: crate::Storage>(
 fn free_unpublished<S: crate::Storage>(ready: &Ready<S>, extent: Option<Extent>) {
     let Some(extent) = extent else { return };
     let mut state = ready.state.lock();
-    let seq = state.seq;
+    let seq = state.seq();
     state.defer_free(extent, seq, None);
 }
 
@@ -858,7 +856,7 @@ async fn expected_span_crc<S: crate::Storage>(
             let state = staged
                 .and_then(|st| st.crcs.get(&chunk))
                 .copied()
-                .or_else(|| inner.crcs.get(chunk))
+                .or_else(|| inner.crcs().get(chunk))
                 .expect("covered chunk has crc");
             match state.crc {
                 ChunkCrc::Ready(expected) => return Ok((expected, state.verified)),
@@ -866,7 +864,7 @@ async fn expected_span_crc<S: crate::Storage>(
                 // exhausted the in-memory sources before falling back.
                 ChunkCrc::Pending => unreachable!("pending chunk without overlay entry"),
                 ChunkCrc::Unloaded => {
-                    if let Some(expected) = inner.crc_cache.get(chunk) {
+                    if let Some(expected) = inner.crc_cache_mut().get(chunk) {
                         return Ok((expected, true));
                     }
                 }
@@ -935,10 +933,10 @@ async fn read_span_prefix<S: crate::Storage>(
             }
         }
         if staged.is_none_or(|st| !st.crcs.contains_key(&chunk)) {
-            if inner.tail_chunk == chunk && inner.tail.len() >= prefix_len {
-                return Ok((inner.tail[..prefix_len].to_vec(), true));
+            if inner.tail_chunk() == chunk && inner.tail().len() >= prefix_len {
+                return Ok((inner.tail()[..prefix_len].to_vec(), true));
             }
-            let verified = inner.crcs.get(chunk).is_some_and(|s| s.verified);
+            let verified = inner.crcs().get(chunk).is_some_and(|s| s.verified);
             if let Some(bytes) = inner.overlay_get(chunk) {
                 if bytes.len() >= prefix_len {
                     return Ok((bytes[..prefix_len].to_vec(), verified));
@@ -992,10 +990,10 @@ async fn read_span_suffix<S: crate::Storage>(
             }
         }
         if staged.is_none_or(|st| !st.crcs.contains_key(&chunk)) {
-            if inner.tail_chunk == chunk && inner.tail.len() >= e {
-                return Ok((inner.tail[s..e].to_vec(), true));
+            if inner.tail_chunk() == chunk && inner.tail().len() >= e {
+                return Ok((inner.tail()[s..e].to_vec(), true));
             }
-            let verified = inner.crcs.get(chunk).is_some_and(|st| st.verified);
+            let verified = inner.crcs().get(chunk).is_some_and(|st| st.verified);
             if let Some(bytes) = inner.overlay_get(chunk) {
                 if bytes.len() >= e {
                     return Ok((bytes[s..e].to_vec(), verified));
@@ -1021,7 +1019,7 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
     // are already queued for reuse, so adopt nothing — a fresh extent
     // would leak until restart and a COW's replaced block would later
     // double-free. Mutating a removed blob is unspecified by the trait.
-    if inner.removed {
+    if inner.removed() {
         drop(inner);
         drop(state);
         free_unpublished(ready, stretch.allocated);
@@ -1031,17 +1029,10 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
 
     if let Some(replaced) = stretch.replaced {
         cow_remap(&mut inner, logical, run);
-        inner.pending_frees.push(replaced);
-        inner.generation += 1;
+        inner.defer_content_free(replaced);
+        inner.bump_generation();
     } else {
-        match inner.runs.get_mut(&logical) {
-            Some(existing) if existing.physical == run.physical => {
-                existing.len = existing.len.max(run.len);
-            }
-            _ => {
-                inner.runs.insert(logical, run);
-            }
-        }
+        inner.publish_run(logical, run);
     }
 
     let last_chunk = stretch
@@ -1052,13 +1043,13 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
     for (chunk, update) in stretch.crcs {
         match update {
             CrcUpdate::Ready(chunk_state) => {
-                inner.crcs.insert(chunk, chunk_state);
+                inner.crcs_mut().insert(chunk, chunk_state);
                 // The chunk's bytes were rewritten without an overlay
                 // refresh: any resident entry is stale.
                 inner.overlay_remove(chunk);
             }
             CrcUpdate::Pending { bytes, verified } => {
-                inner.crcs.insert(
+                inner.crcs_mut().insert(
                     chunk,
                     ChunkState {
                         crc: ChunkCrc::Pending,
@@ -1069,16 +1060,16 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
             }
             CrcUpdate::Splice { at, data } => {
                 inner.overlay_splice(chunk, at, data.as_ref());
-                inner.crcs.make_pending(chunk);
+                inner.crcs_mut().make_pending(chunk);
             }
         }
-        inner.dirty_chunks.insert(chunk);
+        inner.mark_chunk_dirty(chunk);
     }
     // Refresh the tail buffer if this stretch reaches the write frontier
     // (an overlay fast-path stretch derives its span from the spliced
     // overlay entry on the rare frontier hit).
-    if stretch.end >= inner.size || last_chunk >= inner.tail_chunk {
-        inner.tail = match stretch.last_span {
+    if stretch.end >= inner.size() || last_chunk >= inner.tail_chunk() {
+        let tail = match stretch.last_span {
             Some((chunk, span)) => {
                 debug_assert_eq!(chunk, last_chunk);
                 span
@@ -1088,9 +1079,9 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
                 .expect("fast-path chunk is resident")
                 .to_vec(),
         };
-        inner.tail_chunk = last_chunk;
+        inner.set_tail(last_chunk, tail);
     }
-    state.dirty.insert(blob.id);
+    state.mark_dirty(blob.id);
 }
 
 /// Record a completed stretch in a batch overlay. Caller holds the blob
@@ -1137,7 +1128,7 @@ fn publish_staged(inner: &BlobInner, staged: &mut StagedBlob, stretch: Stretch) 
         .last_span
         .expect("staged stretches carry a last span");
     let tail_chunk = staged.tail.as_ref().map(|(c, _)| *c);
-    if stretch.end >= staged.size || chunk >= tail_chunk.unwrap_or(inner.tail_chunk) {
+    if stretch.end >= staged.size || chunk >= tail_chunk.unwrap_or(inner.tail_chunk()) {
         staged.tail = Some((chunk, span));
     }
 }
@@ -1213,9 +1204,9 @@ fn cow_remap_staged(inner: &BlobInner, staged: &mut StagedBlob, chunk_start: u64
 fn cow_remap(inner: &mut BlobInner, chunk_start: u64, fresh: RunMeta) {
     let (old_logical, old_run) = inner.covering(chunk_start).expect("COW of unbacked chunk");
     let (prefix, suffix) = split_run(old_logical, old_run, chunk_start);
-    inner.runs.remove(&old_logical);
+    inner.remove_run(old_logical);
     for (logical, meta) in prefix.into_iter().chain(suffix) {
-        inner.runs.insert(logical, meta);
+        inner.install_run(logical, meta);
     }
-    inner.runs.insert(chunk_start, fresh);
+    inner.install_run(chunk_start, fresh);
 }

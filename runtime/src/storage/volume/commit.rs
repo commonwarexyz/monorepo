@@ -18,14 +18,13 @@
 
 use super::{
     alloc::{block_align, Extent},
-    chunk::{chunk_of, merge_frozen_runs, ChunkCrc, ChunkMap},
+    chunk::{chunk_of, ChunkCrc, ChunkMap},
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
     paging::{load_committed_refs, window_value},
     state::{BlobCore, BlobInner, CommittedMeta, Ready},
     BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, Error, IoBuf};
-use bytes::Bytes;
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::Notify;
 use std::{
@@ -314,7 +313,7 @@ pub(super) async fn commit_locked<S: crate::Storage>(
     let capture = {
         let state = ready.state.lock();
         let capture = state.expand_capture(roots);
-        if !state.meta_dirty && state.dirty.iter().all(|id| !capture.contains(id)) {
+        if state.clean_for(&capture) {
             return Ok(());
         }
         capture
@@ -398,7 +397,7 @@ pub(super) async fn commit_locked<S: crate::Storage>(
 /// identified from the runs, not the array).
 fn covered_end(inner: &BlobInner) -> u64 {
     let last_backed = inner
-        .runs
+        .runs()
         .iter()
         .next_back()
         .map(|(&l, r)| chunk_of(l + r.len - 1));
@@ -447,15 +446,8 @@ async fn take_snapshot<S: crate::Storage>(
     // safe.
     let (seq, dirty_ids) = {
         let mut state = ready.state.lock();
-        let seq = state.seq;
-        state.seq += 1;
-        state.snapshot_seq = seq;
-        let dirty_ids: Vec<u64> = state
-            .dirty
-            .iter()
-            .copied()
-            .filter(|id| capture.contains(id))
-            .collect();
+        let seq = state.begin_snapshot();
+        let dirty_ids = state.dirty_in(&capture);
         (seq, dirty_ids)
     };
 
@@ -464,7 +456,7 @@ async fn take_snapshot<S: crate::Storage>(
     let mut manifest = Vec::new();
 
     for id in dirty_ids {
-        let Some(blob) = ready.state.lock().open.get(&id).cloned() else {
+        let Some(blob) = ready.state.lock().open_blob(id) else {
             continue; // removed with no handles: nothing to snapshot
         };
         // Serialize against writers so the captured entry is coherent with
@@ -525,25 +517,20 @@ async fn plan_refs<S: crate::Storage>(
 ) -> Result<(Option<RefPlan>, Vec<(u64, Vec<u32>)>), Error> {
     let decision = {
         let inner = blob.inner.lock();
-        if inner.removed {
+        if inner.removed() {
             None
         } else {
             let covered_end = covered_end(&inner);
             let prev_refs = inner
-                .committed_entry
-                .as_ref()
+                .committed_entry()
                 .map_or(&[][..], |e| &e.checksums[..]);
             let prev_end = prev_refs
                 .last()
                 .map_or(0, |r| r.first_chunk + r.count as u64);
             let delta = covered_end >= prev_end
                 && prev_refs.len() < MAX_CHECKSUM_REFS
-                && inner
-                    .dirty_chunks
-                    .iter()
-                    .next()
-                    .is_none_or(|&c| c >= prev_end);
-            let load = (!delta && inner.crcs.has_unloaded(covered_end.min(prev_end)))
+                && inner.first_dirty_chunk().is_none_or(|c| c >= prev_end);
+            let load = (!delta && inner.crcs().has_unloaded(covered_end.min(prev_end)))
                 .then(|| prev_refs.to_vec());
             Some((delta, prev_end, load))
         }
@@ -595,58 +582,24 @@ fn capture_blob<S: crate::Storage>(
 ) -> Option<Captured> {
     let mut state = ready.state.lock();
     let mut inner = blob.inner.lock();
-    if inner.removed {
-        state.dirty.remove(&id);
+    if inner.removed() {
+        state.clear_dirty(id);
         return None;
     }
 
-    // Raise the freeze boundary: nothing this snapshot covers may be
-    // rewritten in place until it is confirmed (or rolled back).
-    inner.freeze_size = inner.freeze_size.max(inner.size);
-
-    // Block demotion until finalize publishes the new entry: the
-    // dormant map must never hold an entry this commit supersedes.
-    inner.capturing = true;
-
-    // Finalize deferred chunk CRCs from their overlay entries (the
-    // write lock quiesces the writer): the checksum array, tail
-    // CRC, and delta manifest below must carry exact values.
-    inner.overlay_finalize();
-
-    // Freeze the captured runs atomically with the capture (the
-    // model freezes per-run coverage at snapshot time): this entry,
-    // its checksum extents, and its manifest reference every run
-    // below, so the young-extent exemption must not apply to any of
-    // them — an in-place rewrite after capture would invalidate a
-    // manifested chunk and roll back this commit at recovery. Runs
-    // created after this point keep `born > snapshot_seq` and stay
-    // exempt: they are genuinely absent from this commit's table.
-    for run in inner.runs.values_mut() {
-        run.born = run.born.min(seq);
-    }
-
-    // With every run frozen as of this capture, coalesce contiguous
-    // neighbors: the entry encodes fewer runs and every later
-    // runs-map descent walks a shallower map. Skipped while a batch
-    // holds staged state for this blob, whose overlay references
-    // base runs by key (merging would move keys under it).
-    if inner.staged_batches == 0 {
-        merge_frozen_runs(&mut inner.runs);
-    }
-    let dirty_chunks: Vec<u64> = std::mem::take(&mut inner.dirty_chunks)
-        .into_iter()
-        .collect();
-    state.dirty.remove(&id);
+    inner.freeze_for_capture(seq);
+    let dirty_chunks = inner.take_dirty_chunks();
+    state.clear_dirty(id);
 
     // Content frees of a captured blob resolve when this commit
     // confirms: its new entry stops referencing them.
-    let pending = std::mem::take(&mut inner.pending_frees);
+    let pending = inner.drain_pending_frees();
     for extent in pending {
         state.defer_free(extent, seq, None);
     }
 
     let last_backed = inner
-        .runs
+        .runs()
         .iter()
         .next_back()
         .map(|(&l, r)| chunk_of(l + r.len - 1));
@@ -661,8 +614,7 @@ fn capture_blob<S: crate::Storage>(
     // check above, so a live capture always carries a plan.
     let RefPlan { delta, prev_end } = plan.expect("live blob carries a ref plan");
     let prev_refs = inner
-        .committed_entry
-        .as_ref()
+        .committed_entry()
         .map_or(&[][..], |e| &e.checksums[..]);
     let (array_start, checksums) = if delta {
         (prev_end, prev_refs.to_vec())
@@ -672,7 +624,7 @@ fn capture_blob<S: crate::Storage>(
     let cksum_bytes: Vec<u8> = {
         let mut bytes = Vec::with_capacity(((covered_end - array_start) * 4) as usize);
         for c in array_start..covered_end {
-            bytes.extend_from_slice(&resolve_crc(&inner.crcs, preloaded, c).to_be_bytes());
+            bytes.extend_from_slice(&resolve_crc(inner.crcs(), preloaded, c).to_be_bytes());
         }
         bytes
     };
@@ -688,23 +640,23 @@ fn capture_blob<S: crate::Storage>(
     let shadow_bytes = last_backed.and_then(|last| {
         let (_, span) = inner.chunk_span(last).expect("backed chunk");
         (span < BLOCK).then(|| {
-            assert_eq!(inner.tail_chunk, last, "tail buffer desynced from runs");
+            assert_eq!(inner.tail_chunk(), last, "tail buffer desynced from runs");
             assert_eq!(
-                inner.tail.len() as u64,
+                inner.tail().len() as u64,
                 span,
                 "tail span desynced from runs"
             );
-            inner.tail.clone()
+            inner.tail().to_vec()
         })
     });
 
     // The final backed chunk's CRC, recorded whether the chunk is
     // full or partial: hydration verifies the frontier against it
     // without touching the checksum extents.
-    let tail_crc = last_backed.map_or(0, |last| resolve_crc(&inner.crcs, preloaded, last));
+    let tail_crc = last_backed.map_or(0, |last| resolve_crc(inner.crcs(), preloaded, last));
 
     let runs: Vec<Run> = inner
-        .runs
+        .runs()
         .iter()
         .map(|(&logical, r)| Run {
             logical,
@@ -718,7 +670,7 @@ fn capture_blob<S: crate::Storage>(
     // needs one writes a fresh block), the previous checksum
     // extents only on a full rewrite (a delta commit keeps
     // referencing them).
-    let mut prev_meta = state.committed_meta.remove(&id).unwrap_or_default();
+    let mut prev_meta = state.take_committed_meta(id).unwrap_or_default();
     debug_assert_eq!(
         prev_meta.checksums.len(),
         prev_refs.len(),
@@ -738,7 +690,7 @@ fn capture_blob<S: crate::Storage>(
         partition: 0, // resolved during table assembly
         name: blob.name.clone(),
         version: blob.version,
-        size: inner.size,
+        size: inner.size(),
         runs,
         checksums, // retained refs (a new delta/full ref is pushed below)
         tail_crc,
@@ -784,7 +736,7 @@ fn stage_meta<S: crate::Storage>(
     if !cksum_bytes.is_empty() {
         let extent = {
             let mut state = ready.state.lock();
-            state.alloc.allocate(block_align(cksum_bytes.len() as u64))
+            state.allocate(block_align(cksum_bytes.len() as u64))
         };
         entry.checksums.push(ChecksumRef {
             first_chunk: array_start,
@@ -801,7 +753,7 @@ fn stage_meta<S: crate::Storage>(
     if let Some(shadow) = shadow_bytes {
         let extent = {
             let mut state = ready.state.lock();
-            state.alloc.allocate(BLOCK)
+            state.allocate(BLOCK)
         };
         entry.shadow = Some(extent.offset);
         writes.push(MetaWrite {
@@ -834,7 +786,7 @@ fn stage_meta<S: crate::Storage>(
         for extent in superseded {
             state.defer_free(extent, seq, None);
         }
-        state.committed_meta.insert(id, meta);
+        state.install_committed_meta(id, meta);
     }
     entry
 }
@@ -852,80 +804,11 @@ fn assemble_table<S: crate::Storage>(
     writes: &mut Vec<MetaWrite>,
 ) -> (Option<Extent>, Extent) {
     let mut state = ready.state.lock();
-    state.meta_dirty = false;
-
-    // Encodings embed partition indexes: a changed partition LIST
-    // invalidates every cached encoding.
-    if state.encoded_epoch != state.partition_epoch {
-        state.encoded.clear();
-        state.encoded_epoch = state.partition_epoch;
-    }
-
-    let partitions: Vec<String> = state.partitions.keys().cloned().collect();
-    // Indexed lookups: an epoch change re-encodes EVERY entry, so a
-    // linear scan per blob would make that commit O(blobs x
-    // partitions).
-    let pindex: std::collections::BTreeMap<&str, u32> = partitions
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.as_str(), i as u32))
-        .collect();
-    let pindex = |p: &str| *pindex.get(p).expect("known partition");
-
-    // Fresh encodings for captured blobs.
-    for (blob, entry) in committed.iter_mut() {
-        entry.partition = pindex(&blob.partition);
-        state.encoded.insert(entry.id, Bytes::from(entry.encode()));
-    }
-    // Cache misses among served blobs (first commit after recovery or
-    // an epoch change).
-    let mut missing: Vec<(u64, Bytes)> = Vec::new();
-    for (&id, (partition, entry)) in &state.dormant {
-        if state.encoded.contains_key(&id) {
-            continue;
-        }
-        let mut entry = entry.clone();
-        entry.partition = pindex(partition);
-        missing.push((id, Bytes::from(entry.encode())));
-    }
-    for (&id, core) in &state.open {
-        if state.encoded.contains_key(&id) {
-            continue;
-        }
-        // Served open blob: its cached committed entry (set by the last
-        // commit that captured it), or a fresh empty entry (created but
-        // never captured). Never derived from live state, which may
-        // hold uncommitted writes.
-        let inner = core.inner.lock();
-        if inner.removed {
-            continue;
-        }
-        let mut entry = inner
-            .committed_entry
-            .clone()
-            .unwrap_or_else(|| Entry::empty(core.id, core.name.clone(), core.version));
-        entry.partition = pindex(&core.partition);
-        missing.push((id, Bytes::from(entry.encode())));
-    }
-    for (id, bytes) in missing {
-        state.encoded.insert(id, bytes);
-    }
+    let (partitions, entries) = state.table_entries(committed);
     manifest.sort_unstable();
-    debug_assert_eq!(
-        state.encoded.len(),
-        state.dormant.len()
-            + state
-                .open
-                .values()
-                .filter(|core| !core.inner.lock().removed)
-                .count(),
-        "encoded-entry cache out of sync with the namespace"
-    );
-
-    let entries: Vec<Bytes> = state.encoded.values().cloned().collect();
-    let bytes = Table::assemble(seq, state.next_id, &partitions, entries, manifest);
-    let extent = state.alloc.allocate(block_align(bytes.len() as u64));
-    let superblock_offset = Superblock::slot_offset(1 - state.sacred_slot);
+    let bytes = Table::assemble(seq, state.next_id(), &partitions, entries, manifest);
+    let extent = state.allocate(block_align(bytes.len() as u64));
+    let superblock_offset = Superblock::slot_offset(state.standby_slot());
     let sb = Superblock {
         seq,
         table_offset: extent.offset,
@@ -940,7 +823,7 @@ fn assemble_table<S: crate::Storage>(
         physical: superblock_offset,
         bytes: IoBuf::from(sb.encode()),
     });
-    (state.table_extent, extent)
+    (state.table_extent(), extent)
 }
 
 /// Publish a confirmed commit.
@@ -951,56 +834,16 @@ fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
     // reusable while an entry referencing it is still visible.
     let captured_ids: Vec<u64> = snapshot.committed.iter().map(|(blob, _)| blob.id).collect();
     for (blob, entry) in snapshot.committed {
-        let mut inner = blob.inner.lock();
-        inner.capturing = false;
-        // The confirmed size is now the exact freeze boundary (a rewind
-        // below the old boundary takes effect here).
-        inner.freeze_size = entry.size;
-        inner.shadow = entry.shadow;
-        // Refs this capture wrote are guard-verified by construction —
-        // their bytes were assembled in process memory, from resident
-        // values and old-extent loads that were themselves guard-checked —
-        // and retained refs keep their standing memo. Everything else
-        // (superseded refs) drops out.
-        let prev = std::mem::take(&mut inner.crc_guarded);
-        let guarded = {
-            let old_refs = inner
-                .committed_entry
-                .as_ref()
-                .map_or(&[][..], |e| &e.checksums[..]);
-            entry
-                .checksums
-                .iter()
-                .filter(|r| prev.contains(r) || !old_refs.contains(r))
-                .copied()
-                .collect()
-        };
-        inner.crc_guarded = guarded;
-        inner.committed_entry = Some(entry);
+        blob.inner.lock().publish_committed(entry);
     }
 
     let mut state = ready.state.lock();
-    state.sacred_slot = 1 - state.sacred_slot;
-    state.confirmed_seq = snapshot.seq;
-    if let Some(old) = snapshot.old_table {
-        let seq = snapshot.seq;
-        state.defer_free(old, seq, None);
-    }
-    state.table_extent = Some(snapshot.table_extent);
-    // Applied-batch groups covered by this capture are committed. Capture
-    // expansion guarantees all-or-nothing coverage (never-split).
-    let mut resolved_members: Vec<u64> = Vec::new();
-    state.groups.retain(|group| {
-        let covered = group.iter().any(|id| snapshot.capture.contains(id));
-        debug_assert!(
-            !covered || group.iter().all(|id| snapshot.capture.contains(id)),
-            "commit split an applied batch group"
-        );
-        if covered {
-            resolved_members.extend(group.iter().copied());
-        }
-        !covered
-    });
+    let resolved_members = state.confirm(
+        snapshot.seq,
+        snapshot.old_table,
+        snapshot.table_extent,
+        &snapshot.capture,
+    );
     state.apply_frees();
     // Captured blobs whose last handle dropped mid-commit could not demote
     // then (their next entry lived only in this snapshot), and clean

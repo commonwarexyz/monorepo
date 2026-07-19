@@ -57,8 +57,8 @@ use super::{
     commit,
     paging::load_committed_page,
     state::{
-        chunk_mismatch, unlink, zeroed, BlobCore, BlobInner, HandleTracker, Ready, Shared,
-        StagedBlob, StagedRun,
+        chunk_mismatch, zeroed, BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob,
+        StagedRun,
     },
     write::stage_write,
     Blob, BLOCK,
@@ -130,10 +130,10 @@ impl<S: crate::Storage> Batch<S> {
             let mut inner = blob.core.inner.lock();
             // Gates capture-time run merging until apply or drop: the
             // overlay references base runs by key.
-            inner.staged_batches += 1;
+            inner.stage_batch();
             Staged {
                 core: blob.core.clone(),
-                overlay: StagedBlob::new(inner.size),
+                overlay: StagedBlob::new(inner.size()),
                 discarded: Vec::new(),
                 touched_only: true,
             }
@@ -160,7 +160,7 @@ impl<S: crate::Storage> Batch<S> {
             // A membership-only touch snapshots a base the blob may have
             // legally outgrown through direct writes: staging begins NOW,
             // against the blob's current size.
-            staged.overlay.rebase(core.inner.lock().size);
+            staged.overlay.rebase(core.inner.lock().size());
         }
         stage_write(&ready, &core, &mut staged.overlay, offset, data).await
     }
@@ -180,7 +180,7 @@ impl<S: crate::Storage> Batch<S> {
             staged.touched_only = false;
             // Staging begins now, against the blob's current size (see
             // [`Self::write_at`]).
-            staged.overlay.rebase(core.inner.lock().size);
+            staged.overlay.rebase(core.inner.lock().size());
         }
 
         if len >= staged.overlay.size {
@@ -255,7 +255,7 @@ impl<S: crate::Storage> Batch<S> {
                     .next_back()
                     .map(|(&l, sr)| (l, sr.meta));
                 let base_last = inner
-                    .runs
+                    .runs()
                     .range(..len)
                     .rev()
                     .find(|(l, _)| !overlay.removed.contains(l) && !overlay.runs.contains_key(l))
@@ -278,7 +278,7 @@ impl<S: crate::Storage> Batch<S> {
                 // The merged CRC state (a Trim's provenance, the Read
                 // arms' expected value).
                 let staged_crc = overlay.crcs.get(&chunk).copied();
-                let state = staged_crc.or_else(|| inner.crcs.get(chunk));
+                let state = staged_crc.or_else(|| inner.crcs().get(chunk));
 
                 // In-memory sources first: a copy of the chunk's full
                 // current span needs no read and no re-check. The staged
@@ -295,8 +295,8 @@ impl<S: crate::Storage> Batch<S> {
                         if staged_crc.is_some() {
                             return None;
                         }
-                        if inner.tail_chunk == chunk && inner.tail.len() as u64 == old_span {
-                            return Some(inner.tail.clone());
+                        if inner.tail_chunk() == chunk && inner.tail().len() as u64 == old_span {
+                            return Some(inner.tail().to_vec());
                         }
                         inner
                             .overlay_get(chunk)
@@ -338,7 +338,7 @@ impl<S: crate::Storage> Batch<S> {
                         let known = loaded_crc
                             .filter(|&(c, _)| c == chunk)
                             .map(|(_, crc)| crc)
-                            .or_else(|| inner.crc_cache.get(chunk));
+                            .or_else(|| inner.crc_cache_mut().get(chunk));
                         match known {
                             Some(expected) => {
                                 break Frontier::Read {
@@ -438,7 +438,7 @@ impl<S: crate::Storage> Batch<S> {
                     overlay.replaced.push(extent);
                 }
             }
-            for (&l, r) in inner.runs.range(len..) {
+            for (&l, r) in inner.runs().range(len..) {
                 if overlay.removed.contains(&l) {
                     continue;
                 }
@@ -540,21 +540,17 @@ impl<S: crate::Storage> Batch<S> {
         self.ready.check_poisoned()?;
         let (id, core) = {
             let mut state = self.ready.state.lock();
-            let id = state.next_id;
-            state.next_id += 1;
+            let id = state.reserve_blob_id();
             // Register the handle count now so the returned handle's tracker
             // works whether or not the batch ever applies.
-            *state.handles.entry(id).or_insert(0) += 1;
+            state.count_handle(id);
             let core = Arc::new(BlobCore {
                 id,
                 partition: partition.into(),
                 name: name.to_vec(),
                 version: DEFAULT_BLOB_VERSION,
                 write_lock: AsyncMutex::new(()),
-                inner: Mutex::new(BlobInner {
-                    committed_entry: None,
-                    ..Default::default()
-                }),
+                inner: Mutex::new(BlobInner::default()),
             });
             (id, core)
         };
@@ -704,7 +700,7 @@ async fn apply_task<S: crate::Storage>(
         }
         let state = ready.state.lock();
         let mut sim: BTreeMap<&String, BTreeSet<&Vec<u8>>> = state
-            .partitions
+            .partitions()
             .iter()
             .map(|(partition, blobs)| (partition, blobs.keys().collect()))
             .collect();
@@ -761,29 +757,10 @@ async fn apply_task<S: crate::Storage>(
     if !removals.is_empty() {
         let mut state = ready.state.lock();
         for (partition, name) in removals {
-            let blobs = state.partitions.get(&partition).expect("validated");
-            let ids: Vec<u64> = name.as_ref().map_or_else(
-                || blobs.values().copied().collect(),
-                |name| vec![*blobs.get(name).expect("validated")],
-            );
-            for &id in &ids {
-                unlink(&mut state, id);
-            }
+            let ids = state
+                .remove_named(&partition, name.as_deref())
+                .expect("validated");
             removed.extend(ids);
-            match name {
-                Some(name) => {
-                    state
-                        .partitions
-                        .get_mut(&partition)
-                        .expect("validated")
-                        .remove(&name);
-                }
-                None => {
-                    state.partitions.remove(&partition);
-                    state.partition_epoch += 1;
-                }
-            }
-            state.meta_dirty = true;
         }
     }
     let mut roots: Vec<u64> = Vec::with_capacity(creations.len() + staged.len());
@@ -791,34 +768,25 @@ async fn apply_task<S: crate::Storage>(
         let mut state = ready.state.lock();
         for creation in creations {
             let id = creation.core.id;
-            if !state.partitions.contains_key(&creation.partition) {
-                state.partition_epoch += 1;
-            }
-            state
-                .partitions
-                .entry(creation.partition)
-                .or_default()
-                .insert(creation.name, id);
-            state.open.insert(id, creation.core);
-            state.meta_dirty = true;
+            state.publish_named(&creation.partition, creation.name, creation.core);
             roots.push(id);
         }
     }
     for (id, st) in staged {
         let _guard = st.core.write_lock.lock().await;
         let mut state = ready.state.lock();
-        let seq = state.seq;
+        let seq = state.seq();
         for extent in st.discarded {
             state.defer_free(extent, seq, None);
         }
         let mut inner = st.core.inner.lock();
-        inner.staged_batches -= 1;
+        inner.unstage_batch();
         // Removed mid-batch (a removal staged in THIS batch, or an
         // outside removal): the overlay must not publish into a dead
         // blob. Its fresh extents are unreferenced — the drop path's
         // treatment — and the base extents it replaced were already
         // freed by the unlink.
-        if inner.removed {
+        if inner.removed() {
             for extent in st.overlay.fresh {
                 state.defer_free(extent, seq, None);
             }
@@ -827,7 +795,7 @@ async fn apply_task<S: crate::Storage>(
         roots.push(id);
         if !st.touched_only {
             publish_overlay(&mut inner, st.overlay);
-            state.dirty.insert(id);
+            state.mark_dirty(id);
         }
     }
     {
@@ -873,9 +841,9 @@ async fn apply_task<S: crate::Storage>(
 /// the apply task fails validation (the task owns the staged state).
 fn discard_staged<S: crate::Storage>(ready: &Ready<S>, staged: BTreeMap<u64, Staged>) {
     let mut state = ready.state.lock();
-    let seq = state.seq;
+    let seq = state.seq();
     for st in staged.into_values() {
-        st.core.inner.lock().staged_batches -= 1;
+        st.core.inner.lock().unstage_batch();
         for extent in st.overlay.fresh {
             state.defer_free(extent, seq, None);
         }
@@ -901,51 +869,46 @@ enum ApplyMode {
 /// Swing a blob's published state to the staged overlay. Caller holds the
 /// commit lock, the blob's write lock, and the blob's state lock.
 fn publish_overlay(inner: &mut BlobInner, overlay: StagedBlob) {
-    if overlay.min_size < inner.size {
+    if overlay.min_size < inner.size() {
         // Staged shrink: mirror the published resize bookkeeping, at the
         // DEEPEST staged size. A shrink drops base coverage that a later
         // staged regrow does not restore, so truncating at the final size
         // would keep vacated chunk states alive past their runs; the
         // regrown coverage's states reinstall from the overlay below.
         if overlay.min_size == 0 {
-            inner.crcs.clear();
-            inner.dirty_chunks.clear();
+            inner.crcs_mut().clear();
+            inner.retain_dirty_chunks(|_| false);
         } else {
             let boundary = chunk_of(overlay.min_size - 1);
-            inner.crcs.truncate(boundary);
-            inner.dirty_chunks.retain(|&c| c <= boundary);
-            inner.dirty_chunks.insert(boundary);
+            inner.crcs_mut().truncate(boundary);
+            inner.retain_dirty_chunks(|&c| c <= boundary);
+            inner.mark_chunk_dirty(boundary);
         }
     }
     for l in &overlay.removed {
-        inner.runs.remove(l);
+        inner.remove_run(*l);
     }
     for (l, sr) in overlay.runs {
-        inner.runs.insert(l, sr.meta);
+        inner.install_run(l, sr.meta);
     }
     for (&chunk, &state) in &overlay.crcs {
-        inner.crcs.insert(chunk, state);
-        inner.dirty_chunks.insert(chunk);
+        inner.crcs_mut().insert(chunk, state);
+        inner.mark_chunk_dirty(chunk);
     }
-    inner.size = overlay.size;
+    inner.set_size(overlay.size);
     if let Some((chunk, bytes)) = overlay.tail {
-        inner.tail_chunk = chunk;
-        inner.tail = bytes;
+        inner.set_tail(chunk, bytes);
     }
     if overlay.relocated {
-        inner.generation += 1;
+        inner.bump_generation();
     }
-    inner.pending_frees.extend(overlay.replaced);
+    for extent in overlay.replaced {
+        inner.defer_content_free(extent);
+    }
 
     // Staged state supersedes the blob's overlay bytes for every chunk it
-    // touched (and a staged shrink may have moved spans): keep only entries
-    // that still back a pending CRC.
-    let BlobInner {
-        crcs,
-        overlay: blob_overlay,
-        ..
-    } = inner;
-    blob_overlay.retain(|&chunk, _| crcs.get(chunk).is_some_and(|s| s.crc == ChunkCrc::Pending));
+    // touched (and a staged shrink may have moved spans).
+    inner.prune_overlay();
 }
 
 impl<S: crate::Storage> Drop for Batch<S> {

@@ -209,9 +209,8 @@ mod write;
 
 use crate::{BufferPool, Error, Handle, IoBufs, IoBufsMut};
 pub use batch::Batch;
-use commonware_formatting::hex;
 use commonware_utils::sync::AsyncMutex;
-use state::{unlink, BlobCore, HandleTracker, Ready, Shared};
+use state::{BlobCore, HandleTracker, Ready, Shared};
 use std::{
     future::Future,
     ops::RangeInclusive,
@@ -480,7 +479,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         let known = {
             let state = ready.state.lock();
             state
-                .partitions
+                .partitions()
                 .get(partition)
                 .and_then(|blobs| blobs.get(name))
                 .copied()
@@ -514,7 +513,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         let ready = self.ensure().await?;
         ready.check_poisoned()?;
         let state = ready.state.lock();
-        let Some(blobs) = state.partitions.get(partition) else {
+        let Some(blobs) = state.partitions().get(partition) else {
             return Err(Error::PartitionMissing(partition.into()));
         };
         Ok(blobs.keys().cloned().collect())
@@ -543,40 +542,7 @@ async fn remove_task<S: crate::Storage>(
     // (unlike the batch apply task's publish): no await point separates
     // the edit from `commit_locked`, whose guard arms before consuming
     // state, so the task cannot be dropped inside the half-removed window.
-    let removed = {
-        let mut state = ready.state.lock();
-        let Some(blobs) = state.partitions.get(partition) else {
-            return Err(Error::PartitionMissing(partition.into()));
-        };
-        let ids: Vec<u64> = match name {
-            Some(name) => {
-                let Some(&id) = blobs.get(name) else {
-                    return Err(Error::BlobMissing(partition.into(), hex(name)));
-                };
-                vec![id]
-            }
-            None => blobs.values().copied().collect(),
-        };
-
-        for &id in &ids {
-            unlink(&mut state, id);
-        }
-        match name {
-            Some(name) => {
-                state
-                    .partitions
-                    .get_mut(partition)
-                    .expect("checked")
-                    .remove(name);
-            }
-            None => {
-                state.partitions.remove(partition);
-                state.partition_epoch += 1;
-            }
-        }
-        state.meta_dirty = true;
-        ids
-    };
+    let removed = ready.state.lock().remove_named(partition, name)?;
     // "An Ok result indicates the blob is durably removed." The removed
     // ids root the commit so their applied-batch groups (if any) are
     // captured with the removal (never-split). The removal requests
@@ -599,17 +565,16 @@ async fn open_known<S: crate::Storage>(
     // Hydrate a dormant entry if this blob is not open yet.
     let hydrated = {
         let state = ready.state.lock();
-        if state.open.contains_key(&id) {
+        if state.open().contains_key(&id) {
             None
         } else {
-            Some(state.dormant.get(&id).cloned().expect("known blob").1)
+            Some(state.dormant().get(&id).cloned().expect("known blob").1)
         }
     };
     if let Some(entry) = hydrated {
         let inner = recover::hydrate(ready, &entry, partition).await?;
         let mut state = ready.state.lock();
-        state.dormant.remove(&id);
-        state.open.insert(
+        state.wake_dormant(
             id,
             Arc::new(BlobCore {
                 id,
@@ -624,9 +589,9 @@ async fn open_known<S: crate::Storage>(
 
     let (core, size) = {
         let mut state = ready.state.lock();
-        let core = state.open.get(&id).expect("hydrated").clone();
-        *state.handles.entry(id).or_insert(0) += 1;
-        let size = core.inner.lock().size;
+        let core = state.open_blob(id).expect("hydrated");
+        state.count_handle(id);
+        let size = core.inner.lock().size();
         (core, size)
     };
     if !versions.contains(&core.version) {
@@ -667,30 +632,17 @@ async fn create_blob<S: crate::Storage>(
 ) -> Result<(Blob<S>, u64, u16), Error> {
     let (id, core) = {
         let mut state = ready.state.lock();
-        let id = state.next_id;
-        state.next_id += 1;
+        let id = state.reserve_blob_id();
         let core = Arc::new(BlobCore {
             id,
             partition: partition.into(),
             name: name.to_vec(),
             version,
             write_lock: AsyncMutex::new(()),
-            inner: commonware_utils::sync::Mutex::new(state::BlobInner {
-                committed_entry: None,
-                ..Default::default()
-            }),
+            inner: commonware_utils::sync::Mutex::new(state::BlobInner::default()),
         });
-        if !state.partitions.contains_key(partition) {
-            state.partition_epoch += 1;
-        }
-        state
-            .partitions
-            .entry(partition.into())
-            .or_default()
-            .insert(name.to_vec(), id);
-        state.open.insert(id, core.clone());
-        *state.handles.entry(id).or_insert(0) += 1;
-        state.meta_dirty = true;
+        state.publish_named(partition, name.to_vec(), core.clone());
+        state.count_handle(id);
         (id, core)
     };
     // "An Ok result indicates the blob is durably created." The new
