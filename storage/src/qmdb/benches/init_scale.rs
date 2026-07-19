@@ -194,6 +194,7 @@ fn generate(
 
     /// Time the build itself (updates + prune + sync); opening the empty db is done by the
     /// caller and is cheap.
+    #[commonware_macros::boxed]
     async fn populate<M: DbAny<Mmr, Key = Digest, Value = Digest>>(
         db: M,
         keyspace: u64,
