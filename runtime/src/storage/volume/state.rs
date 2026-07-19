@@ -21,10 +21,10 @@
 //! committed-CRC loading in `paging`.
 
 #[cfg(test)]
-use super::chunk::{chunk_of, ChunkCrc};
+use super::chunk::chunk_of;
 use super::{
-    alloc::{block_align, Extent},
-    chunk::{ChunkMap, ChunkState, CrcCache, RunMeta},
+    alloc::{block_align, Allocator, Extent},
+    chunk::{merge_frozen_runs, ChunkCrc, ChunkMap, ChunkState, CrcCache, RunMeta},
     layout::{ChecksumRef, Entry},
     Config, Driver, BLOCK,
 };
@@ -754,6 +754,626 @@ pub(super) async fn ensure_provisioned<S: crate::Storage>(
     ready.file.resize(target).await?;
     ready.state.lock().provisioned = target;
     Ok(())
+}
+
+// TODO(conversion): drop once every consumer uses the named methods.
+#[allow(dead_code)]
+impl BlobInner {
+    /// Current logical size (includes uncommitted writes).
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Freeze boundary: bytes below are covered by the last confirmed
+    /// table or the in-flight snapshot.
+    pub fn freeze_size(&self) -> u64 {
+        self.freeze_size
+    }
+
+    /// Relocation generation (bumped on any relocation/drop of backing).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Whether the blob was unlinked from the namespace.
+    pub fn removed(&self) -> bool {
+        self.removed
+    }
+
+    /// Batches currently holding staged state for this blob.
+    pub fn staged_batches(&self) -> usize {
+        self.staged_batches
+    }
+
+    /// The entry the last confirmed commit wrote for this blob.
+    pub fn committed_entry(&self) -> Option<&Entry> {
+        self.committed_entry.as_ref()
+    }
+
+    /// Written runs keyed by logical start (gaps are holes).
+    pub fn runs(&self) -> &BTreeMap<u64, RunMeta> {
+        &self.runs
+    }
+
+    /// Checksum state per backed chunk.
+    pub fn crcs(&self) -> &ChunkMap {
+        &self.crcs
+    }
+
+    /// Checksum state per backed chunk, for mutation ([`ChunkMap`] guards
+    /// its own invariants).
+    pub fn crcs_mut(&mut self) -> &mut ChunkMap {
+        &mut self.crcs
+    }
+
+    /// Committed-CRC page cache ([`CrcCache`] guards its own invariants,
+    /// and even lookups stamp its LRU clock).
+    pub fn crc_cache_mut(&mut self) -> &mut CrcCache {
+        &mut self.crc_cache
+    }
+
+    /// Bytes of the frontier chunk's written span (meaningful only when
+    /// [`Self::tail_chunk`] is backed).
+    pub fn tail(&self) -> &[u8] {
+        &self.tail
+    }
+
+    /// Chunk the tail buffer describes.
+    pub fn tail_chunk(&self) -> u64 {
+        self.tail_chunk
+    }
+
+    /// Committed checksum refs whose extent guard was verified this
+    /// process.
+    pub fn crc_guarded(&self) -> &[ChecksumRef] {
+        &self.crc_guarded
+    }
+
+    /// Record a guard-verified checksum ref (idempotent).
+    pub fn record_guarded(&mut self, r: ChecksumRef) {
+        if !self.crc_guarded.contains(&r) {
+            self.crc_guarded.push(r);
+        }
+    }
+
+    /// Publish a new logical size.
+    pub fn set_size(&mut self, size: u64) {
+        self.size = size;
+    }
+
+    /// Publish growth to at least `end`.
+    pub fn grow_to(&mut self, end: u64) {
+        self.size = self.size.max(end);
+    }
+
+    /// Install (or replace) the run at `logical`.
+    pub fn install_run(&mut self, logical: u64, meta: RunMeta) {
+        self.runs.insert(logical, meta);
+    }
+
+    /// Detach the run at `logical`.
+    pub fn remove_run(&mut self, logical: u64) -> Option<RunMeta> {
+        self.runs.remove(&logical)
+    }
+
+    /// Detach every run at or beyond `from`, in order.
+    pub fn split_runs_from(&mut self, from: u64) -> BTreeMap<u64, RunMeta> {
+        self.runs.split_off(&from)
+    }
+
+    /// Bump the relocation generation (COW, resize-down, remove): every
+    /// in-flight read against the old placement retries.
+    pub fn bump_generation(&mut self) {
+        self.generation += 1;
+    }
+
+    /// Queue a replaced extent for release once a commit capturing this
+    /// blob confirms.
+    pub fn defer_content_free(&mut self, extent: Extent) {
+        self.pending_frees.push(extent);
+    }
+
+    /// Record that `chunk`'s content changed since the last snapshot.
+    pub fn mark_chunk_dirty(&mut self, chunk: u64) {
+        self.dirty_chunks.insert(chunk);
+    }
+
+    /// Keep only the dirty-chunk records `keep` accepts.
+    pub fn retain_dirty_chunks(&mut self, keep: impl FnMut(&u64) -> bool) {
+        self.dirty_chunks.retain(keep);
+    }
+
+    /// Install the frontier span buffer.
+    pub fn set_tail(&mut self, chunk: u64, bytes: Vec<u8>) {
+        self.tail_chunk = chunk;
+        self.tail = bytes;
+    }
+
+    /// Drop every overlay entry (resize-down: staged spans are obsolete).
+    pub fn clear_overlay(&mut self) {
+        self.overlay.clear();
+    }
+
+    /// Drop every overlay entry whose chunk no longer defers its CRC (the
+    /// entry is only load-bearing while the chunk is
+    /// [`super::chunk::ChunkCrc::Pending`]).
+    pub fn prune_overlay(&mut self) {
+        self.overlay.retain(
+            |chunk, _| matches!(self.crcs.get(*chunk), Some(s) if s.crc == ChunkCrc::Pending),
+        );
+    }
+
+    /// A batch staged state over this blob (snapshot capture must not
+    /// merge its runs while the overlay references them by key).
+    pub fn stage_batch(&mut self) {
+        self.staged_batches += 1;
+    }
+
+    /// The staged batch resolved (applied or dropped).
+    pub fn unstage_batch(&mut self) {
+        self.staged_batches -= 1;
+    }
+
+    /// Prepare the blob for value capture (the write lock and the state
+    /// lock are held): raise the freeze boundary — nothing this snapshot
+    /// covers may be rewritten in place until it confirms or rolls back —
+    /// block demotion until finalize publishes the new entry, finalize
+    /// deferred chunk CRCs from their overlay entries (the checksum
+    /// array, tail CRC, and delta manifest must carry exact values), and
+    /// freeze the captured runs atomically with the capture (the model
+    /// freezes per-run coverage at snapshot time): this entry, its
+    /// checksum extents, and its manifest reference every run below, so
+    /// the young-extent exemption must not apply to any of them. Runs
+    /// created after this point keep `born > snapshot_seq` and stay
+    /// exempt: they are genuinely absent from this commit's table.
+    ///
+    /// With every run frozen, contiguous neighbors coalesce: the entry
+    /// encodes fewer runs and every later runs-map descent walks a
+    /// shallower map. Skipped while a batch holds staged state for this
+    /// blob, whose overlay references base runs by key (merging would
+    /// move keys under it).
+    pub fn freeze_for_capture(&mut self, seq: u64) {
+        self.freeze_size = self.freeze_size.max(self.size);
+        self.capturing = true;
+        self.overlay_finalize();
+        for run in self.runs.values_mut() {
+            run.born = run.born.min(seq);
+        }
+        if self.staged_batches == 0 {
+            merge_frozen_runs(&mut self.runs);
+        }
+    }
+
+    /// Take the chunks whose content changed since the last snapshot
+    /// (sorted), leaving the set empty.
+    pub fn take_dirty_chunks(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.dirty_chunks).into_iter().collect()
+    }
+
+    /// Drain the extents dropped by uncommitted state changes (released
+    /// once the capturing commit confirms).
+    pub fn drain_pending_frees(&mut self) -> Vec<Extent> {
+        std::mem::take(&mut self.pending_frees)
+    }
+
+    /// The commit confirmed: `entry` is now the blob's committed
+    /// identity. The confirmed size is the exact freeze boundary (a
+    /// rewind below the old boundary takes effect here), demotion
+    /// unblocks, and the guard memo re-derives: refs this capture wrote
+    /// are guard-verified by construction — their bytes were assembled in
+    /// process memory, from resident values and old-extent loads that
+    /// were themselves guard-checked — and retained refs keep their
+    /// standing memo. Everything else (superseded refs) drops out.
+    pub fn publish_committed(&mut self, entry: Entry) {
+        self.capturing = false;
+        self.freeze_size = entry.size;
+        self.shadow = entry.shadow;
+        let prev = std::mem::take(&mut self.crc_guarded);
+        let old_refs = self
+            .committed_entry
+            .as_ref()
+            .map_or(&[][..], |e| &e.checksums[..]);
+        self.crc_guarded = entry
+            .checksums
+            .iter()
+            .filter(|r| prev.contains(r) || !old_refs.contains(r))
+            .copied()
+            .collect();
+        self.committed_entry = Some(entry);
+    }
+
+    /// Rebuild live state from a committed entry (hydration): runs with
+    /// recovered (frozen) birth, merged, and the dense chunk state seeded
+    /// all-unverified with CRC values left on disk. The caller verifies
+    /// and installs the frontier span.
+    pub fn from_entry(entry: &Entry) -> Self {
+        let mut inner = Self {
+            size: entry.size,
+            freeze_size: entry.size,
+            shadow: entry.shadow,
+            committed_entry: Some(entry.clone()),
+            ..Default::default()
+        };
+        for r in &entry.runs {
+            inner.runs.insert(
+                r.logical,
+                RunMeta {
+                    physical: r.physical,
+                    len: r.len,
+                    capacity: block_align(r.len),
+                    born: 0,
+                },
+            );
+        }
+        // Recovered runs are all frozen (born 0): coalesce contiguous
+        // neighbors. A no-op for entries captured after a merging pass,
+        // but an entry captured while a batch held staged state for its
+        // blob (which gates capture-time merging) can still carry
+        // mergeable runs.
+        merge_frozen_runs(&mut inner.runs);
+        // Seed the dense chunk state from the merged runs: every backed
+        // chunk unverified with its CRC left on disk.
+        inner.crcs.seed(&inner.runs);
+        inner
+    }
+}
+
+/// Everything recovery (or first init) adopts from the durable image,
+/// from which [`State::boot`] derives the volume's starting state.
+// TODO(conversion): drop once every consumer uses the named methods.
+#[allow(dead_code)]
+pub(super) struct Genesis {
+    pub partitions: BTreeMap<String, BTreeMap<Vec<u8>, u64>>,
+    pub dormant: BTreeMap<u64, (String, Entry)>,
+    pub committed_meta: BTreeMap<u64, CommittedMeta>,
+    pub recovery_verified: BTreeMap<u64, Vec<u64>>,
+    pub alloc: Allocator,
+    /// Seq of the adopted commit (the next commit is `adopted_seq + 1`).
+    pub adopted_seq: u64,
+    /// Superblock slot holding the adopted commit.
+    pub sacred_slot: u8,
+    /// The adopted table's extent.
+    pub table_extent: Extent,
+    pub next_id: u64,
+    /// Bytes of the volume file known to exist.
+    pub provisioned: u64,
+}
+
+// TODO(conversion): drop once every consumer uses the named methods.
+#[allow(dead_code)]
+impl State {
+    /// The volume's starting state for an adopted commit: the next commit
+    /// follows the adopted seq, the adopted seq is the snapshot and
+    /// confirmation floor, and every runtime set starts empty.
+    pub fn boot(genesis: Genesis) -> Self {
+        Self {
+            partitions: genesis.partitions,
+            open: BTreeMap::new(),
+            handles: BTreeMap::new(),
+            dormant: genesis.dormant,
+            alloc: genesis.alloc,
+            pending_free: Vec::new(),
+            seq: genesis.adopted_seq + 1,
+            snapshot_seq: genesis.adopted_seq,
+            confirmed_seq: genesis.adopted_seq,
+            sacred_slot: genesis.sacred_slot,
+            table_extent: Some(genesis.table_extent),
+            committed_meta: genesis.committed_meta,
+            recovery_verified: genesis.recovery_verified,
+            next_id: genesis.next_id,
+            dirty: Default::default(),
+            meta_dirty: false,
+            groups: Vec::new(),
+            encoded: Default::default(),
+            partition_epoch: 0,
+            encoded_epoch: 0,
+            provisioned: genesis.provisioned,
+            file_high_water: 0,
+        }
+    }
+
+    /// Seq of the next commit.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Seq of the most recent snapshot (the freeze epoch).
+    pub fn snapshot_seq(&self) -> u64 {
+        self.snapshot_seq
+    }
+
+    /// Highest confirmed commit seq.
+    pub fn confirmed_seq(&self) -> u64 {
+        self.confirmed_seq
+    }
+
+    /// Next blob id (persisted, never reused).
+    pub fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// partition -> name -> blob id.
+    pub fn partitions(&self) -> &BTreeMap<String, BTreeMap<Vec<u8>, u64>> {
+        &self.partitions
+    }
+
+    /// Blobs opened this run, by id.
+    pub fn open(&self) -> &BTreeMap<u64, Arc<BlobCore>> {
+        &self.open
+    }
+
+    /// Committed entries for blobs not opened this run.
+    pub fn dormant(&self) -> &BTreeMap<u64, (String, Entry)> {
+        &self.dormant
+    }
+
+    /// The open blob `id`, if any.
+    pub fn open_blob(&self, id: u64) -> Option<Arc<BlobCore>> {
+        self.open.get(&id).cloned()
+    }
+
+    /// Whether a commit capturing `capture` would write nothing new: no
+    /// namespace change and no captured dirty blob.
+    pub fn clean_for(&self, capture: &BTreeSet<u64>) -> bool {
+        !self.meta_dirty && !capture.iter().any(|id| self.dirty.contains(id))
+    }
+
+    /// Assign the next commit's seq and advance the freeze epoch.
+    pub fn begin_snapshot(&mut self) -> u64 {
+        let seq = self.seq;
+        self.seq += 1;
+        self.snapshot_seq = seq;
+        seq
+    }
+
+    /// The dirty blob ids within `capture`.
+    pub fn dirty_in(&self, capture: &BTreeSet<u64>) -> Vec<u64> {
+        self.dirty
+            .iter()
+            .copied()
+            .filter(|id| capture.contains(id))
+            .collect()
+    }
+
+    /// Record uncommitted content changes for blob `id`.
+    pub fn mark_dirty(&mut self, id: u64) {
+        self.dirty.insert(id);
+    }
+
+    /// Drop blob `id`'s dirty mark (captured, or removed with its dirt).
+    pub fn clear_dirty(&mut self, id: u64) {
+        self.dirty.remove(&id);
+    }
+
+    /// Allocate an extent of `len` bytes.
+    pub fn allocate(&mut self, len: u64) -> Extent {
+        self.alloc.allocate(len)
+    }
+
+    /// Detach blob `id`'s committed metadata extents (the capture decides
+    /// what is retained and what is superseded).
+    pub fn take_committed_meta(&mut self, id: u64) -> Option<CommittedMeta> {
+        self.committed_meta.remove(&id)
+    }
+
+    /// Install blob `id`'s new committed metadata extents.
+    pub fn install_committed_meta(&mut self, id: u64, meta: CommittedMeta) {
+        self.committed_meta.insert(id, meta);
+    }
+
+    /// The superblock slot the next commit writes (never the sacred one).
+    pub fn standby_slot(&self) -> u8 {
+        1 - self.sacred_slot
+    }
+
+    /// Capture the namespace into table entries: captured blobs
+    /// re-encode; everything else is served from its cached encoded entry
+    /// (encoded lazily on first use), so assembly is O(captured +
+    /// concatenation). The table now reflects every namespace change, so
+    /// the namespace-dirty flag clears. Returns the partition list and
+    /// the entry encodings, table-ordered.
+    pub fn table_entries(
+        &mut self,
+        captured: &mut [(Arc<BlobCore>, Entry)],
+    ) -> (Vec<String>, Vec<Bytes>) {
+        self.meta_dirty = false;
+
+        // Encodings embed partition indexes: a changed partition LIST
+        // invalidates every cached encoding.
+        if self.encoded_epoch != self.partition_epoch {
+            self.encoded.clear();
+            self.encoded_epoch = self.partition_epoch;
+        }
+
+        let partitions: Vec<String> = self.partitions.keys().cloned().collect();
+        // Indexed lookups: an epoch change re-encodes EVERY entry, so a
+        // linear scan per blob would make that commit O(blobs x
+        // partitions).
+        let pindex: BTreeMap<&str, u32> = partitions
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.as_str(), i as u32))
+            .collect();
+        let pindex = |p: &str| *pindex.get(p).expect("known partition");
+
+        // Fresh encodings for captured blobs.
+        for (blob, entry) in captured.iter_mut() {
+            entry.partition = pindex(&blob.partition);
+            self.encoded.insert(entry.id, Bytes::from(entry.encode()));
+        }
+        // Cache misses among served blobs (first commit after recovery or
+        // an epoch change).
+        let mut missing: Vec<(u64, Bytes)> = Vec::new();
+        for (&id, (partition, entry)) in &self.dormant {
+            if self.encoded.contains_key(&id) {
+                continue;
+            }
+            let mut entry = entry.clone();
+            entry.partition = pindex(partition);
+            missing.push((id, Bytes::from(entry.encode())));
+        }
+        for (&id, core) in &self.open {
+            if self.encoded.contains_key(&id) {
+                continue;
+            }
+            // Served open blob: its cached committed entry (set by the
+            // last commit that captured it), or a fresh empty entry
+            // (created but never captured). Never derived from live
+            // state, which may hold uncommitted writes.
+            let inner = core.inner.lock();
+            if inner.removed {
+                continue;
+            }
+            let mut entry = inner
+                .committed_entry
+                .clone()
+                .unwrap_or_else(|| Entry::empty(core.id, core.name.clone(), core.version));
+            entry.partition = pindex(&core.partition);
+            missing.push((id, Bytes::from(entry.encode())));
+        }
+        for (id, bytes) in missing {
+            self.encoded.insert(id, bytes);
+        }
+        debug_assert_eq!(
+            self.encoded.len(),
+            self.dormant.len()
+                + self
+                    .open
+                    .values()
+                    .filter(|core| !core.inner.lock().removed)
+                    .count(),
+            "encoded-entry cache out of sync with the namespace"
+        );
+
+        (partitions, self.encoded.values().cloned().collect())
+    }
+
+    /// The commit at `seq` confirmed: flip the sacred slot, supersede the
+    /// old table, and resolve every applied-batch group the capture
+    /// covers (capture expansion guarantees all-or-nothing coverage —
+    /// never-split). Returns the resolved groups' members.
+    pub fn confirm(
+        &mut self,
+        seq: u64,
+        old_table: Option<Extent>,
+        table: Extent,
+        capture: &BTreeSet<u64>,
+    ) -> Vec<u64> {
+        self.sacred_slot = 1 - self.sacred_slot;
+        self.confirmed_seq = seq;
+        if let Some(old) = old_table {
+            self.defer_free(old, seq, None);
+        }
+        self.table_extent = Some(table);
+        let mut resolved: Vec<u64> = Vec::new();
+        self.groups.retain(|group| {
+            let covered = group.iter().any(|id| capture.contains(id));
+            debug_assert!(
+                !covered || group.iter().all(|id| capture.contains(id)),
+                "commit split an applied batch group"
+            );
+            if covered {
+                resolved.extend(group.iter().copied());
+            }
+            !covered
+        });
+        resolved
+    }
+
+    /// Assign a fresh blob id.
+    pub fn reserve_blob_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Count a new handle on blob `id`.
+    pub fn count_handle(&mut self, id: u64) {
+        *self.handles.entry(id).or_insert(0) += 1;
+    }
+
+    /// Publish `core` under `partition`/`name`: the blob becomes served
+    /// and the namespace change joins the next table.
+    pub fn publish_named(&mut self, partition: &str, name: Vec<u8>, core: Arc<BlobCore>) {
+        if !self.partitions.contains_key(partition) {
+            self.partition_epoch += 1;
+        }
+        self.partitions
+            .entry(partition.into())
+            .or_default()
+            .insert(name, core.id);
+        self.open.insert(core.id, core);
+        self.meta_dirty = true;
+    }
+
+    /// Remove `name` under `partition` (or, with `None`, the whole
+    /// partition) from the namespace: every named blob unlinks, and the
+    /// namespace change joins the next table. Returns the unlinked ids.
+    pub fn remove_named(
+        &mut self,
+        partition: &str,
+        name: Option<&[u8]>,
+    ) -> Result<Vec<u64>, Error> {
+        let Some(blobs) = self.partitions.get(partition) else {
+            return Err(Error::PartitionMissing(partition.into()));
+        };
+        let ids: Vec<u64> = match name {
+            Some(name) => {
+                let Some(&id) = blobs.get(name) else {
+                    return Err(Error::BlobMissing(partition.into(), hex(name)));
+                };
+                vec![id]
+            }
+            None => blobs.values().copied().collect(),
+        };
+        for &id in &ids {
+            unlink(self, id);
+        }
+        match name {
+            Some(name) => {
+                self.partitions
+                    .get_mut(partition)
+                    .expect("checked")
+                    .remove(name);
+            }
+            None => {
+                self.partitions.remove(partition);
+                self.partition_epoch += 1;
+            }
+        }
+        self.meta_dirty = true;
+        Ok(ids)
+    }
+
+    /// Promote dormant blob `id` to open as `core` (its hydrated state).
+    pub fn wake_dormant(&mut self, id: u64, core: Arc<BlobCore>) {
+        self.dormant.remove(&id);
+        self.open.insert(id, core);
+    }
+
+    /// Take the chunks recovery CRC-verified for blob `id` (consumed at
+    /// hydration to seed verified bits).
+    pub fn take_recovery_verified(&mut self, id: u64) -> Option<Vec<u64>> {
+        self.recovery_verified.remove(&id)
+    }
+
+    /// Raise and return the allocated-span high-water mark (monotonic:
+    /// freeing an extent at the span's end lowers the allocator's end,
+    /// never this).
+    pub fn high_water(&mut self) -> u64 {
+        self.file_high_water = self.file_high_water.max(self.alloc.end());
+        self.file_high_water
+    }
+
+    /// Free bytes in the allocator's index.
+    pub fn free_bytes(&self) -> u64 {
+        self.alloc.free_bytes()
+    }
+
+    /// Bytes queued for reuse but not yet released.
+    pub fn pending_free_bytes(&self) -> u64 {
+        self.pending_free.iter().map(|(e, _, _)| e.len).sum()
+    }
 }
 
 pub(super) struct Shared<S: crate::Storage> {
