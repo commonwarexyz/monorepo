@@ -18,15 +18,14 @@ use super::{
     chunk::{chunk_of, ChunkCrc, ChunkState, RunMeta},
     paging::load_committed_page,
     state::{
-        check_not_removed, ensure_provisioned, zeroed, BlobCore, BlobInner, Ready, StagedBlob,
-        StagedRun,
+        check_not_removed, chunk_mismatch, ensure_provisioned, zeroed, BlobCore, BlobInner, Ready,
+        StagedBlob, StagedRun,
     },
     BLOCK,
 };
 use crate::{Blob as _, Error, IoBuf, IoBufs};
 use bytes::BufMut as _;
 use commonware_cryptography::{Crc32, Hasher as _};
-use commonware_formatting::hex;
 
 /// One chunk's checksum outcome for a planned stretch.
 enum CrcUpdate {
@@ -725,12 +724,7 @@ async fn materialize_cow<S: crate::Storage>(
                     .await?
                     .coalesce();
                 if Crc32::checksum(old.as_ref()) != expected {
-                    ready.metrics.corruptions.inc();
-                    return Err(Error::BlobCorrupt(
-                        blob.partition.clone(),
-                        hex(&blob.name),
-                        format!("chunk {chunk} checksum mismatch"),
-                    ));
+                    return Err(chunk_mismatch(ready, blob, chunk));
                 }
                 Ok(old)
             };
@@ -887,12 +881,7 @@ async fn read_span_checked<S: crate::Storage>(
     let (expected, verified) = expected_span_crc(ready, blob, staged, chunk).await?;
     let span = ready.file.read_at(phys, span_len).await?.coalesce();
     if Crc32::checksum(span.as_ref()) != expected {
-        ready.metrics.corruptions.inc();
-        return Err(Error::BlobCorrupt(
-            blob.partition.clone(),
-            hex(&blob.name),
-            format!("chunk {chunk} checksum mismatch"),
-        ));
+        return Err(chunk_mismatch(ready, blob, chunk));
     }
     Ok((span.as_ref().to_vec(), verified))
 }

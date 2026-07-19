@@ -74,6 +74,23 @@ async fn read_ref_window<S: crate::Storage>(
 /// Returns `Ok(None)` when the chunk no longer holds an unloaded CRC
 /// (rewritten or shrunk away meanwhile): the caller re-derives its plan.
 ///
+/// Record and report a checksum extent whose guard CRC failed: counted in
+/// the corruption metric, loud like every mismatch (fused so no report can
+/// forget the counter).
+fn ref_mismatch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, r: &ChecksumRef) -> Error {
+    ready.metrics.corruptions.inc();
+    Error::BlobCorrupt(
+        blob.partition.clone(),
+        hex(&blob.name),
+        format!(
+            "checksum extent mismatch (chunks {}..{} at offset {})",
+            r.first_chunk,
+            r.first_chunk + r.count as u64,
+            r.offset
+        ),
+    )
+}
+
 /// The extent's guard CRC is verified on the first touch of each ref (the
 /// whole extent is streamed once). Later loads from the same ref read just
 /// the page window. Loads race commits, which swap the committed entry and
@@ -129,17 +146,7 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
             }
             if let Some(guard) = guard {
                 if guard != r.crc {
-                    ready.metrics.corruptions.inc();
-                    return Err(Error::BlobCorrupt(
-                        blob.partition.clone(),
-                        hex(&blob.name),
-                        format!(
-                            "checksum extent mismatch (chunks {}..{} at offset {})",
-                            r.first_chunk,
-                            r.first_chunk + r.count as u64,
-                            r.offset
-                        ),
-                    ));
+                    return Err(ref_mismatch(ready, blob, &r));
                 }
                 if !inner.crc_guarded.contains(&r) {
                     inner.crc_guarded.push(r);
@@ -167,17 +174,7 @@ pub(super) async fn load_committed_refs<S: crate::Storage>(
     for r in refs {
         let (values, guard) = read_ref_window(ready, r, 0, r.count as u64, true).await?;
         if guard.expect("full reads verify") != r.crc {
-            ready.metrics.corruptions.inc();
-            return Err(Error::BlobCorrupt(
-                blob.partition.clone(),
-                hex(&blob.name),
-                format!(
-                    "checksum extent mismatch (chunks {}..{} at offset {})",
-                    r.first_chunk,
-                    r.first_chunk + r.count as u64,
-                    r.offset
-                ),
-            ));
+            return Err(ref_mismatch(ready, blob, r));
         }
         let mut inner = blob.inner.lock();
         if !inner.crc_guarded.contains(r) {

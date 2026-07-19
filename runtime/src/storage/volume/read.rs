@@ -19,12 +19,11 @@
 use super::{
     chunk::{chunk_of, ChunkCrc, RunMeta},
     paging::{insert_window, load_committed_page, window_value},
-    state::{BlobCore, BlobInner, Ready},
+    state::{chunk_mismatch, BlobCore, BlobInner, Ready},
     BLOCK,
 };
 use crate::{Blob as _, Error, IoBuf, IoBufsMut};
 use commonware_cryptography::Crc32;
-use commonware_formatting::hex;
 
 /// Cap on one coalesced inner read issued by [`read_verified`].
 const MAX_READ_SPAN: u64 = 1 << 20;
@@ -531,12 +530,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
                             .coalesce()
                             .freeze();
                         if Crc32::checksum(reread.as_ref()) != stable_crc {
-                            ready.metrics.corruptions.inc();
-                            return Err(Error::BlobCorrupt(
-                                blob.partition.clone(),
-                                hex(&blob.name),
-                                format!("chunk {chunk} checksum mismatch"),
-                            ));
+                            return Err(chunk_mismatch(ready, blob, chunk));
                         }
                         checked.push((chunk, stable_crc));
                         reread

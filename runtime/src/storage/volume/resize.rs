@@ -7,13 +7,12 @@ use super::{
     alloc::{block_align, Extent},
     chunk::{chunk_of, ChunkCrc, ChunkState},
     paging::load_committed_page,
-    state::{check_not_removed, zeroed, BlobCore, Ready},
+    state::{check_not_removed, chunk_mismatch, zeroed, BlobCore, Ready},
     write::write_locked,
     BLOCK,
 };
 use crate::{Blob as _, Error};
 use commonware_cryptography::Crc32;
-use commonware_formatting::hex;
 
 /// Resize to `len`. The blob's `write_lock` MUST be held.
 pub(super) async fn resize_locked<S: crate::Storage>(
@@ -232,12 +231,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             // in it surfaces loudly here, never laundered under the
             // recomputed prefix CRC.
             if Crc32::checksum(bytes.as_ref()) != expected {
-                ready.metrics.corruptions.inc();
-                return Err(Error::BlobCorrupt(
-                    blob.partition.clone(),
-                    hex(&blob.name),
-                    format!("chunk {chunk} checksum mismatch"),
-                ));
+                return Err(chunk_mismatch(ready, blob, chunk));
             }
             let bytes = bytes.as_ref()[..span as usize].to_vec();
             let trimmed = span < old_span;

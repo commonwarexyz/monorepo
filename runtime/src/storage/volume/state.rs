@@ -989,6 +989,22 @@ pub(super) fn check_not_removed(blob: &BlobCore) -> Result<(), Error> {
     Ok(())
 }
 
+/// Record and report `chunk`'s corruption: every mismatch of a chunk's
+/// expected CRC counts in the corruption metric and raises this loud
+/// error — fused so no report can forget the counter.
+pub(super) fn chunk_mismatch<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+    chunk: u64,
+) -> Error {
+    ready.metrics.corruptions.inc();
+    Error::BlobCorrupt(
+        blob.partition.clone(),
+        hex(&blob.name),
+        format!("chunk {chunk} checksum mismatch"),
+    )
+}
+
 /// A pooled all-zero buffer of `len` bytes.
 pub(super) fn zeroed(pool: &BufferPool, len: usize) -> IoBuf {
     let mut buf = pool.alloc(len);
