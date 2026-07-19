@@ -97,6 +97,18 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
     }
 
+    // Invariant: no_nullification_at_genesis
+    // Genesis (view 0) is implicitly finalized and voting begins at view 1, so
+    // no nullification certificate can exist for it (a quorum would require
+    // correct signers to have voted nullify(0)). Notarizations and
+    // finalizations at view 0 are already rejected by the parent < view and
+    // finalization-requires-notarization checks.
+    if let Some(&idx) = nullified.get(&0) {
+        panic!(
+            "Invariant violation: replica {idx} has nullification certificate at genesis view 0"
+        );
+    }
+
     // Invariant: no_finalized_view_nullified
     // A view cannot carry both a finalization and a nullification certificate,
     // regardless of which replicas recorded them.
@@ -214,9 +226,9 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
 {
     // Invariant: no_fault_evidence_against_correct_signers
     // Fault proofs (ConflictingNotarize, ConflictingFinalize, NullifyFinalize)
-    // are signature-verified by the reporter before being recorded, so evidence
-    // against a correct signer proves that key signed conflicting messages: an
-    // engine bug (e.g. mishandled WAL state on restart), not adversarial noise.
+    // are signature-verified by the reporter before being recorded. For
+    // attributable schemes, verified fault evidence identifies the signer.
+    // Non-attributable schemes do not provide safe per-signer attribution.
     // Byzantine signers are expected to equivocate and are excluded. Evidence
     // against a key outside the participant set is flagged rather than skipped.
     //
@@ -260,17 +272,30 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     // A correct node cannot sign multiple payloads of the same vote kind in a
     // view, or both nullify and finalize in the same view.
     // Aggregate across all reporters to get a global view of who sent what.
-    // Reporter maps are hash-based; conflicts are accumulated in raw
-    // iteration order (recording every conflicting payload against a
-    // first-seen pivot, which makes the union order-independent) and payload
-    // conflicts are reported from ordered collections after the sweep. The
-    // same input always panics; only first-message identity may vary.
+    // Hash iteration may change which represented violation is reported first,
+    // but detection of conflicts retained by Reporter is order-independent.
+    //
+    // Certificates are carriers of votes: for attributable schemes the signer
+    // set embedded in a verified certificate is unforgeable proof that each
+    // listed signer cast that vote, so those implicit votes join the same
+    // sweep. This catches a double-sign whose second signature exists only
+    // inside an aggregated certificate. Notarize+nullify by one signer in one
+    // view is legal (timeout after notarizing) and is never flagged.
+    //
+    // Invariant: genesis_is_vote_free
+    // Genesis (view 0) is implicitly finalized and voting begins at view 1,
+    // so a correct signer can never produce a vote for view 0 and no quorum
+    // certificate of any kind can exist there. Byzantine signers can sign
+    // anything, so their view-0 votes are ignored. Checked inline below.
     let mut seen_nullify: HashMap<u64, HashSet<S::PublicKey>> = HashMap::new();
     let mut seen_finalize: HashMap<u64, HashSet<S::PublicKey>> = HashMap::new();
     let mut seen_notarize_payload: HashMap<(u64, S::PublicKey), Sha256Digest> = HashMap::new();
     let mut seen_finalize_payload: HashMap<(u64, S::PublicKey), Sha256Digest> = HashMap::new();
     let mut notarize_conflicts: BTreeMap<(u64, Vec<u8>), BTreeSet<Sha256Digest>> = BTreeMap::new();
     let mut finalize_conflicts: BTreeMap<(u64, Vec<u8>), BTreeSet<Sha256Digest>> = BTreeMap::new();
+    let mut notarization_cert_payloads: BTreeMap<u64, BTreeSet<Sha256Digest>> = BTreeMap::new();
+    let mut nullification_cert_views: BTreeSet<u64> = BTreeSet::new();
+    let mut finalization_cert_payloads: BTreeMap<u64, BTreeSet<Sha256Digest>> = BTreeMap::new();
     for reporter in reporters {
         let correct = |pk: &S::PublicKey| {
             reporter
@@ -286,15 +311,18 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                     if !correct(pk) {
                         continue;
                     }
-                    let pivot = *seen_notarize_payload
-                        .entry((view.get(), pk.clone()))
-                        .or_insert(*digest);
-                    if pivot != *digest {
-                        notarize_conflicts
-                            .entry((view.get(), pk.as_ref().to_vec()))
-                            .or_default()
-                            .extend([pivot, *digest]);
-                    }
+                    assert!(
+                        view.get() != 0,
+                        "Invariant violation: correct signer {:?} has notarize vote at genesis view 0",
+                        pk.as_ref()
+                    );
+                    record_payload_conflict(
+                        &mut seen_notarize_payload,
+                        &mut notarize_conflicts,
+                        view.get(),
+                        pk,
+                        *digest,
+                    );
                 }
             }
         }
@@ -304,6 +332,11 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
         for (view, signers) in nullifies.iter() {
             for pk in signers {
                 if correct(pk) {
+                    assert!(
+                        view.get() != 0,
+                        "Invariant violation: correct signer {:?} has nullify vote at genesis view 0",
+                        pk.as_ref()
+                    );
                     seen_nullify
                         .entry(view.get())
                         .or_default()
@@ -322,23 +355,198 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                     if !correct(pk) {
                         continue;
                     }
+                    assert!(
+                        view.get() != 0,
+                        "Invariant violation: correct signer {:?} has finalize vote at genesis view 0",
+                        pk.as_ref()
+                    );
                     seen_finalize
                         .entry(view.get())
                         .or_default()
                         .insert(pk.clone());
-                    let pivot = *seen_finalize_payload
-                        .entry((view.get(), pk.clone()))
-                        .or_insert(*digest);
-                    if pivot != *digest {
-                        finalize_conflicts
-                            .entry((view.get(), pk.as_ref().to_vec()))
-                            .or_default()
-                            .extend([pivot, *digest]);
-                    }
+                    record_payload_conflict(
+                        &mut seen_finalize_payload,
+                        &mut finalize_conflicts,
+                        view.get(),
+                        pk,
+                        *digest,
+                    );
                 }
             }
         }
         drop(finalizes);
+
+        // Invariant: certificate_signers_vote_consistency
+        // Fold each certificate's embedded signer set (attributable schemes
+        // only) into the vote maps as implicit votes by the listed correct
+        // signers, and reject any certificate recorded at genesis view 0.
+        let max_participants = reporter.participants.len();
+        let notarizations = reporter.notarizations.lock();
+        for (view, notarization) in notarizations.iter() {
+            let view = view.get();
+            assert!(
+                view != 0,
+                "Invariant violation: notarization certificate at genesis view 0"
+            );
+            let payload = notarization.proposal.payload;
+            notarization_cert_payloads
+                .entry(view)
+                .or_default()
+                .insert(payload);
+            let Some(signers) = get_signers::<S>(&notarization.certificate, max_participants)
+            else {
+                continue;
+            };
+            for signer in signers.iter() {
+                let pk = reporter
+                    .participants
+                    .key(signer)
+                    .expect("certificate signer must be a participant");
+                if !correct(pk) {
+                    continue;
+                }
+                record_payload_conflict(
+                    &mut seen_notarize_payload,
+                    &mut notarize_conflicts,
+                    view,
+                    pk,
+                    payload,
+                );
+            }
+        }
+        drop(notarizations);
+
+        let nullifications = reporter.nullifications.lock();
+        for (view, nullification) in nullifications.iter() {
+            let view = view.get();
+            assert!(
+                view != 0,
+                "Invariant violation: nullification certificate at genesis view 0"
+            );
+            nullification_cert_views.insert(view);
+            let Some(signers) = get_signers::<S>(&nullification.certificate, max_participants)
+            else {
+                continue;
+            };
+            for signer in signers.iter() {
+                let pk = reporter
+                    .participants
+                    .key(signer)
+                    .expect("certificate signer must be a participant");
+                if !correct(pk) {
+                    continue;
+                }
+                seen_nullify.entry(view).or_default().insert(pk.clone());
+            }
+        }
+        drop(nullifications);
+
+        let finalizations = reporter.finalizations.lock();
+        for (view, finalization) in finalizations.iter() {
+            let view = view.get();
+            assert!(
+                view != 0,
+                "Invariant violation: finalization certificate at genesis view 0"
+            );
+            let payload = finalization.proposal.payload;
+            finalization_cert_payloads
+                .entry(view)
+                .or_default()
+                .insert(payload);
+            let Some(signers) = get_signers::<S>(&finalization.certificate, max_participants)
+            else {
+                continue;
+            };
+            for signer in signers.iter() {
+                let pk = reporter
+                    .participants
+                    .key(signer)
+                    .expect("certificate signer must be a participant");
+                if !correct(pk) {
+                    continue;
+                }
+                seen_finalize.entry(view).or_default().insert(pk.clone());
+                record_payload_conflict(
+                    &mut seen_finalize_payload,
+                    &mut finalize_conflicts,
+                    view,
+                    pk,
+                    payload,
+                );
+            }
+        }
+        drop(finalizations);
+    }
+
+    // Invariant: certificate_vote_quorum_intersection
+    // A verified certificate proves >= quorum distinct signers cast its vote,
+    // and a correct node never casts the opposing vote in the same view
+    // (finalize vs nullify; a second notarize/finalize payload). At most
+    // max_faults correct signers can therefore legally oppose any recorded
+    // certificate. Exceeding that bound proves a correct node double-signed,
+    // even for non-attributable schemes, without relying on certificate signer
+    // identities.
+    if let Some(first) = reporters.first() {
+        let max_faults = bounds::max_faults(first.participants.len() as u32) as usize;
+        for &view in finalization_cert_payloads.keys() {
+            let opposing = seen_nullify.get(&view).map_or(0, |signers| signers.len());
+            assert!(
+                opposing <= max_faults,
+                "Invariant violation: finalization certificate at view {view} coexists with {opposing} correct nullify signers (max {max_faults})"
+            );
+        }
+        for &view in nullification_cert_views.iter() {
+            let opposing = seen_finalize.get(&view).map_or(0, |signers| signers.len());
+            assert!(
+                opposing <= max_faults,
+                "Invariant violation: nullification certificate at view {view} coexists with {opposing} correct finalize signers (max {max_faults})"
+            );
+        }
+        let mut notarize_votes: HashMap<u64, HashMap<Sha256Digest, usize>> = HashMap::new();
+        for ((view, _), payload) in seen_notarize_payload.iter() {
+            *notarize_votes
+                .entry(*view)
+                .or_default()
+                .entry(*payload)
+                .or_default() += 1;
+        }
+        let mut finalize_votes: HashMap<u64, HashMap<Sha256Digest, usize>> = HashMap::new();
+        for ((view, _), payload) in seen_finalize_payload.iter() {
+            *finalize_votes
+                .entry(*view)
+                .or_default()
+                .entry(*payload)
+                .or_default() += 1;
+        }
+        let opposing_count = |votes: &HashMap<u64, HashMap<Sha256Digest, usize>>,
+                              view: u64,
+                              payload: &Sha256Digest| {
+            votes.get(&view).map_or(0, |by_payload| {
+                by_payload
+                    .iter()
+                    .filter(|(p, _)| *p != payload)
+                    .map(|(_, count)| *count)
+                    .sum::<usize>()
+            })
+        };
+        for (&view, payloads) in notarization_cert_payloads.iter() {
+            for payload in payloads {
+                let opposing = opposing_count(&notarize_votes, view, payload);
+                assert!(
+                    opposing <= max_faults,
+                    "Invariant violation: notarization certificate at view {view} coexists with {opposing} correct conflicting notarize signers (max {max_faults})"
+                );
+            }
+        }
+        for (&view, payloads) in finalization_cert_payloads.iter() {
+            for payload in payloads {
+                let opposing = opposing_count(&finalize_votes, view, payload);
+                assert!(
+                    opposing <= max_faults,
+                    "Invariant violation: finalization certificate at view {view} coexists with {opposing} correct conflicting finalize signers (max {max_faults})"
+                );
+            }
+        }
     }
     if let Some(((view, signer), payloads)) = notarize_conflicts.first_key_value() {
         panic!(
@@ -367,7 +575,10 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     // Invariant: finalize_vote_requires_notarization
     // Every recorded finalize vote attributed to a correct signer must have a
     // matching (view, payload) notarization in the union of checked reporter
-    // snapshots. This checks global recorded evidence, not signer-local possession
+    // snapshots. For attributable schemes, finalization-certificate signers
+    // are included as implicit votes, so their certificates are checked here
+    // as well.
+    // This checks global recorded evidence, not signer-local possession
     // or event ordering. Reporter merges Notarization and Certification, drops the
     // finalize parent, and retains only one notarization per view; therefore this
     // cannot check successful certification, exact proposal identity, or
@@ -394,19 +605,47 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     }
 }
 
-pub(crate) fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
+/// Records a per-signer payload vote for equivocation detection: every payload
+/// conflicting with the signer's first-seen pivot is accumulated so the union
+/// is order-independent.
+fn record_payload_conflict<P: Clone + Eq + Hash + AsRef<[u8]>>(
+    pivots: &mut HashMap<(u64, P), Sha256Digest>,
+    conflicts: &mut BTreeMap<(u64, Vec<u8>), BTreeSet<Sha256Digest>>,
+    view: u64,
+    pk: &P,
+    payload: Sha256Digest,
+) {
+    let pivot = *pivots.entry((view, pk.clone())).or_insert(payload);
+    if pivot != payload {
+        conflicts
+            .entry((view, pk.as_ref().to_vec()))
+            .or_default()
+            .extend([pivot, payload]);
+    }
+}
+
+/// Decodes the signer bitmap used by the currently supported attributable
+/// certificate encodings; returns `None` for non-attributable schemes.
+pub(crate) fn get_signers<S: scheme::Scheme<Sha256Digest>>(
     certificate: &S::Certificate,
     max_participants: usize,
-) -> Option<usize> {
+) -> Option<Signers> {
     if !S::is_attributable() {
         return None;
     }
 
     let encoded = certificate.encode();
     let mut cursor = encoded.as_ref();
-    let signers =
-        Signers::read_cfg(&mut cursor, &max_participants).expect("certificate signers must decode");
-    Some(signers.count())
+    Some(
+        Signers::read_cfg(&mut cursor, &max_participants).expect("certificate signers must decode"),
+    )
+}
+
+pub(crate) fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
+    certificate: &S::Certificate,
+    max_participants: usize,
+) -> Option<usize> {
+    get_signers::<S>(certificate, max_participants).map(|signers| signers.count())
 }
 
 pub fn extract<E, S, L>(
@@ -490,12 +729,17 @@ mod tests {
         simplex::{
             elector::RoundRobin,
             mocks::reporter::Config as ReporterConfig,
+            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
-                ConflictingNotarize, Finalize, Notarization as SimplexNotarization, Notarize,
-                Nullify, Proposal,
+                ConflictingNotarize, Finalization as SimplexFinalization, Finalize,
+                Notarization as SimplexNotarization, Notarize,
+                Nullification as SimplexNullification, Nullify, Proposal,
             },
         },
         types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::{
+        bls12381::primitives::variant::MinPk, ed25519::PublicKey as Ed25519PublicKey,
     };
     use commonware_parallel::Sequential;
     use commonware_utils::{TestRng, ordered::Set, test_rng};
@@ -1034,6 +1278,32 @@ mod tests {
         SimplexNotarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap()
     }
 
+    /// Assembles a quorum-backed nullification certificate for `view`.
+    fn nullification_activity(
+        schemes: &[id_mock::Scheme],
+        view: u64,
+    ) -> SimplexNullification<id_mock::Scheme> {
+        let votes: Vec<_> = schemes[..Q]
+            .iter()
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round(view)).unwrap())
+            .collect();
+        SimplexNullification::from_nullifies(&schemes[0], &votes, &Sequential).unwrap()
+    }
+
+    /// Assembles a quorum-backed finalization certificate over `proposal(view, parent, payload)`.
+    fn finalization_activity(
+        schemes: &[id_mock::Scheme],
+        view: u64,
+        parent: u64,
+        payload: u8,
+    ) -> SimplexFinalization<id_mock::Scheme, Sha256Digest> {
+        let votes: Vec<_> = schemes[..Q]
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal(view, parent, payload)).unwrap())
+            .collect();
+        SimplexFinalization::from_finalizes(&schemes[0], &votes, &Sequential).unwrap()
+    }
+
     #[test]
     fn finalize_vote_with_notarization_passes() {
         let (participants, schemes) = vote_fixture();
@@ -1108,5 +1378,316 @@ mod tests {
         ));
         let byzantine: HashSet<usize> = [0].into_iter().collect();
         check_vote_invariants_with_byzantine(&byzantine, &[rep]);
+    }
+
+    #[test]
+    #[should_panic(expected = "nullification certificate at genesis view 0")]
+    fn nullified_genesis_view_is_rejected() {
+        let r = replica(
+            views(vec![]),
+            views(vec![(0, nullification())]),
+            views(vec![]),
+        );
+        check::<SimplexId>(N, vec![r]);
+    }
+
+    #[test]
+    #[should_panic(expected = "nullify vote at genesis view 0")]
+    fn correct_signer_genesis_vote_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[1], round(0)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    fn byzantine_genesis_vote_is_allowed() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], round(0)).unwrap(),
+        ));
+        let byzantine: HashSet<usize> = [0].into_iter().collect();
+        check_vote_invariants_with_byzantine(&byzantine, &[rep]);
+    }
+
+    #[test]
+    #[should_panic(expected = "nullification certificate at genesis view 0")]
+    fn nullification_certificate_at_genesis_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Nullification(nullification_activity(&schemes, 0)));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    #[should_panic(expected = "correct signer notarized multiple payloads in view 5")]
+    fn certificate_signer_with_conflicting_notarize_vote_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(5, 4, 0xB)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    #[should_panic(expected = "vote equivocation in view 5")]
+    fn nullification_certificate_signer_with_finalize_vote_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Nullification(nullification_activity(&schemes, 5)));
+        rep.report(Activity::Finalize(
+            Finalize::sign(&schemes[1], proposal(5, 4, 0xA)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    #[should_panic(expected = "vote equivocation in view 5")]
+    fn finalization_certificate_signer_with_nullify_vote_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Finalization(finalization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[1], round(5)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    #[should_panic(expected = "correct signer finalized multiple payloads in view 5")]
+    fn finalization_certificate_signer_with_conflicting_finalize_vote_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Finalization(finalization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Finalize(
+            Finalize::sign(&schemes[1], proposal(5, 4, 0xB)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    fn byzantine_certificate_signer_conflict_is_allowed() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(5, 4, 0xB)).unwrap(),
+        ));
+        let byzantine: HashSet<usize> = [1].into_iter().collect();
+        check_vote_invariants_with_byzantine(&byzantine, &[rep]);
+    }
+
+    #[test]
+    #[should_panic(expected = "finalize vote without notarization in view 5")]
+    fn finalization_certificate_without_notarization_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Finalization(finalization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    fn certificates_with_legal_timeout_overlap_pass() {
+        // A notarization and a nullification certificate in one view plus a
+        // minority finalize vote is a legal Simplex outcome (notarize, then
+        // time out) and must not be flagged.
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Nullification(nullification_activity(&schemes, 5)));
+        rep.report(Activity::Finalize(
+            Finalize::sign(&schemes[3], proposal(5, 4, 0xA)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "finalization certificate at view 5 coexists with 2 correct nullify signers"
+    )]
+    fn finalization_with_excess_nullify_signers_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Finalization(finalization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[2], round(5)).unwrap(),
+        ));
+        rep.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[3], round(5)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "nullification certificate at view 5 coexists with 2 correct finalize signers"
+    )]
+    fn nullification_with_excess_finalize_signers_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Nullification(nullification_activity(&schemes, 5)));
+        rep.report(Activity::Finalize(
+            Finalize::sign(&schemes[2], proposal(5, 4, 0xA)).unwrap(),
+        ));
+        rep.report(Activity::Finalize(
+            Finalize::sign(&schemes[3], proposal(5, 4, 0xA)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "notarization certificate at view 5 coexists with 2 correct conflicting notarize signers"
+    )]
+    fn notarization_with_excess_conflicting_notarize_signers_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[2], proposal(5, 4, 0xB)).unwrap(),
+        ));
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[3], proposal(5, 4, 0xB)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "finalization certificate at view 5 coexists with 2 correct conflicting finalize signers"
+    )]
+    fn finalization_with_excess_conflicting_finalize_signers_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Finalization(finalization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        rep.report(Activity::Finalize(
+            Finalize::sign(&schemes[2], proposal(5, 4, 0xB)).unwrap(),
+        ));
+        rep.report(Activity::Finalize(
+            Finalize::sign(&schemes[3], proposal(5, 4, 0xB)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    type ThresholdScheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
+
+    fn threshold_vote_fixture() -> (Vec<Ed25519PublicKey>, Vec<ThresholdScheme>) {
+        let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(
+            &mut test_rng(),
+            b"invariants-threshold-tests",
+            N,
+        );
+        (fixture.participants, fixture.schemes)
+    }
+
+    fn threshold_vote_reporter(
+        participants: &[Ed25519PublicKey],
+        schemes: &[ThresholdScheme],
+    ) -> Reporter<TestRng, ThresholdScheme, RoundRobin, Sha256Digest> {
+        Reporter::new(
+            test_rng(),
+            ReporterConfig {
+                participants: Set::try_from(participants.to_vec()).expect("unique keys"),
+                scheme: schemes[0].clone(),
+                elector: RoundRobin::default(),
+            },
+        )
+    }
+
+    fn threshold_notarization(
+        schemes: &[ThresholdScheme],
+        payload: u8,
+    ) -> SimplexNotarization<ThresholdScheme, Sha256Digest> {
+        let votes: Vec<_> = schemes[..Q]
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal(5, 4, payload)).unwrap())
+            .collect();
+
+        SimplexNotarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap()
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "notarization certificate at view 5 coexists with 2 correct conflicting notarize signers"
+    )]
+    fn non_attributable_certificate_with_f_plus_one_opposing_votes_is_rejected() {
+        assert!(
+            !<ThresholdScheme as commonware_cryptography::certificate::Scheme>::is_attributable()
+        );
+
+        let (participants, schemes) = threshold_vote_fixture();
+        let mut reporter = threshold_vote_reporter(&participants, &schemes);
+
+        let certificate = threshold_notarization(&schemes, 0xA);
+        assert!(get_signers::<ThresholdScheme>(&certificate.certificate, N as usize,).is_none());
+
+        reporter.report(Activity::Notarization(certificate));
+
+        // N=4, f=1: two opposing correct voters exceed f.
+        for signer in [2, 3] {
+            reporter.report(Activity::Notarize(
+                Notarize::sign(&schemes[signer], proposal(5, 4, 0xB)).unwrap(),
+            ));
+        }
+
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[reporter]);
+    }
+
+    #[test]
+    fn non_attributable_certificate_with_exactly_f_opposing_votes_passes() {
+        let (participants, schemes) = threshold_vote_fixture();
+        let mut reporter = threshold_vote_reporter(&participants, &schemes);
+
+        reporter.report(Activity::Notarization(threshold_notarization(
+            &schemes, 0xA,
+        )));
+
+        // Exactly f=1 opposing correct voter can be outside the certificate.
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[3], proposal(5, 4, 0xB)).unwrap(),
+        ));
+
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[reporter]);
     }
 }
