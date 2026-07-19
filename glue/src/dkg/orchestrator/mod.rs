@@ -67,14 +67,14 @@ mod mailbox;
 pub use mailbox::{Mailbox, Message};
 
 mod actor;
-pub use actor::{Actor, Config, SimplexConfig, StateSync};
+pub use actor::{Actor, Config, SimplexConfig};
 
 #[cfg(test)]
 mod tests {
-    use super::{Actor, Config, StateSync};
+    use super::{Actor, Config};
     use crate::dkg::{
-        anchor::Artifact,
         fence::Fence,
+        state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::mocks,
         types::{EpochInfo, EpochOutcome, Payload},
     };
@@ -374,6 +374,15 @@ mod tests {
                     max_pending_acks: NZUsize!(4),
                     strategy: Sequential,
                 },
+            )
+            .await;
+            let state_sync = StateSyncPlan::init(
+                context.child("state_sync_plan"),
+                StateSyncConfig {
+                    partition_prefix: partition_prefix.clone(),
+                    max_participants: NZU32!(16),
+                },
+                state_sync,
             )
             .await;
             let application = mocks::MockApplication::default();
@@ -762,7 +771,7 @@ mod tests {
                     strategy: Sequential,
                     simplex: mocks::simplex_config(),
                     gate,
-                    state_sync: None,
+                    state_sync: StateSyncPlan::disabled(),
                     blocks_per_epoch: NZU64!(2),
                     muxer_size: 16,
                     mailbox_size: NZUsize!(16),
@@ -822,11 +831,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 4);
-            let artifact = Artifact {
-                epoch: Epoch::zero(),
-                finalization: None,
-                info: make_epoch_info(Epoch::zero(), fixture.participants.iter().cloned()),
-            };
+            let info = make_epoch_info(Epoch::zero(), fixture.participants.iter().cloned());
             let genesis = make_genesis_block(
                 fixture.participants[0].clone(),
                 fixture.participants.iter().cloned(),
@@ -840,7 +845,7 @@ mod tests {
                 &fixture.schemes,
             );
 
-            let state_sync = StateSync { artifact, floor };
+            let state_sync = StateSync { info, floor };
             let _cluster = Cluster::start_with_state_sync(&mut context, &fixture, state_sync).await;
         });
     }

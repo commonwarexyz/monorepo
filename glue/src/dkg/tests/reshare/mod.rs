@@ -377,6 +377,44 @@ fn reshare_e2e_state_sync_epoch_first_next_player() {
 
 #[test_group("slow")]
 #[test_traced("INFO")]
+fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
+    let next_player_epoch = Epoch::new(1);
+    let state_sync_floor = FixedEpocher::new(EPOCH_LENGTH)
+        .first(next_player_epoch)
+        .expect("test epoch should be supported");
+    let last_before_boundary = FixedEpocher::new(EPOCH_LENGTH)
+        .last(next_player_epoch)
+        .and_then(|height| height.previous())
+        .expect("test epoch should have a pre-boundary height");
+    let crash_window_start = state_sync_floor.get() + EPOCH_LENGTH.get() / 2;
+    let engine = ReshareEngine::with_committee(6, 4).with_state_sync_floor(state_sync_floor);
+    let delayed = engine.participants[5].clone();
+    let state_sync_starts = engine.state_sync_starts.clone();
+    let result = state_sync_next_player_plan(
+        engine,
+        3,
+        5,
+        next_player_epoch,
+        next_player_epoch.next(),
+        BoundaryEpochInfos::new(4),
+    )
+    .crash(Crash::ProcessedHeight {
+        participant: delayed.clone(),
+        heights: crash_window_start..=last_before_boundary.get(),
+        downtime: Duration::from_millis(250),
+    })
+    .timeout(Duration::from_secs(120))
+    .run()
+    .unwrap()
+    .pop()
+    .unwrap();
+
+    assert_eq!(result.crashes, 1);
+    assert_eq!(state_sync_starts.lock().get(&delayed), Some(&1));
+}
+
+#[test_group("slow")]
+#[test_traced("INFO")]
 fn reshare_e2e_state_sync_epoch_zero_next_player() {
     let next_player_epoch = Epoch::zero();
     state_sync_next_player_plan(

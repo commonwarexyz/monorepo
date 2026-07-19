@@ -10,7 +10,8 @@ use crate::dkg::{
 };
 use commonware_consensus::{
     marshal::{Identifier, core::Variant as MarshalVariant},
-    types::{Epoch, EpochPhase, Epocher, Height},
+    simplex::scheme::Scheme as SimplexScheme,
+    types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
@@ -63,6 +64,30 @@ where
     Participate(Box<PreparedEpoch<V, C>>),
 }
 
+fn startup_height(
+    epocher: &FixedEpocher,
+    current_epoch: Option<Epoch>,
+    state_sync_epoch: Option<Epoch>,
+    processed: Option<Height>,
+) -> Height {
+    if let Some(epoch) = state_sync_epoch {
+        return processed.map_or_else(
+            || {
+                epocher
+                    .first(epoch)
+                    .expect("epocher must know synced epoch")
+            },
+            Height::next,
+        );
+    }
+    if let Some(epoch) = current_epoch {
+        return epocher
+            .first(epoch)
+            .expect("epocher must know hinted epoch");
+    }
+    processed.map_or_else(Height::zero, Height::next)
+}
+
 impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
@@ -75,7 +100,7 @@ where
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme,
+    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
@@ -84,20 +109,17 @@ where
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey>,
         current_epoch: Option<Epoch>,
+        state_sync_info: Option<EpochInfo<V, C::PublicKey>>,
     ) -> Option<Setup<V, C>> {
         self.metrics.set_phase(Phase::Setup);
 
-        let height = match current_epoch {
-            Some(epoch) => self
-                .epocher
-                .first(epoch)
-                .expect("epocher must know hinted epoch"),
-            None => self
-                .marshal
-                .get_processed_height()
-                .await
-                .map_or_else(Height::zero, Height::next),
+        let state_sync_epoch = state_sync_info.as_ref().map(|info| info.epoch);
+        let processed = if state_sync_epoch.is_some() || current_epoch.is_none() {
+            self.marshal.get_processed_height().await
+        } else {
+            None
         };
+        let height = startup_height(&self.epocher, current_epoch, state_sync_epoch, processed);
         let bounds = self
             .epocher
             .containing(height)
@@ -106,7 +128,7 @@ where
 
         let current = store.current().filter(|current| current.epoch == epoch);
         let already_committed = current.is_some();
-        let info = match current {
+        let info = match current.or(state_sync_info) {
             Some(info) => info,
             None => {
                 let Some(info) = self.boundary_epoch_info(epoch).await else {
@@ -257,5 +279,23 @@ where
             dealer,
             player,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_height;
+    use commonware_consensus::types::{Epoch, Epocher as _, FixedEpocher};
+    use commonware_utils::NZU64;
+
+    #[test]
+    fn state_sync_without_processed_height_starts_in_synced_epoch() {
+        let epocher = FixedEpocher::new(NZU64!(64));
+        let epoch = Epoch::new(3);
+
+        assert_eq!(
+            startup_height(&epocher, Some(epoch), Some(epoch), None),
+            epocher.first(epoch).expect("test epoch")
+        );
     }
 }

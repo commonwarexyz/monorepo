@@ -10,12 +10,13 @@
 //!   [`SecretStore`]);
 //! - finalized dealer logs observed during inclusion.
 //!
-//! The current epoch's public state is not persisted here: it is re-derived from
-//! the finalized boundary block that anchors the epoch (see the setup state), so
-//! this store never caches public epoch info. Everything secret stays out of this
-//! plaintext store and is held only through [`SecretStore`]: shares, private
-//! dealings, and the dealer RNG seed (which seeds the dealer polynomial and so
-//! reveals every share that dealer distributes).
+//! The current epoch's public state is not persisted here: ordinary recovery
+//! re-derives it from the finalized boundary block, while state-sync recovery
+//! uses the shared [`state_sync::Plan`](crate::dkg::state_sync::Plan). Everything
+//! secret stays out of this plaintext store and is held only through
+//! [`SecretStore`]: shares, private dealings, and the dealer RNG seed (which
+//! seeds the dealer polynomial and so reveals every share that dealer
+//! distributes).
 
 use crate::dkg::{SecretStore, types::EpochInfo};
 use bytes::{Buf, BufMut};
@@ -156,9 +157,9 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// DKG/reshare crash-recovery store.
 ///
 /// The plaintext side holds only the dealer-message, acknowledgement, and
-/// finalized-log journal. The current epoch's public state is re-derived from
-/// finalized boundary blocks, not cached here. All secret material (shares,
-/// private dealings, and the dealer RNG seed) is held only through
+/// finalized-log journal. The current epoch's public state comes from finalized
+/// boundary blocks or the separate state-sync store, not this journal. All
+/// secret material (shares, private dealings, and the dealer RNG seed) is held only through
 /// [`SecretStore`], never in plaintext.
 pub struct Store<E, SS, V, P>
 where

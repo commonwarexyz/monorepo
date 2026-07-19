@@ -3,7 +3,10 @@ use crate::dkg::{
     reshare::{Actor, EpochInfoResponse, Message, metrics::Phase, store::Store},
     types::Payload,
 };
-use commonware_consensus::{marshal::core::Variant as MarshalVariant, types::Epocher};
+use commonware_consensus::{
+    marshal::core::Variant as MarshalVariant, simplex::scheme::Scheme as SimplexScheme,
+    types::Epocher,
+};
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
     certificate::Scheme,
@@ -31,7 +34,7 @@ where
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme,
+    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,

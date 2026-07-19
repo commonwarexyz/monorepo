@@ -72,8 +72,9 @@
 //! are journaled by [`Store`]: dealer public messages, player acknowledgements,
 //! and finalized dealer logs. Secret material is kept only in [`SecretStore`]:
 //! current shares, private dealings, and dealer RNG seeds. Public epoch info is
-//! not cached in the recovery journal because it is re-derived from finalized
-//! boundary blocks on startup.
+//! normally re-derived from finalized boundary blocks; state-sync startup
+//! material is retained separately and removed on a later startup after marshal
+//! has advanced beyond its epoch.
 //!
 //! ```text
 //! restart
@@ -137,11 +138,13 @@ use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
     reshare::{Mailbox, Message, metrics::Metrics as ReshareMetrics, store::Store},
+    state_sync::{self, Plan as StateSyncPlan},
     types::EpochInfo,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
+    simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher},
 };
 use commonware_cryptography::{
@@ -197,8 +200,9 @@ pub struct Config<C, M, X, P, SS, T, BV, S, MV, R>
 where
     C: Signer,
     X: Blocker<PublicKey = C::PublicKey>,
-    S: Scheme,
+    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant,
+    R: Registrar<PublicKey = C::PublicKey>,
 {
     /// Signer for player acknowledgments and dealer logs.
     pub signer: C,
@@ -228,8 +232,8 @@ where
     /// boundary blocks.
     pub marshal: MarshalMailbox<S, MV>,
 
-    /// State sync floor commitment, if marshal is starting from a floor.
-    pub state_sync_floor: Option<MV::Commitment>,
+    /// Shared DKG state-sync startup recovery plan.
+    pub state_sync: StateSyncPlan<S, MV::Commitment, R::Variant>,
 
     /// Epoch readiness fence.
     pub fence: Fence,
@@ -269,7 +273,7 @@ where
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme,
+    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
@@ -284,7 +288,7 @@ where
     strategy: T,
     registrar: R,
     marshal: MarshalMailbox<S, MV>,
-    state_sync_floor: Option<MV::Commitment>,
+    state_sync: StateSyncPlan<S, MV::Commitment, V>,
     fence: Fence,
     namespace: &'static [u8],
     sharing_mode: SharingMode,
@@ -309,7 +313,7 @@ where
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme,
+    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
@@ -333,7 +337,7 @@ where
                 strategy: config.strategy,
                 registrar: config.registrar,
                 marshal: config.marshal,
-                state_sync_floor: config.state_sync_floor,
+                state_sync: config.state_sync,
                 fence: config.fence,
                 namespace: config.namespace,
                 sharing_mode: config.sharing_mode,
@@ -390,9 +394,22 @@ where
         let (mux, mut dealing_mux) = Muxer::new(self.context.child("mux"), sender, receiver, 128);
         mux.start();
 
-        if let Some(commitment) = self.state_sync_floor.take() {
+        let recovered_epoch = state_sync::recovered_epoch(&self.marshal, &self.epocher).await;
+        let state_sync = self
+            .state_sync
+            .resolve(
+                self.context.as_present().child("state_sync"),
+                recovered_epoch,
+            )
+            .await;
+        if let Some(state_sync) = &state_sync {
+            let share = self.recovered_share(&mut store, &state_sync.info).await;
+            self.register_epoch(&state_sync.info, share).await;
             self.marshal
-                .subscribe_by_commitment(commitment, CommitmentFallback::Wait)
+                .subscribe_by_commitment(
+                    state_sync.floor.proposal.payload,
+                    CommitmentFallback::Wait,
+                )
                 .await
                 .expect("marshal must yield state sync floor block");
         }
@@ -402,9 +419,13 @@ where
             return;
         }
 
-        let mut current_epoch = None;
+        let mut current_epoch = state_sync.as_ref().map(|state_sync| state_sync.info.epoch);
+        let mut state_sync_info = state_sync.map(|state_sync| state_sync.info);
         loop {
-            let Some(prepared) = self.setup(&mut store, current_epoch.take()).await else {
+            let Some(prepared) = self
+                .setup(&mut store, current_epoch.take(), state_sync_info.take())
+                .await
+            else {
                 return;
             };
             let Setup::Participate(prepared) = prepared else {
