@@ -17,7 +17,6 @@ use commonware_consensus::{
     Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardingPolicy, config,
-        elector::Config as _,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
     },
@@ -37,7 +36,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, channel::mpsc::Receiver};
+use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -154,7 +153,7 @@ impl Arbitrary<'_> for FuzzInput {
 
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
-        let term_length = TermLength::new(NZU64!(u.int_in_range(1..=5)?));
+        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=5)?));
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -363,7 +362,7 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
 {
-    let elector = P::Elector::default().with_term_length(term_length);
+    let elector = P::elector(term_length);
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
         scheme: scheme.clone(),
@@ -402,7 +401,6 @@ where
         activity_timeout: Delta::new(10),
         skip_timeout: Duration::from_secs(11),
         fetch_concurrent: NZUsize!(1),
-        finalization_timeout: Duration::from_secs(12),
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -606,7 +604,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
             // Primary: legitimate engine
             let primary_context = context.child("primary");
-            let primary_elector = P::Elector::default().with_term_length(input.term_length);
+            let primary_elector = P::elector(input.term_length);
             let reporter_cfg = reporter::Config {
                 participants: participants
                     .as_ref()
@@ -649,7 +647,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 activity_timeout: Delta::new(10),
                 skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(1),
-                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),

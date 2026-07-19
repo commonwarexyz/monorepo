@@ -59,7 +59,22 @@ impl<
         // Ensure configuration is valid
         cfg.assert(&mut context);
         let elector = cfg.elector.build(cfg.scheme.participants());
-        let term_length = elector.term_length();
+        let terms = elector.terms();
+        let term_length = terms.length();
+        if let elector::Terms::Stable {
+            length,
+            stall_timeout,
+        } = terms
+        {
+            assert!(
+                length.get() > 1,
+                "stable leaders require a term length greater than 1"
+            );
+            assert!(
+                stall_timeout > cfg.certification_timeout,
+                "stall timeout must be greater than certification timeout"
+            );
+        }
 
         // Create batcher
         let (batcher, batcher_mailbox) = batcher::Actor::new(
@@ -97,7 +112,6 @@ impl<
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
                 activity_timeout: cfg.activity_timeout,
-                finalization_timeout: cfg.finalization_timeout,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 page_cache: cfg.page_cache,

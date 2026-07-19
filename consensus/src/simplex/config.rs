@@ -194,23 +194,6 @@ where
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: NonZeroUsize,
 
-    /// Maximum time an entered view may remain unfinalized before we allow a
-    /// local nullify vote for the current view.
-    ///
-    /// With stable leaders, a Byzantine leader can keep every per-view timer
-    /// satisfied while preventing finality: each view notarizes and certifies
-    /// (so the leader and certification timeouts never fire), but no
-    /// finalization certificate forms. With a `term_length` of 1, leader
-    /// rotation bounds such a stall to a single view. With longer terms, this
-    /// timeout bounds it instead: it tracks the oldest entered, unfinalized
-    /// view in the current term and triggers a nullify vote for the current
-    /// view when it expires, skipping the rest of the term.
-    ///
-    /// This timeout must be greater than the certification timeout so normal
-    /// proposal and certification paths have a chance to complete before
-    /// term-level abandonment.
-    pub finalization_timeout: Duration,
-
     /// Policy for proactively forwarding certified blocks when entering the
     /// next view.
     pub forwarding: ForwardingPolicy,
@@ -241,7 +224,7 @@ impl<
         );
 
         // Vote-to-nullify timeouts.
-        // finalization_timeout > certification_timeout > leader_timeout > 0.
+        // certification_timeout > leader_timeout > 0.
         // skip_timeout > certification_timeout and timeout_retry.
         assert!(
             self.leader_timeout > Duration::default(),
@@ -250,10 +233,6 @@ impl<
         assert!(
             self.certification_timeout > self.leader_timeout,
             "certification timeout must be greater than leader timeout"
-        );
-        assert!(
-            self.finalization_timeout > self.certification_timeout,
-            "finalization timeout must be greater than certification timeout"
         );
 
         assert!(

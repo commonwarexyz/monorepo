@@ -3016,7 +3016,7 @@ mod tests {
                 epoch,
                 BatcherOptions {
                     skip_timeout: Duration::from_millis(100),
-                    term_length: TermLength::new(commonware_utils::NZU64!(5)),
+                    term_length: TermLength::new(commonware_utils::NZU32!(5)),
                     ..Default::default()
                 },
             );

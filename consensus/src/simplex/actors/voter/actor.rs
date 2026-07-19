@@ -175,7 +175,6 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
-                finalization_timeout: cfg.finalization_timeout,
             },
         );
         (
@@ -795,9 +794,10 @@ impl<
     /// before it is broadcast (via [Self::notify]).
     ///
     /// We don't need to iterate over all views to check for new actions because messages we receive
-    /// only affect a single view. In particular, healing the same-term finalize gate deliberately
-    /// does not retry finalize votes for views certified while the gate was blocked (see the module
-    /// documentation on same-term vote safety for the consequences).
+    /// only affect a single view. In particular, healing the same-term finalize gate does not
+    /// proactively retry finalize votes for views certified while the gate was blocked: such a view
+    /// only emits its vote if a later message touches it again (see the module documentation on
+    /// same-term vote safety for the consequences when none arrives).
     async fn construct(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,

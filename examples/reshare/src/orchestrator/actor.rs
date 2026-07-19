@@ -10,7 +10,7 @@ use commonware_consensus::{
     CertifiableAutomaton, Relay,
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
     simplex::{self, Floor, Plan, elector, scheme, types::Context},
-    types::{Epoch, Epocher, FixedEpocher, Height, TermLength, ViewDelta},
+    types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
     Digestible, Hasher, Signer, bls12381::primitives::variant::Variant, certificate::Scheme,
@@ -330,7 +330,7 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
-        let elector = L::default().with_term_length(TermLength::ONE);
+        let elector = L::default();
         let context = self
             .context
             .child("consensus_engine")
@@ -359,7 +359,6 @@ where
                 fetch_concurrent: NZUsize!(32),
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
-                finalization_timeout: Duration::from_secs(12),
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );

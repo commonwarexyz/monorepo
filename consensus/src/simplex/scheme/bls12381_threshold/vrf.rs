@@ -14,7 +14,9 @@
 //! Applications that want to incorporate this embedded VRF into execution should employ a "commit-then-reveal" pattern
 //! and require users to bind to the output of randomness in advance (i.e. `draw(view+k)` means execution uses VRF output
 //! `k` views later). The larger `k`, the more likely that the transaction is finalized before the randomness is revealed (recall, Simplex
-//! is streamlined). The safest approach (if you're willing to wait) is to bound the outcome to a future epoch (which ensures a
+//! is streamlined). With stable leaders (`term_length > 1`), views skipped by a covering nullification never produce a seed, so only
+//! bind to a specific future round when every round is guaranteed a certificate (`term_length` of 1). The safest approach (if you're
+//! willing to wait) is to bound the outcome to a future epoch (which ensures a
 //! transaction is finalized before the VRF it relies on is revealed).
 //!
 //! _For applications willing to accept additional overhead, a more robust (and instant) VRF can be implemented

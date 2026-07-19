@@ -33,7 +33,7 @@ use commonware_cryptography::{
     Hasher, PublicKey, Sha256, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
 use commonware_utils::{modulo, ordered::Set};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, time::Duration};
 
 /// Configuration for creating an [`Elector`].
 ///
@@ -51,15 +51,6 @@ pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
     /// The initialized elector type.
     type Elector: Elector<S>;
 
-    /// Sets the term length.
-    ///
-    /// The term length is consensus-critical: every participant must configure
-    /// the same value (see [`TermLength`]).
-    ///
-    /// Implementations that do not support stable leaders should panic when
-    /// `term_length > 1`.
-    fn with_term_length(self, term_length: TermLength) -> Self;
-
     /// Builds the elector with the given participants.
     ///
     /// Called internally by consensus with the correct participant set.
@@ -68,6 +59,54 @@ pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
     ///
     /// Implementations should panic if `participants` is empty.
     fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector;
+}
+
+/// Leadership term structure reported by an [`Elector`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Terms {
+    /// Every view is its own term: a new leader is elected each view, and
+    /// leader rotation itself bounds how long finality can stall.
+    #[default]
+    Single,
+    /// Views are grouped into terms of `length` consecutive views served by
+    /// one leader.
+    Stable {
+        /// Number of consecutive views per term (greater than 1).
+        ///
+        /// Consensus-critical: every participant must configure the same
+        /// value (see [`TermLength`]).
+        length: TermLength,
+        /// Maximum time an entered view may remain unfinalized before this
+        /// participant abandons the term: on expiry it treats its current
+        /// view as timed out and votes nullify, which (with a quorum) forms
+        /// a nullification covering the rest of the term and evicts the
+        /// leader.
+        ///
+        /// A Byzantine stable leader can keep every per-view timer satisfied
+        /// while preventing finality: each view notarizes and certifies, but
+        /// no finalization certificate forms. With single-view terms, leader
+        /// rotation bounds such a stall to one view. With longer terms, this
+        /// timeout bounds it instead.
+        stall_timeout: Duration,
+    },
+}
+
+impl Terms {
+    /// Returns the number of consecutive views per term.
+    pub const fn length(&self) -> TermLength {
+        match self {
+            Self::Single => TermLength::ONE,
+            Self::Stable { length, .. } => *length,
+        }
+    }
+
+    /// Returns the term-abandonment timeout, if stable leaders are configured.
+    pub const fn stall_timeout(&self) -> Option<Duration> {
+        match self {
+            Self::Single => None,
+            Self::Stable { stall_timeout, .. } => Some(*stall_timeout),
+        }
+    }
 }
 
 /// An initialized elector that can select leaders for consensus rounds.
@@ -90,21 +129,21 @@ pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
 /// nullification), and with `term_length > 1` those certificates may even be
 /// from different views. Implementations that derive the leader from the
 /// certificate must return the same leader for every certificate that can
-/// unlock the round; this is why [`Random`] rejects `term_length > 1`, where
-/// certificates from different views carry different randomness.
+/// unlock the round; this is why [`Random`] does not support `term_length > 1`,
+/// where certificates from different views carry different randomness.
 pub trait Elector<S: Scheme>: Clone + Send + 'static {
-    /// Returns the term length this elector was built with.
+    /// Returns the leadership term structure this elector was built with.
     ///
     /// Callers that need term arithmetic should use this value so leader
     /// election and protocol term handling stay aligned.
-    fn term_length(&self) -> TermLength;
+    fn terms(&self) -> Terms;
 
     /// Selects the leader for the given round.
     ///
     /// This method **must** be a pure function given the elector's initialization state.
     ///
     /// Implementations **must** return the same leader for every view within a
-    /// stable-leader term (as defined by [`Self::term_length`]): nullification
+    /// stable-leader term (as defined by [`Self::terms`]): nullification
     /// coverage, finalize gating, and leader-inactivity tracking all assume the
     /// leader is constant for the remainder of a term.
     ///
@@ -124,7 +163,7 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
 #[derive(Clone, Debug, Default)]
 pub struct RoundRobin<H: Hasher = Sha256> {
     seed: Option<Vec<u8>>,
-    term_length: TermLength,
+    terms: Terms,
     _phantom: PhantomData<H>,
 }
 
@@ -136,24 +175,37 @@ impl<H: Hasher> RoundRobin<H> {
     pub fn shuffled(seed: &[u8]) -> Self {
         Self {
             seed: Some(seed.to_vec()),
-            term_length: TermLength::ONE,
+            terms: Terms::Single,
             _phantom: PhantomData,
         }
     }
 
-    /// Sets the number of consecutive views that share a leader.
-    pub const fn with_term_length(mut self, term_length: TermLength) -> Self {
-        self.term_length = term_length;
+    /// Enables stable leaders: `term_length` consecutive views share a leader,
+    /// and a term abandoned after `stall_timeout` evicts them (see
+    /// [`Terms::Stable`]).
+    ///
+    /// The term length is consensus-critical: every participant must configure
+    /// the same value (see [`TermLength`]). The timeout is local policy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `term_length` is 1 (single-view terms need no timeout and are
+    /// the default).
+    pub const fn with_term(mut self, term_length: TermLength, stall_timeout: Duration) -> Self {
+        assert!(
+            term_length.get() > 1,
+            "stable leaders require a term length greater than 1"
+        );
+        self.terms = Terms::Stable {
+            length: term_length,
+            stall_timeout,
+        };
         self
     }
 }
 
 impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
     type Elector = RoundRobinElector<S>;
-
-    fn with_term_length(self, term_length: TermLength) -> Self {
-        Self::with_term_length(self, term_length)
-    }
 
     fn build(self, participants: &Set<S::PublicKey>) -> RoundRobinElector<S> {
         assert!(!participants.is_empty(), "no participants");
@@ -173,7 +225,7 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 
         RoundRobinElector {
             permutation,
-            term_length: self.term_length,
+            terms: self.terms,
             _phantom: PhantomData,
         }
     }
@@ -185,18 +237,18 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 #[derive(Clone, Debug)]
 pub struct RoundRobinElector<S: Scheme> {
     permutation: Vec<Participant>,
-    term_length: TermLength,
+    terms: Terms,
     _phantom: PhantomData<S>,
 }
 
 impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
-    fn term_length(&self) -> TermLength {
-        self.term_length
+    fn terms(&self) -> Terms {
+        self.terms
     }
 
     fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
         // In order to get a stable leader, use the 1-based index of the term
-        let term_idx = round.view().term_index(self.term_length);
+        let term_idx = round.view().term_index(self.terms.length());
 
         // Incorporate the epoch number
         let n = self.permutation.len();
@@ -213,8 +265,8 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 /// leader selection. Falls back to standard round-robin for view 1 when no
 /// certificate is available.
 ///
-/// This elector does not support stable leaders and panics during construction
-/// when `term_length > 1`. Use [`RoundRobin`] for stable-leader configurations.
+/// This elector does not support stable leaders: it has no term-length
+/// configuration and [`Elector::terms`] always returns [`Terms::Single`].
 ///
 /// Only works with [`super::scheme::bls12381_threshold::vrf`]
 /// (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
@@ -222,18 +274,6 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 pub struct Random;
 
 impl Random {
-    /// Configure the length of each leader term.
-    ///
-    /// Random leader election only supports single-view terms.
-    pub fn with_term_length(self, term_length: TermLength) -> Self {
-        assert_eq!(
-            term_length,
-            TermLength::ONE,
-            "random elector does not support stable leaders (term_length > 1)"
-        );
-        self
-    }
-
     /// Returns the selected leader index for the given round and seed signature.
     pub fn select_leader<V: Variant>(
         round: Round,
@@ -261,10 +301,6 @@ where
 {
     type Elector = RandomElector<bls12381_threshold_vrf::Scheme<P, V>>;
 
-    fn with_term_length(self, term_length: TermLength) -> Self {
-        Self::with_term_length(self, term_length)
-    }
-
     fn build(self, participants: &Set<P>) -> RandomElector<bls12381_threshold_vrf::Scheme<P, V>> {
         assert!(!participants.is_empty(), "no participants");
         RandomElector {
@@ -289,8 +325,8 @@ where
     P: PublicKey,
     V: Variant,
 {
-    fn term_length(&self) -> TermLength {
-        TermLength::ONE
+    fn terms(&self) -> Terms {
+        Terms::Single
     }
 
     fn elect(
@@ -325,7 +361,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, NZU64, TryFromIterator, test_rng};
+    use commonware_utils::{Faults, N3f1, NZU32, TryFromIterator, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -387,11 +423,11 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term_length(TermLength::new(NZU64!(5)))
+            .with_term(TermLength::new(NZU32!(5)), Duration::from_secs(10))
             .build(&participants);
 
         let round = Round::new(Epoch::new(u64::MAX - 1), View::new(6));
-        let term_idx = round.view().term_index(TermLength::new(NZU64!(5)));
+        let term_idx = round.view().term_index(TermLength::new(NZU32!(5)));
         let expected = round.epoch().get().wrapping_add(term_idx) % 5;
 
         assert_eq!(
@@ -406,7 +442,7 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term_length(TermLength::new(NZU64!(3)))
+            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
             .build(&participants);
         let epoch = Epoch::new(0);
 
@@ -430,7 +466,7 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term_length(TermLength::new(NZU64!(3)))
+            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
             .build(&participants);
 
         let leader_epoch_0 = elector.elect(Round::new(Epoch::new(0), View::new(1)), None);
@@ -505,6 +541,13 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "stable leaders require a term length greater than 1")]
+    fn round_robin_with_term_panics_on_term_length_one() {
+        let _ =
+            <RoundRobin>::default().with_term(TermLength::new(NZU32!(1)), Duration::from_secs(10));
     }
 
     #[test]
@@ -618,18 +661,6 @@ mod tests {
     fn random_build_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
         let _: RandomElector<ThresholdScheme> = Random.build(&participants);
-    }
-
-    #[test]
-    #[should_panic(expected = "random elector does not support stable leaders")]
-    fn random_with_term_length_panics_on_term_length_greater_than_1() {
-        let mut rng = test_rng();
-        let Fixture { participants, .. } =
-            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
-        let participants = Set::try_from_iter(participants).unwrap();
-        let _: RandomElector<ThresholdScheme> = Random
-            .with_term_length(TermLength::new(NZU64!(2)))
-            .build(&participants);
     }
 
     #[test]

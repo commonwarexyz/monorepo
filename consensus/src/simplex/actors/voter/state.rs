@@ -125,7 +125,6 @@ pub struct Config<S: certificate::Scheme, L: Elector<S>> {
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
-    pub finalization_timeout: Duration,
 }
 
 /// Per-[Epoch] state machine.
@@ -141,15 +140,14 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     leader_timeout: Duration,
     certification_timeout: Duration,
     timeout_retry: Duration,
-    finalization_timeout: Duration,
     view: View,
     last_finalized: View,
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
     /// Monotone cursor for the oldest entered, unfinalized view (the anchor of
-    /// the finalization timeout). See [`Self::next_finalization_timeout`].
-    finalization_anchor: View,
+    /// the stall timeout). See [`Self::next_stall_timeout`].
+    stall_anchor: View,
 
     /// Views for which we have voted to nullify.
     ///
@@ -187,12 +185,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             leader_timeout: cfg.leader_timeout,
             certification_timeout: cfg.certification_timeout,
             timeout_retry: cfg.timeout_retry,
-            finalization_timeout: cfg.finalization_timeout,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
-            finalization_anchor: GENESIS_VIEW,
+            stall_anchor: GENESIS_VIEW,
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
@@ -248,7 +245,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns the term length of the elector.
     fn term_length(&self) -> TermLength {
-        self.elector.term_length()
+        self.elector.terms().length()
     }
 
     /// Returns whether a vote for `pending` is still relevant for progress.
@@ -289,15 +286,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let now = self.context.current();
         let leader_deadline = now + self.leader_timeout;
         let certification_deadline = now + self.certification_timeout;
-        let finalization_deadline = now + self.finalization_timeout;
+        let stall_deadline = self
+            .elector
+            .terms()
+            .stall_timeout()
+            .map(|timeout| now + timeout);
 
         let round = self.create_round(view);
         round.open_span();
-        round.set_deadlines(
-            leader_deadline,
-            certification_deadline,
-            finalization_deadline,
-        );
+        round.set_deadlines(leader_deadline, certification_deadline, stall_deadline);
         self.view = view;
 
         // Update metrics
@@ -370,25 +367,28 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         };
 
         // Once the current view is retrying a nullify, retry cadence should be governed
-        // by timeout_retry. An older expired same-term finalization deadline may still
+        // by timeout_retry. An older expired same-term stall deadline may still
         // exist for the first unfinalized view in the term.
         if matches!(round_timeout.1, TimeoutReason::Retry) {
             return round_timeout;
         }
 
-        // The finalization anchor only overrides a round timeout that has not
+        // The stall anchor only overrides a round timeout that has not
         // itself expired: when both are due, the round's reason (e.g. a latched
         // LeaderNullify or InvalidProposal) is the more diagnostic label for
         // the nullify metric.
-        self.next_finalization_timeout()
+        self.next_stall_timeout()
             .filter(|&deadline| deadline <= round_timeout.0 && now < round_timeout.0)
-            .map(|deadline| (deadline, TimeoutReason::FinalizationTimeout))
+            .map(|deadline| (deadline, TimeoutReason::StallTimeout))
             .unwrap_or(round_timeout)
     }
 
-    /// Returns the oldest entered, unfinalized view's finalization deadline in
+    /// Returns the oldest entered, unfinalized view's stall deadline in
     /// the current term, advancing the cached anchor past skipped rounds.
-    fn next_finalization_timeout(&mut self) -> Option<SystemTime> {
+    ///
+    /// Returns `None` when no stall timeout is configured (rounds never
+    /// arm a deadline).
+    fn next_stall_timeout(&mut self) -> Option<SystemTime> {
         let term_start = self.view.term_start(self.term_length());
         let unfinalized_view = self.last_finalized.next().max(term_start);
 
@@ -396,15 +396,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // jumped past it by certifying a future notarization), and a skipped
         // round never acquires a deadline (views are entered in order), so we
         // anchor on the oldest entered, unfinalized view in the current term.
-        // `finalization_anchor` advances monotonically past skipped rounds,
+        // `stall_anchor` advances monotonically past skipped rounds,
         // keeping the scan amortized constant time (it always terminates by
         // the current view's round, which was entered).
-        let start = self.finalization_anchor.max(unfinalized_view);
+        let start = self.stall_anchor.max(unfinalized_view);
         let (anchor, deadline) = self
             .views
             .range(start..=self.view)
-            .find_map(|(view, round)| round.finalization_deadline().map(|d| (*view, d)))?;
-        self.finalization_anchor = anchor;
+            .find_map(|(view, round)| round.stall_deadline().map(|d| (*view, d)))?;
+        self.stall_anchor = anchor;
         Some(deadline)
     }
 
@@ -842,7 +842,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .expect("notarization must exist for certified view");
 
         if is_success {
-            // Keep the finalization deadline armed after certification so the
+            // Keep the stall deadline armed after certification so the
             // term-level timeout can still abandon a term that certifies but
             // never finalizes.
             self.enter_view(view.next());
@@ -1057,7 +1057,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZU64, futures::AbortablePool};
+    use commonware_utils::{NZU32, futures::AbortablePool};
     use std::time::Duration;
 
     fn round_robin<S: certificate::Scheme>(scheme: &S) -> RoundRobinElector<S> {
@@ -1067,9 +1067,10 @@ mod tests {
     fn round_robin_with_term<S: certificate::Scheme>(
         scheme: &S,
         term_length: TermLength,
+        stall_timeout: Duration,
     ) -> RoundRobinElector<S> {
         <RoundRobin>::default()
-            .with_term_length(term_length)
+            .with_term(term_length, stall_timeout)
             .build(scheme.participants())
     }
 
@@ -1132,7 +1133,6 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(30),
                 },
             );
             state.set_genesis(test_genesis());
@@ -1175,7 +1175,7 @@ mod tests {
         validators: usize,
         epoch: u64,
         activity_timeout: u64,
-        term_length: u64,
+        term_length: u32,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
         let namespace = b"ns".to_vec();
         let fixture = ed25519::fixture(
@@ -1183,20 +1183,24 @@ mod tests {
             &namespace,
             validators.try_into().expect("validator count fits in u32"),
         );
+        let elector = match term_length {
+            1 => round_robin(&fixture.verifier),
+            _ => round_robin_with_term(
+                &fixture.verifier,
+                TermLength::new(NZU32!(term_length)),
+                Duration::from_secs(30),
+            ),
+        };
         let state = State::new(
             context.child("state"),
             Config {
                 scheme: fixture.verifier.clone(),
-                elector: round_robin_with_term(
-                    &fixture.verifier,
-                    TermLength::new(NZU64!(term_length)),
-                ),
+                elector,
                 epoch: Epoch::new(epoch),
                 activity_timeout: ViewDelta::new(activity_timeout),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(30),
             },
         );
         let mut state = state;
@@ -1222,7 +1226,6 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             state.set_genesis(test_genesis());
@@ -1282,7 +1285,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
-                finalization_timeout: Duration::from_secs(30),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1359,7 +1361,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
-                finalization_timeout: Duration::from_secs(30),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1416,7 +1417,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(30),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1467,7 +1467,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1511,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_timeout_tracks_oldest_unfinalized_view() {
+    fn stall_timeout_tracks_oldest_unfinalized_view() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -1520,13 +1519,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(3)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(33),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1586,7 +1588,7 @@ mod tests {
 
             assert_eq!(
                 state.next_timeout(),
-                (oldest_deadline, TimeoutReason::FinalizationTimeout,),
+                (oldest_deadline, TimeoutReason::StallTimeout,),
                 "oldest unfinalized view in the term should drive the timeout"
             );
 
@@ -1604,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_timeout_ignores_prior_terms() {
+    fn stall_timeout_ignores_prior_terms() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -1613,13 +1615,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(3)),
+                    Duration::from_secs(12),
+                ),
                 epoch: Epoch::new(34),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(11),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(12),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1655,19 +1660,22 @@ mod tests {
             let same_term_timeout = Duration::from_millis(30);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(3)),
+                    same_term_timeout,
+                ),
                 epoch: Epoch::new(35),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_millis(10),
                 certification_timeout: Duration::from_millis(20),
                 timeout_retry: retry,
-                finalization_timeout: same_term_timeout,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
             let oldest_deadline = context.current() + same_term_timeout;
 
-            // Certify view 1 late enough that its same-term finalization deadline expires
+            // Certify view 1 late enough that its same-term stall deadline expires
             // after we enter view 2, then ensure view 2 nullify retries are rate-limited.
             let view_1 = View::new(1);
             let proposal = Proposal::new(
@@ -1685,12 +1693,12 @@ mod tests {
             context.sleep(Duration::from_millis(5)).await;
             assert_eq!(
                 state.next_timeout(),
-                (oldest_deadline, TimeoutReason::FinalizationTimeout,)
+                (oldest_deadline, TimeoutReason::StallTimeout,)
             );
 
             let view_2 = state.current_view();
             let (was_retry, _) = state
-                .construct_nullify(view_2, TimeoutReason::FinalizationTimeout)
+                .construct_nullify(view_2, TimeoutReason::StallTimeout)
                 .expect("same-term timeout should nullify current view");
             assert!(!was_retry);
 
@@ -1703,7 +1711,7 @@ mod tests {
     }
 
     #[test]
-    fn local_nullify_preserves_finalization_timeout() {
+    fn local_nullify_preserves_stall_timeout() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -1713,13 +1721,16 @@ mod tests {
             let same_term_timeout = Duration::from_secs(4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(3)),
+                    same_term_timeout,
+                ),
                 epoch: Epoch::new(36),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: same_term_timeout,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1728,7 +1739,7 @@ mod tests {
             let oldest_deadline = context.current() + same_term_timeout;
 
             // Mirror the actor's timeout sequence: trigger_timeout records the
-            // reason (and must not disturb the finalization deadline), then the
+            // reason (and must not disturb the stall deadline), then the
             // nullify vote is constructed.
             state.trigger_timeout(view_1, TimeoutReason::LeaderTimeout);
             let (was_retry, _) = state
@@ -1749,30 +1760,33 @@ mod tests {
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(
                 state.next_timeout(),
-                (oldest_deadline, TimeoutReason::FinalizationTimeout,),
+                (oldest_deadline, TimeoutReason::StallTimeout,),
                 "oldest unfinalized view should remain tracked after local nullify"
             );
         });
     }
 
     #[test]
-    fn finalization_timeout_survives_certificate_jump() {
+    fn stall_timeout_survives_certificate_jump() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, &namespace, 4);
-            let finalization_timeout = Duration::from_secs(4);
+            let stall_timeout = Duration::from_secs(4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(5)),
+                    stall_timeout,
+                ),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1792,13 +1806,45 @@ mod tests {
             assert!(state.certified(View::new(7), true).is_some());
             assert_eq!(state.current_view(), View::new(8));
 
-            // The finalization timeout must anchor on the oldest entered,
+            // The stall timeout must anchor on the oldest entered,
             // unfinalized view in the term (view 8) rather than silently
             // disabling itself because view 6 has no deadline.
             assert_eq!(
-                state.next_finalization_timeout(),
-                Some(entered + finalization_timeout),
-                "jumped-over views must not disable the finalization timeout"
+                state.next_stall_timeout(),
+                Some(entered + stall_timeout),
+                "jumped-over views must not disable the stall timeout"
+            );
+        });
+    }
+
+    #[test]
+    fn no_stall_deadline_when_unconfigured() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: round_robin(&schemes[0]),
+                epoch: Epoch::new(33),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context.child("state"), cfg);
+            state.set_genesis(test_genesis());
+            let entered = context.current();
+
+            // Without a configured stall timeout no round arms a stall
+            // deadline, and only the per-view timeouts drive next_timeout.
+            assert_eq!(state.next_stall_timeout(), None);
+            assert_eq!(
+                state.next_timeout(),
+                (
+                    entered + Duration::from_secs(1),
+                    TimeoutReason::LeaderTimeout
+                )
             );
         });
     }
@@ -1811,20 +1857,23 @@ mod tests {
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(3)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(9),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
 
-            // Let the term's finalization deadline expire, then latch an
+            // Let the term's stall deadline expire, then latch an
             // event-driven timeout: the latched reason must not be relabeled
-            // as FinalizationTimeout by the older expired anchor.
+            // as StallTimeout by the older expired anchor.
             context.sleep(Duration::from_secs(5)).await;
             let view = state.current_view();
             state.trigger_timeout(view, TimeoutReason::LeaderNullify);
@@ -1849,7 +1898,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1896,7 +1944,6 @@ mod tests {
                 leader_timeout,
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1963,7 +2010,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2024,7 +2070,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2079,7 +2124,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2131,7 +2175,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -2198,7 +2241,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -2623,13 +2665,16 @@ mod tests {
                 context.child("state"),
                 Config {
                     scheme: verifier.clone(),
-                    elector: round_robin_with_term(&verifier, TermLength::new(NZU64!(5))),
+                    elector: round_robin_with_term(
+                        &verifier,
+                        TermLength::new(NZU32!(5)),
+                        Duration::from_secs(4),
+                    ),
                     epoch,
                     activity_timeout: ViewDelta::new(20),
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             state.set_genesis(test_genesis());
@@ -2681,7 +2726,6 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             state.set_genesis(test_genesis());
@@ -2732,7 +2776,6 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             state.set_genesis(test_genesis());
@@ -2787,7 +2830,6 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             state.set_genesis(test_genesis());
@@ -2850,7 +2892,6 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             state.set_genesis(test_genesis());
@@ -2891,7 +2932,6 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             state.set_genesis(test_genesis());
@@ -2923,7 +2963,6 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -2952,7 +2991,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3067,7 +3105,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3208,7 +3245,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3265,7 +3301,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3324,13 +3359,16 @@ mod tests {
                 context,
                 Config {
                     scheme: schemes[2].clone(),
-                    elector: round_robin_with_term(&schemes[2], TermLength::new(NZU64!(5))),
+                    elector: round_robin_with_term(
+                        &schemes[2],
+                        TermLength::new(NZU32!(5)),
+                        Duration::from_secs(4),
+                    ),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(10),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             state.set_genesis(test_genesis());
@@ -3370,13 +3408,16 @@ mod tests {
                 context,
                 Config {
                     scheme: schemes[3].clone(),
-                    elector: round_robin_with_term(&schemes[3], TermLength::new(NZU64!(5))),
+                    elector: round_robin_with_term(
+                        &schemes[3],
+                        TermLength::new(NZU32!(5)),
+                        Duration::from_secs(4),
+                    ),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(20),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             state.set_genesis(test_genesis());
@@ -3428,7 +3469,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_secs(30),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -3495,7 +3535,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3534,13 +3573,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(5)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3570,13 +3612,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(3)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3628,7 +3673,6 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3657,13 +3701,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(5)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3726,7 +3773,7 @@ mod tests {
     #[test]
     fn test_interesting() {
         let activity_timeout = ViewDelta::new(10);
-        let term_length = TermLength::new(NZU64!(10));
+        let term_length = TermLength::new(NZU32!(10));
 
         assert!(!interesting(
             activity_timeout,
@@ -3820,13 +3867,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(5)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3876,13 +3926,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(5)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
 
             // Helper that prepares a certified notarization at view 2.
@@ -3913,13 +3966,16 @@ mod tests {
                 context.child("restarted"),
                 Config {
                     scheme: schemes[0].clone(),
-                    elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
+                    elector: round_robin_with_term(
+                        &schemes[0],
+                        TermLength::new(NZU32!(5)),
+                        Duration::from_secs(4),
+                    ),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(20),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -3946,13 +4002,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(20))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(20)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -4011,13 +4070,16 @@ mod tests {
                 context.child("restarted"),
                 Config {
                     scheme: schemes[0].clone(),
-                    elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(20))),
+                    elector: round_robin_with_term(
+                        &schemes[0],
+                        TermLength::new(NZU32!(20)),
+                        Duration::from_secs(4),
+                    ),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(2),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    finalization_timeout: Duration::from_secs(4),
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -4044,13 +4106,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(3)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -4101,13 +4166,16 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
+                elector: round_robin_with_term(
+                    &schemes[0],
+                    TermLength::new(NZU32!(3)),
+                    Duration::from_secs(4),
+                ),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());

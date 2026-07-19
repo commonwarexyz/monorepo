@@ -71,7 +71,7 @@
 //! messages with that participant identity in that view.
 
 use crate::{
-    simplex::elector,
+    simplex::elector::{self, Terms},
     types::{Participant, Round, TermLength, View},
 };
 use commonware_cryptography::certificate::Scheme;
@@ -308,11 +308,6 @@ where
 {
     type Elector = ElectorState<C::Elector>;
 
-    fn with_term_length(mut self, term_length: TermLength) -> Self {
-        self.fallback = self.fallback.with_term_length(term_length);
-        self
-    }
-
     fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
         ElectorState {
             fallback: self.fallback.build(participants),
@@ -326,12 +321,12 @@ where
     S: Scheme,
     E: elector::Elector<S>,
 {
-    fn term_length(&self) -> TermLength {
-        self.fallback.term_length()
+    fn terms(&self) -> Terms {
+        self.fallback.terms()
     }
 
     fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
-        let idx = term_index(round.view(), self.fallback.term_length());
+        let idx = term_index(round.view(), self.fallback.terms().length());
         if let Some(&leader) = self.round_leaders.get(idx) {
             return leader;
         }
@@ -1270,8 +1265,8 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};
-    use commonware_utils::{NZU64, TestRng, ordered::Set, test_rng};
-    use std::collections::HashSet;
+    use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
+    use std::{collections::HashSet, time::Duration};
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
         RoundScenario {
@@ -1771,7 +1766,7 @@ mod tests {
             ],
         };
         let participants: Vec<u32> = (0..3).collect();
-        let term_length = TermLength::new(NZU64!(3));
+        let term_length = TermLength::new(NZU32!(3));
 
         let (primary, secondary) = scenario.partitions(View::new(3), term_length, &participants);
         assert_eq!(primary, vec![0]);
@@ -1855,7 +1850,7 @@ mod tests {
     #[test]
     fn view_helpers_can_follow_stable_leader_terms() {
         let participants: Vec<u32> = (0..5).collect();
-        let term_length = TermLength::new(NZU64!(3));
+        let term_length = TermLength::new(NZU32!(3));
 
         assert_eq!(
             view_partitions(View::new(3), term_length, &participants),
@@ -2277,17 +2272,17 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(seed).public_key())
             .collect();
         let participants = Set::try_from(participants).expect("participants should be unique");
-        let term_length = TermLength::new(NZU64!(3));
+        let term_length = TermLength::new(NZU32!(3));
         let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
             Elector::new(
-                RoundRobin::<Sha256>::default().with_term_length(term_length),
+                RoundRobin::<Sha256>::default().with_term(term_length, Duration::from_secs(10)),
                 &scenario,
                 3,
             ),
             &participants,
         );
         let fallback = <RoundRobin<Sha256> as elector::Config<ed25519::Scheme>>::build(
-            RoundRobin::<Sha256>::default().with_term_length(term_length),
+            RoundRobin::<Sha256>::default().with_term(term_length, Duration::from_secs(10)),
             &participants,
         );
 

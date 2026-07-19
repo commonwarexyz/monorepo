@@ -594,7 +594,6 @@ impl EngineDefinition for SingleDbEngine {
             skip_timeout: Duration::from_secs(5),
             fetch_timeout: Duration::from_secs(2),
             fetch_concurrent: NZUsize!(3),
-            finalization_timeout: Duration::from_secs(3),
             forwarding: ForwardingPolicy::Disabled,
         };
 
