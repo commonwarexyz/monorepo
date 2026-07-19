@@ -117,12 +117,6 @@ where
     /// [`RoundRobin`](super::elector::RoundRobin) for deterministic rotation and
     /// [`Random`](super::elector::Random) for unpredictable selection using BLS
     /// threshold signatures.
-    ///
-    /// Stable leaders are enabled here: the elector owns the term structure
-    /// (see [`RoundRobin::with_term`](super::elector::RoundRobin::with_term)
-    /// and [`Terms`](super::elector::Terms), which pairs the term length with
-    /// its stall timeout), and the engine reads the configured structure back
-    /// from the built elector.
     pub elector: L,
 
     /// Blocker for the network.

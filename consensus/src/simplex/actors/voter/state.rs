@@ -387,10 +387,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// the current term, advancing the cached anchor past skipped rounds.
     ///
     /// Returns `None` when no stall timeout is configured (rounds never
-    /// arm a deadline). At `term_length` 1 the scan reduces to the current
-    /// view's own deadline, which expires strictly after the certification
-    /// deadline (asserted at engine start), so it can only surface as an
-    /// extra nullify rebroadcast for a view that has already timed out.
+    /// arm a deadline).
     fn next_stall_timeout(&mut self) -> Option<SystemTime> {
         let term_start = self.view.term_start(self.term_length());
         let unfinalized_view = self.last_finalized.next().max(term_start);
