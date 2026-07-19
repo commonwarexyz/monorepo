@@ -28,6 +28,8 @@
 //!   expected cells per block; comparison models CRC32C without collisions).
 //! - Extent recycling through deferred frees, hole runs from resize-up, and
 //!   the sacred-slot rule for superblock writes.
+//! - Prefix pruning: a per-blob chunk-aligned floor below which cells are
+//!   dropped and unreadable (see below).
 //!
 //! # The freeze rule
 //!
@@ -111,6 +113,24 @@
 //! together, and a crash before any commit erases them together (see
 //! `mutation_commit_free_gate_detected` for the boundary).
 //!
+//! # Prefix pruning
+//!
+//! [`Action::Prune`] advances a blob's pruned FLOOR by one block: cells
+//! below the floor drop, and reads, writes, and shrinks into them become
+//! illegal (below-floor mutations are simply never enumerated, like other
+//! contract violations). Pruning is a MUTATION, not a durability point:
+//! it marks the blob dirty, the next commit CAPTURING the blob records
+//! the floor in its entry, and the dropped blocks join the same
+//! capture-gated free discipline as COW and rewind drops (the last
+//! confirmed table still references them). Recovery restores the ADOPTED
+//! commit's floor: a floor whose pruning commit never landed regresses
+//! and its cells are readable again — prefix bytes reappear, never the
+//! reverse (I7). A removed-then-recreated blob starts back at floor
+//! zero with its new generation. Pruning a blob over which a batch holds
+//! staged state — membership included — violates the implementation's
+//! single-writer assertion and is never enumerated. For group capture,
+//! pruning is ordinary dirt: never-split needs no prune-specific rule.
+//!
 //! # Invariants
 //!
 //! - I1/I2 (durability + snapshot consistency): every recovery adopts a state
@@ -127,6 +147,10 @@
 //!   entirely or not at all — no snapshot captures one blob of an applied
 //!   batch while leaving another blob's part uncommitted. Combined with I2,
 //!   no recovered state can hold a partial batch.
+//! - I7 (floor durability): every recovery restores exactly the adopted
+//!   commit's floor — never the crashed process's live floor — and once a
+//!   commit confirming a floor is observed durable, no later recovery
+//!   serves a pruned part below it for the same generation.
 //!
 //! Each protocol safeguard can be individually disabled via [`Rules`]; tests
 //! assert the checker FINDS a violation for every disabled safeguard
@@ -176,7 +200,11 @@
 //! soak in `tests` drives that lifecycle at size (ref compaction, overlay
 //! eviction, and committed-CRC paging) under materialized power loss
 //! against a history oracle, but it samples seeded histories rather than
-//! enumerating them.
+//! enumerating them. Pruning is UNCOVERED AT SCALE: the soak does not yet
+//! drive `prune`, so the floor's interaction with checksum-ref dropping,
+//! compaction, and paging at size (see `commit::finalize` and the
+//! recovery ref-window checks) rests on the small-scope checks here until
+//! the soak grows a prune arm.
 //!
 //! # Deliberately out of scope
 //!
@@ -252,6 +280,9 @@ struct Entry {
     gen: u8,
     /// Committed size in cells.
     size: u8,
+    /// Committed pruned floor in cells (block-aligned, at most `size`):
+    /// cells below were dropped and are never served.
+    floor: u8,
     /// Logical block -> (physical block, expected cells). Absent = hole.
     /// Expected cells are the model's chunk CRC. Cells at or beyond `size`
     /// are uncommitted and never compared.
@@ -353,6 +384,11 @@ pub(super) struct BlobState {
     pub(super) live: bool,
     pub(super) gen: u8,
     pub(super) size: u8,
+    /// Live pruned floor in cells (block-aligned, at most `size`): cells
+    /// below were dropped, and reads, writes, and shrinks into them are
+    /// illegal. Monotonic in RAM, while recovery restores the adopted
+    /// commit's floor (I7).
+    pub(super) floor: u8,
     /// Logical block -> run. Absent = hole.
     runs: BTreeMap<u8, Run>,
     /// Durable shadow block from the last commit covering this blob.
@@ -466,11 +502,12 @@ pub(super) struct Volume {
     pending_batches: Vec<BTreeMap<u8, Option<(u64, bool)>>>,
 }
 
-/// A pure logical view: per slot, (generation, committed cells). Holes and
-/// explicit zeros both read as `Cell::Zero` — callers cannot distinguish.
+/// A pure logical view: per slot, (generation, pruned floor, committed
+/// cells at and above the floor). Holes and explicit zeros both read as
+/// `Cell::Zero` — callers cannot distinguish.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(super) struct Logical {
-    pub(super) blobs: Vec<Option<(u8, Vec<Cell>)>>,
+    pub(super) blobs: Vec<Option<(u8, u8, Vec<Cell>)>>,
 }
 
 /// Protocol safeguards. Production = all enabled; tests disable one at a
@@ -542,6 +579,19 @@ pub(super) struct Rules {
     /// commit whose dirt avoids the tail block adopt with a torn shadow,
     /// which the splice then writes over the intact committed tail (I3).
     manifest_fresh_shadow: bool,
+    /// Route pruned extents through the same capture-gated discipline as
+    /// COW and rewind drops (released only once a commit CAPTURING the
+    /// blob confirms). Disabling frees them at the next commit even when
+    /// that commit serves the blob's old entry verbatim — an entry that
+    /// still references the pruned extents, which the recycled table
+    /// write then clobbers (I3, via the extent-reuse machinery).
+    prune_capture_gated: bool,
+    /// Restore each blob's floor from the adopted commit's entry at
+    /// recovery. Disabling models an implementation that persists the
+    /// floor outside the commit protocol: the crashed process's live
+    /// floor survives recovery, making a prune durable without its
+    /// commit (I7).
+    floor_from_commit: bool,
 }
 
 pub(super) const SPEC: Rules = Rules {
@@ -558,6 +608,8 @@ pub(super) const SPEC: Rules = Rules {
     commit_free_creation_gate: true,
     atomic_remove_commit: true,
     manifest_fresh_shadow: true,
+    prune_capture_gated: true,
+    floor_from_commit: true,
 };
 
 /// Capture mask covering every blob (group-commit behavior).
@@ -574,6 +626,13 @@ pub(super) enum Action {
     ResizeUp(u8),
     Remove(u8),
     Recreate(u8),
+    /// Advance the slot's pruned floor by one block (Blob::prune): cells
+    /// below drop into the capture-gated free discipline and the blob
+    /// dirties so the next capture records the floor. Never enumerated
+    /// past the size (the implementation errors), on a removed blob, or
+    /// while a batch holds staged state for the blob — membership
+    /// included (the implementation's single-writer assertion).
+    Prune(u8),
     /// Begin a commit capturing the dirty blobs in the mask (expanded
     /// across applied-batch groups).
     Snapshot(u8),
@@ -704,7 +763,7 @@ impl Volume {
                 blobs.push(None);
                 continue;
             }
-            let cells = (0..b.size)
+            let cells = (b.floor..b.size)
                 .map(|i| {
                     b.runs
                         .get(&(i / CELLS_PER_BLOCK))
@@ -717,7 +776,7 @@ impl Volume {
                         })
                 })
                 .collect();
-            blobs.push(Some((b.gen, cells)));
+            blobs.push(Some((b.gen, b.floor, cells)));
         }
         Logical { blobs }
     }
@@ -909,8 +968,8 @@ impl Volume {
                 blobs.push(live.blobs[slot].clone());
             } else {
                 blobs.push(Some(b.committed.as_ref().map_or_else(
-                    || (b.gen, Vec::new()),
-                    |entry| (entry.gen, entry_cells(entry)),
+                    || (b.gen, 0, Vec::new()),
+                    |entry| (entry.gen, entry.floor, entry_cells(entry)),
                 )));
             }
         }
@@ -918,9 +977,10 @@ impl Volume {
     }
 }
 
-/// The committed cells an entry describes (holes read as zeros).
+/// The committed cells an entry describes, floor..size (holes read as
+/// zeros).
 fn entry_cells(entry: &Entry) -> Vec<Cell> {
-    (0..entry.size)
+    (entry.floor..entry.size)
         .map(|i| {
             entry
                 .runs
@@ -1012,10 +1072,10 @@ fn read_logical(disk: &Disk, table: &Table) -> Result<Logical, String> {
     let mut blobs = vec![None; BLOBS as usize];
     for (&slot, entry) in &table.blobs {
         let mut cells = Vec::new();
-        for i in 0..entry.size {
+        for i in entry.floor..entry.size {
             cells.push(read_cell(disk, entry, i)?);
         }
-        blobs[slot as usize] = Some((entry.gen, cells));
+        blobs[slot as usize] = Some((entry.gen, entry.floor, cells));
     }
     Ok(Logical { blobs })
 }
@@ -1072,14 +1132,27 @@ fn adopt(disk: &Disk, rules: &Rules) -> Result<Adopted, String> {
     Err("both slots unadoptable".into())
 }
 
-/// Build the post-recovery RAM state for an adopted table.
-fn rebuild(adopted: &Adopted) -> Volume {
+/// Build the post-recovery RAM state for an adopted table. `crashed` holds
+/// the crashed process's live (generation, floor) per slot, consumed only
+/// by the [`Rules::floor_from_commit`] mutation.
+fn rebuild(adopted: &Adopted, crashed: &[Option<(u8, u8)>], rules: &Rules) -> Volume {
     let mut used = vec![adopted.table_block];
     let mut volume = Volume::fresh();
     volume.blobs = (0..BLOBS)
         .map(|s| {
             let Some(e) = adopted.table.blobs.get(&s) else {
                 return BlobState::default();
+            };
+            let floor = if rules.floor_from_commit {
+                e.floor
+            } else {
+                // Mutation: the crashed process's live floor survives
+                // recovery when its generation matches the adopted entry
+                // (a floor persisted outside the commit protocol).
+                match crashed.get(s as usize).copied().flatten() {
+                    Some((gen, floor)) if gen == e.gen => e.floor.max(floor),
+                    _ => e.floor,
+                }
             };
             let mut vers: BTreeMap<u8, u8> = BTreeMap::new();
             for &(phys, c0, c1) in e.runs.values() {
@@ -1098,6 +1171,7 @@ fn rebuild(adopted: &Adopted) -> Volume {
                 live: true,
                 gen: e.gen,
                 size: e.size,
+                floor,
                 runs: e
                     .runs
                     .iter()
@@ -1226,12 +1300,21 @@ pub(super) fn initial_state(actions: u8, crashes: u8) -> State {
     }
 }
 
+/// The crashed process's view that recovery's invariants bind to: the last
+/// observed durable state, the commits attempted since, and each live
+/// blob's (generation, floor) for [`rebuild`]'s floor-restore mutation
+/// hook.
+struct CrashContext<'a> {
+    baseline: &'a Logical,
+    attempts: &'a [Logical],
+    crashed: &'a [Option<(u8, u8)>],
+}
+
 /// Recovery as a process: adopt, check invariants, queue repairs, then either
 /// finish cleanly or crash again mid-repair (recursively, budget permitting).
 fn recovery_states(
     disk: Disk,
-    baseline: &Logical,
-    attempts: &[Logical],
+    ctx: &CrashContext<'_>,
     rules: &Rules,
     crashes_left: u8,
     actions_left: u8,
@@ -1261,7 +1344,7 @@ fn recovery_states(
     };
 
     // I1/I2: the adopted state must be the baseline or an attempt made since.
-    if logical != *baseline && !attempts.contains(&logical) {
+    if logical != *ctx.baseline && !ctx.attempts.contains(&logical) {
         let dump: String = repaired
             .durable
             .iter()
@@ -1273,21 +1356,60 @@ fn recovery_states(
             reason: format!(
                 "I1/I2: adopted state is neither the baseline nor an attempted \
                  commit\n  adopted (slot {}, seq {}): {logical:?}\n  baseline: \
-                 {baseline:?}\n  attempts: {attempts:?}\n  durable disk:\n{dump}",
-                adopted.slot, adopted.seq
+                 {:?}\n  attempts: {:?}\n  durable disk:\n{dump}",
+                adopted.slot, adopted.seq, ctx.baseline, ctx.attempts
             ),
         });
+    }
+
+    // I7 (regression arm): once a commit confirming a floor was observed
+    // durable, no recovery may serve parts below it for the same
+    // generation. Subsumed by I1/I2 while floors ride the logical view —
+    // stated directly so floor bookkeeping bugs report as what they are.
+    for (slot, base) in ctx.baseline.blobs.iter().enumerate() {
+        let (Some((bgen, bfloor, _)), Some((agen, afloor, _))) =
+            (base.as_ref(), logical.blobs[slot].as_ref())
+        else {
+            continue;
+        };
+        if agen == bgen && afloor < bfloor {
+            return Err(Violation {
+                trace: trace.to_vec(),
+                reason: format!(
+                    "I7: pruned-and-confirmed prefix served again on slot {slot}: \
+                     adopted floor {afloor} below confirmed floor {bfloor}"
+                ),
+            });
+        }
     }
 
     let mut out = Vec::new();
 
     // (a) Repairs sync cleanly; recovery returns; adopted state is observed.
     {
+        let volume = rebuild(&adopted, ctx.crashed, rules);
+        // I7 (restore arm): the recovered floor is exactly the adopted
+        // commit's — never the crashed process's live floor, whose pruning
+        // commit may never have landed.
+        for slot in 0..BLOBS {
+            let b = &volume.blobs[slot as usize];
+            let entry_floor = adopted.table.blobs.get(&slot).map_or(0, |e| e.floor);
+            if b.live && b.floor != entry_floor {
+                return Err(Violation {
+                    trace: trace.to_vec(),
+                    reason: format!(
+                        "I7: recovered floor {} diverges from the adopted commit's \
+                         {entry_floor} on slot {slot}",
+                        b.floor
+                    ),
+                });
+            }
+        }
         let mut disk = repaired.clone();
         disk.sync();
         out.push(State {
             disk,
-            volume: rebuild(&adopted),
+            volume,
             baseline: logical,
             attempts: Vec::new(),
             latched: false,
@@ -1305,8 +1427,7 @@ fn recovery_states(
         for outcome in repaired.crash_outcomes() {
             out.extend(recovery_states(
                 outcome,
-                baseline,
-                attempts,
+                ctx,
                 rules,
                 crashes_left - 1,
                 actions_left,
@@ -1433,6 +1554,7 @@ fn begin_snapshot(
                     entry = Entry {
                         gen: b.gen,
                         size: staged.size,
+                        floor: b.floor,
                         runs: {
                             let mut runs: BTreeMap<u8, (usize, Cell, Cell)> = b
                                 .runs
@@ -1474,6 +1596,7 @@ fn begin_snapshot(
         let mut entry = Entry {
             gen: b.gen,
             size,
+            floor: b.floor,
             runs: b
                 .runs
                 .iter()
@@ -1581,8 +1704,11 @@ pub(super) fn step(
             Ok(Some(vec![s]))
         }
         Action::Overwrite(slot) => {
+            // Cell 0 sits below any nonzero pruned floor: the write path
+            // rejects it (Error::OffsetPruned), so it is never enumerated.
             let b = &s.volume.blobs[slot as usize];
-            if mutations_blocked || batch_staged(&s, slot) || !b.live || b.size == 0 {
+            if mutations_blocked || batch_staged(&s, slot) || !b.live || b.size == 0 || b.floor > 0
+            {
                 return Ok(None);
             }
             let val = s.volume.next_val(slot, 0);
@@ -1590,10 +1716,13 @@ pub(super) fn step(
             Ok(Some(vec![s]))
         }
         Action::ResizeDown(slot) => {
+            // Shrinking below the pruned floor is rejected by the resize
+            // path (Error::OffsetPruned): enabled only above the floor,
+            // which also covers the empty blob (size == floor == 0).
             if mutations_blocked
                 || batch_staged(&s, slot)
                 || !s.volume.blobs[slot as usize].live
-                || s.volume.blobs[slot as usize].size == 0
+                || s.volume.blobs[slot as usize].size <= s.volume.blobs[slot as usize].floor
             {
                 return Ok(None);
             }
@@ -1611,8 +1740,11 @@ pub(super) fn step(
                 s.volume.release_content(slot, run.phys, rules);
             }
             // The (possibly newly partial) tail must re-commit: its shadow
-            // and manifest entry change even though its bytes do not.
-            if new_size > 0 {
+            // and manifest entry change even though its bytes do not. A
+            // shrink landing exactly on a nonzero floor leaves no backed
+            // tail (all lower runs were pruned): no block to mark, like
+            // the implementation's empty post-shrink frontier.
+            if new_size > s.volume.blobs[slot as usize].floor {
                 let tail = (new_size - 1) / CELLS_PER_BLOCK;
                 s.volume.mark_dirty(slot, Some(tail));
             } else {
@@ -1715,6 +1847,55 @@ pub(super) fn step(
                 committed_pubseq,
                 ..Default::default()
             };
+            Ok(Some(vec![s]))
+        }
+        Action::Prune(slot) => {
+            // Stricter batch gate than a write's: the implementation
+            // asserts NO batch holds a staged slot for the blob —
+            // membership included (Batch::sync stages through the same
+            // counter) — so those interleavings are never enumerated.
+            let staged_any = s
+                .volume
+                .batch
+                .as_ref()
+                .is_some_and(|b| b.slots.contains_key(&slot));
+            let b = &s.volume.blobs[slot as usize];
+            if mutations_blocked || staged_any || !b.live {
+                return Ok(None);
+            }
+            // One block per action: the floor lands between blocks or at
+            // the size. Beyond the size the implementation errors, so the
+            // action disables there.
+            let floor = b.floor + CELLS_PER_BLOCK;
+            if floor > b.size {
+                return Ok(None);
+            }
+            let lfloor = floor / CELLS_PER_BLOCK;
+            let dropped: Vec<u8> = s.volume.blobs[slot as usize]
+                .runs
+                .keys()
+                .copied()
+                .filter(|&l| l < lfloor)
+                .collect();
+            for l in dropped {
+                let run = s.volume.blobs[slot as usize].runs.remove(&l).unwrap();
+                // Pruned extents join the capture-gated free discipline:
+                // the last confirmed table still references them through
+                // this blob's entry (served verbatim until a capture
+                // records the floor).
+                if rules.prune_capture_gated {
+                    s.volume.release_content(slot, run.phys, rules);
+                } else {
+                    s.volume.release(run.phys, rules);
+                }
+            }
+            let b = &mut s.volume.blobs[slot as usize];
+            b.floor = floor;
+            // Dirty marks below the floor drop with their blocks. The
+            // prune itself dirties the blob so the next capture records
+            // the floor and releases the pruned extents.
+            b.dirty_blocks.retain(|&l| l >= lfloor);
+            s.volume.mark_dirty(slot, None);
             Ok(Some(vec![s]))
         }
         Action::Snapshot(mask) => {
@@ -1911,7 +2092,13 @@ pub(super) fn step(
             Ok(Some(vec![s]))
         }
         Action::BatchOverwrite(slot) => {
-            if mutations_blocked || !s.volume.blobs[slot as usize].live {
+            // Cell 0 below a nonzero pruned floor: staging it would
+            // publish a run below the floor (the caller contract the
+            // direct write path rejects), so it is never enumerated.
+            if mutations_blocked
+                || !s.volume.blobs[slot as usize].live
+                || s.volume.blobs[slot as usize].floor > 0
+            {
                 return Ok(None);
             }
             let published = s.volume.blobs[slot as usize].size;
@@ -2142,9 +2329,20 @@ pub(super) fn step(
                 }
                 if staged.member {
                     // Membership only: no content publishes, but the
-                    // slot's direct dirt must commit with the group.
+                    // slot's direct dirt must commit with the group. A
+                    // CLEAN member carries no obligation — nothing of it
+                    // publishes, mirroring the implementation's
+                    // touched-only roots, which the group's commit
+                    // resolves trivially. Recording one anyway makes any
+                    // removal- or creation-bearing apply a phantom split
+                    // batch: the in-step commit resolves those parts
+                    // while the clean member's part is undischargeable
+                    // (found by the deep conformance walk, see
+                    // `clean_member_removal_apply_allowed`).
                     b.pubseq += 1;
-                    record.insert(slot, Some((b.pubseq, false)));
+                    if b.dirty {
+                        record.insert(slot, Some((b.pubseq, false)));
+                    }
                     members.push(slot);
                     continue;
                 }
@@ -2202,12 +2400,24 @@ pub(super) fn step(
                 return Ok(None);
             }
             s.crashes_left -= 1;
+            // The dying process's live floors, kept only for the
+            // floor-restore mutation hook (see `rebuild`).
+            let crashed: Vec<Option<(u8, u8)>> = s
+                .volume
+                .blobs
+                .iter()
+                .map(|b| b.live.then_some((b.gen, b.floor)))
+                .collect();
+            let ctx = CrashContext {
+                baseline: &s.baseline,
+                attempts: &s.attempts,
+                crashed: &crashed,
+            };
             let mut out = Vec::new();
             for outcome in s.disk.crash_outcomes() {
                 out.extend(recovery_states(
                     outcome,
-                    &s.baseline,
-                    &s.attempts,
+                    &ctx,
                     rules,
                     s.crashes_left,
                     s.actions_left,
@@ -2265,13 +2475,15 @@ mod tests {
         Action::Crash,
     ];
 
-    /// Recycling workload: remove/recreate + rewind + holes exercise extent
-    /// reuse, deferred frees, hole runs, and replay-identical resurrection.
+    /// Recycling workload: remove/recreate + rewind + holes + pruning
+    /// exercise extent reuse, deferred frees, hole runs, replay-identical
+    /// resurrection, and the floor resetting with a recreated generation.
     const RECYCLE: &[Action] = &[
         Action::Append(0),
         Action::Overwrite(0),
         Action::ResizeDown(0),
         Action::ResizeUp(0),
+        Action::Prune(0),
         Action::Remove(0),
         Action::Recreate(0),
         Action::Snapshot(ALL),
@@ -2435,6 +2647,24 @@ mod tests {
         Action::Crash,
     ];
 
+    /// Pruning workload: the floor advances between blocks and to the
+    /// size, interleaved with appends, selective commits, and crashes — a
+    /// pruned-but-uncaptured blob serves its old entry verbatim (floor
+    /// and runs intact), a capturing commit records the floor and
+    /// releases the pruned extents, and a crashed-away prune regresses to
+    /// the committed floor (I7). Group capture treats prune as ordinary
+    /// dirt, so batch interplay needs no dedicated menu entry.
+    const PRUNE: &[Action] = &[
+        Action::Append(0),
+        Action::Append(1),
+        Action::Prune(0),
+        Action::Snapshot(0b01),
+        Action::Snapshot(0b10),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
     /// Membership workload (Batch::sync): a directly written slot joins
     /// the group without staged content, stays writable (its growth
     /// rebases a later staged write), and its dirt commits with the group
@@ -2537,6 +2767,11 @@ mod tests {
     #[test]
     fn spec_holds_batch_recreate() {
         assert_holds(BATCH_RECREATE, 8, 2, 1_000);
+    }
+
+    #[test]
+    fn spec_holds_prune() {
+        assert_holds(PRUNE, 8, 2, 10_000);
     }
 
     #[test]
@@ -2808,6 +3043,28 @@ mod tests {
         );
     }
 
+    /// A batch may join a CLEAN blob for membership alongside a staged
+    /// removal: the apply's in-step commit resolves the removal while the
+    /// clean member has nothing to commit — no obligation, no split.
+    /// Recording a member obligation regardless of dirt made this shape a
+    /// phantom I6 violation (found by the deep conformance walk when the
+    /// prune menu re-seeded it).
+    #[test]
+    fn clean_member_removal_apply_allowed() {
+        let trace: &[Action] = &[
+            Action::BatchRemove(1),
+            Action::BatchSync(0),
+            Action::BatchApply,
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Crash,
+        ];
+        assert!(
+            run_trace(trace, &SPEC).is_ok(),
+            "spec must allow a clean member beside a staged removal"
+        );
+    }
+
     /// The never-split checker must stay sensitive on a freshly recreated
     /// blob. A removal's commit confirms while the recreation happens
     /// mid-flight, resolving the slot at the removal's pubseq. A recreation
@@ -2929,6 +3186,76 @@ mod tests {
         assert!(
             run_trace(trace, &rules).is_err(),
             "checker missed the capture-gated free"
+        );
+    }
+
+    /// Releasing a prune's dropped extents at the NEXT commit (instead of
+    /// gating them on a commit that CAPTURES the blob) recycles blocks
+    /// the confirmed table still references through the blob's
+    /// served-verbatim entry: the next table write lands in one and a
+    /// crash exposes the clobber. Mirrors
+    /// `mutation_capture_gated_frees_detected` with the drop coming from
+    /// a prune instead of a COW overwrite.
+    #[test]
+    fn mutation_prune_capture_gated_detected() {
+        let trace: &[Action] = &[
+            // Commit a full block for blob 0 (a partial shadowed tail
+            // would be healed by the shadow splice).
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            // Prune the committed block away, then confirm a commit that
+            // does NOT capture blob 0: its old entry (floor 0, runs
+            // intact) is served verbatim while the mutation releases the
+            // pruned block.
+            Action::Prune(0),
+            Action::Append(1),
+            Action::Snapshot(0b10),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            // The next commit allocates the (wrongly freed) block for its
+            // table and a crash exposes the clobbered fallback.
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            prune_capture_gated: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed the prematurely released prune free"
+        );
+    }
+
+    /// A floor whose pruning commit never landed must regress at recovery
+    /// to the adopted commit's floor. Restoring the crashed process's
+    /// live floor instead (modeling a floor persisted outside the commit
+    /// protocol) makes the prune durable without its commit and trips the
+    /// floor invariant (I7).
+    #[test]
+    fn mutation_floor_restore_detected() {
+        let trace: &[Action] = &[
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Prune(0),
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            floor_from_commit: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed the floor persisted without its commit"
         );
     }
 

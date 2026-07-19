@@ -108,9 +108,9 @@ enum CellObs {
     Garbage,
 }
 
-/// A recovered volume's observable state: per slot, absent or the cell
-/// sequence.
-type Obs = Vec<Option<Vec<CellObs>>>;
+/// A recovered volume's observable state: per slot, absent or (pruned
+/// floor in cells, the cell sequence at and above it).
+type Obs = Vec<Option<(u8, Vec<CellObs>)>>;
 
 /// Decode a blob's content into cells.
 fn decode_cells(bytes: &[u8]) -> Vec<CellObs> {
@@ -168,19 +168,22 @@ fn translated(t: &Tracked, logical: &Logical) -> Obs {
         .blobs
         .iter()
         .map(|blob| {
-            blob.as_ref().map(|(_gen, cells)| {
-                cells
-                    .iter()
-                    .map(|cell| match cell {
-                        Cell::Zero => CellObs::Zero,
-                        Cell::Val { .. } => CellObs::Token(
-                            *t.translate
-                                .get(cell)
-                                .unwrap_or_else(|| panic!("untranslated model value {cell:?}")),
-                        ),
-                        Cell::Garbage => panic!("model logical exposes garbage"),
-                    })
-                    .collect()
+            blob.as_ref().map(|(_gen, floor, cells)| {
+                (
+                    *floor,
+                    cells
+                        .iter()
+                        .map(|cell| match cell {
+                            Cell::Zero => CellObs::Zero,
+                            Cell::Val { .. } => CellObs::Token(
+                                *t.translate
+                                    .get(cell)
+                                    .unwrap_or_else(|| panic!("untranslated model value {cell:?}")),
+                            ),
+                            Cell::Garbage => panic!("model logical exposes garbage"),
+                        })
+                        .collect(),
+                )
             })
         })
         .collect()
@@ -546,6 +549,8 @@ enum Op {
     ResizeUp(u8),
     Remove(u8),
     Recreate(u8),
+    /// Advance the slot's pruned floor by one chunk (Blob::prune).
+    Prune(u8),
     /// Sync every live blob in the mask as ONE commit (multi-bit masks
     /// register every root, then await every handle: one union commit
     /// resolves them all).
@@ -686,6 +691,13 @@ impl Rig {
         self.tracked[0].state.volume.blobs[slot as usize].live
     }
 
+    /// The model's live floor in cells (identical across tracked states:
+    /// actions move it deterministically and crash resumes filter on an
+    /// observable that includes it).
+    fn floor_cells(&self, slot: u8) -> u8 {
+        self.tracked[0].state.volume.blobs[slot as usize].floor
+    }
+
     /// The staged size the next batch write on `slot` appends at (the
     /// model's staged overlay, falling back to the published size).
     fn staged_cells(&self, slot: u8) -> u8 {
@@ -707,6 +719,7 @@ impl Rig {
             Op::Overwrite(s) => vec![Action::Overwrite(s)],
             Op::ResizeDown(s) => vec![Action::ResizeDown(s)],
             Op::ResizeUp(s) => vec![Action::ResizeUp(s)],
+            Op::Prune(s) => vec![Action::Prune(s)],
             Op::Remove(s) => vec![
                 Action::Remove(s),
                 Action::Snapshot(1 << s),
@@ -907,6 +920,15 @@ impl Rig {
                     .await
                     .unwrap_or_else(|e| panic!("{}: resize up: {e}", self.ctx()));
             }
+            Op::Prune(s) => {
+                // One model block per prune: the byte offset of the next
+                // chunk boundary above the current floor.
+                let offset = (self.floor_cells(s) + CELLS_PER_BLOCK) as u64 * CELL;
+                self.blobs[&s]
+                    .prune(offset)
+                    .await
+                    .unwrap_or_else(|e| panic!("{}: prune: {e}", self.ctx()));
+            }
             Op::Remove(s) => {
                 self.blobs.remove(&s);
                 self.volume
@@ -1030,7 +1052,10 @@ impl Rig {
     }
 
     /// Read every live blob through the public API and compare against
-    /// every tracked state's translated logical view.
+    /// every tracked state's translated logical view, including the
+    /// pruned floor: `Blob::floor` must match the model's live floor,
+    /// and a read below it must be rejected exactly when the model
+    /// treats those cells as unreadable.
     async fn check_live(&self) {
         for slot in 0..BLOBS {
             if !self.live(slot) {
@@ -1041,22 +1066,42 @@ impl Rig {
                 );
                 continue;
             }
+            let floor = self.blobs[&slot].floor();
+            for t in &self.tracked {
+                assert_eq!(
+                    floor,
+                    t.state.volume.blobs[slot as usize].floor as u64 * CELL,
+                    "{}: floor of slot {slot} diverged from the model",
+                    self.ctx()
+                );
+            }
+            if floor > 0 {
+                assert!(
+                    matches!(
+                        self.blobs[&slot].read_at(0, 1).await,
+                        Err(Error::OffsetPruned(..))
+                    ),
+                    "{}: read below the floor of slot {slot} must be rejected",
+                    self.ctx()
+                );
+            }
             let size = self.size_cells(slot) as u64 * CELL;
-            let cells = if size == 0 {
+            let cells = if size == floor {
                 Vec::new()
             } else {
                 let bytes = self.blobs[&slot]
-                    .read_at(0, size as usize)
+                    .read_at(floor, (size - floor) as usize)
                     .await
                     .unwrap_or_else(|e| panic!("{}: live read slot {slot}: {e}", self.ctx()))
                     .coalesce();
                 decode_cells(bytes.as_ref())
             };
+            let obs = ((floor / CELL) as u8, cells);
             for t in &self.tracked {
                 let logical = t.state.volume.logical();
                 let expected = translated(t, &logical);
                 assert_eq!(
-                    Some(&cells),
+                    Some(&obs),
                     expected[slot as usize].as_ref(),
                     "{}: live content of slot {slot} diverged from the model",
                     self.ctx()
@@ -1152,17 +1197,37 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
         if !size.is_multiple_of(CELL) {
             return Err(format!("slot {slot}: size {size} is not cell-aligned"));
         }
-        let cells = if size == 0 {
+        // The recovered floor is part of the observable: it must be the
+        // adopted commit's, chunk-aligned, and enforced on reads.
+        let floor = blob.floor();
+        if !floor.is_multiple_of(BLOCK) {
+            return Err(format!("slot {slot}: floor {floor} is not chunk-aligned"));
+        }
+        if floor > size {
+            return Err(format!("slot {slot}: floor {floor} beyond size {size}"));
+        }
+        if floor > 0 {
+            match blob.read_at(floor - 1, 1).await {
+                Err(Error::OffsetPruned(..)) => {}
+                Err(e) => {
+                    return Err(format!("slot {slot}: below-floor read: wrong error {e}"));
+                }
+                Ok(_) => {
+                    return Err(format!("slot {slot}: below-floor read served pruned bytes"));
+                }
+            }
+        }
+        let cells = if size == floor {
             Vec::new()
         } else {
             let bytes = blob
-                .read_at(0, size as usize)
+                .read_at(floor, (size - floor) as usize)
                 .await
                 .map_err(|e| format!("read slot {slot}: {e}"))?
                 .coalesce();
             decode_cells(bytes.as_ref())
         };
-        obs.push(Some(cells));
+        obs.push(Some(((floor / CELL) as u8, cells)));
         blobs.push(blob);
     }
     // The freshly recovered state is quiesced: bookkeeping must be exact.
@@ -1176,6 +1241,12 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
 /// with NO op of its own, and the pin that stands in for each:
 ///
 /// - `Blob::write_at_sync`: `write_at` + `sync` composition (both mapped).
+/// - `Blob::floor`: a read accessor with no op of its own — compared
+///   against the model's live floor at every lockstep node and against
+///   the adopted commit's at every crash extraction, alongside the
+///   below-floor read rejection (below-floor writes and resizes are
+///   never enumerated, and their rejection is pinned by
+///   `tests::test_volume_prune_end_to_end`).
 /// - `Batch::resize`: no model action by design (the model docs'
 ///   uncovered list), pinned by directed unit tests in `tests`.
 /// - `Batch::apply_start_sync`: `apply`'s publish plus `start_sync`'s
@@ -1192,6 +1263,7 @@ fn conformance_surface_parity() {
         match op {
             Op::Append(_) | Op::Overwrite(_) => "Blob::write_at",
             Op::ResizeDown(_) | Op::ResizeUp(_) => "Blob::resize",
+            Op::Prune(_) => "Blob::prune",
             Op::Sync(_) => "Blob::sync / Blob::start_sync (pooled union)",
             Op::Remove(_) => "Storage::remove",
             Op::Recreate(_) => "Storage::open (creation commit)",
@@ -1465,7 +1537,7 @@ async fn conformance_core() {
         ],
         depth: 5,
         window_masks: &[0b001, 0b011],
-        window_menu: &[Op::Append(0), Op::Overwrite(0)],
+        window_menu: &[Op::Append(0), Op::Overwrite(0), Op::Prune(0)],
         window_depth: 1,
         window_max_prefix: 3,
         fail_max_prefix: 2,
@@ -1493,7 +1565,7 @@ async fn conformance_recycle() {
         ],
         depth: 3,
         window_masks: &[0b001],
-        window_menu: &[Op::ResizeDown(0), Op::ResizeUp(0)],
+        window_menu: &[Op::ResizeDown(0), Op::ResizeUp(0), Op::Prune(0)],
         window_depth: 1,
         window_max_prefix: 3,
         fail_max_prefix: 0,
@@ -1736,6 +1808,54 @@ async fn conformance_directed_capture_gated_frees() {
     );
 }
 
+/// The directed prune family: a committed prefix is pruned, and a crash
+/// BEFORE the pruning commit must regress the floor to the committed one
+/// (the pruned cells readable again), while a crash AFTER the pruning
+/// commit must keep the floor durable — no confirmed-pruned part is ever
+/// served again. The model-side floor sets are asserted explicitly so
+/// both arms stay directed, and the crash probes then hold the real
+/// recovered state to them (extraction compares `Blob::floor` and the
+/// below-floor read rejection against the model's allowed states).
+#[tokio::test]
+async fn conformance_directed_prune() {
+    let mut stats = Stats::default();
+    let mut rig = Rig::new().await;
+    for op in [
+        Op::Append(0),
+        Op::Append(0),
+        Op::Append(0),
+        Op::Sync(0b001),
+        Op::Prune(0),
+    ] {
+        assert!(rig.enabled(op), "directed prune: {op:?} disabled");
+        rig.execute(op).await;
+        rig.crash_probe(&[], 2048, 31, &mut stats).await;
+    }
+    // The pruning commit never landed: every recovery regresses the floor.
+    let regressed = states_after(&rig.tracked, &[Action::Crash], &rig.trace);
+    assert!(
+        regressed
+            .iter()
+            .all(|(_, state)| state.volume.blobs[0].floor == 0),
+        "model must regress the crashed-away floor"
+    );
+    // The pruning commit lands: the floor is durable across the crash.
+    rig.execute(Op::Sync(0b001)).await;
+    rig.crash_probe(&[], 2048, 32, &mut stats).await;
+    let persisted = states_after(&rig.tracked, &[Action::Crash], &rig.trace);
+    assert!(
+        persisted
+            .iter()
+            .all(|(_, state)| state.volume.blobs[0].floor == CELLS_PER_BLOCK),
+        "model must keep the committed floor"
+    );
+    println!("directed prune stats: {stats:?}");
+    assert!(
+        stats.exhaustive_points == stats.crash_points && stats.cases > 10,
+        "suspiciously thin coverage: {stats:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Deep randomized mode (soak profile)
 // ---------------------------------------------------------------------------
@@ -1749,6 +1869,8 @@ const DEEP_MENU: &[Op] = &[
     Op::Overwrite(1),
     Op::ResizeDown(0),
     Op::ResizeUp(0),
+    Op::Prune(0),
+    Op::Prune(1),
     Op::Remove(0),
     Op::Recreate(0),
     Op::Sync(0b001),
