@@ -273,13 +273,13 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     // A correct node cannot sign multiple payloads of the same vote kind in a
     // view, or both nullify and finalize in the same view.
     // Aggregate across all reporters to get a global view of who sent what.
-    // Reporter maps are hash-based, so conflicts are accumulated in raw
+    // Reporter maps are hash-based; conflicts are accumulated in raw
     // iteration order (recording every conflicting payload against a
-    // first-seen pivot, which makes the union order-independent) and reported
-    // from ordered collections after the sweep: diagnostics stay deterministic
-    // without allocating or sorting under the locks.
-    let mut seen_nullify: BTreeMap<u64, HashSet<S::PublicKey>> = BTreeMap::new();
-    let mut seen_finalize: BTreeMap<u64, HashSet<S::PublicKey>> = BTreeMap::new();
+    // first-seen pivot, which makes the union order-independent) and payload
+    // conflicts are reported from ordered collections after the sweep. The
+    // same input always panics; only first-message identity may vary.
+    let mut seen_nullify: HashMap<u64, HashSet<S::PublicKey>> = HashMap::new();
+    let mut seen_finalize: HashMap<u64, HashSet<S::PublicKey>> = HashMap::new();
     let mut seen_notarize_payload: HashMap<(u64, S::PublicKey), Sha256Digest> = HashMap::new();
     let mut seen_finalize_payload: HashMap<(u64, S::PublicKey), Sha256Digest> = HashMap::new();
     let mut notarize_conflicts: BTreeMap<(u64, Vec<u8>), BTreeSet<Sha256Digest>> = BTreeMap::new();
@@ -521,14 +521,14 @@ mod tests {
     }
 
     fn replica(
-        notarizations: BTreeMap<u64, Notarization>,
-        nullifications: BTreeMap<u64, Nullification>,
-        finalizations: BTreeMap<u64, Finalization>,
+        notarizations: HashMap<u64, Notarization>,
+        nullifications: HashMap<u64, Nullification>,
+        finalizations: HashMap<u64, Finalization>,
     ) -> ReplicaState {
         (notarizations, nullifications, finalizations)
     }
 
-    fn views<T>(entries: Vec<(u64, T)>) -> BTreeMap<u64, T> {
+    fn views<T>(entries: Vec<(u64, T)>) -> HashMap<u64, T> {
         entries.into_iter().collect()
     }
 
@@ -807,16 +807,6 @@ mod tests {
             views(vec![]),
             views(vec![(2, finalization(1, 0xA))]),
         );
-        check::<SimplexId>(N, vec![r]);
-    }
-
-    #[test]
-    #[should_panic(expected = "notarization in view 1 has 2 < 3 signatures")]
-    fn certificate_failures_are_ordered_by_view() {
-        let mut notarizations = BTreeMap::new();
-        notarizations.insert(3, notarization_with(0, 0xB, Some(2)));
-        notarizations.insert(1, notarization_with(0, 0xA, Some(2)));
-        let r = replica(notarizations, views(vec![]), views(vec![]));
         check::<SimplexId>(N, vec![r]);
     }
 
