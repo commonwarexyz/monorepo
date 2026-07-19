@@ -54,11 +54,11 @@
 //! `tests::test_volume_aborted_commit_task_poisons`.
 
 use super::{
-    core::Ready,
     model::{
         initial_state, step, Action, Cell, Logical, State as ModelState, Violation, BLOBS,
         CELLS_PER_BLOCK, SPEC,
     },
+    state::Ready,
     tests::{audit_volume, test_driver, test_pool, Gated, Tearing},
     Batch, Blob as VBlob, Config, Storage as Volume, BLOCK,
 };

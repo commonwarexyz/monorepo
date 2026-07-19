@@ -187,24 +187,28 @@
 
 mod alloc;
 mod batch;
+mod chunk;
 mod commit;
 #[cfg(test)]
 mod conformance;
-mod core;
 mod layout;
 mod metrics;
 #[cfg(test)]
 mod model;
+mod paging;
+mod read;
 mod recover;
+mod resize;
+mod state;
 #[cfg(test)]
 mod tests;
+mod write;
 
 use crate::{BufferPool, Error, Handle, IoBufs, IoBufsMut};
-use alloc::{block_align, Extent};
 pub use batch::Batch;
 use commonware_formatting::hex;
 use commonware_utils::sync::AsyncMutex;
-use core::{BlobCore, Ready};
+use state::{unlink, BlobCore, HandleTracker, Ready, Shared};
 use std::{
     future::Future,
     ops::RangeInclusive,
@@ -290,18 +294,6 @@ impl<S: crate::Storage> Clone for Storage<S> {
             shared: self.shared.clone(),
         }
     }
-}
-
-struct Shared<S: crate::Storage> {
-    inner: S,
-    pool: BufferPool,
-    cfg: Config,
-    driver: Driver,
-    metrics: Arc<metrics::Metrics>,
-    /// Set once recovery has completed (fast path).
-    ready: OnceLock<Arc<Ready<S>>>,
-    /// Serializes recovery (single-flight) and namespace changes.
-    ns_lock: AsyncMutex<()>,
 }
 
 impl<S: crate::Storage> Storage<S> {
@@ -398,42 +390,6 @@ impl<S: crate::Storage> Storage<S> {
         );
         let _ = self.shared.ready.set(ready.clone());
         Ok(ready)
-    }
-}
-
-/// Tracks one open handle (shared by clones); the drop of the last clone
-/// releases removal-gated extents.
-struct HandleTracker<S: crate::Storage> {
-    ready: Arc<Ready<S>>,
-    id: u64,
-}
-
-impl<S: crate::Storage> Drop for HandleTracker<S> {
-    fn drop(&mut self) {
-        let mut state = self.ready.state.lock();
-        let count = state
-            .handles
-            .get_mut(&self.id)
-            .expect("open handle is counted");
-        assert!(*count > 0, "open handle is counted");
-        *count -= 1;
-        if *count == 0 {
-            state.handles.remove(&self.id);
-            // Drop the blob entirely if it was removed (no name references
-            // it and no handle can reach it anymore); otherwise demote a
-            // clean blob's hydrated state back to dormant.
-            let removed = state
-                .open
-                .get(&self.id)
-                .is_some_and(|b| b.inner.lock().removed);
-            if removed {
-                state.open.remove(&self.id);
-            } else {
-                state.maybe_demote(self.id);
-            }
-            state.apply_frees();
-            self.ready.metrics.observe_state(&mut state);
-        }
     }
 }
 
@@ -600,7 +556,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
                 name: name.to_vec(),
                 version,
                 write_lock: AsyncMutex::new(()),
-                inner: commonware_utils::sync::Mutex::new(core::BlobInner {
+                inner: commonware_utils::sync::Mutex::new(state::BlobInner {
                     committed_entry: None,
                     ..Default::default()
                 }),
@@ -732,75 +688,9 @@ async fn remove_task<S: crate::Storage>(
     commit::commit_locked(ready, &removed).await
 }
 
-/// Unlink one blob id: mark removed, queue every extent it references for
-/// reuse once the removal commits (and its last handle drops).
-///
-/// The very next commit — whatever it captures — drops the entry from the
-/// table, so removal frees gate only on that commit's seq (plus the handle
-/// gate for extents still readable through open handles).
-fn unlink(state: &mut core::State, id: u64) {
-    let seq = state.seq;
-    let gate = Some(id);
-    state.encoded.remove(&id);
-    if let Some(core) = state.open.get(&id).cloned() {
-        let mut inner = core.inner.lock();
-        inner.removed = true;
-        inner.generation += 1;
-        // The runs map keeps its entries — reads through live handles
-        // stay served — but every extent is queued now, released once the
-        // removal commits and the last handle drops (the gate). Mutations
-        // of a removed blob are rejected (see `core::write_locked`), so
-        // no new extent can enter the map after this point.
-        for run in inner.runs.values() {
-            state.defer_free(
-                Extent {
-                    offset: run.physical,
-                    len: run.capacity,
-                },
-                seq,
-                gate,
-            );
-        }
-        // Capture-gated frees resolve with the removal commit: the entry
-        // that referenced them is dropped (never readable via handles).
-        for extent in std::mem::take(&mut inner.pending_frees) {
-            state.defer_free(extent, seq, None);
-        }
-        state.dirty.remove(&id);
-        // Committed metadata extents (checksums + shadow).
-        if let Some(meta) = state.committed_meta.remove(&id) {
-            for extent in meta.into_extents() {
-                state.defer_free(extent, seq, gate);
-            }
-        }
-        // No handles: nothing can read it; drop immediately.
-        if state.handles.get(&id).copied().unwrap_or(0) == 0 {
-            drop(inner);
-            state.open.remove(&id);
-        }
-    } else if let Some((_, entry)) = state.dormant.remove(&id) {
-        for r in &entry.runs {
-            state.defer_free(
-                Extent {
-                    offset: r.physical,
-                    len: block_align(r.len),
-                },
-                seq,
-                None,
-            );
-        }
-        if let Some(meta) = state.committed_meta.remove(&id) {
-            for extent in meta.into_extents() {
-                state.defer_free(extent, seq, None);
-            }
-        }
-    }
-    state.recovery_verified.remove(&id);
-}
-
 impl<S: crate::Storage> crate::Blob for Blob<S> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        core::read_verified(&self.ready, &self.core, offset, len, None).await
+        read::read_verified(&self.ready, &self.core, offset, len, None).await
     }
 
     async fn read_at_buf(
@@ -809,13 +699,13 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        core::read_verified(&self.ready, &self.core, offset, len, Some(bufs.into())).await
+        read::read_verified(&self.ready, &self.core, offset, len, Some(bufs.into())).await
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let data = bufs.into().coalesce();
         let _guard = self.core.write_lock.lock().await;
-        core::write_locked(&self.ready, &self.core, offset, data).await
+        write::write_locked(&self.ready, &self.core, offset, data).await
     }
 
     async fn write_at_sync(
@@ -829,7 +719,7 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let _guard = self.core.write_lock.lock().await;
-        core::resize_locked(&self.ready, &self.core, len).await
+        resize::resize_locked(&self.ready, &self.core, len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {

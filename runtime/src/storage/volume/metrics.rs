@@ -8,7 +8,7 @@
 //! free/pending-free split is the only early warning before disk
 //! exhaustion).
 
-use super::core::State;
+use super::state::State;
 use crate::telemetry::metrics::{
     histogram::Buckets, raw, Counter, Gauge, GaugeExt as _, Histogram, Register, Registered,
     Registration,

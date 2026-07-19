@@ -53,12 +53,14 @@
 
 use super::{
     alloc::{block_align, Extent},
+    chunk::{chunk_of, ChunkCrc, ChunkState, RunMeta},
     commit,
-    core::{
-        chunk_of, load_committed_page, stage_write, zeroed, BlobCore, BlobInner, ChunkCrc,
-        ChunkState, Ready, RunMeta, StagedBlob, StagedRun,
+    paging::load_committed_page,
+    state::{
+        unlink, zeroed, BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob, StagedRun,
     },
-    unlink, Blob, HandleTracker, Shared, BLOCK,
+    write::stage_write,
+    Blob, BLOCK,
 };
 use crate::{Blob as _, Error, Handle, IoBufs, DEFAULT_BLOB_VERSION};
 use commonware_cryptography::Crc32;
@@ -165,7 +167,7 @@ impl<S: crate::Storage> Batch<S> {
     /// Stage a resize to `len`.
     pub async fn resize(&mut self, blob: &Blob<S>, len: u64) -> Result<(), Error> {
         self.ready.check_poisoned()?;
-        // Chunk-end representability, as in `core::write_locked`.
+        // Chunk-end representability, as in `write::write_locked`.
         if len > u64::MAX - BLOCK {
             return Err(Error::OffsetOverflow);
         }
@@ -203,12 +205,12 @@ impl<S: crate::Storage> Batch<S> {
 
         // Staged shrink: trim the overlay so apply publishes the truncated
         // view; base extents dropped from coverage are replaced at apply.
-        // Mirrors `core::resize_locked`: the staged tail is refreshed to
+        // Mirrors `resize::resize_locked`: the staged tail is refreshed to
         // the post-shrink FRONTIER (the last merged backed chunk, which may
         // sit below hole chunks), and the fallible read-back runs BEFORE
         // any overlay state changes (clean unwind).
 
-        /// How the staged tail is refreshed (see `core::resize_locked`).
+        /// How the staged tail is refreshed (see `resize::resize_locked`).
         enum Frontier {
             Empty,
             /// An in-memory copy holds the frontier chunk's span,
@@ -227,7 +229,7 @@ impl<S: crate::Storage> Batch<S> {
             },
             /// Read the chunk's current span (`old_span`) back from disk
             /// and check it against `expected` before slicing the
-            /// surviving prefix (see `core::resize_locked`'s Read arm).
+            /// surviving prefix (see `resize::resize_locked`'s Read arm).
             Read {
                 chunk: u64,
                 phys: u64,
@@ -405,7 +407,7 @@ impl<S: crate::Storage> Batch<S> {
                 let trimmed = span < old_span;
                 // (Re)install the frontier state when the span changed or
                 // the checked value was never resident (see
-                // `core::resize_locked`).
+                // `resize::resize_locked`).
                 let state = (trimmed || !resident).then(|| ChunkState {
                     crc: ChunkCrc::Ready(if trimmed {
                         Crc32::checksum(&bytes)

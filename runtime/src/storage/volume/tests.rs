@@ -3142,7 +3142,7 @@ async fn test_volume_torn_checksum_extent_outside_manifest_rejected() {
 /// segments and never admits pending, unverified, or uncovered chunks.
 #[test]
 fn test_chunk_map_span_verified() {
-    use super::core::{ChunkCrc, ChunkMap, ChunkState};
+    use super::chunk::{ChunkCrc, ChunkMap, ChunkState};
     let ready = |verified| ChunkState {
         crc: ChunkCrc::Ready(7),
         verified,
@@ -3411,7 +3411,7 @@ async fn test_volume_chunk_counts_stay_exact() {
 /// that needs it).
 #[tokio::test]
 async fn test_volume_hydrate_reads_only_frontier() {
-    use super::core::ChunkCrc;
+    use super::chunk::ChunkCrc;
     let pool = test_pool();
     let recording = Recording::new(pool.clone());
     {

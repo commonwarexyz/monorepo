@@ -33,11 +33,10 @@
 
 use super::{
     alloc::{block_align, Allocator, Extent},
-    core::{
-        chunk_of, decode_crcs, merge_frozen_runs, window_value, BlobInner, ChunkCrc, ChunkState,
-        CommittedMeta, Ready, RunMeta, State,
-    },
+    chunk::{chunk_of, merge_frozen_runs, ChunkCrc, ChunkState, RunMeta},
     layout::{ChecksumRef, Entry, Superblock, Table},
+    paging::{decode_crcs, window_value},
+    state::{BlobInner, CommittedMeta, Ready, State},
     Config, BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error, IoBuf};
@@ -120,7 +119,7 @@ const VERIFY_READ_SPAN: u64 = 1 << 20;
 /// pass verification wherever the manifest does not reach, adopting a
 /// table that vouches for values that never landed — and a pure power-loss
 /// history would then surface as read-time corruption (first reads
-/// re-check the guard, see `core::load_committed_page`) instead of the
+/// re-check the guard, see `paging::load_committed_page`) instead of the
 /// mandated one-commit rollback.
 async fn load_ref_windows<B: crate::Blob>(
     file: &B,
@@ -700,7 +699,7 @@ async fn init_fresh<S: crate::Storage>(
 /// Hydration is O(runs + chunks/64): it seeds the dense chunk state (all
 /// unverified, CRCs left on disk) and reads only the frontier span. CRC
 /// values are loaded on demand from the committed checksum extents when a
-/// read first verifies a chunk (see `core::load_committed_page`), so an
+/// read first verifies a chunk (see `paging::load_committed_page`), so an
 /// open multi-TiB blob holds bitmaps, not its checksum array.
 pub(super) async fn hydrate<S: crate::Storage>(
     ready: &Ready<S>,

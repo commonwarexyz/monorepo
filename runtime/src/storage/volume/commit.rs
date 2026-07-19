@@ -18,11 +18,10 @@
 
 use super::{
     alloc::{block_align, Extent},
-    core::{
-        chunk_of, load_committed_refs, merge_frozen_runs, window_value, BlobCore, BlobInner,
-        ChunkCrc, ChunkMap, CommittedMeta, Ready,
-    },
+    chunk::{chunk_of, merge_frozen_runs, ChunkCrc, ChunkMap},
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
+    paging::{load_committed_refs, window_value},
+    state::{BlobCore, BlobInner, CommittedMeta, Ready},
     BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, Error, IoBuf};
@@ -73,7 +72,7 @@ pub(super) struct TicketState {
     notify: Notify,
 }
 
-impl Default for super::core::PendingCommit {
+impl Default for super::state::PendingCommit {
     fn default() -> Self {
         Self {
             roots: BTreeSet::new(),
@@ -355,7 +354,7 @@ pub(super) async fn commit_locked<S: crate::Storage>(
             .map(|write| write.physical + write.bytes.len() as u64)
             .max()
             .expect("a commit writes at least its table");
-        super::core::ensure_provisioned(ready, end).await?;
+        super::state::ensure_provisioned(ready, end).await?;
         futures::future::try_join_all(
             snapshot
                 .writes
