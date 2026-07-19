@@ -612,11 +612,13 @@ pub(super) fn audit_volume<S: crate::Storage>(volume: &Volume<S>, quiesced: bool
 }
 
 /// Commit `name` plus the transitive closure of pending groups touching it
-/// in the soak's ledger (mirrors the never-split rule).
-fn ledger_commit(
+/// in the soak's ledger (mirrors the never-split rule). Generic over the
+/// entry type: the power-loss soak tracks content, the scale soak content
+/// plus the pruned floor.
+fn ledger_commit<T: Clone>(
     name: &'static str,
-    committed: &mut BTreeMap<&'static str, Vec<u8>>,
-    current: &BTreeMap<&'static str, Vec<u8>>,
+    committed: &mut BTreeMap<&'static str, T>,
+    current: &BTreeMap<&'static str, T>,
     groups: &mut Vec<std::collections::BTreeSet<&'static str>>,
 ) {
     let mut capture: std::collections::BTreeSet<&'static str> = [name].into();
@@ -5010,8 +5012,17 @@ const BIG: &str = "big";
 /// The churned side blobs.
 const SIDES: [&str; 2] = ["s0", "s1"];
 
-/// Content per blob name in the scale soak's ledger.
-type ScaleLedger = BTreeMap<&'static str, Vec<u8>>;
+/// One blob's ledger entry: the full logical image plus the pruned floor
+/// gating its readable range. Bytes below the floor are dropped by the
+/// implementation and never compared.
+#[derive(Clone, Default)]
+struct ScaleEntry {
+    content: Vec<u8>,
+    floor: u64,
+}
+
+/// Content and pruned floor per blob name in the scale soak's ledger.
+type ScaleLedger = BTreeMap<&'static str, ScaleEntry>;
 
 /// Applied-but-uncommitted batch groups (never split by a commit).
 type ScaleGroups = Vec<std::collections::BTreeSet<&'static str>>;
@@ -5062,20 +5073,37 @@ fn scale_divergence(actual: &ScaleLedger, expect: &ScaleLedger) -> Option<String
     for name in SCALE_NAMES {
         let got = &actual[name];
         let want = &expect[name];
-        if got.len() != want.len() {
-            return Some(format!("{name}: size {} vs {}", got.len(), want.len()));
+        if got.floor != want.floor {
+            return Some(format!("{name}: floor {} vs {}", got.floor, want.floor));
         }
-        if let Some(at) = got.iter().zip(want).position(|(g, w)| g != w) {
-            return Some(format!("{name}: content diverges at byte {at}"));
+        if got.content.len() != want.content.len() {
+            return Some(format!(
+                "{name}: size {} vs {}",
+                got.content.len(),
+                want.content.len()
+            ));
+        }
+        // Bytes below the floor were pruned away: only the readable range
+        // is compared.
+        let readable = got.floor as usize;
+        if let Some(at) = got.content[readable..]
+            .iter()
+            .zip(&want.content[readable..])
+            .position(|(g, w)| g != w)
+        {
+            return Some(format!(
+                "{name}: content diverges at byte {}",
+                readable + at
+            ));
         }
     }
     None
 }
 
 /// The scale soak's mutable world: the storage stack, open handles, the
-/// ledger oracle (committed and current content per blob plus pending
-/// batch groups, exactly as `power_loss_round` tracks them), and the
-/// crash counters the round-end structural guards check.
+/// ledger oracle (committed and current content plus pruned floor per
+/// blob, and pending batch groups, exactly as `power_loss_round` tracks
+/// content), and the crash counters the round-end structural guards check.
 struct ScaleSoak {
     rng: TestRng,
     pool: BufferPool,
@@ -5088,6 +5116,9 @@ struct ScaleSoak {
     crashes: u32,
     parked_crashes: u32,
     parked_forward: u32,
+    prunes: u32,
+    floored_crashes: u32,
+    floor_regressions: u32,
 }
 
 impl ScaleSoak {
@@ -5108,13 +5139,16 @@ impl ScaleSoak {
             crashes: 0,
             parked_crashes: 0,
             parked_forward: 0,
+            prunes: 0,
+            floored_crashes: 0,
+            floor_regressions: 0,
         };
         for name in SCALE_NAMES {
             let (blob, size) = soak.rig.volume.open("p", name.as_bytes()).await.unwrap();
             assert_eq!(size, 0, "seed {seed}: fresh blob");
             soak.blobs.insert(name, blob);
-            soak.committed.insert(name, Vec::new());
-            soak.current.insert(name, Vec::new());
+            soak.committed.insert(name, ScaleEntry::default());
+            soak.current.insert(name, ScaleEntry::default());
         }
         soak
     }
@@ -5124,8 +5158,19 @@ impl ScaleSoak {
         ledger_commit(name, &mut self.committed, &self.current, &mut self.groups);
     }
 
+    /// Prune `name`'s prefix below `offset` and advance the ledger's
+    /// current floor to the chunk-rounded value. Pruning is a mutation:
+    /// the blob's next commit publishes the floor.
+    async fn prune(&mut self, name: &'static str, offset: u64) {
+        self.blobs[name].prune(offset).await.unwrap();
+        let entry = self.current.get_mut(name).unwrap();
+        entry.floor = entry.floor.max(offset - offset % BLOCK);
+        self.prunes += 1;
+    }
+
     /// Reopen every soak blob on the current volume (the first open runs
-    /// recovery on a rebuilt rig) and read back the full content of each.
+    /// recovery on a rebuilt rig) and read back each blob's readable
+    /// range, probing once below any nonzero floor for the pruned error.
     async fn reopen_all(&mut self, phase: &str) -> ScaleLedger {
         let seed = self.seed;
         self.blobs.clear();
@@ -5152,27 +5197,54 @@ impl ScaleSoak {
                 .open("p", name.as_bytes())
                 .await
                 .unwrap_or_else(|e| panic!("seed {seed} {phase}: reopen {name}: {e}"));
-            let content = if size == 0 {
-                Vec::new()
-            } else {
+            let floor = blob.floor();
+            assert!(
+                floor <= size && floor.is_multiple_of(BLOCK),
+                "seed {seed} {phase}: {name} floor {floor} out of shape (size {size})"
+            );
+            // The readable range starts at the recovered floor. One probe
+            // below a nonzero floor must report the pruned prefix.
+            if floor > 0 {
+                assert!(
+                    matches!(
+                        blob.read_at(floor - 1, 1).await,
+                        Err(Error::OffsetPruned(_, _, f)) if f == floor
+                    ),
+                    "seed {seed} {phase}: {name} read below floor {floor} not rejected"
+                );
+            }
+            let mut content = vec![0u8; size as usize];
+            if size > floor {
                 let got = blob
-                    .read_at(0, size as usize)
+                    .read_at(floor, (size - floor) as usize)
                     .await
                     .unwrap_or_else(|e| panic!("seed {seed} {phase}: read {name}: {e}"))
                     .coalesce();
-                got.as_ref().to_vec()
-            };
+                content[floor as usize..].copy_from_slice(got.as_ref());
+            }
             self.blobs.insert(name, blob);
-            actual.insert(name, content);
+            actual.insert(name, ScaleEntry { content, floor });
         }
         actual
     }
 
     /// Materialize a power loss (no commit in flight), rebuild the rig
     /// from the crash image, and require every blob to read back exactly
-    /// its ledger-committed content.
+    /// its ledger-committed content and floor.
     async fn crash(&mut self, phase: &str) {
         self.crashes += 1;
+        if self.committed.values().any(|e| e.floor > 0) {
+            self.floored_crashes += 1;
+        }
+        // A current floor above the committed one is a crashed-away
+        // uncommitted prune: recovery below regresses to the committed
+        // floor and the bytes in between must be readable again.
+        if SCALE_NAMES
+            .iter()
+            .any(|&n| self.current[n].floor > self.committed[n].floor)
+        {
+            self.floor_regressions += 1;
+        }
         self.blobs.clear();
         let image = self.rig.tearing.crash(&mut self.rng);
         self.rig = ScaleRig::from_image(&self.pool, image).await;
@@ -5216,7 +5288,7 @@ impl ScaleSoak {
         let len = self.rng.random_range(1..2 * BLOCK as usize);
         let mut data = vec![0u8; len];
         self.rng.fill_bytes(&mut data);
-        let offset = self.current[target].len() as u64;
+        let offset = self.current[target].content.len() as u64;
         self.blobs[target]
             .write_at(offset, IoBuf::copy_from_slice(&data))
             .await
@@ -5224,6 +5296,7 @@ impl ScaleSoak {
         self.current
             .get_mut(target)
             .unwrap()
+            .content
             .extend_from_slice(&data);
 
         // Park the target's commit inside the inner fsync.
@@ -5307,16 +5380,17 @@ impl ScaleSoak {
     }
 }
 
-/// One scale-soak round: scripted BULK, REOPEN, SPLICE, and CHURN phases
-/// with seeded parameters, crashing (plain and mid-commit) along the way
-/// and checking every recovery against the ledger. The scripted phase
-/// sizes push the big blob across the implementation's scale thresholds —
-/// checksum-ref compaction (more than `MAX_CHECKSUM_REFS` append-shaped
-/// commits), overlay eviction (more than `OVERLAY_CHUNKS` spliced chunks),
-/// and committed-CRC paging (more than `CRC_PAGE_CHUNKS` chunks) — the
-/// bookkeeping the 2-chunk-bounded model and conformance workloads never
-/// reach, plus capture-time run merging and allocator fragmentation at
-/// scale.
+/// One scale-soak round: scripted BULK, REOPEN, SPLICE, PRUNE, and CHURN
+/// phases with seeded parameters, crashing (plain and mid-commit) along
+/// the way and checking every recovery against the ledger. The scripted
+/// phase sizes push the big blob across the implementation's scale
+/// thresholds — checksum-ref compaction (more than `MAX_CHECKSUM_REFS`
+/// append-shaped commits), overlay eviction (more than `OVERLAY_CHUNKS`
+/// spliced chunks), and committed-CRC paging (more than `CRC_PAGE_CHUNKS`
+/// chunks) — the bookkeeping the 2-chunk-bounded model and conformance
+/// workloads never reach, plus capture-time run merging, allocator
+/// fragmentation, and prefix pruning (a committed thousand-chunk floor
+/// riding plain, regressed, and mid-commit crashes) at scale.
 async fn scale_soak_round(seed: u64) {
     let mut soak = ScaleSoak::new(seed).await;
 
@@ -5337,12 +5411,12 @@ async fn scale_soak_round(seed: u64) {
             let mut data = vec![0u8; (take * BLOCK) as usize];
             soak.rng.fill_bytes(&mut data);
             let cur = soak.current.get_mut(BIG).unwrap();
-            let offset = cur.len() as u64;
+            let offset = cur.content.len() as u64;
             soak.blobs[BIG]
                 .write_at(offset, IoBuf::copy_from_slice(&data))
                 .await
                 .unwrap();
-            cur.extend_from_slice(&data);
+            cur.content.extend_from_slice(&data);
         }
         // Sometimes lose the round to a crash before its sync: the
         // appended blocks vanish with recovery and the loop retries.
@@ -5361,7 +5435,7 @@ async fn scale_soak_round(seed: u64) {
         prev_refs = refs;
         audit_volume(&soak.rig.volume, true);
     }
-    let bulk_chunks = soak.current[BIG].len() as u64 / BLOCK;
+    let bulk_chunks = soak.current[BIG].content.len() as u64 / BLOCK;
 
     // REOPEN: a clean process restart between the bulk and splice phases,
     // so the splices below start from Unloaded committed CRCs.
@@ -5374,7 +5448,7 @@ async fn scale_soak_round(seed: u64) {
     // once its cap is crossed. No crash lands mid-phase, so the eviction
     // threshold is reached within one hydration.
     let splice_target = 1025 + soak.rng.random_range(0..32) as usize;
-    let total_chunks = soak.current[BIG].len() / BLOCK as usize;
+    let total_chunks = soak.current[BIG].content.len() / BLOCK as usize;
     let mut spliced = std::collections::BTreeSet::new();
     let mut until_sync = 96 + soak.rng.random_range(0..64u32);
     while spliced.len() < splice_target {
@@ -5387,7 +5461,7 @@ async fn scale_soak_round(seed: u64) {
             .write_at(at as u64, IoBuf::copy_from_slice(&data))
             .await
             .unwrap();
-        soak.current.get_mut(BIG).unwrap()[at..at + len].copy_from_slice(&data);
+        soak.current.get_mut(BIG).unwrap().content[at..at + len].copy_from_slice(&data);
         spliced.insert(chunk);
         until_sync -= 1;
         if until_sync == 0 {
@@ -5402,19 +5476,38 @@ async fn scale_soak_round(seed: u64) {
     audit_volume(&soak.rig.volume, true);
     let spliced_chunks = spliced.len();
 
+    // PRUNE: drop a third of the big blob behind its floor and commit, so
+    // a large floor rides every scripted crash below. The plain crash
+    // proves the pruning commit persisted the floor.
+    let committed_size = soak.committed[BIG].content.len() as u64;
+    soak.prune(BIG, committed_size / 3).await;
+    soak.blobs[BIG].sync().await.unwrap();
+    soak.commit(BIG);
+    audit_volume(&soak.rig.volume, true);
+    soak.crash("prune-committed").await;
+
+    // A further prune whose commit never lands: recovery regresses to the
+    // committed floor and the bytes between the two floors are readable
+    // again (verified against the ledger by the crash's readback).
+    let floor = soak.current[BIG].floor;
+    soak.prune(BIG, (floor + 7 * BLOCK + 9).min(committed_size))
+        .await;
+    soak.crash("prune-regressed").await;
+
     // The scripted mid-commit crashes (churn may add more): one seeded fan
-    // resolution, then one directed roll-forward at full scale.
+    // resolution, then one directed roll-forward, at full scale and over
+    // the large committed floor.
     soak.parked_crash("splice-parked").await;
     soak.parked_crash_landed("splice-forward").await;
 
     // CHURN: randomized ops over the side blobs (batches may rope in the
-    // big blob) for allocator churn — COW frees, remove/recreate, resizes
-    // — and group coverage, with plain and mid-commit crashes at random
-    // points.
+    // big blob, prunes mostly target it) for allocator churn — COW frees,
+    // remove/recreate, resizes, floor advances — and group coverage, with
+    // plain and mid-commit crashes at random points.
     let churn_steps = 60 + soak.rng.random_range(0..21u32);
     for step in 0..churn_steps {
         let name = SIDES[soak.rng.random_range(0..SIDES.len())];
-        match soak.rng.random_range(0..16u8) {
+        match soak.rng.random_range(0..17u8) {
             // Append a random amount (small through multi-block).
             0..=2 => {
                 let len = match soak.rng.random_range(0..3u8) {
@@ -5425,50 +5518,52 @@ async fn scale_soak_round(seed: u64) {
                 let mut data = vec![0u8; len];
                 soak.rng.fill_bytes(&mut data);
                 let cur = soak.current.get_mut(name).unwrap();
-                let offset = cur.len() as u64;
+                let offset = cur.content.len() as u64;
                 soak.blobs[name]
                     .write_at(offset, IoBuf::copy_from_slice(&data))
                     .await
                     .unwrap();
-                cur.extend_from_slice(&data);
+                cur.content.extend_from_slice(&data);
             }
-            // Overwrite a random committed range (exercises COW).
+            // Overwrite a random range above the floor (exercises COW).
             3..=4 => {
                 let cur = soak.current.get_mut(name).unwrap();
-                if cur.is_empty() {
+                let floor = cur.floor as usize;
+                if cur.content.len() <= floor {
                     continue;
                 }
-                let at = soak.rng.random_range(0..cur.len());
+                let at = soak.rng.random_range(floor..cur.content.len());
                 let len = soak
                     .rng
-                    .random_range(1..=(cur.len() - at).min(2 * BLOCK as usize));
+                    .random_range(1..=(cur.content.len() - at).min(2 * BLOCK as usize));
                 let mut data = vec![0u8; len];
                 soak.rng.fill_bytes(&mut data);
                 soak.blobs[name]
                     .write_at(at as u64, IoBuf::copy_from_slice(&data))
                     .await
                     .unwrap();
-                cur[at..at + len].copy_from_slice(&data);
+                cur.content[at..at + len].copy_from_slice(&data);
             }
-            // Rewind (resize down).
+            // Rewind (resize down, never below the floor).
             5 => {
                 let cur = soak.current.get_mut(name).unwrap();
-                if cur.is_empty() {
+                let floor = cur.floor as usize;
+                if cur.content.len() <= floor {
                     continue;
                 }
-                let to = soak.rng.random_range(0..cur.len());
+                let to = soak.rng.random_range(floor..cur.content.len());
                 soak.blobs[name].resize(to as u64).await.unwrap();
-                cur.truncate(to);
+                cur.content.truncate(to);
             }
             // Zero-extend (resize up).
             6 => {
                 let grow = soak.rng.random_range(1..2 * BLOCK as usize);
                 let cur = soak.current.get_mut(name).unwrap();
                 soak.blobs[name]
-                    .resize((cur.len() + grow) as u64)
+                    .resize((cur.content.len() + grow) as u64)
                     .await
                     .unwrap();
-                cur.resize(cur.len() + grow, 0);
+                cur.content.resize(cur.content.len() + grow, 0);
             }
             // Sync: commit the blob plus its applied-batch group.
             7..=8 => {
@@ -5482,7 +5577,7 @@ async fn scale_soak_round(seed: u64) {
                 let mut batch = soak.rig.volume.batch().await.unwrap();
                 let mut ends: BTreeMap<&'static str, u64> = SCALE_NAMES
                     .iter()
-                    .map(|&n| (n, soak.current[n].len() as u64))
+                    .map(|&n| (n, soak.current[n].content.len() as u64))
                     .collect();
                 let mut staged: Vec<(&'static str, Vec<u8>)> = Vec::new();
                 for pick in [name, other] {
@@ -5501,7 +5596,11 @@ async fn scale_soak_round(seed: u64) {
                     0 => {
                         batch.apply().await.unwrap();
                         for (pick, data) in staged {
-                            soak.current.get_mut(pick).unwrap().extend_from_slice(&data);
+                            soak.current
+                                .get_mut(pick)
+                                .unwrap()
+                                .content
+                                .extend_from_slice(&data);
                         }
                         let mut group: std::collections::BTreeSet<&'static str> =
                             [name, other].into();
@@ -5519,7 +5618,11 @@ async fn scale_soak_round(seed: u64) {
                     1 => {
                         batch.apply_sync().await.unwrap();
                         for (pick, data) in staged {
-                            soak.current.get_mut(pick).unwrap().extend_from_slice(&data);
+                            soak.current
+                                .get_mut(pick)
+                                .unwrap()
+                                .content
+                                .extend_from_slice(&data);
                         }
                         soak.commit(name);
                         soak.commit(other);
@@ -5529,19 +5632,25 @@ async fn scale_soak_round(seed: u64) {
                 }
             }
             // Record rewrite through a batch: staged resize + staged
-            // write, committed atomically.
+            // write of everything above the floor, committed atomically.
             11 => {
                 let len = soak.rng.random_range(1..2 * BLOCK as usize);
                 let mut data = vec![0u8; len];
                 soak.rng.fill_bytes(&mut data);
+                let floor = soak.current[name].floor;
                 let mut batch = soak.rig.volume.batch().await.unwrap();
-                batch.resize(&soak.blobs[name], len as u64).await.unwrap();
                 batch
-                    .write_at(&soak.blobs[name], 0, IoBuf::copy_from_slice(&data))
+                    .resize(&soak.blobs[name], floor + len as u64)
+                    .await
+                    .unwrap();
+                batch
+                    .write_at(&soak.blobs[name], floor, IoBuf::copy_from_slice(&data))
                     .await
                     .unwrap();
                 batch.apply_sync().await.unwrap();
-                soak.current.insert(name, data);
+                let cur = soak.current.get_mut(name).unwrap();
+                cur.content.truncate(floor as usize);
+                cur.content.extend_from_slice(&data);
                 soak.commit(name);
             }
             // Remove and recreate the name, directly or through a batch.
@@ -5567,28 +5676,57 @@ async fn scale_soak_round(seed: u64) {
                     batch.apply_sync().await.unwrap();
                     soak.blobs.insert(name, fresh);
                 }
-                soak.committed.insert(name, Vec::new());
-                soak.current.insert(name, Vec::new());
+                soak.committed.insert(name, ScaleEntry::default());
+                soak.current.insert(name, ScaleEntry::default());
             }
-            // Read a random range of the big blob against the ledger's
-            // current image (cold chunks page committed CRCs in).
+            // Read a random range of the big blob above its floor against
+            // the ledger's current image (cold chunks page committed CRCs
+            // in).
             13 => {
-                let at = soak.rng.random_range(0..soak.current[BIG].len());
+                let cur = &soak.current[BIG];
+                let floor = cur.floor as usize;
+                if cur.content.len() <= floor {
+                    continue;
+                }
+                let at = soak.rng.random_range(floor..cur.content.len());
                 let len = soak
                     .rng
-                    .random_range(1..=(soak.current[BIG].len() - at).min(16 * BLOCK as usize));
+                    .random_range(1..=(cur.content.len() - at).min(16 * BLOCK as usize));
                 let got = soak.blobs[BIG]
                     .read_at(at as u64, len)
                     .await
                     .unwrap()
                     .coalesce();
                 assert!(
-                    got.as_ref() == &soak.current[BIG][at..at + len],
+                    got.as_ref() == &soak.current[BIG].content[at..at + len],
                     "seed {seed} churn {step}: big readback at {at}+{len}"
                 );
             }
             // Crash + recover.
             14 => soak.crash(&format!("churn {step}")).await,
+            // Prune: advance the big blob's floor (occasionally a side's)
+            // to a random offset between the current floor and the
+            // committed size, clamped to the current size (a rewound side
+            // blob may sit below its committed size, and pruning past the
+            // size errs). The impl rounds the floor DOWN to a chunk and
+            // the next commit publishes it. No batch outlives a churn
+            // step, so no prune can hit a blob a batch stages over (the
+            // impl asserts on that).
+            15 => {
+                let target = if soak.rng.random_range(0..4u8) == 0 {
+                    name
+                } else {
+                    BIG
+                };
+                let cap = (soak.committed[target].content.len() as u64)
+                    .min(soak.current[target].content.len() as u64);
+                let floor = soak.current[target].floor;
+                if floor >= cap {
+                    continue;
+                }
+                let offset = soak.rng.random_range(floor..=cap);
+                soak.prune(target, offset).await;
+            }
             // Crash while a commit is parked at the inner fsync.
             _ => soak.parked_crash(&format!("churn {step}")).await,
         }
@@ -5631,16 +5769,33 @@ async fn scale_soak_round(seed: u64) {
         spliced_chunks > 1024,
         "seed {seed}: splice touched only {spliced_chunks} chunks"
     );
+    assert!(
+        soak.prunes > 1,
+        "seed {seed}: only {} prunes landed",
+        soak.prunes
+    );
+    assert!(
+        soak.committed[BIG].floor > 0,
+        "seed {seed}: the big blob's floor never advanced"
+    );
+    assert!(
+        soak.floored_crashes > 0,
+        "seed {seed}: no crash landed with a nonzero committed floor"
+    );
+    assert!(
+        soak.floor_regressions > 0,
+        "seed {seed}: no crash regressed an uncommitted prune"
+    );
 }
 
 /// Scale-tier history-oracle soak: drive the volume across its
 /// scale-dependent bookkeeping thresholds — checksum-ref compaction,
-/// overlay eviction, committed-CRC paging, capture-time run merging, and
-/// allocator fragmentation — under materialized power loss (plain and
-/// parked mid-commit), checking every recovery against a ledger of
-/// expected committed content. The exhaustive model caps blobs at 2
-/// chunks, so this soak is the only crash-oracle coverage these
-/// mechanisms have.
+/// overlay eviction, committed-CRC paging, capture-time run merging,
+/// allocator fragmentation, and prefix pruning at size — under
+/// materialized power loss (plain and parked mid-commit), checking every
+/// recovery against a ledger of expected committed content and floors.
+/// The exhaustive model caps blobs at 2 chunks, so this soak is the only
+/// crash-oracle coverage these mechanisms have.
 #[tokio::test]
 async fn test_volume_scale_soak() {
     for seed in 0..4u64 {

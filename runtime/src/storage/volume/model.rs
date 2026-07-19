@@ -200,11 +200,11 @@
 //! soak in `tests` drives that lifecycle at size (ref compaction, overlay
 //! eviction, and committed-CRC paging) under materialized power loss
 //! against a history oracle, but it samples seeded histories rather than
-//! enumerating them. Pruning is UNCOVERED AT SCALE: the soak does not yet
-//! drive `prune`, so the floor's interaction with checksum-ref dropping,
+//! enumerating them. The same soak covers pruning at scale: its prune arm
+//! and scripted large-floor crashes (committed, regressed, and parked
+//! mid-commit) drive the floor's interaction with checksum-ref dropping,
 //! compaction, and paging at size (see `commit::finalize` and the
-//! recovery ref-window checks) rests on the small-scope checks here until
-//! the soak grows a prune arm.
+//! recovery ref-window checks), sampled under the same caveat.
 //!
 //! # Deliberately out of scope
 //!
