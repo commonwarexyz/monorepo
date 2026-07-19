@@ -334,10 +334,9 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         partition_index_and_sub_key::<P>(key).0
     }
 
-    /// The range matches this index's translator and spill threshold, and shares its metric
-    /// handles (clones of the same registered metrics), so worker mutations count live exactly
-    /// as the serial build's do. It allocates just `count` partition slots, so per-worker memory
-    /// is the range rather than the full `2^(8*P)`, which is what makes a large `P` affordable.
+    /// The range matches this index's translator and spill threshold. It allocates only `count`
+    /// partition slots, so per-worker memory is the range rather than the full `2^(8*P)`, which
+    /// is what makes a large `P` affordable.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
         let partitions = (0..count)
             .map(|_| Partition::default())
@@ -358,9 +357,8 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         }
     }
 
-    /// Moves the worker's partitions and spilled entries wholesale. The worker's mutations
-    /// already counted on this index's metric handles (the worker holds clones), so nothing
-    /// folds here.
+    /// Moves the worker's partitions and spilled entries wholesale. Metrics need no adjustment,
+    /// since the worker updated this index's handles directly.
     fn install_range(&mut self, mut worker: RangeIndex<T, V, P>) {
         let lo = worker.offset;
         for (local, partition) in worker.index.partitions.iter_mut().enumerate() {

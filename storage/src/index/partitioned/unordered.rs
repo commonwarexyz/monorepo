@@ -62,13 +62,11 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         partition_index_and_sub_key::<P>(key).0
     }
 
-    /// The range's slots match this index's translator and share each covered partition's
-    /// metric handles (clones of the same registered metrics), so worker mutations count on the
-    /// partition's own metrics live. It allocates just `count` slots, so per-worker memory is
-    /// the range, not the full `2^(8*P)`.
+    /// The range allocates only `count` slots, so per-worker memory is the range rather than
+    /// the full `2^(8*P)`.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
         let partitions = (0..count)
-            .map(|i| self.partitions[offset + i].empty_clone())
+            .map(|i| self.partitions[offset + i].empty())
             .collect();
         RangeIndex { partitions, offset }
     }

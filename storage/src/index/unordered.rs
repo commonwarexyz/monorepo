@@ -79,12 +79,11 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
-    /// Create an empty index sharing this index's translator and metric handles (clones of the
-    /// same registered metrics). Parallel snapshot-build workers use it for their partition
-    /// slots, so worker mutations count on the partition's own metrics live. The maps start
-    /// without capacity, since a worker slot often receives nothing.
+    /// Create an empty index with this index's translator and metric handles. Parallel
+    /// snapshot-build workers use it for their partition slots. The maps start without
+    /// capacity, since a worker slot often receives nothing.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn empty_clone(&self) -> Self {
+    pub(crate) fn empty(&self) -> Self {
         Self {
             translator: self.translator.clone(),
             overflow: HashMap::with_hasher(self.translator.clone()),
@@ -96,9 +95,8 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 
     /// Move `other`'s contents into self, which must be empty. Wholesale moves are what let
-    /// [`Self::empty_clone`] build-worker slots install without re-inserting each entry, and
-    /// `other`'s mutations already counted on self's metric handles (it holds clones), so
-    /// nothing folds here.
+    /// [`Self::empty`] build-worker slots install without re-inserting each entry.
+    /// Metrics need no adjustment, since `other` updated self's handles directly.
     ///
     /// # Panics
     ///
