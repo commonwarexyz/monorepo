@@ -361,10 +361,17 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
     /// since the worker updated this index's handles directly.
     fn install_range(&mut self, mut worker: RangeIndex<T, V, P>) {
         let lo = worker.offset;
+        let len = worker.index.partitions.len();
+
+        // Probe the spilled side-table by its (usually empty) key set rather than once per slot.
+        assert!(
+            self.spilled.keys().all(|&p| p < lo || p >= lo + len),
+            "install target range must be empty"
+        );
         for (local, partition) in worker.index.partitions.iter_mut().enumerate() {
             let global = lo + local;
             assert!(
-                self.partitions[global].is_empty() && self.spilled_partition(global).is_none(),
+                self.partitions[global].is_empty(),
                 "install target range must be empty"
             );
             self.partitions[global] = std::mem::take(partition);

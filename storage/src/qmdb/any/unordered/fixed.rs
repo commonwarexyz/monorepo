@@ -773,6 +773,49 @@ pub(crate) mod test {
         });
     }
 
+    /// A multi-worker build of an empty log must return the serial build's result (zero active
+    /// keys, an empty bitmap) rather than panicking on the last-commit bit.
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_parallel_init_empty_log() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut results = Vec::new();
+            for concurrency in [1usize, 4] {
+                let cfg = fixed_db_config::<OneCap>("unordered_parallel_empty", &context);
+                let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                    context
+                        .child("log")
+                        .with_attribute("concurrency", concurrency),
+                    cfg.journal_config,
+                )
+                .await
+                .unwrap();
+                let log = Arc::new(log);
+                let mut index =
+                    crate::index::partitioned::unordered::Index::<OneCap, Location, 1>::new(
+                        context
+                            .child("index")
+                            .with_attribute("concurrency", concurrency),
+                        OneCap,
+                    );
+                let result = index
+                    .build_snapshot(
+                        context
+                            .child("build")
+                            .with_attribute("concurrency", concurrency),
+                        Location::new(0),
+                        &log,
+                        NonZeroUsize::new(concurrency).unwrap(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.0, 0);
+                results.push(result);
+            }
+            assert_eq!(results[0], results[1]);
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_any_unordered_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {

@@ -229,8 +229,9 @@ mod tests {
     }
 
     /// A worker with a nonzero offset must land its slots at the global partitions
-    /// `offset + local` when installed, carrying inline values, overflow chains, and the
-    /// key/item counts.
+    /// `offset + local` when installed, carrying inline values and overflow chains (the
+    /// key/item counts are live through the shared handles, so the `get` asserts are what pin
+    /// the moved contents).
     #[test_traced]
     fn test_install_range_nonzero_offset() {
         deterministic::Runner::default().start(|context| async move {

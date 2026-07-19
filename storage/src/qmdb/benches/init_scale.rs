@@ -33,9 +33,9 @@
 //!
 //! The optional index flavor (default `ordered`) selects the snapshot index whose parallel
 //! `build_snapshot` override is exercised: `ordered` is the P=3 partitioned ordered index (the
-//! inline-SoA config for large key sets), `unordered` the P=2 (65,536 partition) hash index. Bench
-//! a database with the flavor it was generated with -- the two db variants write different
-//! operation logs.
+//! inline-SoA config for large key sets), `unordered` the P=2 (65,536 partition) hash index.
+//! Bench a database with the flavor it was generated with, since the two db variants write
+//! different operation logs.
 //!
 //! Each invocation does exactly one reopen, so numbers are warm only if the OS file cache is already
 //! warm. For the realistic cold-cache case (init at process start), have the driver drop the OS cache

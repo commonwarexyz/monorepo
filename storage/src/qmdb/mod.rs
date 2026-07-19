@@ -663,7 +663,11 @@ where
         active.set(**loc - floor, true);
         total_items += 1;
     });
-    if last_commit >= floor {
+
+    // `end > floor` (rather than `last_commit >= floor`) so an empty log sets no bit: with
+    // `end == 0`, the saturated `last_commit` of zero would spuriously pass the floor check
+    // and index past the empty bitmap.
+    if end > floor {
         active.set(last_commit - floor, true);
     }
 
