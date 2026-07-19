@@ -427,7 +427,11 @@ fn resolve_crc(crcs: &ChunkMap, preloaded: &[(u64, Vec<u32>)], chunk: u64) -> u3
     })
 }
 
-/// Capture the commit's content and allocate/encode its metadata writes.
+/// Capture the commit's content and allocate/encode its metadata writes,
+/// in four phases per captured blob: plan the checksum-ref shape
+/// ([`plan_refs`]), capture the value snapshot under the write lock
+/// ([`capture_blob`]), allocate and stage its metadata ([`stage_meta`]),
+/// then assemble the table over every entry ([`assemble_table`]).
 async fn take_snapshot<S: crate::Storage>(
     ready: &Ready<S>,
     capture: BTreeSet<u64>,
@@ -467,388 +471,17 @@ async fn take_snapshot<S: crate::Storage>(
         // issued bytes; released before any I/O below (the capture is a
         // value snapshot, and the freeze boundary protects it thereafter).
         let write_guard = blob.write_lock.lock().await;
-
-        // Decide the checksum-ref shape ONCE, and preload what a full
-        // rewrite needs. Append-shaped dirt leaves every previously
-        // covered chunk's CRC valid: extend coverage with one NEW delta
-        // ref and keep the prior refs (and their extents) untouched, so a
-        // bulk-load sync stops rewriting the blob's whole array. Anything
-        // else — dirt below the covered frontier (overwrite, COW, shrink),
-        // coverage shrinking (rewind), or a full ref list — rewrites the
-        // array as a single ref, which also keeps refs disjoint and
-        // contiguous from chunk 0 (compaction). A full rewrite re-encodes
-        // every covered chunk's CRC, and chunks untouched this process
-        // hold theirs only on disk: preload those values from the OLD
-        // extents (a read-modify-write of the checksum array). The
-        // capture below reuses this decision — its inputs (runs coverage,
-        // the committed refs, the dirty set) are stable under the write
-        // lock and the commit lock, capture-time run merging preserves
-        // chunk coverage exactly, and the old extents cannot be recycled
-        // underneath the read (their frees are queued by this capture at
-        // the earliest and applied only once this commit confirms).
-        let (plan, preloaded) = {
-            let decision = {
-                let inner = blob.inner.lock();
-                if inner.removed {
-                    None
-                } else {
-                    let covered_end = covered_end(&inner);
-                    let prev_refs = inner
-                        .committed_entry
-                        .as_ref()
-                        .map_or(&[][..], |e| &e.checksums[..]);
-                    let prev_end = prev_refs
-                        .last()
-                        .map_or(0, |r| r.first_chunk + r.count as u64);
-                    let delta = covered_end >= prev_end
-                        && prev_refs.len() < MAX_CHECKSUM_REFS
-                        && inner
-                            .dirty_chunks
-                            .iter()
-                            .next()
-                            .is_none_or(|&c| c >= prev_end);
-                    let load = (!delta && inner.crcs.has_unloaded(covered_end.min(prev_end)))
-                        .then(|| prev_refs.to_vec());
-                    Some((delta, prev_end, load))
-                }
-            };
-            match decision {
-                Some((delta, prev_end, load)) => {
-                    let preloaded = match load {
-                        // Boxed: the cold streaming loader would otherwise
-                        // deepen every commit future's layout.
-                        Some(refs) => Box::pin(load_committed_refs(ready, &blob, &refs)).await?,
-                        None => Vec::new(),
-                    };
-                    (Some((delta, prev_end)), preloaded)
-                }
-                None => (None, Vec::new()),
-            }
-        };
-
-        let (entry, dirty_chunks, array_start, cksum_bytes, shadow_bytes, retained, superseded) = {
-            let mut state = ready.state.lock();
-            let mut inner = blob.inner.lock();
-            if inner.removed {
-                state.dirty.remove(&id);
-                continue;
-            }
-
-            // Raise the freeze boundary: nothing this snapshot covers may be
-            // rewritten in place until it is confirmed (or rolled back).
-            inner.freeze_size = inner.freeze_size.max(inner.size);
-
-            // Block demotion until finalize publishes the new entry: the
-            // dormant map must never hold an entry this commit supersedes.
-            inner.capturing = true;
-
-            // Finalize deferred chunk CRCs from their overlay entries (the
-            // write lock quiesces the writer): the checksum array, tail
-            // CRC, and delta manifest below must carry exact values.
-            inner.overlay_finalize();
-
-            // Freeze the captured runs atomically with the capture (the
-            // model freezes per-run coverage at snapshot time): this entry,
-            // its checksum extents, and its manifest reference every run
-            // below, so the young-extent exemption must not apply to any of
-            // them — an in-place rewrite after capture would invalidate a
-            // manifested chunk and roll back this commit at recovery. Runs
-            // created after this point keep `born > snapshot_seq` and stay
-            // exempt: they are genuinely absent from this commit's table.
-            for run in inner.runs.values_mut() {
-                run.born = run.born.min(seq);
-            }
-
-            // With every run frozen as of this capture, coalesce contiguous
-            // neighbors: the entry encodes fewer runs and every later
-            // runs-map descent walks a shallower map. Skipped while a batch
-            // holds staged state for this blob, whose overlay references
-            // base runs by key (merging would move keys under it).
-            if inner.staged_batches == 0 {
-                merge_frozen_runs(&mut inner.runs);
-            }
-            let dirty_chunks: Vec<u64> = std::mem::take(&mut inner.dirty_chunks)
-                .into_iter()
-                .collect();
-            state.dirty.remove(&id);
-
-            // Content frees of a captured blob resolve when this commit
-            // confirms: its new entry stops referencing them.
-            let pending = std::mem::take(&mut inner.pending_frees);
-            for extent in pending {
-                state.defer_free(extent, seq, None);
-            }
-
-            let last_backed = inner
-                .runs
-                .iter()
-                .next_back()
-                .map(|(&l, r)| chunk_of(l + r.len - 1));
-
-            // Chunk coverage the checksum refs must provide (see
-            // [`covered_end`]). Unchanged by the run merging above, which
-            // preserves chunk coverage exactly.
-            let covered_end = covered_end(&inner);
-
-            // The ref shape decided at preload (inputs stable, see above).
-            // A removal between the two sections is caught by the removed
-            // check above, so a live capture always carries a plan.
-            let (delta, prev_end) = plan.expect("live blob carries a ref plan");
-            let prev_refs = inner
-                .committed_entry
-                .as_ref()
-                .map_or(&[][..], |e| &e.checksums[..]);
-            let (array_start, checksums) = if delta {
-                (prev_end, prev_refs.to_vec())
-            } else {
-                (0, Vec::new())
-            };
-            let cksum_bytes: Vec<u8> = {
-                let mut bytes = Vec::with_capacity(((covered_end - array_start) * 4) as usize);
-                for c in array_start..covered_end {
-                    bytes.extend_from_slice(&resolve_crc(&inner.crcs, &preloaded, c).to_be_bytes());
-                }
-                bytes
-            };
-
-            // Shadow: the frontier chunk's span, when partial (post-commit
-            // appends will write into its block in place; recovery restores
-            // the frozen span from the shadow). The shadow bytes come from
-            // the tail buffer, whose invariant — it always describes the
-            // last BACKED chunk — every mutation path maintains; the model
-            // derives the shadow from the captured runs directly, so a
-            // desynced tail cache here would durably record a wrong shadow:
-            // assert coherence instead of writing one.
-            let shadow_bytes = last_backed.and_then(|last| {
-                let (_, span) = inner.chunk_span(last).expect("backed chunk");
-                (span < BLOCK).then(|| {
-                    assert_eq!(inner.tail_chunk, last, "tail buffer desynced from runs");
-                    assert_eq!(
-                        inner.tail.len() as u64,
-                        span,
-                        "tail span desynced from runs"
-                    );
-                    inner.tail.clone()
-                })
-            });
-
-            // The final backed chunk's CRC, recorded whether the chunk is
-            // full or partial: hydration verifies the frontier against it
-            // without touching the checksum extents.
-            let tail_crc = last_backed.map_or(0, |last| resolve_crc(&inner.crcs, &preloaded, last));
-
-            let runs: Vec<Run> = inner
-                .runs
-                .iter()
-                .map(|(&logical, r)| Run {
-                    logical,
-                    physical: r.physical,
-                    len: r.len,
-                })
-                .collect();
-
-            // Extents the new entry stops referencing, freed once this
-            // commit confirms: the previous shadow always (each commit that
-            // needs one writes a fresh block), the previous checksum
-            // extents only on a full rewrite (a delta commit keeps
-            // referencing them).
-            let mut prev_meta = state.committed_meta.remove(&id).unwrap_or_default();
-            debug_assert_eq!(
-                prev_meta.checksums.len(),
-                prev_refs.len(),
-                "committed_meta out of sync with the committed entry"
-            );
-            let mut superseded: Vec<Extent> = Vec::new();
-            superseded.extend(prev_meta.shadow.take());
-            let retained = if delta {
-                std::mem::take(&mut prev_meta.checksums)
-            } else {
-                superseded.append(&mut prev_meta.checksums);
-                Vec::new()
-            };
-
-            let entry = Entry {
-                id,
-                partition: 0, // resolved during table assembly
-                name: blob.name.clone(),
-                version: blob.version,
-                size: inner.size,
-                runs,
-                checksums, // retained refs (a new delta/full ref is pushed below)
-                tail_crc,
-                shadow: None, // filled after allocation below
-            };
-            (
-                entry,
-                dirty_chunks,
-                array_start,
-                cksum_bytes,
-                shadow_bytes,
-                retained,
-                superseded,
-            )
+        let (plan, preloaded) = plan_refs(ready, &blob).await?;
+        let Some(captured) = capture_blob(ready, &blob, id, seq, plan, &preloaded) else {
+            continue;
         };
         drop(write_guard);
-
-        // Allocate + stage checksum/shadow writes.
-        let mut entry = entry;
-        let mut meta = CommittedMeta {
-            checksums: retained,
-            shadow: None,
-        };
-        if !cksum_bytes.is_empty() {
-            let extent = {
-                let mut state = ready.state.lock();
-                state.alloc.allocate(block_align(cksum_bytes.len() as u64))
-            };
-            entry.checksums.push(ChecksumRef {
-                first_chunk: array_start,
-                count: (cksum_bytes.len() / 4) as u32,
-                offset: extent.offset,
-                crc: Crc32::checksum(&cksum_bytes),
-            });
-            writes.push(MetaWrite {
-                physical: extent.offset,
-                bytes: IoBuf::from(cksum_bytes),
-            });
-            meta.checksums.push(extent);
-        }
-        if let Some(shadow) = shadow_bytes {
-            let extent = {
-                let mut state = ready.state.lock();
-                state.alloc.allocate(BLOCK)
-            };
-            entry.shadow = Some(extent.offset);
-            writes.push(MetaWrite {
-                physical: extent.offset,
-                bytes: IoBuf::from(shadow),
-            });
-            meta.shadow = Some(extent);
-        }
-        // A fresh shadow is a metadata write this commit may tear, and
-        // recovery's splice is a raw byte copy that cannot tell a torn
-        // shadow from a valid one: manifest the frontier chunk so
-        // verification checks the shadow's content against `tail_crc`
-        // before adoption, even when no dirt touched the frontier (see
-        // the model's `manifest_fresh_shadow` rule).
-        if entry.shadow.is_some() {
-            let frontier = entry
-                .runs
-                .last()
-                .map(|r| chunk_of(r.logical + r.len - 1))
-                .expect("shadow requires a backed chunk");
-            if dirty_chunks.binary_search(&frontier).is_err() {
-                manifest.push((id, frontier));
-            }
-        }
-        for chunk in dirty_chunks {
-            manifest.push((id, chunk));
-        }
-        {
-            let mut state = ready.state.lock();
-            for extent in superseded {
-                state.defer_free(extent, seq, None);
-            }
-            state.committed_meta.insert(id, meta);
-        }
+        let entry = stage_meta(ready, id, seq, captured, &mut writes, &mut manifest);
         committed.push((blob, entry));
     }
 
-    // Assemble the table: captured blobs re-encode; everything else is
-    // served from its cached encoded entry (encoded lazily on first use),
-    // so assembly is O(captured + concatenation).
-    let (old_table, table_extent) = {
-        let mut state = ready.state.lock();
-        state.meta_dirty = false;
-
-        // Encodings embed partition indexes: a changed partition LIST
-        // invalidates every cached encoding.
-        if state.encoded_epoch != state.partition_epoch {
-            state.encoded.clear();
-            state.encoded_epoch = state.partition_epoch;
-        }
-
-        let partitions: Vec<String> = state.partitions.keys().cloned().collect();
-        // Indexed lookups: an epoch change re-encodes EVERY entry, so a
-        // linear scan per blob would make that commit O(blobs x
-        // partitions).
-        let pindex: std::collections::BTreeMap<&str, u32> = partitions
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.as_str(), i as u32))
-            .collect();
-        let pindex = |p: &str| *pindex.get(p).expect("known partition");
-
-        // Fresh encodings for captured blobs.
-        for (blob, entry) in &mut committed {
-            entry.partition = pindex(&blob.partition);
-            state.encoded.insert(entry.id, Bytes::from(entry.encode()));
-        }
-        // Cache misses among served blobs (first commit after recovery or
-        // an epoch change).
-        let mut missing: Vec<(u64, Bytes)> = Vec::new();
-        for (&id, (partition, entry)) in &state.dormant {
-            if state.encoded.contains_key(&id) {
-                continue;
-            }
-            let mut entry = entry.clone();
-            entry.partition = pindex(partition);
-            missing.push((id, Bytes::from(entry.encode())));
-        }
-        for (&id, core) in &state.open {
-            if state.encoded.contains_key(&id) {
-                continue;
-            }
-            // Served open blob: its cached committed entry (set by the last
-            // commit that captured it), or a fresh empty entry (created but
-            // never captured). Never derived from live state, which may
-            // hold uncommitted writes.
-            let inner = core.inner.lock();
-            if inner.removed {
-                continue;
-            }
-            let mut entry = inner
-                .committed_entry
-                .clone()
-                .unwrap_or_else(|| Entry::empty(core.id, core.name.clone(), core.version));
-            entry.partition = pindex(&core.partition);
-            missing.push((id, Bytes::from(entry.encode())));
-        }
-        for (id, bytes) in missing {
-            state.encoded.insert(id, bytes);
-        }
-        manifest.sort_unstable();
-        debug_assert_eq!(
-            state.encoded.len(),
-            state.dormant.len()
-                + state
-                    .open
-                    .values()
-                    .filter(|core| !core.inner.lock().removed)
-                    .count(),
-            "encoded-entry cache out of sync with the namespace"
-        );
-
-        let entries: Vec<Bytes> = state.encoded.values().cloned().collect();
-        let bytes = Table::assemble(seq, state.next_id, &partitions, entries, &manifest);
-        let extent = state.alloc.allocate(block_align(bytes.len() as u64));
-        let superblock_offset = Superblock::slot_offset(1 - state.sacred_slot);
-        let sb = Superblock {
-            seq,
-            table_offset: extent.offset,
-            table_len: bytes.len() as u32,
-            table_crc: Crc32::checksum(&bytes),
-        };
-        writes.push(MetaWrite {
-            physical: extent.offset,
-            bytes: IoBuf::from(bytes),
-        });
-        writes.push(MetaWrite {
-            physical: superblock_offset,
-            bytes: IoBuf::from(sb.encode()),
-        });
-        (state.table_extent, extent)
-    };
+    let (old_table, table_extent) =
+        assemble_table(ready, seq, &mut committed, &mut manifest, &mut writes);
 
     Ok(Snapshot {
         seq,
@@ -858,6 +491,456 @@ async fn take_snapshot<S: crate::Storage>(
         capture,
         old_table,
     })
+}
+
+/// The checksum-ref shape decided for one capture: extend coverage with
+/// one new delta ref, or rewrite the whole array as a single ref from
+/// chunk 0.
+struct RefPlan {
+    delta: bool,
+    /// Chunk coverage end of the previously committed refs.
+    prev_end: u64,
+}
+
+/// Decide the checksum-ref shape ONCE, and preload what a full rewrite
+/// needs. Append-shaped dirt leaves every previously covered chunk's CRC
+/// valid: extend coverage with one NEW delta ref and keep the prior refs
+/// (and their extents) untouched, so a bulk-load sync stops rewriting the
+/// blob's whole array. Anything else — dirt below the covered frontier
+/// (overwrite, COW, shrink), coverage shrinking (rewind), or a full ref
+/// list — rewrites the array as a single ref, which also keeps refs
+/// disjoint and contiguous from chunk 0 (compaction). A full rewrite
+/// re-encodes every covered chunk's CRC, and chunks untouched this
+/// process hold theirs only on disk: preload those values from the OLD
+/// extents (a read-modify-write of the checksum array). The capture
+/// ([`capture_blob`]) reuses this decision — its inputs (runs coverage,
+/// the committed refs, the dirty set) are stable under the write lock and
+/// the commit lock, capture-time run merging preserves chunk coverage
+/// exactly, and the old extents cannot be recycled underneath the read
+/// (their frees are queued by this capture at the earliest and applied
+/// only once this commit confirms). A removed blob carries no plan.
+async fn plan_refs<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+) -> Result<(Option<RefPlan>, Vec<(u64, Vec<u32>)>), Error> {
+    let decision = {
+        let inner = blob.inner.lock();
+        if inner.removed {
+            None
+        } else {
+            let covered_end = covered_end(&inner);
+            let prev_refs = inner
+                .committed_entry
+                .as_ref()
+                .map_or(&[][..], |e| &e.checksums[..]);
+            let prev_end = prev_refs
+                .last()
+                .map_or(0, |r| r.first_chunk + r.count as u64);
+            let delta = covered_end >= prev_end
+                && prev_refs.len() < MAX_CHECKSUM_REFS
+                && inner
+                    .dirty_chunks
+                    .iter()
+                    .next()
+                    .is_none_or(|&c| c >= prev_end);
+            let load = (!delta && inner.crcs.has_unloaded(covered_end.min(prev_end)))
+                .then(|| prev_refs.to_vec());
+            Some((delta, prev_end, load))
+        }
+    };
+    match decision {
+        Some((delta, prev_end, load)) => {
+            let preloaded = match load {
+                // Boxed: the cold streaming loader would otherwise deepen
+                // every commit future's layout.
+                Some(refs) => Box::pin(load_committed_refs(ready, blob, &refs)).await?,
+                None => Vec::new(),
+            };
+            Ok((Some(RefPlan { delta, prev_end }), preloaded))
+        }
+        None => Ok((None, Vec::new())),
+    }
+}
+
+/// One blob's capture: the entry to encode plus the metadata bytes and
+/// extent movements the staging step turns into allocations and writes.
+struct Captured {
+    entry: Entry,
+    /// Chunks whose content changed since the last capture, sorted.
+    dirty_chunks: Vec<u64>,
+    /// First chunk the new checksum array covers.
+    array_start: u64,
+    /// The new checksum array's encoded values (empty: no new ref).
+    cksum_bytes: Vec<u8>,
+    /// The frontier chunk's span for the shadow block, when partial.
+    shadow_bytes: Option<Vec<u8>>,
+    /// Previous checksum extents the new entry keeps referencing.
+    retained: Vec<Extent>,
+    /// Extents the new entry stops referencing (freed on confirmation).
+    superseded: Vec<Extent>,
+}
+
+/// Capture one blob's value snapshot under its write lock (held by the
+/// caller): raise the freeze boundary, finalize deferred CRCs, freeze and
+/// merge the captured runs, take the dirty set, and encode the new
+/// checksum array. Returns `None` for a blob removed since planning (its
+/// dirt drops with it).
+fn capture_blob<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+    id: u64,
+    seq: u64,
+    plan: Option<RefPlan>,
+    preloaded: &[(u64, Vec<u32>)],
+) -> Option<Captured> {
+    let mut state = ready.state.lock();
+    let mut inner = blob.inner.lock();
+    if inner.removed {
+        state.dirty.remove(&id);
+        return None;
+    }
+
+    // Raise the freeze boundary: nothing this snapshot covers may be
+    // rewritten in place until it is confirmed (or rolled back).
+    inner.freeze_size = inner.freeze_size.max(inner.size);
+
+    // Block demotion until finalize publishes the new entry: the
+    // dormant map must never hold an entry this commit supersedes.
+    inner.capturing = true;
+
+    // Finalize deferred chunk CRCs from their overlay entries (the
+    // write lock quiesces the writer): the checksum array, tail
+    // CRC, and delta manifest below must carry exact values.
+    inner.overlay_finalize();
+
+    // Freeze the captured runs atomically with the capture (the
+    // model freezes per-run coverage at snapshot time): this entry,
+    // its checksum extents, and its manifest reference every run
+    // below, so the young-extent exemption must not apply to any of
+    // them — an in-place rewrite after capture would invalidate a
+    // manifested chunk and roll back this commit at recovery. Runs
+    // created after this point keep `born > snapshot_seq` and stay
+    // exempt: they are genuinely absent from this commit's table.
+    for run in inner.runs.values_mut() {
+        run.born = run.born.min(seq);
+    }
+
+    // With every run frozen as of this capture, coalesce contiguous
+    // neighbors: the entry encodes fewer runs and every later
+    // runs-map descent walks a shallower map. Skipped while a batch
+    // holds staged state for this blob, whose overlay references
+    // base runs by key (merging would move keys under it).
+    if inner.staged_batches == 0 {
+        merge_frozen_runs(&mut inner.runs);
+    }
+    let dirty_chunks: Vec<u64> = std::mem::take(&mut inner.dirty_chunks)
+        .into_iter()
+        .collect();
+    state.dirty.remove(&id);
+
+    // Content frees of a captured blob resolve when this commit
+    // confirms: its new entry stops referencing them.
+    let pending = std::mem::take(&mut inner.pending_frees);
+    for extent in pending {
+        state.defer_free(extent, seq, None);
+    }
+
+    let last_backed = inner
+        .runs
+        .iter()
+        .next_back()
+        .map(|(&l, r)| chunk_of(l + r.len - 1));
+
+    // Chunk coverage the checksum refs must provide (see
+    // [`covered_end`]). Unchanged by the run merging above, which
+    // preserves chunk coverage exactly.
+    let covered_end = covered_end(&inner);
+
+    // The ref shape decided at preload (inputs stable, see above).
+    // A removal between the two sections is caught by the removed
+    // check above, so a live capture always carries a plan.
+    let RefPlan { delta, prev_end } = plan.expect("live blob carries a ref plan");
+    let prev_refs = inner
+        .committed_entry
+        .as_ref()
+        .map_or(&[][..], |e| &e.checksums[..]);
+    let (array_start, checksums) = if delta {
+        (prev_end, prev_refs.to_vec())
+    } else {
+        (0, Vec::new())
+    };
+    let cksum_bytes: Vec<u8> = {
+        let mut bytes = Vec::with_capacity(((covered_end - array_start) * 4) as usize);
+        for c in array_start..covered_end {
+            bytes.extend_from_slice(&resolve_crc(&inner.crcs, preloaded, c).to_be_bytes());
+        }
+        bytes
+    };
+
+    // Shadow: the frontier chunk's span, when partial (post-commit
+    // appends will write into its block in place; recovery restores
+    // the frozen span from the shadow). The shadow bytes come from
+    // the tail buffer, whose invariant — it always describes the
+    // last BACKED chunk — every mutation path maintains; the model
+    // derives the shadow from the captured runs directly, so a
+    // desynced tail cache here would durably record a wrong shadow:
+    // assert coherence instead of writing one.
+    let shadow_bytes = last_backed.and_then(|last| {
+        let (_, span) = inner.chunk_span(last).expect("backed chunk");
+        (span < BLOCK).then(|| {
+            assert_eq!(inner.tail_chunk, last, "tail buffer desynced from runs");
+            assert_eq!(
+                inner.tail.len() as u64,
+                span,
+                "tail span desynced from runs"
+            );
+            inner.tail.clone()
+        })
+    });
+
+    // The final backed chunk's CRC, recorded whether the chunk is
+    // full or partial: hydration verifies the frontier against it
+    // without touching the checksum extents.
+    let tail_crc = last_backed.map_or(0, |last| resolve_crc(&inner.crcs, preloaded, last));
+
+    let runs: Vec<Run> = inner
+        .runs
+        .iter()
+        .map(|(&logical, r)| Run {
+            logical,
+            physical: r.physical,
+            len: r.len,
+        })
+        .collect();
+
+    // Extents the new entry stops referencing, freed once this
+    // commit confirms: the previous shadow always (each commit that
+    // needs one writes a fresh block), the previous checksum
+    // extents only on a full rewrite (a delta commit keeps
+    // referencing them).
+    let mut prev_meta = state.committed_meta.remove(&id).unwrap_or_default();
+    debug_assert_eq!(
+        prev_meta.checksums.len(),
+        prev_refs.len(),
+        "committed_meta out of sync with the committed entry"
+    );
+    let mut superseded: Vec<Extent> = Vec::new();
+    superseded.extend(prev_meta.shadow.take());
+    let retained = if delta {
+        std::mem::take(&mut prev_meta.checksums)
+    } else {
+        superseded.append(&mut prev_meta.checksums);
+        Vec::new()
+    };
+
+    let entry = Entry {
+        id,
+        partition: 0, // resolved during table assembly
+        name: blob.name.clone(),
+        version: blob.version,
+        size: inner.size,
+        runs,
+        checksums, // retained refs (a new delta/full ref is pushed below)
+        tail_crc,
+        shadow: None, // filled after allocation below
+    };
+
+    Some(Captured {
+        entry,
+        dirty_chunks,
+        array_start,
+        cksum_bytes,
+        shadow_bytes,
+        retained,
+        superseded,
+    })
+}
+
+/// Allocate and stage one captured blob's metadata writes — the new
+/// checksum ref (when the capture encoded one), the shadow block, and the
+/// delta-manifest entries — and install its new committed metadata.
+/// Returns the entry, completed with its allocations, for table assembly.
+fn stage_meta<S: crate::Storage>(
+    ready: &Ready<S>,
+    id: u64,
+    seq: u64,
+    captured: Captured,
+    writes: &mut Vec<MetaWrite>,
+    manifest: &mut Vec<(u64, u64)>,
+) -> Entry {
+    let Captured {
+        mut entry,
+        dirty_chunks,
+        array_start,
+        cksum_bytes,
+        shadow_bytes,
+        retained,
+        superseded,
+    } = captured;
+    let mut meta = CommittedMeta {
+        checksums: retained,
+        shadow: None,
+    };
+    if !cksum_bytes.is_empty() {
+        let extent = {
+            let mut state = ready.state.lock();
+            state.alloc.allocate(block_align(cksum_bytes.len() as u64))
+        };
+        entry.checksums.push(ChecksumRef {
+            first_chunk: array_start,
+            count: (cksum_bytes.len() / 4) as u32,
+            offset: extent.offset,
+            crc: Crc32::checksum(&cksum_bytes),
+        });
+        writes.push(MetaWrite {
+            physical: extent.offset,
+            bytes: IoBuf::from(cksum_bytes),
+        });
+        meta.checksums.push(extent);
+    }
+    if let Some(shadow) = shadow_bytes {
+        let extent = {
+            let mut state = ready.state.lock();
+            state.alloc.allocate(BLOCK)
+        };
+        entry.shadow = Some(extent.offset);
+        writes.push(MetaWrite {
+            physical: extent.offset,
+            bytes: IoBuf::from(shadow),
+        });
+        meta.shadow = Some(extent);
+    }
+    // A fresh shadow is a metadata write this commit may tear, and
+    // recovery's splice is a raw byte copy that cannot tell a torn
+    // shadow from a valid one: manifest the frontier chunk so
+    // verification checks the shadow's content against `tail_crc`
+    // before adoption, even when no dirt touched the frontier (see
+    // the model's `manifest_fresh_shadow` rule).
+    if entry.shadow.is_some() {
+        let frontier = entry
+            .runs
+            .last()
+            .map(|r| chunk_of(r.logical + r.len - 1))
+            .expect("shadow requires a backed chunk");
+        if dirty_chunks.binary_search(&frontier).is_err() {
+            manifest.push((id, frontier));
+        }
+    }
+    for chunk in dirty_chunks {
+        manifest.push((id, chunk));
+    }
+    {
+        let mut state = ready.state.lock();
+        for extent in superseded {
+            state.defer_free(extent, seq, None);
+        }
+        state.committed_meta.insert(id, meta);
+    }
+    entry
+}
+
+/// Assemble the table — captured blobs re-encode; everything else is
+/// served from its cached encoded entry (encoded lazily on first use), so
+/// assembly is O(captured + concatenation) — and stage the table and
+/// superblock writes (into the NON-sacred slot). Returns the previous
+/// confirmed table extent and the new table's.
+fn assemble_table<S: crate::Storage>(
+    ready: &Ready<S>,
+    seq: u64,
+    committed: &mut [(Arc<BlobCore>, Entry)],
+    manifest: &mut [(u64, u64)],
+    writes: &mut Vec<MetaWrite>,
+) -> (Option<Extent>, Extent) {
+    let mut state = ready.state.lock();
+    state.meta_dirty = false;
+
+    // Encodings embed partition indexes: a changed partition LIST
+    // invalidates every cached encoding.
+    if state.encoded_epoch != state.partition_epoch {
+        state.encoded.clear();
+        state.encoded_epoch = state.partition_epoch;
+    }
+
+    let partitions: Vec<String> = state.partitions.keys().cloned().collect();
+    // Indexed lookups: an epoch change re-encodes EVERY entry, so a
+    // linear scan per blob would make that commit O(blobs x
+    // partitions).
+    let pindex: std::collections::BTreeMap<&str, u32> = partitions
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.as_str(), i as u32))
+        .collect();
+    let pindex = |p: &str| *pindex.get(p).expect("known partition");
+
+    // Fresh encodings for captured blobs.
+    for (blob, entry) in committed.iter_mut() {
+        entry.partition = pindex(&blob.partition);
+        state.encoded.insert(entry.id, Bytes::from(entry.encode()));
+    }
+    // Cache misses among served blobs (first commit after recovery or
+    // an epoch change).
+    let mut missing: Vec<(u64, Bytes)> = Vec::new();
+    for (&id, (partition, entry)) in &state.dormant {
+        if state.encoded.contains_key(&id) {
+            continue;
+        }
+        let mut entry = entry.clone();
+        entry.partition = pindex(partition);
+        missing.push((id, Bytes::from(entry.encode())));
+    }
+    for (&id, core) in &state.open {
+        if state.encoded.contains_key(&id) {
+            continue;
+        }
+        // Served open blob: its cached committed entry (set by the last
+        // commit that captured it), or a fresh empty entry (created but
+        // never captured). Never derived from live state, which may
+        // hold uncommitted writes.
+        let inner = core.inner.lock();
+        if inner.removed {
+            continue;
+        }
+        let mut entry = inner
+            .committed_entry
+            .clone()
+            .unwrap_or_else(|| Entry::empty(core.id, core.name.clone(), core.version));
+        entry.partition = pindex(&core.partition);
+        missing.push((id, Bytes::from(entry.encode())));
+    }
+    for (id, bytes) in missing {
+        state.encoded.insert(id, bytes);
+    }
+    manifest.sort_unstable();
+    debug_assert_eq!(
+        state.encoded.len(),
+        state.dormant.len()
+            + state
+                .open
+                .values()
+                .filter(|core| !core.inner.lock().removed)
+                .count(),
+        "encoded-entry cache out of sync with the namespace"
+    );
+
+    let entries: Vec<Bytes> = state.encoded.values().cloned().collect();
+    let bytes = Table::assemble(seq, state.next_id, &partitions, entries, manifest);
+    let extent = state.alloc.allocate(block_align(bytes.len() as u64));
+    let superblock_offset = Superblock::slot_offset(1 - state.sacred_slot);
+    let sb = Superblock {
+        seq,
+        table_offset: extent.offset,
+        table_len: bytes.len() as u32,
+        table_crc: Crc32::checksum(&bytes),
+    };
+    writes.push(MetaWrite {
+        physical: extent.offset,
+        bytes: IoBuf::from(bytes),
+    });
+    writes.push(MetaWrite {
+        physical: superblock_offset,
+        bytes: IoBuf::from(sb.encode()),
+    });
+    (state.table_extent, extent)
 }
 
 /// Publish a confirmed commit.
