@@ -26,7 +26,10 @@
 //! All multi-byte integers are big-endian. Every structure is terminated by
 //! a CRC32C over the preceding bytes.
 
-use super::BLOCK;
+use super::{
+    alloc::{block_align, Extent},
+    BLOCK,
+};
 use bytes::{Buf, BufMut};
 use commonware_cryptography::Crc32;
 
@@ -108,6 +111,17 @@ pub(super) struct Run {
     pub logical: u64,
     pub physical: u64,
     pub len: u64,
+}
+
+impl Run {
+    /// The extent backing this run: starts are block-aligned and the
+    /// allocation covers the written length rounded up to whole blocks.
+    pub const fn extent(&self) -> Extent {
+        Extent {
+            offset: self.physical,
+            len: block_align(self.len),
+        }
+    }
 }
 
 /// A checksum extent: CRC32Cs for `count` consecutive chunks starting at

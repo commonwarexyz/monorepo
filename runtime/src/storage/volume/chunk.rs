@@ -8,7 +8,10 @@
 //! [`CrcCache`] holds committed values paged in from the blob's checksum
 //! extents (see `paging`). Everything here is pure bookkeeping — no I/O.
 
-use super::{alloc::block_align, BLOCK};
+use super::{
+    alloc::{block_align, Extent},
+    BLOCK,
+};
 use commonware_utils::bitmap::BitMap;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,6 +33,16 @@ pub(super) struct RunMeta {
     pub len: u64,
     pub capacity: u64,
     pub born: u64,
+}
+
+impl RunMeta {
+    /// The extent backing this run (its whole allocated capacity).
+    pub const fn extent(&self) -> Extent {
+        Extent {
+            offset: self.physical,
+            len: self.capacity,
+        }
+    }
 }
 
 /// Per-chunk checksum state: the CRC32C over the chunk's written span, and

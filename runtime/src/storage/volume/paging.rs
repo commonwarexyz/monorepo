@@ -67,13 +67,6 @@ async fn read_ref_window<S: crate::Storage>(
     Ok((values, Some(hasher.finalize().as_u32())))
 }
 
-/// Load the committed-CRC page covering `chunk` from the blob's checksum
-/// extents into its cache, returning the loaded window as
-/// `(first chunk, values)`.
-///
-/// Returns `Ok(None)` when the chunk no longer holds an unloaded CRC
-/// (rewritten or shrunk away meanwhile): the caller re-derives its plan.
-///
 /// Record and report a checksum extent whose guard CRC failed: counted in
 /// the corruption metric, loud like every mismatch (fused so no report can
 /// forget the counter).
@@ -91,6 +84,13 @@ fn ref_mismatch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, r: &Checks
     )
 }
 
+/// Load the committed-CRC page covering `chunk` from the blob's checksum
+/// extents into its cache, returning the loaded window as
+/// `(first chunk, values)`.
+///
+/// Returns `Ok(None)` when the chunk no longer holds an unloaded CRC
+/// (rewritten or shrunk away meanwhile): the caller re-derives its plan.
+///
 /// The extent's guard CRC is verified on the first touch of each ref (the
 /// whole extent is streamed once). Later loads from the same ref read just
 /// the page window. Loads race commits, which swap the committed entry and

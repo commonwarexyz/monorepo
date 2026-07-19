@@ -18,7 +18,7 @@ use super::{
     chunk::{chunk_of, ChunkCrc, ChunkState, RunMeta},
     paging::load_committed_page,
     state::{
-        check_not_removed, chunk_mismatch, ensure_provisioned, zeroed, BlobCore, BlobInner, Ready,
+        check_not_removed, chunk_mismatch, ensure_provisioned, BlobCore, BlobInner, Ready,
         StagedBlob, StagedRun,
     },
     BLOCK,
@@ -525,7 +525,7 @@ async fn materialize_in_place<S: crate::Storage>(
         (Vec::new(), true)
     };
     let gap = (cursor - fill_from) as usize;
-    let zeros = (gap > 0).then(|| zeroed(&ready.pool, gap));
+    let zeros = (gap > 0).then(|| ready.pool.alloc_zeroed(gap).freeze());
     let payload = data.slice(d0..d1);
 
     // The logical pieces of `[base, suffix_end)`, in order.
@@ -598,7 +598,7 @@ fn materialize_fresh<S: crate::Storage>(
     let d0 = (cursor - data_base) as usize;
     let d1 = (stretch_end - data_base) as usize;
     let lead = (cursor - chunk_base) as usize;
-    let zeros = (lead > 0).then(|| zeroed(&ready.pool, lead));
+    let zeros = (lead > 0).then(|| ready.pool.alloc_zeroed(lead).freeze());
     let payload = data.slice(d0..d1);
     let pieces: [(u64, &[u8]); 2] = [
         (chunk_base, zeros.as_ref().map_or(&[][..], |z| z.as_ref())),

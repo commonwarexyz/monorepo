@@ -28,8 +28,8 @@ use super::{
     layout::{ChecksumRef, Entry},
     Config, Driver, BLOCK,
 };
-use crate::{Blob as _, BufferPool, Error, IoBuf};
-use bytes::{BufMut as _, Bytes};
+use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error};
+use bytes::Bytes;
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
 use commonware_utils::sync::{AsyncMutex, Mutex};
@@ -531,13 +531,7 @@ impl State {
         }
         for (&id, (_, entry)) in &self.dormant {
             for r in &entry.runs {
-                referenced.push((
-                    Extent {
-                        offset: r.physical,
-                        len: block_align(r.len),
-                    },
-                    format!("dormant {id} run"),
-                ));
+                referenced.push((r.extent(), format!("dormant {id} run")));
             }
         }
         for (&id, meta) in &self.committed_meta {
@@ -555,13 +549,7 @@ impl State {
             }
             inner.audit();
             for run in inner.runs.values() {
-                referenced.push((
-                    Extent {
-                        offset: run.physical,
-                        len: run.capacity,
-                    },
-                    format!("open {id} run"),
-                ));
+                referenced.push((run.extent(), format!("open {id} run")));
             }
             for extent in &inner.pending_frees {
                 referenced.push((*extent, format!("open {id} pending free")));
@@ -690,21 +678,6 @@ fn assert_meta_parity(id: u64, entry: &Entry, meta: &CommittedMeta) {
     }
 }
 
-/// Capture roots pooled by commit registrations, with the completion latch
-/// their commit resolves.
-///
-/// Whichever driver task acquires the commit lock first drains the pool and
-/// commits the UNION, so one fsync acknowledges every pooled registration
-/// (commit coalescing, see `commit::commit`). The ticket is swapped out
-/// atomically with the roots at drain: a ticket therefore resolves exactly
-/// when a commit whose snapshot began after every covered registration
-/// completes, and a failed commit resolves it with the poisoning error
-/// (every pooled registration was promised durability).
-pub(super) struct PendingCommit {
-    pub roots: BTreeSet<u64>,
-    pub ticket: super::commit::Ticket,
-}
-
 /// The volume once recovery has run.
 pub(super) struct Ready<S: crate::Storage> {
     /// The single inner blob backing the volume.
@@ -718,7 +691,7 @@ pub(super) struct Ready<S: crate::Storage> {
     /// Serializes commits.
     pub commit_lock: AsyncMutex<()>,
     /// Roots (and ticket) of syncs queued for the next commit.
-    pub pending: Mutex<PendingCommit>,
+    pub pending: Mutex<super::commit::PendingCommit>,
     /// Latched on the first failed commit: a failed fsync leaves the page
     /// cache undefined, so a later "successful" commit could vouch for bytes
     /// that never land. Every subsequent operation fails.
@@ -733,6 +706,13 @@ pub(super) struct Ready<S: crate::Storage> {
 impl<S: crate::Storage> Ready<S> {
     pub fn check_poisoned(&self) -> Result<(), Error> {
         self.poisoned.get().map_or(Ok(()), |e| Err(e.clone()))
+    }
+
+    /// Latch the poison error and its gauge (fused so no site can set one
+    /// without the other). First error wins.
+    pub fn poison(&self, e: Error) {
+        let _ = self.poisoned.set(e);
+        let _ = self.metrics.poisoned.try_set(1);
     }
 }
 
@@ -1470,14 +1450,7 @@ pub(super) fn unlink(state: &mut State, id: u64) {
         // of a removed blob are rejected (see `write::write_locked`), so
         // no new extent can enter the map after this point.
         for run in inner.runs.values() {
-            state.defer_free(
-                Extent {
-                    offset: run.physical,
-                    len: run.capacity,
-                },
-                seq,
-                gate,
-            );
+            state.defer_free(run.extent(), seq, gate);
         }
         // Capture-gated frees resolve with the removal commit: the entry
         // that referenced them is dropped (never readable via handles).
@@ -1498,14 +1471,7 @@ pub(super) fn unlink(state: &mut State, id: u64) {
         }
     } else if let Some((_, entry)) = state.dormant.remove(&id) {
         for r in &entry.runs {
-            state.defer_free(
-                Extent {
-                    offset: r.physical,
-                    len: block_align(r.len),
-                },
-                seq,
-                None,
-            );
+            state.defer_free(r.extent(), seq, None);
         }
         if let Some(meta) = state.committed_meta.remove(&id) {
             for extent in meta.into_extents() {
@@ -1649,11 +1615,4 @@ pub(super) fn chunk_mismatch<S: crate::Storage>(
         hex(&blob.name),
         format!("chunk {chunk} checksum mismatch"),
     )
-}
-
-/// A pooled all-zero buffer of `len` bytes.
-pub(super) fn zeroed(pool: &BufferPool, len: usize) -> IoBuf {
-    let mut buf = pool.alloc(len);
-    buf.put_bytes(0, len);
-    buf.freeze()
 }

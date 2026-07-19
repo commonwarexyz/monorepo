@@ -7,7 +7,7 @@ use super::{
     alloc::{block_align, Extent},
     chunk::{chunk_of, ChunkCrc, ChunkState},
     paging::load_committed_page,
-    state::{check_not_removed, chunk_mismatch, zeroed, BlobCore, Ready},
+    state::{check_not_removed, chunk_mismatch, BlobCore, Ready},
     write::write_locked,
     BLOCK,
 };
@@ -42,7 +42,10 @@ pub(super) async fn resize_locked<S: crate::Storage>(
             }
         };
         if zero_to > old_size {
-            let zeros = zeroed(&ready.pool, (zero_to - old_size) as usize);
+            let zeros = ready
+                .pool
+                .alloc_zeroed((zero_to - old_size) as usize)
+                .freeze();
             write_locked(ready, blob, old_size, zeros).await?;
         }
         let mut state = ready.state.lock();
@@ -266,10 +269,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
         inner.clear_overlay();
 
         for run in inner.split_runs_from(len).into_values() {
-            inner.defer_content_free(Extent {
-                offset: run.physical,
-                len: run.capacity,
-            });
+            inner.defer_content_free(run.extent());
         }
         if let Some((l, mut run)) = inner.covering(len.saturating_sub(1)).filter(|_| len > 0) {
             if l + run.len > len {

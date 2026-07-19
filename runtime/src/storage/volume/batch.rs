@@ -57,8 +57,7 @@ use super::{
     commit,
     paging::load_committed_page,
     state::{
-        chunk_mismatch, zeroed, BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob,
-        StagedRun,
+        chunk_mismatch, BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob, StagedRun,
     },
     write::stage_write,
     Blob, BLOCK,
@@ -197,7 +196,7 @@ impl<S: crate::Storage> Batch<S> {
                 }
             };
             if zero_to > size {
-                let zeros = zeroed(&ready.pool, (zero_to - size) as usize);
+                let zeros = ready.pool.alloc_zeroed((zero_to - size) as usize).freeze();
                 stage_write(&ready, &core, &mut staged.overlay, size, zeros).await?;
             }
             staged.overlay.size = staged.overlay.size.max(len);
@@ -424,10 +423,7 @@ impl<S: crate::Storage> Batch<S> {
             let dropped: Vec<u64> = overlay.runs.range(len..).map(|(&l, _)| l).collect();
             for l in dropped {
                 let sr = overlay.runs.remove(&l).expect("listed key");
-                let extent = Extent {
-                    offset: sr.meta.physical,
-                    len: sr.meta.capacity,
-                };
+                let extent = sr.meta.extent();
                 if sr.private {
                     // Batch-allocated: nothing will ever reference it.
                     overlay.fresh.retain(|e| e.offset != extent.offset);
@@ -443,10 +439,7 @@ impl<S: crate::Storage> Batch<S> {
                     continue;
                 }
                 overlay.removed.insert(l);
-                overlay.replaced.push(Extent {
-                    offset: r.physical,
-                    len: r.capacity,
-                });
+                overlay.replaced.push(r.extent());
             }
             // Trim the boundary run in the overlay, splitting off the
             // capacity slack exactly as a published shrink would: every

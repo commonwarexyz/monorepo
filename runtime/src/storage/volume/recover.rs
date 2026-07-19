@@ -536,10 +536,7 @@ pub(super) async fn recover<S: crate::Storage>(
             .insert(entry.name.clone(), entry.id);
         let mut meta = CommittedMeta::default();
         for r in &entry.runs {
-            used.push(Extent {
-                offset: r.physical,
-                len: block_align(r.len),
-            });
+            used.push(r.extent());
         }
         for c in &entry.checksums {
             let extent = Extent {

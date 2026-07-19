@@ -24,7 +24,7 @@ use super::{
     state::{BlobCore, BlobInner, CommittedMeta, Ready},
     BLOCK,
 };
-use crate::{telemetry::metrics::GaugeExt as _, Blob as _, Error, IoBuf};
+use crate::{Blob as _, Error, IoBuf};
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::Notify;
 use std::{
@@ -71,7 +71,22 @@ pub(super) struct TicketState {
     notify: Notify,
 }
 
-impl Default for super::state::PendingCommit {
+/// Capture roots pooled by commit registrations, with the completion latch
+/// their commit resolves.
+///
+/// Whichever driver task acquires the commit lock first drains the pool and
+/// commits the UNION, so one fsync acknowledges every pooled registration
+/// (commit coalescing, see `commit::commit`). The ticket is swapped out
+/// atomically with the roots at drain: a ticket therefore resolves exactly
+/// when a commit whose snapshot began after every covered registration
+/// completes, and a failed commit resolves it with the poisoning error
+/// (every pooled registration was promised durability).
+pub(super) struct PendingCommit {
+    pub roots: BTreeSet<u64>,
+    pub ticket: Ticket,
+}
+
+impl Default for PendingCommit {
     fn default() -> Self {
         Self {
             roots: BTreeSet::new(),
@@ -165,8 +180,7 @@ impl<S: crate::Storage> Drop for CancelGuard<'_, S> {
             return;
         };
         tracing::error!("volume commit task dropped mid-commit; storage poisoned until restart");
-        let _ = self.ready.poisoned.set(Error::Aborted);
-        let _ = self.ready.metrics.poisoned.try_set(1);
+        self.ready.poison(Error::Aborted);
         ticket.abort();
     }
 }
@@ -205,8 +219,7 @@ impl<S: crate::Storage> Drop for PoisonOnCancel<'_, S> {
             return;
         }
         tracing::error!("volume commit future dropped mid-flight; storage poisoned until restart");
-        let _ = self.ready.poisoned.set(Error::Aborted);
-        let _ = self.ready.metrics.poisoned.try_set(1);
+        self.ready.poison(Error::Aborted);
     }
 }
 
@@ -333,8 +346,7 @@ pub(super) async fn commit_locked<S: crate::Storage>(
                 error = %e,
                 "volume commit snapshot failed; storage poisoned until restart"
             );
-            let _ = ready.poisoned.set(e.clone());
-            let _ = ready.metrics.poisoned.try_set(1);
+            ready.poison(e.clone());
             guard.disarm();
             return Err(e);
         }
@@ -378,8 +390,7 @@ pub(super) async fn commit_locked<S: crate::Storage>(
             error = %e,
             "volume commit write/fsync failed; storage poisoned until restart"
         );
-        let _ = ready.poisoned.set(e.clone());
-        let _ = ready.metrics.poisoned.try_set(1);
+        ready.poison(e.clone());
         guard.disarm();
         return Err(e);
     }
@@ -609,9 +620,10 @@ fn capture_blob<S: crate::Storage>(
     // preserves chunk coverage exactly.
     let covered_end = covered_end(&inner);
 
-    // The ref shape decided at preload (inputs stable, see above).
-    // A removal between the two sections is caught by the removed
-    // check above, so a live capture always carries a plan.
+    // The ref shape decided at preload (inputs stable, see
+    // [`plan_refs`]). A removal between planning and this capture is
+    // caught by the removed check above, so a live capture always
+    // carries a plan.
     let RefPlan { delta, prev_end } = plan.expect("live blob carries a ref plan");
     let prev_refs = inner
         .committed_entry()
