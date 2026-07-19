@@ -35,12 +35,12 @@ use super::{
     alloc::{block_align, Allocator, Extent},
     chunk::{chunk_of, ChunkCrc, ChunkState},
     layout::{ChecksumRef, Entry, Superblock, Table},
-    paging::{decode_crcs, window_value},
+    paging::{stream_ref_windows, window_value},
     state::{BlobInner, CommittedMeta, Genesis, Ready, State},
     Config, BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error, IoBuf};
-use commonware_cryptography::{Crc32, Hasher as _};
+use commonware_cryptography::Crc32;
 use commonware_utils::sync::{AsyncMutex, Mutex};
 use futures::{stream, StreamExt as _};
 use std::collections::BTreeMap;
@@ -126,35 +126,14 @@ async fn load_ref_windows<B: crate::Blob>(
     r: &ChecksumRef,
     windows: &[(u64, u64)],
 ) -> Result<Option<Vec<(u64, Vec<u32>)>>, Error> {
-    /// Streaming step for guard verification of large extents.
-    const STEP: u64 = 1 << 22;
-    let mut hasher = Crc32::new();
-    let mut out: Vec<(u64, Vec<u32>)> = windows
-        .iter()
-        .map(|&(w0, w1)| (r.first_chunk + w0, Vec::with_capacity((w1 - w0) as usize)))
-        .collect();
-    let total = r.count as u64 * 4;
-    let mut pos = 0;
-    while pos < total {
-        let step = STEP.min(total - pos);
-        let bytes = file
-            .read_at(r.offset + pos, step as usize)
-            .await?
-            .coalesce();
-        hasher.update(bytes.as_ref());
-        // Capture each window's intersection with this step.
-        for (&(w0, w1), (_, values)) in windows.iter().zip(out.iter_mut()) {
-            let lo = (w0 * 4).max(pos);
-            let hi = (w1 * 4).min(pos + step);
-            if hi > lo {
-                values.extend(decode_crcs(
-                    &bytes.as_ref()[(lo - pos) as usize..(hi - pos) as usize],
-                ));
-            }
-        }
-        pos += step;
-    }
-    Ok((hasher.finalize().as_u32() == r.crc).then_some(out))
+    let (values, guard) = stream_ref_windows(file, r, windows).await?;
+    Ok((guard == r.crc).then(|| {
+        windows
+            .iter()
+            .zip(values)
+            .map(|(&(w0, _), v)| (r.first_chunk + w0, v))
+            .collect()
+    }))
 }
 
 /// One chunk's CRC check within a coalesced verification read.

@@ -455,85 +455,16 @@ pub(super) async fn read_verified<S: crate::Storage>(
                 // and re-verify the chunk against its now-stable state
                 // before reporting corruption.
                 let chunk = chunk_of(chunk_start);
-                let _quiesce = blob.write_lock.lock().await;
-                /// A quiesced chunk's stable content source.
-                enum Stable {
-                    Disk { phys: u64, span: u64, crc: u32 },
-                    Ram(Vec<u8>),
-                }
-                let source = loop {
-                    let need_load = {
-                        let mut inner = blob.inner.lock();
-                        if inner.generation() != generation {
+                let stable =
+                    match requiesce(ready, blob, chunk, generation, &mut loaded, &mut checked)
+                        .await?
+                    {
+                        Quiesced::Retry => {
                             invalidated += 1;
                             continue 'retry;
                         }
-                        match inner.chunk_span(chunk) {
-                            None => break None,
-                            Some((phys, span)) => {
-                                let state = inner.crcs().get(chunk).expect("backed chunk has crc");
-                                match state.crc {
-                                    ChunkCrc::Ready(crc) => {
-                                        break Some(Stable::Disk { phys, span, crc })
-                                    }
-                                    // The racing writer left the chunk
-                                    // pending: its overlay entry is the
-                                    // stable content.
-                                    ChunkCrc::Pending => {
-                                        break Some(Stable::Ram(
-                                            inner
-                                                .overlay_get(chunk)
-                                                .expect("pending chunk is overlay-resident")
-                                                .to_vec(),
-                                        ))
-                                    }
-                                    // Untouched since hydration: the stable
-                                    // CRC is the committed value.
-                                    ChunkCrc::Unloaded => {
-                                        match window_value(&loaded, chunk)
-                                            .or_else(|| inner.crc_cache_mut().get(chunk))
-                                        {
-                                            Some(crc) => {
-                                                break Some(Stable::Disk { phys, span, crc })
-                                            }
-                                            None => true,
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        Quiesced::Stable(bytes) => bytes,
                     };
-                    debug_assert!(need_load);
-                    if let Some(window) = Box::pin(load_committed_page(ready, blob, chunk)).await? {
-                        insert_window(&mut loaded, window);
-                    }
-                };
-                let stable: IoBuf = match source {
-                    None => {
-                        invalidated += 1;
-                        continue 'retry;
-                    }
-                    Some(Stable::Disk {
-                        phys,
-                        span: stable_span,
-                        crc: stable_crc,
-                    }) => {
-                        let reread = ready
-                            .file
-                            .read_at(phys, stable_span as usize)
-                            .await?
-                            .coalesce()
-                            .freeze();
-                        if Crc32::checksum(reread.as_ref()) != stable_crc {
-                            return Err(chunk_mismatch(ready, blob, chunk));
-                        }
-                        checked.push((chunk, stable_crc));
-                        reread
-                    }
-                    // Served from process memory: nothing was verified
-                    // against the disk.
-                    Some(Stable::Ram(stable_bytes)) => IoBuf::from(stable_bytes),
-                };
                 // Replace what the group copy installed for this chunk: the
                 // corrected requested slice, and zeros where the stable
                 // span ends short of the copied extent.
@@ -570,5 +501,96 @@ pub(super) async fn read_verified<S: crate::Storage>(
             }
             None => out.into(),
         });
+    }
+}
+
+/// A quiesced chunk's re-verification outcome (see [`requiesce`]).
+enum Quiesced {
+    /// The blob relocated (or the chunk vanished) meanwhile: re-derive the
+    /// read plan.
+    Retry,
+    /// The chunk's stable content: re-verified against the disk (recorded
+    /// in the caller's `checked`), or served from process memory (nothing
+    /// was verified against the disk).
+    Stable(IoBuf),
+}
+
+/// Quiesce the (single) writer and re-verify `chunk` against its
+/// now-stable state: resolve the stable content source under the write
+/// lock — the resident CRC, the overlay entry of a pending chunk, or the
+/// committed value (loaded on demand into `loaded`) — then reread and
+/// check disk-backed spans, reporting corruption only when the stable
+/// bytes still mismatch.
+async fn requiesce<S: crate::Storage>(
+    ready: &Ready<S>,
+    blob: &BlobCore,
+    chunk: u64,
+    generation: u64,
+    loaded: &mut Vec<(u64, Vec<u32>)>,
+    checked: &mut Vec<(u64, u32)>,
+) -> Result<Quiesced, Error> {
+    let _quiesce = blob.write_lock.lock().await;
+    /// A quiesced chunk's stable content source.
+    enum Stable {
+        Disk { phys: u64, span: u64, crc: u32 },
+        Ram(Vec<u8>),
+    }
+    let source = loop {
+        let need_load = {
+            let mut inner = blob.inner.lock();
+            if inner.generation() != generation {
+                return Ok(Quiesced::Retry);
+            }
+            match inner.chunk_span(chunk) {
+                None => break None,
+                Some((phys, span)) => {
+                    let state = inner.crcs().get(chunk).expect("backed chunk has crc");
+                    match state.crc {
+                        ChunkCrc::Ready(crc) => break Some(Stable::Disk { phys, span, crc }),
+                        // The racing writer left the chunk pending: its
+                        // overlay entry is the stable content.
+                        ChunkCrc::Pending => {
+                            break Some(Stable::Ram(
+                                inner
+                                    .overlay_get(chunk)
+                                    .expect("pending chunk is overlay-resident")
+                                    .to_vec(),
+                            ))
+                        }
+                        // Untouched since hydration: the stable CRC is the
+                        // committed value.
+                        ChunkCrc::Unloaded => {
+                            match window_value(loaded, chunk)
+                                .or_else(|| inner.crc_cache_mut().get(chunk))
+                            {
+                                Some(crc) => break Some(Stable::Disk { phys, span, crc }),
+                                None => true,
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        debug_assert!(need_load);
+        if let Some(window) = Box::pin(load_committed_page(ready, blob, chunk)).await? {
+            insert_window(loaded, window);
+        }
+    };
+    match source {
+        None => Ok(Quiesced::Retry),
+        Some(Stable::Disk { phys, span, crc }) => {
+            let reread = ready
+                .file
+                .read_at(phys, span as usize)
+                .await?
+                .coalesce()
+                .freeze();
+            if Crc32::checksum(reread.as_ref()) != crc {
+                return Err(chunk_mismatch(ready, blob, chunk));
+            }
+            checked.push((chunk, crc));
+            Ok(Quiesced::Stable(reread))
+        }
+        Some(Stable::Ram(bytes)) => Ok(Quiesced::Stable(IoBuf::from(bytes))),
     }
 }

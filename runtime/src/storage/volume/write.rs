@@ -885,6 +885,39 @@ async fn read_span_checked<S: crate::Storage>(
     Ok((span.as_ref().to_vec(), verified))
 }
 
+/// The chunk's span bytes `[..min_len]` from an in-memory source when one
+/// describes it: the staged tail wins for chunks the batch touched, and
+/// published sources — the tail buffer, then the chunk's overlay entry —
+/// serve only chunks the batch has not staged over. The bool is the
+/// span's verified provenance (in-memory sources are process memory; an
+/// overlay entry passes its chunk's bit through).
+fn span_source(
+    inner: &mut BlobInner,
+    staged: Option<&StagedBlob>,
+    chunk: u64,
+    min_len: usize,
+) -> Option<(Vec<u8>, bool)> {
+    if let Some(st) = staged {
+        if let Some((tail_chunk, tail)) = &st.tail {
+            if *tail_chunk == chunk && tail.len() >= min_len {
+                return Some((tail[..min_len].to_vec(), true));
+            }
+        }
+    }
+    if staged.is_none_or(|st| !st.crcs.contains_key(&chunk)) {
+        if inner.tail_chunk() == chunk && inner.tail().len() >= min_len {
+            return Some((inner.tail()[..min_len].to_vec(), true));
+        }
+        let verified = inner.crcs().get(chunk).is_some_and(|s| s.verified);
+        if let Some(bytes) = inner.overlay_get(chunk) {
+            if bytes.len() >= min_len {
+                return Some((bytes[..min_len].to_vec(), verified));
+            }
+        }
+    }
+    None
+}
+
 /// Source the first affected chunk's current prefix `[base, fill_from)`:
 /// from an in-memory tail buffer or overlay entry when one describes this
 /// chunk, otherwise a checked read-back of the chunk's whole span (rare:
@@ -909,28 +942,8 @@ async fn read_span_prefix<S: crate::Storage>(
         return Ok((Vec::new(), true));
     }
     let chunk = chunk_of(base);
-    {
-        let mut inner = blob.inner.lock();
-        // The staged tail wins for chunks the batch touched; published
-        // sources are valid only for chunks the batch has not staged over.
-        if let Some(st) = staged {
-            if let Some((tail_chunk, tail)) = &st.tail {
-                if *tail_chunk == chunk && tail.len() >= prefix_len {
-                    return Ok((tail[..prefix_len].to_vec(), true));
-                }
-            }
-        }
-        if staged.is_none_or(|st| !st.crcs.contains_key(&chunk)) {
-            if inner.tail_chunk() == chunk && inner.tail().len() >= prefix_len {
-                return Ok((inner.tail()[..prefix_len].to_vec(), true));
-            }
-            let verified = inner.crcs().get(chunk).is_some_and(|s| s.verified);
-            if let Some(bytes) = inner.overlay_get(chunk) {
-                if bytes.len() >= prefix_len {
-                    return Ok((bytes[..prefix_len].to_vec(), verified));
-                }
-            }
-        }
+    if let Some(out) = span_source(&mut blob.inner.lock(), staged, chunk, prefix_len) {
+        return Ok(out);
     }
     let span_end = (run_logical + run.len).min(base + BLOCK);
     let phys = run.physical + (base - run_logical);
@@ -968,26 +981,8 @@ async fn read_span_suffix<S: crate::Storage>(
     let chunk_start = chunk * BLOCK;
     let s = (stretch_end - chunk_start) as usize;
     let e = (suffix_end - chunk_start) as usize;
-    {
-        let mut inner = blob.inner.lock();
-        if let Some(st) = staged {
-            if let Some((tail_chunk, tail)) = &st.tail {
-                if *tail_chunk == chunk && tail.len() >= e {
-                    return Ok((tail[s..e].to_vec(), true));
-                }
-            }
-        }
-        if staged.is_none_or(|st| !st.crcs.contains_key(&chunk)) {
-            if inner.tail_chunk() == chunk && inner.tail().len() >= e {
-                return Ok((inner.tail()[s..e].to_vec(), true));
-            }
-            let verified = inner.crcs().get(chunk).is_some_and(|st| st.verified);
-            if let Some(bytes) = inner.overlay_get(chunk) {
-                if bytes.len() >= e {
-                    return Ok((bytes[s..e].to_vec(), verified));
-                }
-            }
-        }
+    if let Some((bytes, verified)) = span_source(&mut blob.inner.lock(), staged, chunk, e) {
+        return Ok((bytes[s..].to_vec(), verified));
     }
     // A suffix exists only when the run extends past the write, so the
     // chunk's span ends exactly at `suffix_end`.

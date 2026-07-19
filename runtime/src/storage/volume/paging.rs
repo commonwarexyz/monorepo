@@ -43,28 +43,48 @@ async fn read_ref_window<S: crate::Storage>(
             .coalesce();
         return Ok((decode_crcs(bytes.as_ref()).collect(), None));
     }
+    let (mut windows, guard) = stream_ref_windows(&ready.file, r, &[(w0, w1)]).await?;
+    Ok((windows.pop().expect("one window"), Some(guard)))
+}
+
+/// Stream a checksum extent once: hash the WHOLE extent for its guard
+/// while capturing each requested window's values (`(w0, w1)` value-index
+/// ranges within the ref). Recovery streams before the volume is ready,
+/// so this takes the raw inner blob.
+pub(super) async fn stream_ref_windows<B: crate::Blob>(
+    file: &B,
+    r: &ChecksumRef,
+    windows: &[(u64, u64)],
+) -> Result<(Vec<Vec<u32>>, u32), Error> {
     /// Streaming step for guard verification of large extents.
     const STEP: u64 = 1 << 22;
     let mut hasher = Crc32::new();
-    let mut values = Vec::with_capacity((w1 - w0) as usize);
+    let mut out: Vec<Vec<u32>> = windows
+        .iter()
+        .map(|&(w0, w1)| Vec::with_capacity((w1 - w0) as usize))
+        .collect();
     let total = r.count as u64 * 4;
     let mut pos = 0;
     while pos < total {
-        let len = STEP.min(total - pos);
-        let bytes = ready.file.read_at(r.offset + pos, len as usize).await?;
-        let bytes = bytes.coalesce();
+        let step = STEP.min(total - pos);
+        let bytes = file
+            .read_at(r.offset + pos, step as usize)
+            .await?
+            .coalesce();
         hasher.update(bytes.as_ref());
-        // Capture the window's intersection with this step.
-        let lo = (w0 * 4).max(pos);
-        let hi = (w1 * 4).min(pos + len);
-        if hi > lo {
-            values.extend(decode_crcs(
-                &bytes.as_ref()[(lo - pos) as usize..(hi - pos) as usize],
-            ));
+        // Capture each window's intersection with this step.
+        for (&(w0, w1), values) in windows.iter().zip(out.iter_mut()) {
+            let lo = (w0 * 4).max(pos);
+            let hi = (w1 * 4).min(pos + step);
+            if hi > lo {
+                values.extend(decode_crcs(
+                    &bytes.as_ref()[(lo - pos) as usize..(hi - pos) as usize],
+                ));
+            }
         }
-        pos += len;
+        pos += step;
     }
-    Ok((values, Some(hasher.finalize().as_u32())))
+    Ok((out, hasher.finalize().as_u32()))
 }
 
 /// Record and report a checksum extent whose guard CRC failed: counted in
