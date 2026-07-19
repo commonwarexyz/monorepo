@@ -55,14 +55,13 @@ use super::{
     alloc::{block_align, Extent},
     chunk::{chunk_of, ChunkCrc, ChunkState, RunMeta},
     commit,
-    paging::load_committed_page,
-    state::{
-        chunk_mismatch, BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob, StagedRun,
-    },
+    paging::CrcMemo,
+    resize::{read_frontier, FrontierRead},
+    state::{BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob, StagedRun},
     write::stage_write,
     Blob, BLOCK,
 };
-use crate::{Blob as _, Error, Handle, IoBufs, DEFAULT_BLOB_VERSION};
+use crate::{Error, Handle, IoBufs, DEFAULT_BLOB_VERSION};
 use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
 use commonware_utils::{
@@ -227,21 +226,12 @@ impl<S: crate::Storage> Batch<S> {
                 bytes: Vec<u8>,
                 verified: bool,
             },
-            /// Read the chunk's current span (`old_span`) back from disk
-            /// and check it against `expected` before slicing the
-            /// surviving prefix (see `resize::resize_locked`'s Read arm).
-            Read {
-                chunk: u64,
-                phys: u64,
-                span: u64,
-                old_span: u64,
-                expected: u32,
-                verified: bool,
-                resident: bool,
-            },
+            /// Read the frontier's surviving prefix back from disk (see
+            /// [`read_frontier`]).
+            Read(FrontierRead),
         }
 
-        let mut loaded_crc: Option<(u64, u32)> = None;
+        let mut memo = CrcMemo::new();
         let frontier = loop {
             let outcome = {
                 let mut inner = core.inner.lock();
@@ -316,7 +306,7 @@ impl<S: crate::Storage> Batch<S> {
                 let state = state.expect("covered chunk has crc");
                 match state.crc {
                     ChunkCrc::Ready(expected) => {
-                        break Frontier::Read {
+                        break Frontier::Read(FrontierRead {
                             chunk,
                             phys,
                             span,
@@ -324,7 +314,7 @@ impl<S: crate::Storage> Batch<S> {
                             expected,
                             verified: state.verified,
                             resident: true,
-                        }
+                        })
                     }
                     // Pending chunks are overlay-resident with a full-span
                     // entry, caught above.
@@ -333,33 +323,23 @@ impl<S: crate::Storage> Batch<S> {
                     // committed value — the authoritative one, so checking
                     // the read-back against it IS the chunk's
                     // verification.
-                    ChunkCrc::Unloaded => {
-                        let known = loaded_crc
-                            .filter(|&(c, _)| c == chunk)
-                            .map(|(_, crc)| crc)
-                            .or_else(|| inner.crc_cache_mut().get(chunk));
-                        match known {
-                            Some(expected) => {
-                                break Frontier::Read {
-                                    chunk,
-                                    phys,
-                                    span,
-                                    old_span,
-                                    expected,
-                                    verified: true,
-                                    resident: false,
-                                }
-                            }
-                            None => chunk,
+                    ChunkCrc::Unloaded => match memo.lookup(&mut inner, chunk) {
+                        Some(expected) => {
+                            break Frontier::Read(FrontierRead {
+                                chunk,
+                                phys,
+                                span,
+                                old_span,
+                                expected,
+                                verified: true,
+                                resident: false,
+                            })
                         }
-                    }
+                        None => chunk,
+                    },
                 }
             };
-            if let Some((first, values)) =
-                Box::pin(load_committed_page(&ready, &core, outcome)).await?
-            {
-                loaded_crc = Some((outcome, values[(outcome - first) as usize]));
-            }
+            memo.load(&ready, &core, outcome).await?;
         };
 
         // Perform the read-back (the only fallible step) before mutating
@@ -378,39 +358,9 @@ impl<S: crate::Storage> Batch<S> {
                 };
                 Some((chunk, bytes, Some(state)))
             }
-            Frontier::Read {
-                chunk,
-                phys,
-                span,
-                old_span,
-                expected,
-                verified,
-                resident,
-            } => {
-                let read = ready
-                    .file
-                    .read_at(phys, old_span as usize)
-                    .await?
-                    .coalesce();
-                // The chunk's current span must match its expected CRC:
-                // rot in it surfaces loudly here, never laundered under
-                // the recomputed prefix CRC.
-                if Crc32::checksum(read.as_ref()) != expected {
-                    return Err(chunk_mismatch(&ready, &core, chunk));
-                }
-                let bytes = read.as_ref()[..span as usize].to_vec();
-                let trimmed = span < old_span;
-                // (Re)install the frontier state when the span changed or
-                // the checked value was never resident (see
-                // `resize::resize_locked`).
-                let state = (trimmed || !resident).then(|| ChunkState {
-                    crc: ChunkCrc::Ready(if trimmed {
-                        Crc32::checksum(&bytes)
-                    } else {
-                        expected
-                    }),
-                    verified,
-                });
+            Frontier::Read(fr) => {
+                let chunk = fr.chunk;
+                let (bytes, state) = read_frontier(&ready, &core, fr).await?;
                 Some((chunk, bytes, state))
             }
         };

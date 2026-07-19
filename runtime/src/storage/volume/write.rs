@@ -16,7 +16,7 @@
 use super::{
     alloc::{block_align, Extent},
     chunk::{chunk_of, ChunkCrc, ChunkState, RunMeta},
-    paging::load_committed_page,
+    paging::{load_committed_page, CrcMemo},
     state::{
         check_not_removed, chunk_mismatch, ensure_provisioned, BlobCore, BlobInner, Ready,
         StagedBlob, StagedRun,
@@ -273,7 +273,7 @@ async fn plan_stretch<S: crate::Storage>(
     // (the read-back check): loaded outside the locks, memoized, and the
     // plan re-derived. The target chunk is fixed by `cursor`, so the memo
     // guarantees the second attempt resolves.
-    let mut loaded_crc: Option<(u64, u32)> = None;
+    let mut memo = CrcMemo::new();
     let plan = loop {
         let outcome = 'plan: {
             let mut state = ready.state.lock();
@@ -341,16 +341,10 @@ async fn plan_stretch<S: crate::Storage>(
                                     }
                                     // Untouched since hydration: the expected
                                     // CRC is the committed value.
-                                    ChunkCrc::Unloaded => {
-                                        let known = loaded_crc
-                                            .filter(|&(c, _)| c == chunk)
-                                            .map(|(_, crc)| crc)
-                                            .or_else(|| inner.crc_cache_mut().get(chunk));
-                                        match known {
-                                            Some(expected) => expected,
-                                            None => break 'plan Outcome::NeedCrc(chunk),
-                                        }
-                                    }
+                                    ChunkCrc::Unloaded => match memo.lookup(&mut inner, chunk) {
+                                        Some(expected) => expected,
+                                        None => break 'plan Outcome::NeedCrc(chunk),
+                                    },
                                 };
                                 CowSource::Disk { expected }
                             }
@@ -424,13 +418,7 @@ async fn plan_stretch<S: crate::Storage>(
         };
         match outcome {
             Outcome::Plan(plan) => break plan,
-            Outcome::NeedCrc(chunk) => {
-                if let Some((first, values)) =
-                    Box::pin(load_committed_page(ready, blob, chunk)).await?
-                {
-                    loaded_crc = Some((chunk, values[(chunk - first) as usize]));
-                }
-            }
+            Outcome::NeedCrc(chunk) => memo.load(ready, blob, chunk).await?,
         }
     };
 

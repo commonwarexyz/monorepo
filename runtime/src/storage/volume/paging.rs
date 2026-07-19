@@ -11,7 +11,7 @@
 use super::{
     chunk::{ChunkCrc, CRC_PAGE_CHUNKS},
     layout::ChecksumRef,
-    state::{BlobCore, Ready},
+    state::{BlobCore, BlobInner, Ready},
 };
 use crate::{Blob as _, Error};
 use commonware_cryptography::{Crc32, Hasher as _};
@@ -154,6 +154,44 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
                 .insert(r.first_chunk + w0, values.clone());
         }
         return Ok(Some((r.first_chunk + w0, values)));
+    }
+}
+
+/// The COW-style memo for one chunk's committed CRC: loaded outside the
+/// locks, memoized, and the caller's plan re-derived. The target chunk is
+/// fixed by the caller's position, so the memo guarantees the second
+/// attempt resolves even if the bounded CRC cache evicts the loaded page
+/// meanwhile.
+pub(super) struct CrcMemo(Option<(u64, u32)>);
+
+impl CrcMemo {
+    pub const fn new() -> Self {
+        Self(None)
+    }
+
+    /// The chunk's expected committed CRC when known: the memo (exact
+    /// chunk only), else the blob's committed-CRC cache.
+    pub fn lookup(&self, inner: &mut BlobInner, chunk: u64) -> Option<u32> {
+        self.0
+            .filter(|&(c, _)| c == chunk)
+            .map(|(_, crc)| crc)
+            .or_else(|| inner.crc_cache_mut().get(chunk))
+    }
+
+    /// Load the committed page covering `chunk` and memoize its value (a
+    /// no-op when the chunk stopped being unloaded meanwhile). Boxed
+    /// internally: the cold streaming loader must not deepen the calling
+    /// future's layout.
+    pub async fn load<S: crate::Storage>(
+        &mut self,
+        ready: &Ready<S>,
+        blob: &BlobCore,
+        chunk: u64,
+    ) -> Result<(), Error> {
+        if let Some((first, values)) = Box::pin(load_committed_page(ready, blob, chunk)).await? {
+            self.0 = Some((chunk, values[(chunk - first) as usize]));
+        }
+        Ok(())
     }
 }
 
