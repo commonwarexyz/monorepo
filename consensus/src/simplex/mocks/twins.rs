@@ -1265,7 +1265,7 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};
-    use commonware_utils::{NZU32, NZU64, TestRng, ordered::Set, test_rng};
+    use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
     use std::{collections::HashSet, time::Duration};
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
@@ -1766,7 +1766,7 @@ mod tests {
             ],
         };
         let participants: Vec<u32> = (0..3).collect();
-        let term_length = TermLength::new(NZU64!(3));
+        let term_length = TermLength::new(NZU32!(3));
 
         let (primary, secondary) = scenario.partitions(View::new(3), term_length, &participants);
         assert_eq!(primary, vec![0]);
@@ -1850,7 +1850,7 @@ mod tests {
     #[test]
     fn view_helpers_can_follow_stable_leader_terms() {
         let participants: Vec<u32> = (0..5).collect();
-        let term_length = TermLength::new(NZU64!(3));
+        let term_length = TermLength::new(NZU32!(3));
 
         assert_eq!(
             view_partitions(View::new(3), term_length, &participants),
@@ -2272,7 +2272,7 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(seed).public_key())
             .collect();
         let participants = Set::try_from(participants).expect("participants should be unique");
-        let term_length = NZU32!(3);
+        let term_length = TermLength::new(NZU32!(3));
         let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
             Elector::new(
                 RoundRobin::<Sha256>::default().with_term(term_length, Duration::from_secs(10)),

@@ -22,8 +22,8 @@ use std::time::Duration;
 #[allow(clippy::large_enum_variant)]
 #[derive(Arbitrary, Debug)]
 enum FuzzElector {
-    RoundRobin,
-    RoundRobinShuffled([u8; 32]),
+    RoundRobin(TermLength),
+    RoundRobinShuffled([u8; 32], TermLength),
     RandomMinPk(bls12381_threshold_vrf::Certificate<MinPk>),
     RandomMinSig(bls12381_threshold_vrf::Certificate<MinSig>),
 }
@@ -33,9 +33,6 @@ struct FuzzInput {
     participants_count: u8,
     round: Round,
     elector: FuzzElector,
-    /// Fuzzed term length for round-robin electors. Ignored for Random (which
-    /// has no term-length configuration).
-    term_length: TermLength,
 }
 
 fn fuzz<S, L>(input: &FuzzInput, elector_config: L, certificate: Option<&S::Certificate>)
@@ -72,19 +69,20 @@ where
 
 fuzz_target!(|input: FuzzInput| {
     match &input.elector {
-        FuzzElector::RoundRobin => {
-            let elector = match input.term_length.get() {
+        FuzzElector::RoundRobin(term_length) => {
+            let elector = match term_length.get() {
                 1 => RoundRobin::<Sha256>::default(),
-                _ => RoundRobin::<Sha256>::default()
-                    .with_term(input.term_length, Duration::from_secs(12)),
+                _ => {
+                    RoundRobin::<Sha256>::default().with_term(*term_length, Duration::from_secs(12))
+                }
             };
             fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }
-        FuzzElector::RoundRobinShuffled(seed) => {
-            let elector = match input.term_length.get() {
+        FuzzElector::RoundRobinShuffled(seed, term_length) => {
+            let elector = match term_length.get() {
                 1 => RoundRobin::<Sha256>::shuffled(seed),
                 _ => RoundRobin::<Sha256>::shuffled(seed)
-                    .with_term(input.term_length, Duration::from_secs(12)),
+                    .with_term(*term_length, Duration::from_secs(12)),
             };
             fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }

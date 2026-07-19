@@ -161,12 +161,12 @@ mod tests {
     use crate::{FuzzInput, N4F1C3, Standard, fuzz, strategy::StrategyChoice, utils::Partition};
     use commonware_consensus::types::TermLength;
     use commonware_macros::{test_group, test_traced};
-    use commonware_utils::NZU64;
+    use commonware_utils::NZU32;
     use proptest::prelude::*;
 
     const TEST_CONTAINERS: u64 = 1000;
     const PROPERTY_TEST_CONTAINERS: u64 = 30;
-    const TERM_LENGTH_BOUNDARIES: [TermLength; 2] = [TermLength::ONE, TermLength::new(NZU64!(5))];
+    const TERM_LENGTH_BOUNDARIES: [TermLength; 2] = [TermLength::ONE, TermLength::new(NZU32!(5))];
     const SEED: u64 = 0;
 
     fn test_input(seed: u64, containers: u64, term_length: TermLength) -> FuzzInput {

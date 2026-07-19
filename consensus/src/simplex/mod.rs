@@ -125,8 +125,7 @@
 //! * If an entered view remains unfinalized for the stall timeout (configured alongside the term
 //!   length, see [`elector::Terms`]) and we are still in the same term, we locally time out the
 //!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
-//!   entered in the current term. With `term_length = 1` there is no stall timeout: leader
-//!   rotation itself bounds a finality stall to a single view.
+//!   entered in the current term.
 //! * Votes for views at or below the highest finalized view are ignored on arrival: they produce no
 //!   activity reports, and equivocation at or below the finalized tip is not detected or reported.
 //!   Downstream systems consuming per-vote activity (rewards, slashing) only observe votes for views
@@ -484,7 +483,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Participant, Round, View, ViewDelta},
+        types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -1271,7 +1270,7 @@ mod tests {
     #[test_traced]
     fn test_non_genesis_floor_joiner_catches_tip_stable_leader() {
         non_genesis_floor_joiner_catches_tip_with_term::<_, _, RoundRobin>(
-            RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
+            RoundRobin::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
             scheme_mocks::fixture,
         );
     }
@@ -2263,7 +2262,7 @@ mod tests {
     #[test_traced]
     fn test_one_offline_stable_leader() {
         one_offline_with_term::<_, _, RoundRobin>(
-            RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
+            RoundRobin::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
             scheme_mocks::fixture,
         );
     }
@@ -6060,14 +6059,16 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
-                RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
+                RoundRobin::default()
+                    .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
                 ed25519::fixture
             ),
             run_hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
-                RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
+                RoundRobin::default()
+                    .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
                 ed25519::fixture
             )
         );
@@ -6608,7 +6609,7 @@ mod tests {
     fn test_twins_stable_leader() {
         twins_campaign_all_links(
             TWINS_CAMPAIGN,
-            RoundRobin::default().with_term(NZU32!(3), Duration::from_secs(12)),
+            RoundRobin::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
         );
     }
 

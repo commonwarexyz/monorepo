@@ -1060,7 +1060,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZU64, futures::AbortablePool};
+    use commonware_utils::{NZU32, futures::AbortablePool};
     use std::time::Duration;
 
     fn round_robin<S: certificate::Scheme>(scheme: &S) -> RoundRobinElector<S> {
@@ -1178,7 +1178,7 @@ mod tests {
         validators: usize,
         epoch: u64,
         activity_timeout: u64,
-        term_length: u64,
+        term_length: u32,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
         let namespace = b"ns".to_vec();
         let fixture = ed25519::fixture(
@@ -1190,7 +1190,7 @@ mod tests {
             1 => round_robin(&fixture.verifier),
             _ => round_robin_with_term(
                 &fixture.verifier,
-                TermLength::new(NZU64!(term_length)),
+                TermLength::new(NZU32!(term_length)),
                 Duration::from_secs(30),
             ),
         };
@@ -1524,7 +1524,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(3)),
+                    TermLength::new(NZU32!(3)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(33),
@@ -1620,7 +1620,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(3)),
+                    TermLength::new(NZU32!(3)),
                     Duration::from_secs(12),
                 ),
                 epoch: Epoch::new(34),
@@ -1665,7 +1665,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(3)),
+                    TermLength::new(NZU32!(3)),
                     same_term_timeout,
                 ),
                 epoch: Epoch::new(35),
@@ -1726,7 +1726,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(3)),
+                    TermLength::new(NZU32!(3)),
                     same_term_timeout,
                 ),
                 epoch: Epoch::new(36),
@@ -1782,7 +1782,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(5)),
+                    TermLength::new(NZU32!(5)),
                     stall_timeout,
                 ),
                 epoch: Epoch::new(7),
@@ -1862,7 +1862,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(3)),
+                    TermLength::new(NZU32!(3)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(9),
@@ -2670,7 +2670,7 @@ mod tests {
                     scheme: verifier.clone(),
                     elector: round_robin_with_term(
                         &verifier,
-                        TermLength::new(NZU64!(5)),
+                        TermLength::new(NZU32!(5)),
                         Duration::from_secs(4),
                     ),
                     epoch,
@@ -3364,7 +3364,7 @@ mod tests {
                     scheme: schemes[2].clone(),
                     elector: round_robin_with_term(
                         &schemes[2],
-                        TermLength::new(NZU64!(5)),
+                        TermLength::new(NZU32!(5)),
                         Duration::from_secs(4),
                     ),
                     epoch: Epoch::new(1),
@@ -3413,7 +3413,7 @@ mod tests {
                     scheme: schemes[3].clone(),
                     elector: round_robin_with_term(
                         &schemes[3],
-                        TermLength::new(NZU64!(5)),
+                        TermLength::new(NZU32!(5)),
                         Duration::from_secs(4),
                     ),
                     epoch: Epoch::new(1),
@@ -3578,7 +3578,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(5)),
+                    TermLength::new(NZU32!(5)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
@@ -3617,7 +3617,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(3)),
+                    TermLength::new(NZU32!(3)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
@@ -3706,7 +3706,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(5)),
+                    TermLength::new(NZU32!(5)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
@@ -3776,7 +3776,7 @@ mod tests {
     #[test]
     fn test_interesting() {
         let activity_timeout = ViewDelta::new(10);
-        let term_length = TermLength::new(NZU64!(10));
+        let term_length = TermLength::new(NZU32!(10));
 
         assert!(!interesting(
             activity_timeout,
@@ -3872,7 +3872,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(5)),
+                    TermLength::new(NZU32!(5)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
@@ -3931,7 +3931,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(5)),
+                    TermLength::new(NZU32!(5)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
@@ -3971,7 +3971,7 @@ mod tests {
                     scheme: schemes[0].clone(),
                     elector: round_robin_with_term(
                         &schemes[0],
-                        TermLength::new(NZU64!(5)),
+                        TermLength::new(NZU32!(5)),
                         Duration::from_secs(4),
                     ),
                     epoch: Epoch::new(1),
@@ -4007,7 +4007,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(20)),
+                    TermLength::new(NZU32!(20)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
@@ -4075,7 +4075,7 @@ mod tests {
                     scheme: schemes[0].clone(),
                     elector: round_robin_with_term(
                         &schemes[0],
-                        TermLength::new(NZU64!(20)),
+                        TermLength::new(NZU32!(20)),
                         Duration::from_secs(4),
                     ),
                     epoch: Epoch::new(1),
@@ -4111,7 +4111,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(3)),
+                    TermLength::new(NZU32!(3)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
@@ -4171,7 +4171,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin_with_term(
                     &schemes[0],
-                    TermLength::new(NZU64!(3)),
+                    TermLength::new(NZU32!(3)),
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),

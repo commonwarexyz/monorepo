@@ -563,33 +563,25 @@ pub type ViewDelta = Delta<View>;
 /// the highest finalized view and the current view, and the current view
 /// advances by up to a full term per nullification.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TermLength(NonZeroU64);
+pub struct TermLength(u32);
 
 impl TermLength {
-    /// The maximum term length, bounding term arithmetic (like
-    /// [`View::next_term_start`]) away from `u64` overflow for any
-    /// realistic view.
-    pub const MAX: Self = Self(NonZeroU64::new(u32::MAX as u64).unwrap());
+    /// The maximum term length. Lengths are stored as a `u32`, bounding term
+    /// arithmetic (like [`View::next_term_start`]) away from `u64` overflow
+    /// for any realistic view.
+    pub const MAX: Self = Self(u32::MAX);
 
     /// A term length of one view (every view has an independently elected leader).
-    pub const ONE: Self = Self(NonZeroU64::MIN);
+    pub const ONE: Self = Self(1);
 
     /// Creates a new term length.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `length` exceeds [`Self::MAX`].
-    pub const fn new(length: NonZeroU64) -> Self {
-        assert!(
-            length.get() <= Self::MAX.get(),
-            "term length must not exceed TermLength::MAX"
-        );
-        Self(length)
+    pub const fn new(length: NonZeroU32) -> Self {
+        Self(length.get())
     }
 
     /// Returns the number of views per term.
     pub const fn get(self) -> u64 {
-        self.0.get()
+        self.0 as u64
     }
 }
 
@@ -599,19 +591,10 @@ impl Default for TermLength {
     }
 }
 
-impl From<NonZeroU32> for TermLength {
-    /// Total conversion: every non-zero `u32` is a valid term length (see
-    /// [`TermLength::MAX`]).
-    fn from(length: NonZeroU32) -> Self {
-        Self::new(NonZeroU64::from(length))
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for TermLength {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let length = u.int_in_range(1..=Self::MAX.get())?;
-        Ok(Self(NonZeroU64::new(length).expect("length is nonzero")))
+        Ok(Self(u.int_in_range(1..=u32::MAX)?))
     }
 }
 
@@ -1137,7 +1120,6 @@ mod tests {
     use commonware_coding::Config as CodingConfig;
     use commonware_math::algebra::Random;
     use commonware_utils::{Array, NZU16, NZU64, Span, test_rng};
-    use core::num::NonZeroU32;
     use std::ops::Deref;
 
     #[test]
@@ -1506,7 +1488,7 @@ mod tests {
         ];
         for (view, term_length, expected) in cases {
             assert_eq!(
-                View::new(view).term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
+                View::new(view).term_start(TermLength::new(commonware_utils::NZU32!(term_length))),
                 View::new(expected),
                 "view={view}, term_length={term_length}"
             );
@@ -1528,7 +1510,7 @@ mod tests {
         ];
         for (view, term_length, expected) in cases {
             assert_eq!(
-                View::new(view).term_end(TermLength::new(commonware_utils::NZU64!(term_length))),
+                View::new(view).term_end(TermLength::new(commonware_utils::NZU32!(term_length))),
                 View::new(expected),
                 "view={view}, term_length={term_length}"
             );
@@ -1550,7 +1532,7 @@ mod tests {
         for (view, term_length, expected) in cases {
             assert_eq!(
                 View::new(view)
-                    .is_term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
+                    .is_term_start(TermLength::new(commonware_utils::NZU32!(term_length))),
                 expected,
                 "view={view}, term_length={term_length}"
             );
@@ -1576,26 +1558,12 @@ mod tests {
             assert_eq!(
                 View::new(a).same_term(
                     View::new(b),
-                    TermLength::new(commonware_utils::NZU64!(term_length))
+                    TermLength::new(commonware_utils::NZU32!(term_length))
                 ),
                 expected,
                 "a={a}, b={b}, term_length={term_length}"
             );
         }
-    }
-
-    #[test]
-    fn test_term_length_from_non_zero_u32() {
-        assert_eq!(
-            TermLength::from(NonZeroU32::MIN),
-            TermLength::ONE,
-            "smallest non-zero u32 is the unit term length"
-        );
-        assert_eq!(
-            TermLength::from(NonZeroU32::MAX),
-            TermLength::MAX,
-            "the conversion is total up to the bound"
-        );
     }
 
     #[test]
@@ -1613,7 +1581,7 @@ mod tests {
         for (view, term_length, expected) in cases {
             assert_eq!(
                 View::new(view)
-                    .next_term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
+                    .next_term_start(TermLength::new(commonware_utils::NZU32!(term_length))),
                 View::new(expected),
                 "view={view}, term_length={term_length}"
             );
@@ -1635,7 +1603,7 @@ mod tests {
         ];
         for (view, term_length, expected) in cases {
             assert_eq!(
-                View::new(view).term_index(TermLength::new(commonware_utils::NZU64!(term_length))),
+                View::new(view).term_index(TermLength::new(commonware_utils::NZU32!(term_length))),
                 expected,
                 "view={view}, term_length={term_length}"
             );
@@ -1662,7 +1630,7 @@ mod tests {
             assert_eq!(
                 View::new(nullified).covers(
                     View::new(view),
-                    TermLength::new(commonware_utils::NZU64!(term_length))
+                    TermLength::new(commonware_utils::NZU32!(term_length))
                 ),
                 expected,
                 "nullified={nullified}, view={view}, term_length={term_length}"
@@ -1692,7 +1660,7 @@ mod tests {
             assert_eq!(
                 View::new(current).admits(
                     View::new(pending),
-                    TermLength::new(commonware_utils::NZU64!(term_length))
+                    TermLength::new(commonware_utils::NZU32!(term_length))
                 ),
                 expected,
                 "current={current}, pending={pending}, term_length={term_length}"
@@ -1703,7 +1671,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "view term_end overflow")]
     fn test_view_term_end_overflow_panics() {
-        let _ = View::new(u64::MAX).term_end(TermLength::new(commonware_utils::NZU64!(2)));
+        let _ = View::new(u64::MAX).term_end(TermLength::new(commonware_utils::NZU32!(2)));
     }
 
     #[test]
@@ -1714,7 +1682,7 @@ mod tests {
 
     #[test]
     fn test_view_admits_near_max_does_not_panic() {
-        let term_length = TermLength::new(commonware_utils::NZU64!(5));
+        let term_length = TermLength::new(commonware_utils::NZU32!(5));
         // The next term start overflows, so only lower views and the
         // successor are admitted.
         let current = View::new(u64::MAX - 2);

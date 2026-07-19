@@ -377,7 +377,7 @@ mod tests {
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, deterministic};
-    use commonware_utils::{NZU64, NZUsize};
+    use commonware_utils::{NZU32, NZUsize};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
     const EPOCH: Epoch = Epoch::new(9);
@@ -408,7 +408,7 @@ mod tests {
                 mailbox_size: NZUsize!(8),
                 fetch_concurrent: NZUsize!(4),
                 fetch_timeout: Duration::from_secs(1),
-                term_length: TermLength::new(NZU64!(5)),
+                term_length: TermLength::new(NZU32!(5)),
             },
         );
         actor
@@ -422,7 +422,7 @@ mod tests {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-            assert!(View::new(6).same_term(View::new(10), TermLength::new(NZU64!(5))));
+            assert!(View::new(6).same_term(View::new(10), TermLength::new(NZU32!(5))));
             let mut actor = build_actor(context, verifier);
 
             let validated = actor.validate(

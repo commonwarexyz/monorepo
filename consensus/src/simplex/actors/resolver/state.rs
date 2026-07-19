@@ -306,7 +306,7 @@ mod tests {
     use super::{super::test_helpers::*, *};
     use crate::{simplex::scheme::ed25519, types::Epoch};
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
-    use commonware_utils::{NZU64, NZUsize, test_rng};
+    use commonware_utils::{NZU32, NZUsize, test_rng};
 
     const NAMESPACE: &[u8] = b"resolver-state";
     const EPOCH: Epoch = Epoch::new(9);
@@ -397,7 +397,7 @@ mod tests {
     fn fetch_requests_only_term_anchor_nullifications() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
@@ -429,7 +429,7 @@ mod tests {
     fn same_term_nullification_serves_later_views_until_pruned() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
 
         let nullification_v2 = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
         state.handle(Certificate::Nullification(nullification_v2.clone()), None);
@@ -458,7 +458,7 @@ mod tests {
     fn nullification_below_floor_can_cover_unresolved_term_views() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         let finalization_v3 = build_finalization(&schemes, &verifier, EPOCH, View::new(3));
@@ -487,7 +487,7 @@ mod tests {
     fn nullification_admission_matches_pruning_boundary() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
 
         let finalization_v3 = build_finalization(&schemes, &verifier, EPOCH, View::new(3));
         let effects = state.handle(Certificate::Finalization(finalization_v3), None);
@@ -657,7 +657,7 @@ mod tests {
     fn certification_success_refills_next_term_anchor_window() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(1), TermLength::new(NZU64!(5)));
+            State::new(NZUsize!(1), TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
@@ -694,7 +694,7 @@ mod tests {
     fn certification_success_at_mid_term_floor_refetches_term_tail() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
@@ -729,7 +729,7 @@ mod tests {
     fn mid_term_floor_at_current_view_refetches_term_tail_later() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         // A gossiped notarization at view 4 is the highest view seen: the
@@ -767,7 +767,7 @@ mod tests {
     fn fetch_requests_each_anchor_once() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
         let effects = state.handle(Certificate::Nullification(nullification_v14), None);
@@ -810,7 +810,7 @@ mod tests {
     fn certification_failure_skips_covered_re_requests() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
         state.handle(Certificate::Nullification(nullification_v14), None);

@@ -47,13 +47,6 @@ use std::{marker::PhantomData, time::Duration};
 /// and the same inputs to [`Elector::elect`], the method must always return
 /// the same leader index. This is critical for consensus correctness - all honest
 /// participants must agree on the leader for each round.
-///
-/// # Term Structure
-///
-/// Term configuration is not part of this trait. Electors that support
-/// stable leaders expose their own setter (like [`RoundRobin::with_term`]),
-/// and consensus reads the configured structure back from the built
-/// [`Elector::terms`].
 pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
     /// The initialized elector type.
     type Elector: Elector<S>;
@@ -69,10 +62,6 @@ pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
 }
 
 /// Leadership term structure reported by an [`Elector`].
-///
-/// Couples the term length with the term-abandonment timeout so that stable
-/// leaders cannot be configured without their liveness backstop (and the
-/// backstop cannot be configured without stable leaders).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Terms {
     /// Every view is its own term: a new leader is elected each view, and
@@ -98,11 +87,6 @@ pub enum Terms {
         /// no finalization certificate forms. With single-view terms, leader
         /// rotation bounds such a stall to one view. With longer terms, this
         /// timeout bounds it instead.
-        ///
-        /// Local policy: participants may configure different values. Must
-        /// exceed the certification timeout (asserted at engine start) so
-        /// normal proposal and certification paths have a chance to complete
-        /// before term-level abandonment.
         stall_timeout: Duration,
     },
 }
@@ -207,12 +191,7 @@ impl<H: Hasher> RoundRobin<H> {
     ///
     /// Panics if `term_length` is 1 (single-view terms need no timeout and are
     /// the default).
-    pub fn with_term(
-        mut self,
-        term_length: impl Into<TermLength>,
-        stall_timeout: Duration,
-    ) -> Self {
-        let term_length = term_length.into();
+    pub const fn with_term(mut self, term_length: TermLength, stall_timeout: Duration) -> Self {
         assert!(
             term_length.get() > 1,
             "stable leaders require a term length greater than 1"
@@ -288,7 +267,6 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 ///
 /// This elector does not support stable leaders: it has no term-length
 /// configuration and [`Elector::terms`] always returns [`Terms::Single`].
-/// Use [`RoundRobin`] for stable-leader configurations.
 ///
 /// Only works with [`super::scheme::bls12381_threshold::vrf`]
 /// (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
@@ -305,10 +283,7 @@ impl Random {
         assert!(seed_signature.is_some() || round.view() == View::new(1));
 
         let Some(seed_signature) = seed_signature else {
-            // Standard round-robin for view 1. The sum is deliberately
-            // truncated to u32 before the modulo: leader election is
-            // consensus-critical, and widening it would change the elected
-            // leader once the epoch exceeds u32::MAX.
+            // Standard round-robin for view 1
             return Participant::new(
                 (round.epoch().get().wrapping_add(round.view().get())) as u32 % n,
             );
@@ -386,7 +361,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, NZU32, NZU64, TryFromIterator, test_rng};
+    use commonware_utils::{Faults, N3f1, NZU32, TryFromIterator, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -448,11 +423,11 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term(NZU32!(5), Duration::from_secs(10))
+            .with_term(TermLength::new(NZU32!(5)), Duration::from_secs(10))
             .build(&participants);
 
         let round = Round::new(Epoch::new(u64::MAX - 1), View::new(6));
-        let term_idx = round.view().term_index(TermLength::new(NZU64!(5)));
+        let term_idx = round.view().term_index(TermLength::new(NZU32!(5)));
         let expected = round.epoch().get().wrapping_add(term_idx) % 5;
 
         assert_eq!(
@@ -467,7 +442,7 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term(NZU32!(3), Duration::from_secs(10))
+            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
             .build(&participants);
         let epoch = Epoch::new(0);
 
@@ -491,7 +466,7 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term(NZU32!(3), Duration::from_secs(10))
+            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
             .build(&participants);
 
         let leader_epoch_0 = elector.elect(Round::new(Epoch::new(0), View::new(1)), None);
@@ -571,7 +546,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "stable leaders require a term length greater than 1")]
     fn round_robin_with_term_panics_on_term_length_one() {
-        let _ = <RoundRobin>::default().with_term(NZU32!(1), Duration::from_secs(10));
+        let _ =
+            <RoundRobin>::default().with_term(TermLength::new(NZU32!(1)), Duration::from_secs(10));
     }
 
     #[test]
@@ -624,14 +600,6 @@ mod tests {
             seen[usize::from(*leader)] = true;
         }
         assert!(seen.iter().all(|x| *x));
-
-        // The sum is truncated to u32 before the modulo (see select_leader):
-        // widening it would change the elected leader for epochs beyond
-        // u32::MAX, so the truncated value is pinned here.
-        let epoch = u64::from(u32::MAX) + 3;
-        let round = Round::new(Epoch::new(epoch), View::new(1));
-        let expected = ((epoch + 1) as u32) % n as u32;
-        assert_eq!(elector.elect(round, None), Participant::new(expected));
     }
 
     #[test]
