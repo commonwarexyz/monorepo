@@ -154,8 +154,8 @@ pub(super) struct Entry {
     /// Committed logical size in bytes.
     pub size: u64,
     /// Pruned floor: bytes below this offset were dropped and their reads
-    /// fail. Chunk-aligned. Runs never start below it, and checksum refs
-    /// cover from at most its chunk.
+    /// fail. Byte-exact. Runs never start below its chunk, and checksum
+    /// refs cover from at most its chunk.
     pub floor: u64,
     pub runs: Vec<Run>,
     pub checksums: Vec<ChecksumRef>,

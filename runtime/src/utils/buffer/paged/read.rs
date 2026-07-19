@@ -60,12 +60,29 @@ impl<B: Blob> PageReader<B> {
         // be partial).
         let remaining = self.blob_size - start_offset;
         let bytes_to_read = remaining.min((self.prefetch_count * self.page_size) as u64) as usize;
-        let buf = self
-            .blob
-            .read_at(start_offset, bytes_to_read)
-            .await?
-            .coalesce()
-            .freeze();
+
+        // A batch straddling the blob's pruned floor cannot be read from its start (a seek to
+        // an unpruned offset may land mid-page below the floor): read the readable suffix and
+        // zero the pruned prefix, which the seek skips before the first unpruned byte. A batch
+        // wholly below the floor reads unclamped so the blob reports the misuse.
+        let floor = self.blob.floor();
+        let buf = if start_offset < floor && floor < start_offset + bytes_to_read as u64 {
+            let prefix = (floor - start_offset) as usize;
+            let suffix = self
+                .blob
+                .read_at(floor, bytes_to_read - prefix)
+                .await?
+                .coalesce();
+            let mut batch = vec![0u8; bytes_to_read];
+            batch[prefix..].copy_from_slice(suffix.as_ref());
+            IoBuf::from(batch)
+        } else {
+            self.blob
+                .read_at(start_offset, bytes_to_read)
+                .await?
+                .coalesce()
+                .freeze()
+        };
         self.blob_page += bytes_to_read.div_ceil(self.page_size) as u64;
 
         Ok(Some(buf))

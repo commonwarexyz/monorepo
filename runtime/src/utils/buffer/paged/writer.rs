@@ -88,6 +88,26 @@ const fn too_big_for_buffer(
     overflows_capacity && has_full_page_after_fill
 }
 
+/// Read the partial tail page `[tail_offset, size)` of `blob`, zero-filling any prefix below
+/// the blob's pruned floor. Bytes below the floor were dropped and cannot be read, so the
+/// zeros stand in for them: callers honoring the floor never serve those offsets.
+async fn read_partial_tail<B: Blob>(
+    blob: &B,
+    tail_offset: u64,
+    size: u64,
+) -> Result<Vec<u8>, Error> {
+    let mut partial = vec![0u8; (size - tail_offset) as usize];
+    let read_start = tail_offset.max(blob.floor());
+    if read_start < size {
+        let bytes = blob
+            .read_at(read_start, (size - read_start) as usize)
+            .await?
+            .coalesce();
+        partial[(read_start - tail_offset) as usize..].copy_from_slice(bytes.as_ref());
+    }
+    Ok(partial)
+}
+
 /// Unique writer to a cache-wrapped [Blob].
 pub struct Writer<B: Blob> {
     /// The underlying blob being wrapped.
@@ -160,13 +180,12 @@ impl<B: Blob> Writer<B> {
         let capacity = adjusted_capacity(capacity, page_size);
 
         // The blob's size is the logical size: a trailing partial page is just logical bytes.
+        // The partial page may straddle a pruned floor, in which case its pruned prefix seeds
+        // as zeros (see [read_partial_tail]).
         let tail_offset = blob_size - blob_size % page_size;
         let partial_len = (blob_size - tail_offset) as usize;
         let partial_data = if partial_len > 0 {
-            blob.read_at(tail_offset, partial_len)
-                .await?
-                .coalesce()
-                .freeze()
+            IoBuf::from(read_partial_tail(&blob, tail_offset, blob_size).await?)
         } else {
             IoBuf::default()
         };
@@ -570,6 +589,34 @@ impl<B: Blob> Writer<B> {
         self.shrink(size).await
     }
 
+    /// Drop the blob's bytes below `offset` via [`Blob::prune`], flushing buffered bytes
+    /// first so the blob's physical size covers `offset`. The floor rounds down per the
+    /// backend's granularity, and its durability follows the blob's next sync.
+    ///
+    /// Pages below the resulting floor may linger in the shared page cache and in this
+    /// writer's tip buffer, and pages straddling it re-fetch with their pruned prefix
+    /// zeroed. Reads below the floor therefore serve stale or zero bytes instead of
+    /// failing: callers must confine reads to offsets at or above the floor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `offset` exceeds the logical size.
+    pub async fn prune(&mut self, offset: u64) -> Result<(), Error> {
+        assert!(
+            offset <= self.buffer.size(),
+            "prune beyond the logical size"
+        );
+        self.flush_internal(true, false).await?;
+        // Pruning is a mutation: it must not race a started sync (writer exclusivity).
+        self.sync_state.wait_for_pending().await?;
+        self.blob.prune(offset).await
+    }
+
+    /// The blob's pruned floor: bytes below it were dropped (see [`Blob::floor`]).
+    pub fn floor(&self) -> u64 {
+        self.blob.floor()
+    }
+
     /// Shrink the blob to `size` logical bytes and reposition the tip at the new tail.
     async fn shrink(&mut self, size: u64) -> Result<(), Error> {
         // Flush and persist buffered data first so the blob holds every retained byte before
@@ -633,14 +680,9 @@ impl<B: Blob> Writer<B> {
         } else {
             self.buffer.offset = tail_offset;
             self.buffer.clear();
-            let partial_len = (size - tail_offset) as usize;
-            if partial_len > 0 {
-                let partial = self
-                    .blob
-                    .read_at(tail_offset, partial_len)
-                    .await?
-                    .coalesce();
-                let over_capacity = self.buffer.append(partial.as_ref());
+            if size > tail_offset {
+                let partial = read_partial_tail(&self.blob, tail_offset, size).await?;
+                let over_capacity = self.buffer.append(&partial);
                 assert!(!over_capacity);
             }
         }

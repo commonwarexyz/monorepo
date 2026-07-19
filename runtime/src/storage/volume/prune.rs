@@ -10,11 +10,14 @@
 use super::state::{check_not_removed, BlobCore, Ready};
 use crate::Error;
 
-/// Prune bytes below `offset`, rounded DOWN to a chunk boundary (bytes at
-/// and above `offset` always survive). The blob's `write_lock` MUST be
-/// held, and per the blob's single-writer contract no batch may hold
-/// staged state over the blob (staged overlays reference base runs by
-/// key, which pruning re-keys).
+/// Prune bytes below `offset`, exactly: the floor IS `offset`, and reads,
+/// writes, and shrinks below it fail from this call on. Physical surgery
+/// is chunk-granular (a chunk straddling the floor keeps its low bytes on
+/// disk — the checksum granularity requires them — but they are logically
+/// dead and never served). The blob's `write_lock` MUST be held, and per
+/// the blob's single-writer contract no batch may hold staged state over
+/// the blob (staged overlays reference base runs by key, which pruning
+/// re-keys).
 pub(super) fn prune_locked<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
@@ -22,7 +25,6 @@ pub(super) fn prune_locked<S: crate::Storage>(
 ) -> Result<(), Error> {
     ready.check_poisoned()?;
     check_not_removed(blob)?;
-    let floor = offset - offset % super::BLOCK;
     let mut state = ready.state.lock();
     let mut inner = blob.inner.lock();
     assert_eq!(
@@ -33,10 +35,10 @@ pub(super) fn prune_locked<S: crate::Storage>(
     if offset > inner.size() {
         return Err(Error::BlobInsufficientLength);
     }
-    if floor <= inner.floor() {
+    if offset <= inner.floor() {
         return Ok(());
     }
-    inner.prune_to(floor);
+    inner.prune_to(offset);
     // The next commit must capture the blob: its entry records the floor,
     // and the pruned extents release when it confirms.
     state.mark_dirty(blob.id);

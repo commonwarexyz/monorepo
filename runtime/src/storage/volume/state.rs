@@ -62,8 +62,10 @@ pub(super) struct BlobInner {
     /// or the in-flight snapshot.
     freeze_size: u64,
     /// Pruned floor: bytes below were dropped, and reads, writes, and
-    /// resizes into them fail. Chunk-aligned, monotonic in RAM (the
-    /// committed floor regresses across a crash to the adopted commit's).
+    /// resizes into them fail. Byte-exact and monotonic in RAM (the
+    /// committed floor regresses across a crash to the adopted commit's);
+    /// physical state below is chunk-granular — the floor's own chunk
+    /// stays backed with its low bytes logically dead.
     floor: u64,
     /// Written runs keyed by logical start; gaps are holes (zeros).
     runs: BTreeMap<u64, RunMeta>,
@@ -225,13 +227,13 @@ impl BlobInner {
             prev_end = logical + run.len;
         }
 
-        // Pruned floor: chunk-aligned, within the size, below every run
-        // and every piece of tracked chunk state.
-        assert!(self.floor.is_multiple_of(BLOCK), "unaligned floor");
+        // Pruned floor: within the size, with no run or tracked chunk
+        // state below its chunk (the floor itself may sit mid-chunk: the
+        // straddling chunk stays backed, its low bytes logically dead).
         assert!(self.floor <= self.size, "floor beyond size");
         let floor_chunk = chunk_of(self.floor);
         if let Some((&first, _)) = self.runs.first_key_value() {
-            assert!(first >= self.floor, "run below the floor");
+            assert!(first >= floor_chunk * BLOCK, "run below the floor's chunk");
         }
         assert!(
             self.dirty_chunks.first().is_none_or(|&c| c >= floor_chunk),
@@ -1009,34 +1011,38 @@ impl BlobInner {
         self.committed_entry = Some(entry);
     }
 
-    /// Prune bytes below `floor` (chunk-aligned, above the current floor,
-    /// at most `size`): runs wholly below drop, a straddling run keeps its
-    /// suffix in place, and chunk state, overlay entries, and dirty marks
-    /// below the floor drop. Freed extent pieces join `pending_frees` —
+    /// Prune bytes below `floor` (byte-exact, above the current floor, at
+    /// most `size`): runs wholly below the floor's chunk drop, a
+    /// straddling run keeps its suffix in place, and chunk state, overlay
+    /// entries, and dirty marks below the floor's chunk drop. Freed extent pieces join `pending_frees` —
     /// the last confirmed table still references them, so they release
     /// only once a commit CAPTURING this blob confirms (the caller marks
     /// the blob dirty). The generation bumps: in-flight reads against the
     /// old placement retry, then fail loudly below the new floor.
     pub fn prune_to(&mut self, floor: u64) {
         debug_assert!(
-            floor.is_multiple_of(BLOCK) && floor > self.floor && floor <= self.size,
+            floor > self.floor && floor <= self.size,
             "prune floor out of contract"
         );
-        let kept = self.runs.split_off(&floor);
+        // Physical surgery is chunk-granular: the chunk containing the
+        // floor survives whole (its low bytes stay on disk for the
+        // checksum granularity, logically dead behind the exact floor).
+        let chunk_start = chunk_of(floor) * BLOCK;
+        let kept = self.runs.split_off(&chunk_start);
         let below = std::mem::replace(&mut self.runs, kept);
         for (logical, run) in below {
-            if logical + run.len <= floor {
+            if logical + run.len <= chunk_start {
                 self.pending_frees.push(run.extent());
             } else {
                 // The straddler keeps its suffix: the pruned prefix blocks
-                // free, the rest re-keys at the floor.
-                let cut = floor - logical;
+                // free, the rest re-keys at the floor's chunk start.
+                let cut = chunk_start - logical;
                 self.pending_frees.push(Extent {
                     offset: run.physical,
                     len: cut,
                 });
                 self.runs.insert(
-                    floor,
+                    chunk_start,
                     RunMeta {
                         physical: run.physical + cut,
                         len: run.len - cut,

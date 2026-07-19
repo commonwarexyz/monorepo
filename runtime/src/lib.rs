@@ -78,6 +78,11 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
+    /// Upper bound on [`Blob::prune`]'s rounding granularity across backends: a pruned
+    /// floor is never more than this many bytes below the requested offset. Backends may
+    /// round less (or not at all), never more.
+    pub const MAX_PRUNE_GRANULARITY: u64 = 4096;
+
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
     pub enum Error {
@@ -819,19 +824,21 @@ stability_scope!(BETA {
         /// ```
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
 
-        /// Drop the blob's bytes below `offset`, rounded DOWN to an
-        /// implementation-defined granularity (bytes at and above `offset`
-        /// always survive). Reads, writes, and resizes below the pruned
-        /// floor fail with [`Error::OffsetPruned`]. Pruning is a mutation,
-        /// not a durability point: the floor persists at the next
-        /// [`Blob::sync`], and a crash may regress it to the last synced
-        /// floor — prefix bytes reappear, never the reverse — so callers
-        /// re-prune after recovery. `offset` must not exceed the blob's
-        /// size, and per the writer-exclusivity contract must not race
-        /// writes, resizes, or an open write batch on this blob.
+        /// Drop the blob's bytes below `offset`, exactly: the floor
+        /// becomes `offset`, and reads, writes, and resizes below it fail
+        /// with [`Error::OffsetPruned`] from this call on (implementations
+        /// may retain bytes physically — storage granularity — but never
+        /// serve them). Pruning is a mutation, not a durability point: the
+        /// floor persists at the next [`Blob::sync`], and a crash may
+        /// regress it to the last synced floor — prefix bytes reappear,
+        /// never the reverse — so callers re-prune after recovery.
+        /// `offset` must not exceed the blob's size, and per the
+        /// writer-exclusivity contract must not race writes, resizes, or
+        /// an open write batch on this blob.
         fn prune(&self, offset: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// The pruned floor: bytes below it were dropped and their reads
+        /// The pruned floor: the exact offset of the last effective
+        /// [`Blob::prune`] (zero for a never-pruned blob). Bytes below it
         /// fail. Zero for a never-pruned blob.
         fn floor(&self) -> u64;
     }

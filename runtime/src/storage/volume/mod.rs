@@ -227,6 +227,10 @@ use std::{
 /// write can only damage data that the adopted table does not reference.
 pub(crate) const BLOCK: u64 = 4096;
 
+// The volume prunes at BLOCK granularity, the coarsest of any backend, so the
+// public bound must match it exactly.
+const _: () = assert!(BLOCK == crate::MAX_PRUNE_GRANULARITY);
+
 /// Location and growth policy of the volume file within the inner storage.
 #[derive(Clone, Debug)]
 pub struct Config {

@@ -36,8 +36,9 @@ fn volume_over_memory() -> Volume<memory::Storage> {
     )
 }
 
-/// Native prefix pruning end to end: the floor rounds down to a chunk
-/// boundary, gates reads, writes, and shrinks, is monotonic, persists
+/// Native prefix pruning end to end: the floor is byte-exact (physical
+/// surgery stays chunk-granular — the straddling chunk keeps its dead low
+/// bytes), gates reads, writes, and shrinks, is monotonic, persists
 /// across a commit and a clean reopen, regresses to the committed floor
 /// when the pruning commit never lands, and releases the pruned extents
 /// for reuse once the pruning commit confirms (the closing audit proves
@@ -61,19 +62,25 @@ async fn test_volume_prune_end_to_end() {
     blob.sync().await.unwrap();
     assert_eq!(blob.floor(), 0);
 
-    // Mid-chunk prune rounds DOWN: chunk 1 survives whole.
+    // Mid-chunk prune is exact: the floor is the requested offset, the
+    // straddling chunk's bytes at and above it stay readable, and reads
+    // below it — even within the surviving chunk — fail.
     blob.prune(BLOCK + 7).await.unwrap();
-    assert_eq!(blob.floor(), BLOCK);
+    assert_eq!(blob.floor(), BLOCK + 7);
     assert!(matches!(
         blob.read_at(0, 1).await,
-        Err(Error::OffsetPruned(_, _, f)) if f == BLOCK
+        Err(Error::OffsetPruned(_, _, f)) if f == BLOCK + 7
+    ));
+    assert!(matches!(
+        blob.read_at(BLOCK, 1).await,
+        Err(Error::OffsetPruned(..))
     ));
     let got = blob
-        .read_at(BLOCK, BLOCK as usize)
+        .read_at(BLOCK + 7, (BLOCK - 7) as usize)
         .await
         .unwrap()
         .coalesce();
-    assert_eq!(got.as_ref(), &vec![2u8; BLOCK as usize][..]);
+    assert_eq!(got.as_ref(), &vec![2u8; (BLOCK - 7) as usize][..]);
     assert!(matches!(
         blob.write_at(0, IoBuf::from(vec![9u8; 8])).await,
         Err(Error::OffsetPruned(..))
@@ -84,7 +91,7 @@ async fn test_volume_prune_end_to_end() {
     ));
     // Monotonic: pruning below the floor is a no-op, beyond the size errs.
     blob.prune(4).await.unwrap();
-    assert_eq!(blob.floor(), BLOCK);
+    assert_eq!(blob.floor(), BLOCK + 7);
     assert!(blob.prune(5 * BLOCK).await.is_err());
     audit_volume(&volume, false);
 
@@ -100,7 +107,7 @@ async fn test_volume_prune_end_to_end() {
     );
     let (blob, size) = volume.open("p", b"journal").await.unwrap();
     assert_eq!(size, 4 * BLOCK);
-    assert_eq!(blob.floor(), BLOCK);
+    assert_eq!(blob.floor(), BLOCK + 7);
     assert!(matches!(
         blob.read_at(0, 1).await,
         Err(Error::OffsetPruned(..))
@@ -119,13 +126,13 @@ async fn test_volume_prune_end_to_end() {
     drop(volume);
     let volume = Volume::new(inner, pool, Config::default(), test_driver());
     let (blob, _) = volume.open("p", b"journal").await.unwrap();
-    assert_eq!(blob.floor(), BLOCK);
+    assert_eq!(blob.floor(), BLOCK + 7);
     let got = blob
-        .read_at(BLOCK, BLOCK as usize)
+        .read_at(BLOCK + 7, (BLOCK - 7) as usize)
         .await
         .unwrap()
         .coalesce();
-    assert_eq!(got.as_ref(), &vec![2u8; BLOCK as usize][..]);
+    assert_eq!(got.as_ref(), &vec![2u8; (BLOCK - 7) as usize][..]);
 
     // Confirm a pruning commit and prove the extents recycled: the
     // quiesced audit asserts exact extent/free-space coverage (no leak).
@@ -5164,7 +5171,7 @@ impl ScaleSoak {
     async fn prune(&mut self, name: &'static str, offset: u64) {
         self.blobs[name].prune(offset).await.unwrap();
         let entry = self.current.get_mut(name).unwrap();
-        entry.floor = entry.floor.max(offset - offset % BLOCK);
+        entry.floor = entry.floor.max(offset);
         self.prunes += 1;
     }
 
@@ -5199,8 +5206,8 @@ impl ScaleSoak {
                 .unwrap_or_else(|e| panic!("seed {seed} {phase}: reopen {name}: {e}"));
             let floor = blob.floor();
             assert!(
-                floor <= size && floor.is_multiple_of(BLOCK),
-                "seed {seed} {phase}: {name} floor {floor} out of shape (size {size})"
+                floor <= size,
+                "seed {seed} {phase}: {name} floor {floor} beyond size {size}"
             );
             // The readable range starts at the recovered floor. One probe
             // below a nonzero floor must report the pruned prefix.

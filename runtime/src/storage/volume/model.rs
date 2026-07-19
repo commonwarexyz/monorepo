@@ -28,8 +28,12 @@
 //!   expected cells per block; comparison models CRC32C without collisions).
 //! - Extent recycling through deferred frees, hole runs from resize-up, and
 //!   the sacred-slot rule for superblock writes.
-//! - Prefix pruning: a per-blob chunk-aligned floor below which cells are
-//!   dropped and unreadable (see below).
+//! - Prefix pruning: a per-blob floor below which cells are
+//!   dropped and unreadable (see below). The model's floor is
+//!   cell-granular; the implementation's floor is BYTE-exact within its
+//!   chunk (the sub-chunk refinement only tightens the read/write guard
+//!   boundary — it is covered by the end-to-end unit test and the
+//!   lockstep floor comparison, not enumerated here).
 //!
 //! # The freeze rule
 //!

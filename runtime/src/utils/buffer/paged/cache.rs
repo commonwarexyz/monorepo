@@ -556,6 +556,24 @@ async fn fetch_cacheable_page(
     let offset = page_num
         .checked_mul(page_size)
         .ok_or_else(|| Arc::new(Error::OffsetOverflow))?;
+
+    // A page straddling the blob's pruned floor cannot be read from its start: read the
+    // readable suffix and zero the pruned prefix. Cache entries must be whole pages, and
+    // callers honoring the floor never serve the zeroed offsets. A page wholly below the
+    // floor reads unclamped so the blob reports the misuse.
+    let floor = blob.floor();
+    if offset < floor && floor < offset + page_size {
+        let prefix = (floor - offset) as usize;
+        let suffix = blob
+            .read_at(floor, page_size as usize - prefix)
+            .await
+            .map_err(Arc::new)?
+            .coalesce();
+        let mut page = vec![0u8; page_size as usize];
+        page[prefix..].copy_from_slice(suffix.as_ref());
+        return Ok(IoBuf::from(page));
+    }
+
     let page = blob
         .read_at(offset, page_size as usize)
         .await

@@ -665,11 +665,17 @@ pub(super) async fn hydrate<S: crate::Storage>(
             msg.into(),
         )
     };
-    // Pruned-floor sanity: chunk-aligned, within the size, below every run.
-    if !entry.floor.is_multiple_of(BLOCK) || entry.floor > entry.size {
+    // Pruned-floor sanity: within the size, no run below its chunk (the
+    // floor is byte-exact; its own chunk stays backed).
+    if entry.floor > entry.size {
         return Err(corrupt("pruned floor out of range"));
     }
-    if entry.runs.first().is_some_and(|r| r.logical < entry.floor) {
+    let floor_chunk_start = chunk_of(entry.floor) * BLOCK;
+    if entry
+        .runs
+        .first()
+        .is_some_and(|r| r.logical < floor_chunk_start)
+    {
         return Err(corrupt("run below the pruned floor"));
     }
     let mut inner = BlobInner::from_entry(entry);
