@@ -27,11 +27,7 @@ use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::paged::CacheRef, WriteBatch as _};
 use commonware_utils::range::NonEmptyRange;
-use std::{
-    collections::BTreeMap,
-    num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::{debug, warn};
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
@@ -104,10 +100,7 @@ pub struct Config<S: Strategy> {
     /// generate proofs.
     pub metadata_partition: String,
 
-    /// The maximum number of items to store in each blob in the backing journal.
-    pub items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the backing journal.
+    /// The size of the write buffer to use for the backing journal's blob.
     pub write_buffer: NonZeroUsize,
 
     /// Strategy used to parallelize batch operations.
@@ -237,7 +230,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ) -> Result<Self, Error<F>> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
-            items_per_blob: cfg.items_per_blob,
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
@@ -271,20 +263,16 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         // The pins record rewrite and the journal prune it describes commit in ONE batch (as
-        // do the record and the journal clear during sync initialization), so the journal's
-        // blob-aligned boundary can trail the leaf-aligned record only within one blob — and
-        // can never lead it or outrun the journal's size. Verify instead of repairing: any
-        // other pairing is corruption. The record is the pruning boundary.
+        // do the record and the journal clear during sync initialization), and the journal's
+        // native pruning is byte-exact: its boundary IS the record's position. A crash
+        // regresses the floor and the record together (they only ever commit jointly),
+        // preserving the equality. Verify instead of repairing: any other pairing is
+        // corruption. The record is the pruning boundary.
         let record_prune_pos = Position::try_from(pins.pruned_to())?;
         let journal_bounds_start = journal.bounds().start;
-        if *record_prune_pos < journal_bounds_start {
+        if *record_prune_pos != journal_bounds_start {
             return Err(Error::DataCorrupted(
-                "pins record is behind the journal's pruning boundary",
-            ));
-        }
-        if *record_prune_pos - journal_bounds_start >= cfg.items_per_blob.get() {
-            return Err(Error::DataCorrupted(
-                "pins record is more than one blob ahead of the journal's pruning boundary",
+                "pins record does not match the journal's pruning boundary",
             ));
         }
         if record_prune_pos > journal_size {
@@ -378,7 +366,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///
     /// 2. **Reuse**: range.start < existing_size <= range.end
     ///    - Keeps existing journal data
-    ///    - Prunes the journal toward `range.start` (section-aligned)
+    ///    - Prunes the journal to exactly `range.start`
     ///
     /// 3. **Error**: existing_size > range.end
     ///    - Returns [crate::journal::Error::ItemOutOfRange]
@@ -387,7 +375,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let end_pos = Position::try_from(cfg.range.end())?;
         let journal_cfg = JConfig {
             partition: cfg.config.journal_partition.clone(),
-            items_per_blob: cfg.config.items_per_blob,
             write_buffer: cfg.config.write_buffer,
             page_cache: cfg.config.page_cache.clone(),
         };
@@ -649,9 +636,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Ok(false);
         }
 
-        // Stage the durability of nodes cached in the mem: the prune boundary may only be
-        // justified by them.
-        self.sync_into(batch).await?;
+        // Flush nodes cached in the mem to the journal: the prune boundary may only be
+        // justified by them. Their durability is staged below, with this batch.
+        self.flush_internal().await?;
 
         // Stage the pins record rewrite for the new boundary. The nodes are read BEFORE the
         // journal prune is staged (staging updates the journal's bounds immediately).
@@ -661,7 +648,14 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             .write_into(prune_loc, pinned_nodes.clone(), batch)
             .await?;
 
+        // The journal's native prune must be this batch's FIRST staging over the journal's
+        // blob, so it runs before the sync staging. The prune stages the blob's durability
+        // itself; the sync covers the flushed nodes when the prune declines (the target moved
+        // less than one granularity chunk).
         self.journal.prune_into(*pos, batch).await?;
+        self.journal.sync_into(batch).await?;
+        self.journal_dirty = false;
+
         Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
@@ -677,8 +671,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.mem.root(hasher, inactive_peaks)
     }
 
-    /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
-    /// blob.
+    /// Prune as many nodes as possible, leaving behind at most one pruning-granularity chunk
+    /// of nodes.
     pub async fn prune_all(&mut self) -> Result<(), Error<F>> {
         let leaves = self.mem.leaves();
         if leaves != 0 {
@@ -1037,7 +1031,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
     };
-    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, NZUsize, NZU16};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
@@ -1054,7 +1048,6 @@ mod tests {
         Config {
             journal_partition: "journal-partition".into(),
             metadata_partition: "metadata-partition".into(),
-            items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1535,7 +1528,6 @@ mod tests {
                 context.child("corrupt"),
                 JConfig {
                     partition: "journal-partition".into(),
-                    items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
@@ -1602,7 +1594,6 @@ mod tests {
         let cfg_unpruned = Config {
             journal_partition: "unpruned-journal-partition".into(),
             metadata_partition: "unpruned-metadata-partition".into(),
-            items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: cfg_pruned.page_cache.clone(),
@@ -1699,7 +1690,6 @@ mod tests {
             .add(&hasher, &test_digest(LEAF_COUNT));
         let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
         pruned_mmr.apply_batch(&batch).unwrap();
-        assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
         pruned_mmr.sync().await.unwrap();
         drop(pruned_mmr);
         let mut pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -1727,15 +1717,7 @@ mod tests {
             Location::<F>::try_from(size).unwrap()
         );
 
-        // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
-        // retained nodes.
-        while *pruned_mmr.size() % cfg_pruned.items_per_blob != 0 {
-            let batch = pruned_mmr
-                .new_batch()
-                .add(&hasher, &test_digest(LEAF_COUNT));
-            let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            pruned_mmr.apply_batch(&batch).unwrap();
-        }
+        // Pruning is byte-exact, so prune_all removes all retained nodes at ANY size.
         pruned_mmr.prune_all().await.unwrap();
         assert!(pruned_mmr.bounds().is_empty());
 
@@ -2005,7 +1987,6 @@ mod tests {
             Config {
                 journal_partition: "ref-journal-pruned".into(),
                 metadata_partition: "ref-metadata-pruned".into(),
-                items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2069,7 +2050,6 @@ mod tests {
             Config {
                 journal_partition: "server-journal".into(),
                 metadata_partition: "server-metadata".into(),
-                items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2098,7 +2078,6 @@ mod tests {
             Config {
                 journal_partition: "client-journal".into(),
                 metadata_partition: "client-metadata".into(),
-                items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2559,11 +2538,9 @@ mod tests {
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
-        // Use small items_per_blob to create many sections and trigger pruning.
         let cfg = Config {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),
-            items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(64),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3164,7 +3141,6 @@ mod tests {
                 context.child("corrupt"),
                 JConfig {
                     partition: "journal-partition".into(),
-                    items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 },

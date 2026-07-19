@@ -13,7 +13,6 @@ use commonware_storage::merkle::{
     full::Config, hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold,
     Family as MerkleFamily, Location,
 };
-use commonware_utils::NZU64;
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -32,10 +31,6 @@ fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
 
 fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_blob(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
 }
 
 fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
@@ -71,9 +66,6 @@ struct FuzzInput {
     /// Number of pages in the buffer pool cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    /// Items per blob.
-    #[arbitrary(with = bounded_items_per_blob)]
-    items_per_blob: u64,
     /// Write buffer size.
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
@@ -92,13 +84,11 @@ fn merkle_config(
     pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
-    items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> Config<Sequential> {
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),
-        items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
@@ -223,7 +213,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
-    let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
     let partition_suffix = format!("crash-{suffix}-{}", input.seed);
@@ -246,7 +235,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     &ctx,
                     page_size,
                     page_cache_size,
-                    items_per_blob,
                     write_buffer,
                 ),
             )
@@ -278,7 +266,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 &ctx,
                 page_size,
                 page_cache_size,
-                items_per_blob,
                 write_buffer,
             ),
         )

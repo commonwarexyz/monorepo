@@ -114,7 +114,6 @@ mod tests {
             merkle_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
@@ -306,7 +305,7 @@ mod tests {
     fn test_variable_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_pruning(ctx, open::<mmr::Family>).await;
+            test::test_immutable_pruning(ctx, open::<mmr::Family>, |loc| loc / 5 * 5).await;
         });
     }
 
@@ -652,7 +651,7 @@ mod tests {
     fn test_variable_pruning_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_pruning(ctx, open::<mmb::Family>).await;
+            test::test_immutable_pruning(ctx, open::<mmb::Family>, |loc| loc / 5 * 5).await;
         });
     }
 

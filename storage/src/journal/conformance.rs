@@ -31,7 +31,6 @@ fn authenticated_merkle_config(
     crate::merkle::full::Config {
         journal_partition: format!("{prefix}-merkle-journal"),
         metadata_partition: format!("{prefix}-merkle-metadata"),
-        items_per_blob: NZU64!(11),
         write_buffer: WRITE_BUFFER,
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -41,7 +40,6 @@ fn authenticated_merkle_config(
 fn authenticated_journal_config(prefix: &str, pooler: &impl BufferPooler) -> fixed::Config {
     fixed::Config {
         partition: format!("{prefix}-journal"),
-        items_per_blob: NZU64!(11),
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
     }
@@ -94,7 +92,6 @@ impl StorageWorkload for ContiguousFixedWorkload {
     ) -> Result<(), Self::Error> {
         let config = fixed::Config {
             partition: format!("contiguous-fixed-conformance-{seed}"),
-            items_per_blob: ITEMS_PER_BLOB,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
         };

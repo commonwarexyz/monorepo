@@ -35,7 +35,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(8_192);
 /// fast, but not so big we avoid any page faults for the larger benchmarks.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
-/// Value of items_per_blob to use in the journal config.
+/// Value of items_per_section to use in the variable journal config.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
 
 /// Size of each journal item in bytes.
@@ -45,12 +45,10 @@ const ITEM_SIZE: usize = 32;
 async fn get_fixed_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
-    items_per_blob: NonZeroU64,
 ) -> FixedJournal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = FixedConfig {
         partition: partition_name.into(),
-        items_per_blob,
         write_buffer: WRITE_BUFFER,
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
     };

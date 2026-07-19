@@ -324,7 +324,6 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
         FixedConfig {
             partition: partition.into(),
-            items_per_blob: NZU64!(params.items_per_section),
             page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
                 pooler,
                 params.page_size,

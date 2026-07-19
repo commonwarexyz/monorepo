@@ -3,18 +3,11 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     Supervisor as _,
 };
-use commonware_utils::NZU64;
 use criterion::{criterion_group, Criterion};
-use std::{
-    num::NonZeroU64,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test-partition";
-
-/// Value of items_per_blob to use in the journal config.
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000);
 
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
@@ -35,12 +28,8 @@ fn bench_fixed_append(c: &mut Criterion) {
                     let mut duration = Duration::ZERO;
                     for _ in 0..iters {
                         // Create a new journal for each iteration
-                        let mut j = get_fixed_journal::<ITEM_SIZE>(
-                            ctx.child("storage"),
-                            PARTITION,
-                            ITEMS_PER_BLOB,
-                        )
-                        .await;
+                        let mut j =
+                            get_fixed_journal::<ITEM_SIZE>(ctx.child("storage"), PARTITION).await;
 
                         // Append random data to the journal
                         let start = Instant::now();

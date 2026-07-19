@@ -28,7 +28,6 @@ const MAX_PROOF_OPS: u64 = 100;
 const PAGE_SIZE: NonZeroU16 = NZU16!(77);
 const PAGE_CACHE_SIZE: usize = 9;
 const ITEMS_PER_SECTION: u64 = 5;
-const ITEMS_PER_BLOB: u64 = 11;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum ImmutableOperation {
@@ -105,7 +104,6 @@ fn db_config(
         merkle_config: MerkleConfig {
             journal_partition: format!("journal-{suffix}"),
             metadata_partition: format!("metadata-{suffix}"),
-            items_per_blob: NZU64!(ITEMS_PER_BLOB),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: page_cache.clone(),

@@ -30,7 +30,7 @@ use commonware_storage::{
     },
     Context,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, NZU16};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
@@ -59,14 +59,12 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
         merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),
-            items_per_blob: NZU64!(4096),
             write_buffer: NZUsize!(4096),
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         journal_config: FConfig {
             partition: "log-journal".into(),
-            items_per_blob: NZU64!(4096),
             write_buffer: NZUsize!(4096),
             page_cache,
         },

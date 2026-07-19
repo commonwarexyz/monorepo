@@ -21,7 +21,7 @@ use commonware_storage::{
     qmdb::current::{unordered::fixed::Db as CurrentDb, BitmapPrunedBits, FixedConfig as Config},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, HashSet},
@@ -142,8 +142,6 @@ fn find_live_key(
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(88);
 const PAGE_CACHE_SIZE: usize = 2;
-const MERKLE_ITEMS_PER_BLOB: u64 = 11;
-const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
 fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
@@ -151,14 +149,12 @@ fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
         merkle_config: MerkleConfig {
             journal_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-journal"),
             metadata_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-metadata"),
-            items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
             write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         journal_config: FConfig {
             partition: format!("fuzz-current-mmb-pruning-{name}-log-journal"),
-            items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
             write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             page_cache,
         },

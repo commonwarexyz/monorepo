@@ -37,17 +37,12 @@ use commonware_runtime::{
     Runner as _, Supervisor as _,
 };
 use commonware_storage::{merkle::mmr::Family as Mmr, qmdb::any::traits::DbAny as _};
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::NZUsize;
 use std::{
     io::Write as _,
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroUsize,
     time::{Duration, Instant},
 };
-
-/// Items per blob for the generated database. Much larger than the shared bench default (50k) so a
-/// multi-GB database is split across far fewer blob files, which keeps the partition-directory scan
-/// on reopen cheap. Note this only reduces the file count, not the on-disk byte growth.
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
 /// Page cache size, realistic for a multi-GB database rather than the shared bench default of 8 MB
 /// (512 pages). Both `generate` and `bench` use it, so the init-cache benefit is measured on top of
@@ -128,7 +123,7 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
     let elapsed = Runner::new(cfg).start(|ctx| async move {
         let mut db = AnyOFixDb::<Mmr>::init(
             ctx.child("storage"),
-            any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
+            any_fix_cfg_with(&ctx, PAGE_CACHE_SIZE),
         )
         .await
         .unwrap();
@@ -200,7 +195,7 @@ fn destroy(folder: &str) {
 /// elapsed time and the replay-region size (`0` if the database is empty/absent).
 fn time_init(cfg: &Config, cache_size: Option<NonZeroUsize>) -> (Duration, u64) {
     Runner::new(cfg.clone()).start(|ctx| async move {
-        let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE);
+        let mut config = any_fix_cfg_with(&ctx, PAGE_CACHE_SIZE);
         config.init_cache_size = cache_size;
         let start = Instant::now();
         let db = AnyOFixDb::<Mmr>::init(ctx.child("storage"), config)

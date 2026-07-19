@@ -78,11 +78,6 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
-    /// Upper bound on [`Blob::prune`]'s rounding granularity across backends: a pruned
-    /// floor is never more than this many bytes below the requested offset. Backends may
-    /// round less (or not at all), never more.
-    pub const MAX_PRUNE_GRANULARITY: u64 = 4096;
-
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
     pub enum Error {

@@ -5,21 +5,17 @@ use commonware_runtime::{
     Runner as _, Supervisor as _,
 };
 use commonware_storage::journal::contiguous::{fixed::Journal, Contiguous as _};
-use commonware_utils::{sequence::FixedBytes, test_rng, NZU64};
+use commonware_utils::{sequence::FixedBytes, test_rng};
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
 use rand::RngExt as _;
 use std::{
     hint::black_box,
-    num::NonZeroU64,
     time::{Duration, Instant},
 };
 
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test-partition";
-
-/// Value of items_per_blob to use in the journal config.
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000);
 
 /// Number of items to write to the journal we will be reading from.
 const ITEMS_TO_WRITE: u64 = 5_000_000;
@@ -94,7 +90,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                     // Setup: populate journal (once, on first sample).
                     if !initialized {
                         Runner::new(cfg.clone()).start(|ctx| async move {
-                            let mut j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                            let mut j = get_fixed_journal(ctx, PARTITION).await;
                             append_fixed_random_data::<_, ITEM_SIZE>(&mut j, ITEMS_TO_WRITE).await;
                             j.sync().await.unwrap();
                         });
@@ -104,9 +100,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                     // Benchmark: measure read time.
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let mut j =
-                            get_fixed_journal(ctx.child("storage"), PARTITION, ITEMS_PER_BLOB)
-                                .await;
+                        let mut j = get_fixed_journal(ctx.child("storage"), PARTITION).await;
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
@@ -128,7 +122,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     // Cleanup: destroy journal.
     if initialized {
         Runner::new(cfg).start(|context| async move {
-            let j = get_fixed_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
+            let j = get_fixed_journal::<ITEM_SIZE>(context, PARTITION).await;
             j.destroy().await.unwrap();
         });
     }

@@ -144,6 +144,16 @@ impl<E: Clock> Metrics<E> {
         self.sync_duration.scoped(&self.clock)
     }
 
+    /// Update state gauges for a single-blob journal: the blob containing the newest retained
+    /// item is THE blob, so the tail gauge equals the retained count.
+    pub(super) fn update_single_blob(&self, size: u64, pruning_boundary: u64) {
+        let _ = self.size.try_set(size);
+        let _ = self.pruning_boundary.try_set(pruning_boundary);
+        let retained = size.saturating_sub(pruning_boundary);
+        let _ = self.retained.try_set(retained);
+        let _ = self.tail_items.try_set(retained);
+    }
+
     /// Update state gauges from current bounds.
     pub(super) fn update(&self, size: u64, pruning_boundary: u64, items_per_blob: u64) {
         let _ = self.size.try_set(size);

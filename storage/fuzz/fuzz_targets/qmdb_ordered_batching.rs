@@ -17,7 +17,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -94,14 +94,12 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 merkle_config: MerkleConfig {
                     journal_partition: format!("test-qmdb-merkle-journal-{suffix}"),
                     metadata_partition: format!("test-qmdb-merkle-metadata-{suffix}"),
-                    items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
                 journal_config: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
-                    items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),
                     page_cache,
                 },

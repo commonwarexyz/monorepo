@@ -755,14 +755,12 @@ pub mod tests {
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
-                items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },
@@ -782,7 +780,6 @@ pub mod tests {
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
@@ -1583,7 +1580,6 @@ pub mod tests {
                 merkle_config: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),
-                    items_per_blob: NZU64!(11),
                     write_buffer: NZUsize!(1024),
                     strategy: Sequential,
                     page_cache: page_cache.clone(),

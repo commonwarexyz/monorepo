@@ -1235,14 +1235,12 @@ mod tests {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FixedJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
-                items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },
@@ -1261,7 +1259,6 @@ mod tests {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),

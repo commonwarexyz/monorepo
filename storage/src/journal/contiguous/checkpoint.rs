@@ -1,11 +1,13 @@
 //! A small durable record that recovery reads before trusting anything on disk.
 //!
-//! A journal's contents are recovered from its blobs: blob indexes give positions and blob
-//! lengths give item counts. The [Checkpoint] records the one fact that blob state alone
+//! A multi-blob journal's contents are recovered from its blobs: blob indexes give positions
+//! and blob lengths give item counts. The [Checkpoint] records the one fact blob state alone
 //! cannot provide: the pruning boundary, when it cannot be derived from the oldest blob —
-//! either because it falls mid-blob (from
-//! [Journal::init_at_size](super::fixed::Journal::init_at_size)) or because a clear removed
-//! every blob and the new tail has not been recreated yet.
+//! either because it falls mid-blob or because a clear removed every blob and the new tail
+//! has not been recreated yet. The legacy multi-blob journal (see [super::legacy], the
+//! variable journal's offsets index) computes the hint under its derivability rule and passes
+//! it to [Checkpoint::persist_into]. The single-blob [super::fixed] journal needs no
+//! checkpoint: its byte-exact pruned floor derives the boundary alone.
 //!
 //! A clear (reset) writes the boundary record in the SAME batch as the blob removals, so the
 //! whole reset is one old-state-or-new-state transition and no staged intent is needed
@@ -37,10 +39,9 @@ const BLOB_NAME: &[u8] = b"checkpoint";
 /// The durable contents of a checkpoint.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 struct Record {
-    /// The pruning boundary, when blob state cannot derive it. Kept while the boundary is
-    /// mid-blob; also written (possibly blob-aligned) by a clear, whose batch removes every
-    /// blob. A blob-aligned hint is dropped by the next persist once the recreated blob state
-    /// derives it.
+    /// The pruning boundary, when blob state cannot derive it. Kept while the journal's
+    /// derivability rule says so; also written by a clear, whose batch removes the blob(s).
+    /// A derivable hint is dropped by the next persist.
     boundary_hint: Option<u64>,
 }
 
@@ -128,15 +129,13 @@ impl<E: Context> Checkpoint<E> {
 
     /// Stage the boundary record with `batch`, writing only if it changed.
     ///
-    /// A blob-aligned boundary is derived from the oldest blob, so the hint is only kept while
-    /// the boundary is mid-blob.
+    /// `boundary_hint` is `Some(boundary)` when blob state cannot derive the boundary and
+    /// `None` when it can (dropping any stale hint). The caller owns the derivability rule.
     pub(super) async fn persist_into(
         &mut self,
-        items_per_blob: u64,
-        boundary: u64,
+        boundary_hint: Option<u64>,
         batch: &mut E::Batch,
     ) -> Result<(), Error> {
-        let boundary_hint = (!boundary.is_multiple_of(items_per_blob)).then_some(boundary);
         let record = Record { boundary_hint };
         if record != self.record {
             self.write_into(record, batch).await?;
@@ -144,9 +143,9 @@ impl<E: Context> Checkpoint<E> {
         Ok(())
     }
 
-    /// Stage the cleared-boundary record with `batch`: the hint is written even when
-    /// blob-aligned, because the cleared journal has no blobs to derive the boundary from
-    /// until its tail is recreated on the next open.
+    /// Stage the cleared-boundary record with `batch`: the hint is written even when blob
+    /// state could derive it, because the cleared journal has no blobs to derive the boundary
+    /// from until its blob state is recreated on the next open.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn clear_into(
         &mut self,
@@ -189,14 +188,9 @@ mod tests {
         }
 
         /// [Checkpoint::persist_into] with an immediately applied batch.
-        pub(crate) async fn persist(
-            &mut self,
-            items_per_blob: u64,
-            boundary: u64,
-        ) -> Result<(), Error> {
+        pub(crate) async fn persist(&mut self, boundary_hint: Option<u64>) -> Result<(), Error> {
             let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
-            self.persist_into(items_per_blob, boundary, &mut batch)
-                .await?;
+            self.persist_into(boundary_hint, &mut batch).await?;
             batch.apply_sync().await.map_err(Error::Runtime)
         }
 
@@ -231,8 +225,8 @@ mod tests {
         executor.start(|context| async move {
             {
                 let mut checkpoint = Checkpoint::open(context.child("a"), "rt").await.unwrap();
-                // A mid-blob boundary is kept.
-                checkpoint.persist(10, 13).await.unwrap();
+                // A non-derivable boundary is kept.
+                checkpoint.persist(Some(13)).await.unwrap();
             }
             let checkpoint = Checkpoint::open(context.child("b"), "rt").await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), Some(13));
@@ -240,18 +234,17 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_persist_boundary_hint_tracks_alignment() {
+    fn test_persist_boundary_hint_tracks_derivability() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut checkpoint = Checkpoint::open(context, "align").await.unwrap();
 
-            // A mid-blob boundary is recorded as a hint.
-            checkpoint.persist(10, 13).await.unwrap();
+            // A non-derivable boundary is recorded as a hint.
+            checkpoint.persist(Some(13)).await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), Some(13));
 
-            // A later blob-aligned boundary drops the stale hint (it is derived from the
-            // oldest blob).
-            checkpoint.persist(10, 20).await.unwrap();
+            // Once the caller derives the boundary from blob state, the stale hint drops.
+            checkpoint.persist(None).await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), None);
         });
     }
@@ -263,9 +256,9 @@ mod tests {
             use commonware_runtime::{Batchable as _, WriteBatch as _};
             {
                 let mut checkpoint = Checkpoint::open(context.child("a"), "clear").await.unwrap();
-                checkpoint.persist(10, 13).await.unwrap();
-                // A clear stages the target as the boundary — even blob-aligned,
-                // since the cleared journal has no blobs to derive it from.
+                checkpoint.persist(Some(13)).await.unwrap();
+                // A clear stages the target as the boundary — even one blob state could
+                // derive, since the cleared journal has no blobs to derive it from.
                 let mut batch = context.batch().await.unwrap();
                 checkpoint.clear_into(20, &mut batch).await.unwrap();
                 batch.apply_sync().await.unwrap();
@@ -274,9 +267,8 @@ mod tests {
             {
                 let mut checkpoint = Checkpoint::open(context.child("b"), "clear").await.unwrap();
                 assert_eq!(checkpoint.boundary_hint(), Some(20));
-                // Once blob state derives an aligned boundary again, persist
-                // drops the hint.
-                checkpoint.persist(10, 20).await.unwrap();
+                // Once blob state derives the boundary again, persist drops the hint.
+                checkpoint.persist(None).await.unwrap();
             }
             let checkpoint = Checkpoint::open(context.child("c"), "clear").await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), None);

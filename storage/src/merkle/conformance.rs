@@ -52,7 +52,7 @@ mod tests {
         conformance::{StorageConformance, StorageWorkload},
         BufferPooler, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZUsize, NZU16};
     use rand::RngExt as _;
 
     type Standard = crate::merkle::hasher::Standard<Sha256>;
@@ -95,7 +95,6 @@ mod tests {
         full::Config {
             journal_partition: format!("{prefix}-journal"),
             metadata_partition: format!("{prefix}-metadata"),
-            items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, NZU16!(1024), NZUsize!(10)),

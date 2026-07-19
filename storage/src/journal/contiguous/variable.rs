@@ -1,15 +1,16 @@
 //! Position-based journal for variable-length items.
 //!
 //! Items are stored as varint-framed records in data blobs. A parallel offsets journal (a
-//! [fixed::Journal] of `u64`s) records, for each position, the byte offset one past its frame's
-//! end within its data blob: frame `i` spans `[entry[i - 1], entry[i])`, with the first frame of
-//! each data blob starting at byte 0. Every mutation stages both journals in one atomic batch,
-//! so recovery is a bounded per-blob length verification (see [Journal::init]).
+//! legacy multi-blob fixed journal of `u64`s, `super::legacy`) records, for each position,
+//! the byte offset one past its frame's end within its data blob: frame `i` spans
+//! `[entry[i - 1], entry[i])`, with the first frame of each data blob starting at byte 0.
+//! Every mutation stages both journals in one atomic batch, so recovery is a bounded per-blob
+//! length verification (see [Journal::init]).
 
 use super::{
     blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
-    fixed,
+    legacy as fixed,
     metrics::Metrics,
     position_to_blob, Contiguous, Many, Mutable,
 };
@@ -2646,25 +2647,33 @@ mod tests {
     fn test_variable_contiguous() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            run_contiguous_tests(move |test_name: String, idx: usize| {
-                let label = test_name.replace('-', "_");
-                let context = context
-                    .child("test")
-                    .with_attribute("name", &label)
-                    .with_attribute("index", idx);
-                async move {
-                    let cfg = Config {
-                        partition: format!("generic-test-{test_name}"),
-                        items_per_section: NZU64!(10),
-                        compression: None,
-                        codec_config: (),
-                        page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                        write_buffer: NZUsize!(1024),
-                    };
-                    Journal::<_, u64>::init(context, cfg).await
-                }
-                .boxed()
-            })
+            run_contiguous_tests(
+                move |test_name: String, idx: usize| {
+                    let label = test_name.replace('-', "_");
+                    let context = context
+                        .child("test")
+                        .with_attribute("name", &label)
+                        .with_attribute("index", idx);
+                    async move {
+                        let cfg = Config {
+                            partition: format!("generic-test-{test_name}"),
+                            items_per_section: NZU64!(10),
+                            compression: None,
+                            codec_config: (),
+                            page_cache: CacheRef::from_pooler(
+                                &context,
+                                LARGE_PAGE_SIZE,
+                                NZUsize!(10),
+                            ),
+                            write_buffer: NZUsize!(1024),
+                        };
+                        Journal::<_, u64>::init(context, cfg).await
+                    }
+                    .boxed()
+                },
+                // Pruning is section-aligned (10 items per section).
+                |n| n / 10 * 10,
+            )
             .await;
         });
     }

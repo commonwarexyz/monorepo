@@ -470,14 +470,12 @@ mod tests {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-immutable-full-journal-{suffix}"),
                 metadata_partition: format!("stateful-immutable-full-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: FixedJournalConfig {
                 partition: format!("stateful-immutable-full-log-{suffix}"),
-                items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },

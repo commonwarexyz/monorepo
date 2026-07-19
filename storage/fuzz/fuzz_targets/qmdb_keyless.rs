@@ -200,7 +200,6 @@ fn test_config<S: Strategy>(
         merkle: MerkleConfig {
             journal_partition: format!("{test_name}-journal"),
             metadata_partition: format!("{test_name}-meta"),
-            items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
             strategy,
             page_cache: page_cache.clone(),

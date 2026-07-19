@@ -178,7 +178,6 @@ pub(crate) mod test {
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
                 metadata_partition: format!("mmr-metadata-{seed}"),
-                items_per_blob: NZU64!(12), // intentionally small and janky size
                 write_buffer: NZUsize!(64),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),

@@ -967,7 +967,7 @@ mod tests {
         non_empty_range,
         range::NonEmptyRange,
         sync::{Mutex, TracedAsyncRwLock},
-        NZUsize, NZU16, NZU64,
+        NZUsize, NZU16,
     };
     use futures::{Stream, StreamExt};
     use std::{
@@ -1600,14 +1600,12 @@ mod tests {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
                 metadata_partition: format!("{prefix}_mmr_metadata"),
-                items_per_blob: NZU64!(11),
                 write_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FixedLogConfig {
                 partition: format!("{prefix}_log_journal"),
-                items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: IO_BUFFER_SIZE,
             },

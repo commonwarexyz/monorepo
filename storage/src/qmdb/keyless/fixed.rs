@@ -88,14 +88,12 @@ mod test {
             merkle: crate::merkle::full::Config {
                 journal_partition: format!("fixed-journal-{suffix}"),
                 metadata_partition: format!("fixed-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy,
                 page_cache: page_cache.clone(),
             },
             log: JournalConfig {
                 partition: format!("fixed-log-journal-{suffix}"),
-                items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },

@@ -441,6 +441,9 @@ where
     /// record plus its journal's prune). No crash can leave the two sides describing
     /// different histories.
     ///
+    /// Both prunes run before the sync staging: a native journal prune must be the batch's
+    /// first touch of its blob, and each prune stages the durability that justifies it.
+    ///
     /// # Returns
     /// The new pruning boundary (which may be less than the requested `prune_loc`) and
     /// whether a prune was staged.
@@ -454,8 +457,6 @@ where
             return Ok((Location::new(self.journal.bounds().start), false));
         }
 
-        self.sync_into(batch).await?;
-
         let journal_pruned = self.journal.prune_into(*prune_loc, batch).await?;
         let bounds = self.journal.bounds();
         let boundary = Location::new(bounds.start);
@@ -465,6 +466,10 @@ where
             debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
             self.merkle.prune_into(boundary, batch).await?;
         }
+
+        // Stage whatever durability the prunes left unstaged (each declines within its
+        // pruning granularity).
+        self.sync_into(batch).await?;
 
         Ok((boundary, journal_pruned || boundary > merkle_boundary))
     }
@@ -1155,7 +1160,6 @@ mod tests {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
-            items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             strategy,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1171,7 +1175,6 @@ mod tests {
     fn journal_config(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
         JConfig {
             partition: format!("journal-{suffix}"),
-            items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
@@ -1720,9 +1723,9 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            // Prune up to position 8 (this will prune section 0, items 0-6, keeping 7+)
+            // Prune up to position 8 (exact: the boundary lands at 8)
             journal.prune(8).await.unwrap();
-            assert_eq!(journal.bounds().start, 7);
+            assert_eq!(journal.bounds().start, 8);
 
             // Add more uncommitted operations
             for i in 15..20 {
@@ -1760,20 +1763,19 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            // Prune up to position 8 (this prunes section 0, including the commit at pos 5)
-            // Pruning boundary will be at position 7 (start of section 1)
+            // Prune up to position 8 (exact), dropping the commit at position 5
             journal.prune(8).await.unwrap();
-            assert_eq!(journal.bounds().start, 7);
+            assert_eq!(journal.bounds().start, 8);
 
-            // Add uncommitted operations with no commits (in section 1: 7-13)
+            // Add uncommitted operations with no commits
             for i in 10..14 {
                 journal.append(&create_operation::<F>(i)).await.unwrap();
             }
 
             // Rewind with no matching commits after the pruning boundary
-            // Should rewind to the pruning boundary at position 7
+            // Should rewind to the pruning boundary at position 8
             let final_size = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 7);
+            assert_eq!(final_size, 8);
         }
 
         // Test 6: Empty journal
@@ -1847,17 +1849,17 @@ mod tests {
                 journal.append(&create_operation::<F>(i)).await.unwrap();
             }
             journal.prune(Location::<F>::new(100)).await.unwrap();
-            assert_eq!(journal.bounds().start, 98);
+            assert_eq!(journal.bounds().start, 100);
             let res = journal.rewind(97).await;
             assert!(matches!(
                 res,
                 Err(Error::Journal(JournalError::ItemPruned(97)))
             ));
-            journal.rewind(98).await.unwrap();
+            journal.rewind(100).await.unwrap();
             let bounds = journal.bounds();
-            assert_eq!(bounds.end, 98);
-            assert_eq!(journal.merkle.leaves(), 98);
-            assert_eq!(bounds.start, 98);
+            assert_eq!(bounds.end, 100);
+            assert_eq!(journal.merkle.leaves(), 100);
+            assert_eq!(bounds.start, 100);
             assert!(bounds.is_empty());
         }
     }

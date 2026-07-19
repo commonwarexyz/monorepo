@@ -249,14 +249,12 @@ pub(crate) mod test {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
                 partition: format!("log-journal-{suffix}"),
-                items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },
@@ -274,7 +272,6 @@ pub(crate) mod test {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),

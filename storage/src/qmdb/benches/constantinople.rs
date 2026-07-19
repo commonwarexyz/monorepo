@@ -343,14 +343,12 @@ fn main() {
         let merkle_config = full::Config {
             journal_partition: "constantinople-merkle-journal".into(),
             metadata_partition: "constantinople-merkle-metadata".into(),
-            items_per_blob: ITEMS_PER_BLOB,
             write_buffer: WRITE_BUFFER,
             strategy: ctx.strategy(threads),
             page_cache: pc.clone(),
         };
         let journal_config = FConfig {
             partition: "constantinople-log".into(),
-            items_per_blob: ITEMS_PER_BLOB,
             page_cache: pc,
             write_buffer: WRITE_BUFFER,
         };

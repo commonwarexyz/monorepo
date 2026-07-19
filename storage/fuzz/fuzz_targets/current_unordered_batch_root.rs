@@ -12,7 +12,7 @@ use commonware_storage::{
     qmdb::current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::OneCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -82,14 +82,12 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
         merkle_config: MerkleConfig {
             journal_partition: format!("{name}-merkle"),
             metadata_partition: format!("{name}-meta"),
-            items_per_blob: NZU64!(17),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         journal_config: FConfig {
             partition: format!("{name}-log"),
-            items_per_blob: NZU64!(13),
             write_buffer: NZUsize!(1024),
             page_cache,
         },

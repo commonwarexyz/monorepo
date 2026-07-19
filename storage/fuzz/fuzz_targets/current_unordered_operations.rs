@@ -10,7 +10,7 @@ use commonware_storage::{
     qmdb::current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -84,8 +84,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(88);
 const PAGE_CACHE_SIZE: usize = 8;
-const MERKLE_ITEMS_PER_BLOB: u64 = 11;
-const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
 // Generates a deterministic key/value pair for seeding the db.
@@ -131,14 +129,12 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             merkle_config: MerkleConfig {
                 journal_partition: format!("fuzz-current-{suffix}-merkle-journal"),
                 metadata_partition: format!("fuzz-current-{suffix}-merkle-metadata"),
-                items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
                 partition: format!("fuzz-current-{suffix}-log-journal"),
-                items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 page_cache,
             },

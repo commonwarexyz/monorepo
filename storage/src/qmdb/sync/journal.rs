@@ -153,10 +153,9 @@ mod tests {
     use commonware_cryptography::sha256::Digest;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob, BufferPooler, Runner, Storage,
-        Supervisor as _,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
     };
-    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, NZUsize, NZU16};
 
     type FixedJournal = fixed::Journal<deterministic::Context, Digest>;
     type F = crate::merkle::mmr::Family;
@@ -164,34 +163,27 @@ mod tests {
     fn test_cfg(pooler: &impl BufferPooler) -> fixed::Config {
         fixed::Config {
             partition: "sync-journal-test".into(),
-            items_per_blob: NZU64!(5),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
             write_buffer: NZUsize!(2048),
         }
     }
 
     #[test_traced]
-    fn test_sync_journal_new_recovers_from_stale_clear_to_size() {
+    fn test_sync_journal_new_reclears_to_earlier_start() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
 
-            // Create a journal at pruning_boundary=9 (mid-section in section 1).
+            // Create an empty journal at position 9, ahead of the requested sync start.
             let mut journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Simulate clear_to_size(7) crash: blobs cleared, section 1 recreated
-            // empty, but metadata still says pruning_boundary=9.
-            let blob_part = format!("{}-blobs", cfg.partition);
-            context.remove(&blob_part, None).await.unwrap();
-            let (blob, _) = context.open(&blob_part, &1u64.to_be_bytes()).await.unwrap();
-            blob.sync().await.unwrap();
-
-            // Without the fix, this reopens at 9..9 and the sync engine skips
-            // locations 7-8. With the fix, it re-clears to 7.
+            // Without the re-clear, this reopens at 9..9 and the sync engine skips
+            // locations 7-8. With it, the journal re-clears to 7 (recreating the blob:
+            // nothing may shrink below the pruned floor).
             let range = non_empty_range!(
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)

@@ -402,7 +402,7 @@ mod tests {
         qmdb::any::{unordered::fixed, FixedConfig},
         translator::TwoCap,
     };
-    use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
+    use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock, NZUsize, NZU16};
     use std::{num::NonZeroU64, sync::Arc, time::Duration};
 
     #[derive(Clone, Debug)]
@@ -494,14 +494,12 @@ mod tests {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),
                 metadata_partition: format!("{suffix}-mmr-metadata"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FixedLogConfig {
                 partition: format!("{suffix}-log-journal"),
-                items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },

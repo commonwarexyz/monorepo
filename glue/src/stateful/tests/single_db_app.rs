@@ -350,14 +350,12 @@ impl EngineDefinition for SingleDbEngine {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
-                items_per_blob: NZU64!(11),
                 write_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FixedLogConfig {
                 partition: format!("{partition_prefix}-qmdb-log-journal"),
-                items_per_blob: NZU64!(7),
                 page_cache: page_cache.clone(),
                 write_buffer: IO_BUFFER_SIZE,
             },

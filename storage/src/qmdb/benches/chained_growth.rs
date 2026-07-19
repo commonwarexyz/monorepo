@@ -24,17 +24,16 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU16};
 use criterion::{criterion_group, Criterion};
 use std::{
     hint::black_box,
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroUsize},
     time::{Duration, Instant},
 };
 
 // -- Config (mirrors merkleize bench) --
 
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
@@ -56,7 +55,6 @@ fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Co
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
-        items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
         page_cache: pc,
@@ -66,7 +64,6 @@ fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Co
 fn fix_log_cfg(pc: CacheRef) -> FConfig {
     FConfig {
         partition: format!("log-journal-{PARTITION}"),
-        items_per_blob: ITEMS_PER_BLOB,
         page_cache: pc,
         write_buffer: WRITE_BUFFER_SIZE,
     }

@@ -10,7 +10,7 @@ use commonware_storage::merkle::{
     full::Config, hasher::Standard, mem::Mem, mmb, mmr, Bagging::ForwardFold, Error,
     Family as MerkleFamily, Location, LocationRangeExt as _, Position,
 };
-use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+use commonware_utils::{non_empty_range, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -18,7 +18,6 @@ const MAX_OPERATIONS: usize = 200;
 const MAX_DATA_SIZE: usize = 64;
 const PAGE_SIZE: NonZeroU16 = NZU16!(111);
 const PAGE_CACHE_SIZE: usize = 5;
-const ITEMS_PER_BLOB: u64 = 7;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum Operation {
@@ -83,7 +82,6 @@ fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config<Seq
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),
-        items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),

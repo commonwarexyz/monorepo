@@ -15,17 +15,13 @@ use commonware_storage::{
     merkle::mmb::Family as Mmb,
     qmdb::any::traits::{BatchableDb, UnmerkleizedBatch},
 };
-use commonware_utils::{TestRng, NZU64};
+use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
 use rand::Rng;
-use std::{
-    num::NonZeroU64,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 const NUM_KEYS: u64 = 65_536;
 const UPDATES: [u64; 1] = [16_384];
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 
 // Unordered "any" DB with a fixed-size value.
 type Db = AnyUFixDb<Mmb>;
@@ -50,12 +46,9 @@ fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(
 }
 
 async fn open_db(ctx: &Context) -> Db {
-    Db::init(
-        ctx.child("storage"),
-        any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
-    )
-    .await
-    .unwrap()
+    Db::init(ctx.child("storage"), any_fix_cfg_with(ctx, PAGE_CACHE_SIZE))
+        .await
+        .unwrap()
 }
 
 #[boxed]
@@ -76,12 +69,9 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
 }
 
 async fn open_ord_db(ctx: &Context) -> ODb {
-    ODb::init(
-        ctx.child("storage"),
-        any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
-    )
-    .await
-    .unwrap()
+    ODb::init(ctx.child("storage"), any_fix_cfg_with(ctx, PAGE_CACHE_SIZE))
+        .await
+        .unwrap()
 }
 
 #[boxed]
@@ -211,7 +201,7 @@ async fn seed_imm_db(db: &mut ImmDb, keys: u64, counter: &mut u64, rng: &mut Tes
 }
 
 async fn open_imm_db(ctx: &Context) -> ImmDb {
-    ImmDb::init(ctx.child("storage"), imm_fix_cfg_with(ctx, ITEMS_PER_BLOB))
+    ImmDb::init(ctx.child("storage"), imm_fix_cfg_with(ctx))
         .await
         .unwrap()
 }

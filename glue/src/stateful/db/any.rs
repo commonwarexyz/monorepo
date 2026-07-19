@@ -795,7 +795,7 @@ mod tests {
         qmdb::any::unordered::fixed,
         translator::TwoCap,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZUsize, NZU16};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type UnorderedFixedDb =
@@ -810,14 +810,12 @@ mod tests {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-any-journal-{suffix}"),
                 metadata_partition: format!("stateful-any-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             journal_config: FixedJournalConfig {
                 partition: format!("stateful-any-log-{suffix}"),
-                items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },

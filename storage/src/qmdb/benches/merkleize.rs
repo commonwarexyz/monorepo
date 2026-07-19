@@ -291,7 +291,6 @@ fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Co
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
-        items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
         page_cache: pc,
@@ -301,7 +300,6 @@ fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Co
 fn fix_log_cfg(pc: CacheRef) -> FConfig {
     FConfig {
         partition: format!("log-journal-{PARTITION}"),
-        items_per_blob: ITEMS_PER_BLOB,
         page_cache: pc,
         write_buffer: WRITE_BUFFER_SIZE,
     }

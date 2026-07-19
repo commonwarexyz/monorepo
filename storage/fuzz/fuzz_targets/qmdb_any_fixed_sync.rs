@@ -99,14 +99,12 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Se
         merkle_config: MerkleConfig {
             journal_partition: format!("{test_name}-merkle"),
             metadata_partition: format!("{test_name}-meta"),
-            items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
         journal_config: FConfig {
             partition: format!("{test_name}-log"),
-            items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
             page_cache,
         },

@@ -485,7 +485,7 @@ mod tests {
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::full::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
     };
-    use commonware_utils::{non_empty_range, sequence::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, sequence::U64, NZUsize, NZU16};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type FixedDb = fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
@@ -501,14 +501,12 @@ mod tests {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
             log: FixedJournalConfig {
                 partition: format!("log-{suffix}"),
-                items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },

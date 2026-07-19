@@ -1278,12 +1278,15 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// `boundary` maps a requested prune location to the boundary the log guarantees:
+    /// the identity for the fixed log (exact pruning), section-aligned for the variable log.
     #[boxed]
     pub(crate) async fn test_immutable_pruning<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+        boundary: fn(u64) -> u64,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
@@ -1321,10 +1324,10 @@ pub(super) mod test {
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
 
-        // items_per_section is 5, so half should be exactly at a blob boundary, in which case
-        // the actual pruning location should match the requested.
+        // The boundary advances per the log's pruning alignment.
+        let first_boundary = boundary((ELEMENTS + 2) / 2);
         let oldest_retained_loc = bounds.start;
-        assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
+        assert_eq!(oldest_retained_loc, Location::new(first_boundary));
 
         // Try to fetch a pruned key (at location oldest_retained - 1).
         let pruned_key = sorted_keys[*oldest_retained_loc as usize - 2];
@@ -1344,27 +1347,21 @@ pub(super) mod test {
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
         let oldest_retained_loc = bounds.start;
-        assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
+        assert_eq!(oldest_retained_loc, Location::new(first_boundary));
 
-        // Prune to a non-blob boundary.
-        let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
-        db.prune(loc).await.unwrap();
-        // Actual boundary should be a multiple of 5.
+        // Prune to a non-section boundary.
+        let second_request = ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1);
+        db.prune(Location::new(second_request)).await.unwrap();
+        let second_boundary = boundary(second_request);
         let oldest_retained_loc = db.bounds().start;
-        assert_eq!(
-            oldest_retained_loc,
-            Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
-        );
+        assert_eq!(oldest_retained_loc, Location::new(second_boundary));
 
         // Confirm boundary persists across restart.
         db.sync().await.unwrap();
         drop(db);
         let db = open_db(context.child("third")).await;
         let oldest_retained_loc = db.bounds().start;
-        assert_eq!(
-            oldest_retained_loc,
-            Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
-        );
+        assert_eq!(oldest_retained_loc, Location::new(second_boundary));
 
         // Try to fetch a key before the inactivity floor (not in snapshot after reopen).
         let floor_val = ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1;
@@ -1376,7 +1373,7 @@ pub(super) mod test {
         assert!(db.get(&active_key).await.unwrap().is_some());
 
         // Confirm behavior of trying to create a proof of pruned items is as expected.
-        let pruned_pos = ELEMENTS / 2;
+        let pruned_pos = second_boundary - 1;
         let proof_result = db
             .proof(Location::new(pruned_pos), NZU64!(pruned_pos + 100))
             .await;

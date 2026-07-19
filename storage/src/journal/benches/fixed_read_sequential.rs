@@ -4,19 +4,15 @@ use commonware_runtime::{
     tokio::Context,
 };
 use commonware_storage::journal::contiguous::{fixed::Journal, Contiguous as _};
-use commonware_utils::{sequence::FixedBytes, NZU64};
+use commonware_utils::sequence::FixedBytes;
 use criterion::{criterion_group, Criterion};
 use std::{
     hint::black_box,
-    num::NonZeroU64,
     time::{Duration, Instant},
 };
 
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test-partition";
-
-/// Value of items_per_blob to use in the journal config.
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
 
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
@@ -40,8 +36,7 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
                 b.to_async(&runner).iter_custom(|iters| async move {
                     // Append random data to the journal
                     let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let mut j =
-                        get_fixed_journal::<ITEM_SIZE>(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                    let mut j = get_fixed_journal::<ITEM_SIZE>(ctx, PARTITION).await;
                     append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
                     let sz = j.size();
                     assert_eq!(sz, items);

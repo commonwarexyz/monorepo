@@ -15,6 +15,7 @@ use tracing::warn;
 mod blobs;
 mod checkpoint;
 pub mod fixed;
+mod legacy;
 mod metrics;
 pub mod variable;
 
@@ -259,10 +260,11 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// # Behavior
     ///
     /// - If `min_position > bounds.end`, the prune is capped to `bounds.end` (no error is returned)
-    /// - Some items with positions less than `min_position` may be retained due to
-    ///   section/blob alignment
+    /// - The fixed journal prunes exactly at `min_position`; the variable journal may retain
+    ///   items with positions less than `min_position` to preserve section alignment
     /// - The prune commits atomically: a crash leaves the journal either in its prior state or
-    ///   fully pruned
+    ///   fully pruned. The fixed journal's boundary may also regress across a crash to the
+    ///   last synced boundary (never advance), so callers re-prune after recovery
     ///
     /// # Errors
     ///

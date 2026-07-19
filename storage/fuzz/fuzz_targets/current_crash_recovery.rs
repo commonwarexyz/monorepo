@@ -76,8 +76,6 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     #[arbitrary(with = bounded_items_per_blob)]
-    merkle_items_per_blob: u64,
-    #[arbitrary(with = bounded_items_per_blob)]
     log_items_per_blob: u64,
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
@@ -93,7 +91,6 @@ fn make_config(
     suffix: &str,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
-    merkle_items_per_blob: u64,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<TwoCap, ((), ()), Sequential> {
@@ -102,7 +99,6 @@ fn make_config(
         merkle_config: MerkleConfig {
             journal_partition: format!("crash-merkle-journal-{suffix}"),
             metadata_partition: format!("crash-merkle-metadata-{suffix}"),
-            items_per_blob: NZU64!(merkle_items_per_blob),
             write_buffer,
             strategy: Sequential,
             page_cache: page_cache.clone(),
@@ -186,7 +182,6 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
 
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
-    let merkle_items_per_blob = input.merkle_items_per_blob;
     let log_items_per_blob = input.log_items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let sync_failure_rate = input.sync_failure_rate;
@@ -210,7 +205,6 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                     &suffix,
                     page_size,
                     page_cache_size,
-                    merkle_items_per_blob,
                     log_items_per_blob,
                     write_buffer,
                 ),
@@ -292,7 +286,6 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                     &suffix,
                     page_size,
                     page_cache_size,
-                    merkle_items_per_blob,
                     log_items_per_blob,
                     write_buffer,
                 ),
