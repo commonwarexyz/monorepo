@@ -13,7 +13,7 @@ use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{Buf, BufMut, deterministic};
-use std::{convert::Infallible, sync::Arc};
+use std::convert::Infallible;
 
 pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;

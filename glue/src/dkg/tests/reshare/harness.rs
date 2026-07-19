@@ -16,7 +16,7 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p::standard as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
@@ -73,7 +73,7 @@ use commonware_utils::{
     N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
     ordered::{Map, Set},
     range::NonEmptyRange,
-    sync::{Mutex, TracedAsyncRwLock},
+    sync::Mutex,
     test_rng,
 };
 use rand::Rng;
@@ -87,7 +87,7 @@ use std::{
 
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
-type Database<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
+type Database<E> = Shared<Qmdb<E>>;
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
