@@ -22,7 +22,7 @@ use commonware_cryptography::{
 use commonware_formatting::{from_hex, hex};
 use commonware_glue::{
     dkg::{self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, types::Payload},
-    stateful::db::SyncEngineConfig,
+    stateful::db::{Shared, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Buf, BufMut, buffer::paged::CacheRef};
@@ -36,11 +36,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU64, NZUsize,
-    ordered::Set,
-    range::NonEmptyRange,
-    sequence::U64,
-    sync::{Mutex, TracedAsyncRwLock},
+    Acknowledgement, NZU64, NZUsize, ordered::Set, range::NonEmptyRange, sequence::U64, sync::Mutex,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
@@ -54,7 +50,7 @@ use tracing::info;
 
 pub type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinSig>;
 pub type Qmdb<E> = fixed::Db<mmr::Family, E, U64, U64, Sha256, TwoCap, Sequential>;
-pub type Database<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
+pub type Database<E> = Shared<Qmdb<E>>;
 pub const NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE_EXAMPLE";
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(64);
 pub const MAX_PARTICIPANTS: NonZeroU32 = commonware_utils::NZU32!(64);
