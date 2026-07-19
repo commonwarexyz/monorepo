@@ -536,10 +536,13 @@ pub(crate) mod test {
         let db = db.commit().await.unwrap();
         let db = db.sync().await.unwrap();
         let root = db.root();
+        let active_keys = db.active_keys;
         drop(db);
 
         // Reopen with a range of concurrency values. All rebuild from the same log and must
-        // match the original root and serve the expected value for every key.
+        // match the original root, the original active-key count (counted per actual key, so
+        // translated-key collision chains contribute each of their members), and serve the
+        // expected value for every key.
         for &concurrency in concurrency_sweep {
             let mut cfg = fixed_db_config::<OneCap>(partition, &context);
             cfg.init_concurrency = NonZeroUsize::new(concurrency).unwrap();
@@ -551,6 +554,10 @@ pub(crate) mod test {
                 db.root(),
                 root,
                 "root mismatch at P={P} concurrency={concurrency}"
+            );
+            assert_eq!(
+                db.active_keys, active_keys,
+                "active-key count mismatch at P={P} concurrency={concurrency}"
             );
             assert_expected_values(&db).await;
             drop(db);

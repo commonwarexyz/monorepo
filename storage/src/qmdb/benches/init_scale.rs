@@ -102,7 +102,7 @@ impl IndexKind {
     }
 
     /// The flavor's report label (the db type alias it selects).
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Ordered => "any::ordered::fixed::p3::mmr",
             Self::Unordered => "any::unordered::fixed::p64k::mmr",
