@@ -49,6 +49,14 @@
 //! state (e.g., a staking contract). The chain can announce future players first,
 //! giving those nodes an epoch to state sync and enter the next ceremony normally.
 //!
+//! Before starting either actor, initialize one [`state_sync::Plan`] under a
+//! stable node-wide partition prefix and clone it into the orchestrator and
+//! reshare configurations. The plan durably records fresh state-sync material
+//! before the actors start, so a node can restart immediately after state sync
+//! completes. Both actors share one recovery decision, and the plan removes
+//! stale material once marshal's recovered epoch advances beyond the synced
+//! epoch. This API is independent of the optional [`crate::stateful`] actor.
+//!
 //! # Marshal Retention
 //!
 //! DKG startup relies on marshal's local finalized block archive unless the node
@@ -90,8 +98,8 @@
 //! corresponding boundary finalization and boundary block for every epoch they
 //! intend to serve.
 //!
-//! See [`anchor`], [`fence`], [`orchestrator`], [`reshare`], and [`types`] for
-//! the detailed actors, synchronization points, and wire artifacts.
+//! See [`anchor`], [`fence`], [`orchestrator`], [`reshare`], [`state_sync`], and
+//! [`types`] for the detailed actors, synchronization points, and wire artifacts.
 
 use crate::dkg::types::SchemeInfo;
 use commonware_consensus::{Block, types::Epoch};
@@ -111,6 +119,7 @@ pub mod bootstrap;
 pub mod fence;
 pub mod orchestrator;
 pub mod reshare;
+pub mod state_sync;
 pub mod types;
 
 #[cfg(test)]
@@ -141,6 +150,9 @@ pub trait Registrar: Send + Sync + 'static {
     type PublicKey: PublicKey;
 
     /// Hook for handling an epoch transition.
+    ///
+    /// Registration is idempotent. An actor may repeat the same epoch and scheme
+    /// after recovering state-sync startup material.
     fn register(
         &self,
         epoch: Epoch,

@@ -1,20 +1,18 @@
 //! Consensus engine orchestration for threshold reshare epoch transitions.
 
 use crate::dkg::{
-    ReshareBlock, anchor,
+    ReshareBlock,
     fence::Gate,
     orchestrator::{Mailbox, mailbox::Message},
+    state_sync::{self, Plan as StateSyncPlan},
     types::{EpochInfo, Payload},
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    CertifiableAutomaton, Epochable, Heightable, Relay,
+    CertifiableAutomaton, Heightable, Relay,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
-        self, Floor, ForwardingPolicy, Plan,
-        elector::Config as Elector,
-        scheme,
-        types::{Context, Finalization},
+        self, Floor, ForwardingPolicy, Plan, elector::Config as Elector, scheme, types::Context,
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
@@ -76,20 +74,6 @@ enum EnterEpochError {
     GateClosed,
     MuxClosed,
     Stopped,
-}
-
-/// Public boundary material used for one-time state-sync startup.
-pub struct StateSync<S, D, V>
-where
-    S: scheme::Scheme<D>,
-    D: Digest,
-    V: BlsVariant,
-{
-    /// Public boundary material discovered by `dkg::anchor`.
-    pub artifact: anchor::Artifact<S, D, V>,
-
-    /// Finalized floor selected by `stateful::probe`.
-    pub floor: Finalization<S, D>,
 }
 
 struct ResolvedStart<S, D, V, P>
@@ -183,8 +167,8 @@ where
     /// entering an epoch.
     pub gate: Gate,
 
-    /// Public boundary material used only when entering through state sync.
-    pub state_sync: Option<StateSync<P::Scheme, MV::Commitment, DV>>,
+    /// Shared DKG state-sync startup recovery plan.
+    pub state_sync: StateSyncPlan<P::Scheme, MV::Commitment, DV>,
 
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
@@ -233,7 +217,7 @@ where
     strategy: T,
     simplex: SimplexConfig<L>,
     gate: Gate,
-    state_sync: Option<StateSync<P::Scheme, MV::Commitment, DV>>,
+    state_sync: StateSyncPlan<P::Scheme, MV::Commitment, DV>,
     blocks_per_epoch: NonZeroU64,
     muxer_size: usize,
     partition_prefix: String,
@@ -274,14 +258,6 @@ where
         context: E,
         config: Config<B, M, P, MV, DV, A, L, T>,
     ) -> (Self, Mailbox<MV::ApplicationBlock, ACK>) {
-        if let Some(state_sync) = &config.state_sync {
-            assert_eq!(
-                state_sync.artifact.epoch,
-                state_sync.floor.epoch(),
-                "state sync artifact and floor must be in the same epoch"
-            );
-        }
-
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(
             &context,
@@ -436,8 +412,8 @@ where
     /// Resolve the first epoch this process should run.
     ///
     /// Normal startup resolves from marshal's local boundary blocks. State-sync
-    /// startup is the only exception: the node may know a recent public
-    /// boundary from `dkg::anchor` before it has the previous boundary block in
+    /// startup and recovery are exceptions: the node may know a recent public
+    /// boundary from `dkg::anchor` without having the previous boundary block in
     /// local marshal storage.
     ///
     /// Returns `None` when marshal becomes unavailable because the context is
@@ -447,26 +423,24 @@ where
         epocher: &FixedEpocher,
     ) -> Option<ResolvedStart<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey>>
     {
-        if let Some(state_sync) = &self.state_sync {
+        let recovered_epoch = state_sync::recovered_epoch(&self.marshal, epocher).await;
+        if let Some(state_sync) = self
+            .state_sync
+            .resolve(
+                self.context.as_present().child("state_sync"),
+                recovered_epoch,
+            )
+            .await
+        {
             return Some(ResolvedStart {
-                epoch: state_sync.artifact.epoch,
-                floor: Floor::Finalized(state_sync.floor.clone()),
-                info: state_sync.artifact.info.clone(),
+                epoch: state_sync.info.epoch,
+                floor: Floor::Finalized(state_sync.floor),
+                info: state_sync.info,
             });
         }
 
-        let epoch =
-            self.marshal
-                .get_processed_height()
-                .await
-                .map_or_else(Epoch::zero, |processed| {
-                    let height = processed.next();
-                    epocher
-                        .containing(height)
-                        .expect("epocher must know recovered height")
-                        .epoch()
-                });
-        self.resolve_boundary(epoch, epocher).await
+        self.resolve_boundary(recovered_epoch.unwrap_or_else(Epoch::zero), epocher)
+            .await
     }
 
     /// Resolve a locally recovered epoch from marshal's finalized boundary block.

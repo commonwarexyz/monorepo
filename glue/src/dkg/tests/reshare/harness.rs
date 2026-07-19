@@ -4,6 +4,7 @@ use crate::{
         fence::Fence,
         orchestrator,
         reshare::{self, Input as ReshareInput},
+        state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::mocks::{FilteredReceiver, MemorySecretStore},
         types::*,
     },
@@ -217,6 +218,8 @@ impl Block {
 #[derive(Clone)]
 struct App {
     genesis: Block,
+    processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
+    public_key: ed25519::PublicKey,
 }
 
 impl App {
@@ -286,6 +289,17 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         Self::execute(block.height(), batches).await
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        block: &Self::Block,
+        _databases: &Self::Databases,
+    ) {
+        self.processed
+            .lock()
+            .insert(self.public_key.clone(), block.height().get());
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
@@ -414,7 +428,9 @@ pub(super) struct ReshareEngine {
     stores: Arc<Mutex<BTreeMap<ed25519::PublicKey, MemorySecretStore>>>,
     pub(super) registrations: Arc<Mutex<BTreeMap<ed25519::PublicKey, Vec<Registration>>>>,
     pub(super) state_syncs: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
+    pub(super) state_sync_starts: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     state_sync_floor: Option<Height>,
+    processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
 }
@@ -540,7 +556,9 @@ impl ReshareEngine {
             stores: Arc::new(Mutex::new(BTreeMap::new())),
             registrations: Arc::new(Mutex::new(BTreeMap::new())),
             state_syncs: Arc::new(Mutex::new(BTreeMap::new())),
+            state_sync_starts: Arc::new(Mutex::new(BTreeMap::new())),
             state_sync_floor: None,
+            processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
         }
@@ -707,6 +725,13 @@ impl EngineDefinition for ReshareEngine {
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
         let should_state_sync = plan.should_state_sync(delayed);
+        if should_state_sync {
+            *self
+                .state_sync_starts
+                .lock()
+                .entry(public_key.clone())
+                .or_default() += 1;
+        }
         let anchor_artifact = if should_state_sync {
             let artifact = anchor_mailbox.subscribe().await.expect("anchor stopped");
             provider.register(
@@ -825,7 +850,10 @@ impl EngineDefinition for ReshareEngine {
                 .floor()
                 .cloned()
                 .expect("state-sync startup must have a probe floor");
-            orchestrator::StateSync { artifact, floor }
+            StateSync {
+                info: artifact.info,
+                floor,
+            }
         });
         let registrar = TestRegistrar {
             provider: provider.clone(),
@@ -833,9 +861,18 @@ impl EngineDefinition for ReshareEngine {
             public_key: public_key.clone(),
         };
         let (fence, gate) = Fence::new(fence_epoch);
-        let sync_floor: Option<Finalization<Scheme, sha256::Digest>> = plan.floor().cloned();
-        let state_sync_floor: Option<sha256::Digest> =
-            sync_floor.as_ref().map(|floor| floor.proposal.payload);
+        let sync_floor: Option<Finalization<Scheme, sha256::Digest>> = state_sync
+            .as_ref()
+            .map(|state_sync| state_sync.floor.clone());
+        let state_sync = StateSyncPlan::init(
+            context.child("dkg_state_sync_plan"),
+            StateSyncConfig {
+                partition_prefix: partition_prefix.clone(),
+                max_participants: MAX_PARTICIPANTS,
+            },
+            state_sync,
+        )
+        .await;
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
             context.child("reshare"),
             reshare::Config {
@@ -849,7 +886,7 @@ impl EngineDefinition for ReshareEngine {
                 strategy: Sequential,
                 registrar,
                 marshal: marshal.clone(),
-                state_sync_floor,
+                state_sync: state_sync.clone(),
                 fence,
                 namespace: NAMESPACE,
                 sharing_mode: self.sharing_mode,
@@ -871,6 +908,8 @@ impl EngineDefinition for ReshareEngine {
             StatefulConfig {
                 application: App {
                     genesis: genesis.clone(),
+                    processed: self.processed.clone(),
+                    public_key: public_key.clone(),
                 },
                 db_config,
                 provider: (),
@@ -974,6 +1013,7 @@ impl EngineDefinition for ReshareEngine {
             },
             ValidatorState {
                 marshal,
+                processed: self.processed.clone(),
                 registrations: self.registrations.clone(),
                 state_syncs: self.state_syncs.clone(),
                 public_key: public_key.clone(),
@@ -990,6 +1030,7 @@ impl EngineDefinition for ReshareEngine {
 #[derive(Clone)]
 pub(super) struct ValidatorState {
     pub(super) marshal: Marshal,
+    processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     registrations: Arc<Mutex<BTreeMap<ed25519::PublicKey, Vec<Registration>>>>,
     pub(super) state_syncs: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     public_key: ed25519::PublicKey,
@@ -1003,10 +1044,11 @@ impl PartialEq for ValidatorState {
 
 impl ProcessedHeight for ValidatorState {
     async fn processed_height(&self) -> u64 {
-        self.marshal
-            .get_processed_height()
-            .await
-            .map_or(0, |height| height.get())
+        self.processed
+            .lock()
+            .get(&self.public_key)
+            .copied()
+            .unwrap_or_default()
     }
 }
 

@@ -1,6 +1,6 @@
 //! Engine definition trait and supporting types.
 
-use super::tracker::FinalizationUpdate;
+use super::{processed::ProcessedHeight, tracker::FinalizationUpdate};
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{self, Oracle};
 use commonware_runtime::{Handle, Quota, deterministic};
@@ -52,7 +52,7 @@ pub trait EngineDefinition: Clone + Send + 'static {
     type Engine: Send + 'static;
 
     /// Per-validator state inspectable by property checkers.
-    type State: Send + Sync + 'static;
+    type State: ProcessedHeight + Send + Sync + 'static;
 
     /// The participants for this simulation.
     ///

@@ -4,6 +4,7 @@ use super::{
     action::{Action, Crash, Schedule},
     engine::EngineDefinition,
     exit::{ExitCondition, MinimumFinalizations},
+    processed::ProcessedHeight as _,
     property::{FinalizationProperty, Property},
     team::Team,
     tracker::{FinalizationUpdate, ProgressTracker},
@@ -19,6 +20,7 @@ use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set};
 use rand::seq::IndexedRandom;
 use std::{
     collections::HashSet,
+    ops::RangeInclusive,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -200,6 +202,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
                     .any(|crash| matches!(crash, Crash::Random { .. })),
                 "only one Crash::Random strategy may be configured"
             ),
+            Crash::ProcessedHeight { .. } => {}
             Crash::Schedule(_) => {}
         }
         self.crashes.push(crash);
@@ -338,6 +341,64 @@ impl<D: EngineDefinition> Plan<D> {
             Crash::Schedule(schedule) => Some(schedule),
             _ => None,
         })
+    }
+
+    fn processed_height_crashes(
+        &self,
+    ) -> impl Iterator<Item = (usize, &D::PublicKey, RangeInclusive<u64>, Duration)> {
+        self.crashes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, crash)| match crash {
+                Crash::ProcessedHeight {
+                    participant,
+                    heights,
+                    downtime,
+                } => Some((index, participant, heights.clone(), *downtime)),
+                _ => None,
+            })
+    }
+
+    async fn trigger_processed_height_crashes(
+        &self,
+        ctx: &deterministic::Context,
+        team: &mut Team<D>,
+        triggered: &mut HashSet<usize>,
+        restart_tx: &mpsc::Sender<D::PublicKey>,
+    ) -> u64 {
+        let mut crashes = 0;
+        for (index, participant, heights, downtime) in self.processed_height_crashes() {
+            if triggered.contains(&index) {
+                continue;
+            }
+            let Some(state) = team.active_state(participant) else {
+                continue;
+            };
+            let processed = state.processed_height().await;
+            if processed < *heights.start() {
+                continue;
+            }
+            assert!(
+                heights.contains(&processed),
+                "validator skipped configured processed-height crash window: {processed} not in {heights:?}",
+            );
+
+            triggered.insert(index);
+            if !team.crash(participant) {
+                continue;
+            }
+            crashes += 1;
+            let pk = participant.clone();
+            let restart_tx = restart_tx.clone();
+            ctx.child("processed_height_restart")
+                .spawn(move |ctx| async move {
+                    if downtime > Duration::ZERO {
+                        ctx.sleep(downtime).await;
+                    }
+                    let _ = restart_tx.send(pk).await;
+                });
+        }
+        crashes
     }
 
     /// Determine which participants should be delayed at startup.
@@ -492,6 +553,7 @@ impl<D: EngineDefinition> Plan<D> {
 
         let mut tracker = ProgressTracker::default();
         let mut delayed_started = false;
+        let mut processed_height_crashes = HashSet::new();
         let active_count = total - delayed.len();
         let mut crashes: u64 = 0;
         let mut result: Result<PlanResult<D>, String> =
@@ -503,11 +565,24 @@ impl<D: EngineDefinition> Plan<D> {
             on_stopped => {
                 result = Err("simulation stopped".into());
             },
+            Some(pk) = restart_rx.recv() else break => {
+                let was_delayed = delayed.contains(&pk);
+                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                    .await;
+            },
             Some(update) = monitor_rx.recv() else {
                 result = Err("monitor channel closed".into());
                 break;
             } => {
                 tracker.observe(update)?;
+                crashes += self
+                    .trigger_processed_height_crashes(
+                        &ctx,
+                        &mut team,
+                        &mut processed_height_crashes,
+                        &restart_tx,
+                    )
+                    .await;
 
                 // Check finalization properties
                 let states = team.active_states();
@@ -604,11 +679,6 @@ impl<D: EngineDefinition> Plan<D> {
                     .await;
                 break;
             },
-            Some(pk) = restart_rx.recv() else break => {
-                let was_delayed = delayed.contains(&pk);
-                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
-                    .await;
-            },
             Some(cmd) = schedule_rx.recv() else break => match cmd {
                 ScheduleCmd::Crash(pk) => {
                     if team.crash(&pk) {
@@ -673,6 +743,13 @@ impl<D: EngineDefinition> Plan<D> {
                      Increase required_finalizations or decrease the delay threshold."
                 );
             }
+
+            let expected_processed_height_crashes = self.processed_height_crashes().count();
+            assert_eq!(
+                processed_height_crashes.len(),
+                expected_processed_height_crashes,
+                "not all Crash::ProcessedHeight triggers were reached",
+            );
         }
 
         result

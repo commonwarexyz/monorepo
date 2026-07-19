@@ -12,6 +12,7 @@ use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
     reshare::{self, DkgConfig},
+    state_sync::Plan as StateSyncPlan,
     types::{EpochInfo, Participants, Payload, SchemeInfo},
 };
 use commonware_broadcast::buffered;
@@ -436,7 +437,7 @@ where
                 strategy: self.config.strategy.clone(),
                 registrar: NoopRegistrar(PhantomData),
                 marshal: marshal_mailbox.clone(),
-                state_sync_floor: None,
+                state_sync: StateSyncPlan::disabled(),
                 fence,
                 namespace: self.config.namespace,
                 sharing_mode: self.config.sharing_mode,
