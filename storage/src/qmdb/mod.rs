@@ -648,18 +648,20 @@ where
 
     // Install each worker's partition range into the snapshot. Each worker carries its own
     // partition offset, so installation needs no range arguments.
-    let mut total_items = 0;
     for handle in joined {
         let worker_index = handle??;
-        total_items += snapshot.install_range(worker_index);
+        snapshot.install_range(worker_index);
     }
 
     // Reconstruct the activity bitmap in location order: a location is active iff it is the
     // current location of an active key, or it is the last commit. This matches the serial
-    // build's per-op push-then-clear, which leaves exactly those bits set.
+    // build's per-op push-then-clear, which leaves exactly those bits set. Each active key
+    // holds exactly one location in the snapshot, so the same walk counts the active keys.
+    let mut total_items = 0;
     let mut active: BitMap = BitMap::zeroes(end - floor);
     snapshot.for_each_value(|loc| {
         active.set(**loc - floor, true);
+        total_items += 1;
     });
     if last_commit >= floor {
         active.set(last_commit - floor, true);

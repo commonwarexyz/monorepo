@@ -48,14 +48,13 @@ pub(crate) trait Partitioned: Unordered {
     /// The partition index that holds `key`.
     fn partition_of(key: &[u8]) -> usize;
 
-    /// Create a [Self::Range] covering partitions `[offset, offset + count)`.
+    /// Create a [Self::Range] covering partitions `[offset, offset + count)`. The range shares
+    /// self's metric handles, so its mutations count live.
     fn new_range(&self, offset: usize, count: usize) -> Self::Range;
 
     /// Move a populated `range`'s contents into self at the global slot range it was created
-    /// with, which must be empty. Build workers are transient, so the range's metric counts fold
-    /// into self's registered handles here. Returns the range's item count so the caller can
-    /// total items across workers.
-    fn install_range(&mut self, range: Self::Range) -> usize;
+    /// with, which must be empty.
+    fn install_range(&mut self, range: Self::Range);
 
     /// Visit every value held across all partitions, in unspecified order.
     fn for_each_value(&self, f: impl FnMut(&Self::Value));

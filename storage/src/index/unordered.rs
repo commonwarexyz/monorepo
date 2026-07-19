@@ -2,8 +2,6 @@
 //! arbitrary values. If you require ordering over the map's keys, consider
 //! [crate::index::ordered::Index] instead.
 
-#[commonware_macros::stability(ALPHA)]
-use crate::index::detached_metric;
 use crate::{
     index::{
         Cursor as CursorTrait, Unordered,
@@ -81,47 +79,38 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
-    /// Create an empty index with this index's translator whose metric handles are detached
-    /// (never registered). Parallel snapshot-build workers use it for their partition slots:
-    /// the detached handles only accumulate the counts that [`Self::absorb`] folds back into a
-    /// registered index. The maps start without capacity, since a worker slot often receives
-    /// nothing.
+    /// Create an empty index sharing this index's translator and metric handles (clones of the
+    /// same registered metrics). Parallel snapshot-build workers use it for their partition
+    /// slots, so worker mutations count on the partition's own metrics live. The maps start
+    /// without capacity, since a worker slot often receives nothing.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn detached(&self) -> Self {
+    pub(crate) fn empty_clone(&self) -> Self {
         Self {
             translator: self.translator.clone(),
             overflow: HashMap::with_hasher(self.translator.clone()),
             map: HashMap::with_hasher(self.translator.clone()),
-            keys: detached_metric(),
-            items: detached_metric(),
-            pruned: detached_metric(),
+            keys: self.keys.clone(),
+            items: self.items.clone(),
+            pruned: self.pruned.clone(),
         }
     }
 
-    /// Move `other`'s contents into self, which must be empty, folding `other`'s metric counts
-    /// (`keys`, `items`, `pruned`) into self's handles. Wholesale moves are what let
-    /// [`Self::detached`] build-worker slots install without re-inserting each entry. Returns the
-    /// number of items moved.
+    /// Move `other`'s contents into self, which must be empty. Wholesale moves are what let
+    /// [`Self::empty_clone`] build-worker slots install without re-inserting each entry, and
+    /// `other`'s mutations already counted on self's metric handles (it holds clones), so
+    /// nothing folds here.
     ///
     /// # Panics
     ///
     /// Panics if self is not empty.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn absorb(&mut self, other: Self) -> usize {
+    pub(crate) fn absorb(&mut self, other: Self) {
         assert!(
             self.map.is_empty() && self.overflow.is_empty(),
             "absorb target must be empty"
         );
         self.map = other.map;
         self.overflow = other.overflow;
-        self.keys.inc_by(other.keys.get());
-        self.pruned.inc_by(other.pruned.get());
-        let items = other.items.get();
-        self.items.inc_by(items);
-
-        // A detached worker slot only ever holds in-memory entries, so its item gauge is
-        // non-negative and fits in a usize.
-        usize::try_from(items).expect("absorbed item count fits usize")
     }
 
     /// Visit every value held by the index (inline and overflow), in unspecified order.

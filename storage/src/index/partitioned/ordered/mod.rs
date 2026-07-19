@@ -44,10 +44,7 @@ mod partition;
 pub use self::cursor::Cursor;
 use self::partition::Partition;
 #[commonware_macros::stability(ALPHA)]
-use crate::index::{
-    detached_metric,
-    partitioned::{PartitionRange, Partitioned},
-};
+use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
         Cursor as CursorTrait, Factory, Ordered, Unordered,
@@ -103,7 +100,8 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     pruned: Counter,
 
     /// Metric: cumulative partitions spilled to the side-table. Emptied partitions that de-spill
-    /// (rare) are not subtracted. Detached on build workers and folded in at [`Self::install_range`].
+    /// (rare) are not subtracted. Build workers hold clones of the handle, so their spills count
+    /// here live.
     spills: Counter,
 }
 
@@ -336,9 +334,10 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         partition_index_and_sub_key::<P>(key).0
     }
 
-    /// The range matches this index's translator and spill threshold. It allocates just `count`
-    /// partition slots, so per-worker memory is the range, not the full `2^(8*P)` -- which is
-    /// what makes a large `P` affordable.
+    /// The range matches this index's translator and spill threshold, and shares its metric
+    /// handles (clones of the same registered metrics), so worker mutations count live exactly
+    /// as the serial build's do. It allocates just `count` partition slots, so per-worker memory
+    /// is the range, not the full `2^(8*P)` -- which is what makes a large `P` affordable.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
         let partitions = (0..count)
             .map(|_| Partition::default())
@@ -350,18 +349,19 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
                 partitions,
                 spilled: HashMap::new(),
                 threshold: self.threshold,
-                keys: detached_metric(),
-                items: detached_metric(),
-                pruned: detached_metric(),
-                spills: detached_metric(),
+                keys: self.keys.clone(),
+                items: self.items.clone(),
+                pruned: self.pruned.clone(),
+                spills: self.spills.clone(),
             },
             offset,
         }
     }
 
-    /// Moves the worker's partitions and spilled entries wholesale, folding all of its metric
-    /// counts (`spills`, `pruned`, `keys`, `items`) into this index's handles.
-    fn install_range(&mut self, mut worker: RangeIndex<T, V, P>) -> usize {
+    /// Moves the worker's partitions and spilled entries wholesale. The worker's mutations
+    /// already counted on this index's metric handles (the worker holds clones), so nothing
+    /// folds here.
+    fn install_range(&mut self, mut worker: RangeIndex<T, V, P>) {
         let lo = worker.offset;
         for (local, partition) in worker.index.partitions.iter_mut().enumerate() {
             self.partitions[lo + local] = std::mem::take(partition);
@@ -372,18 +372,6 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         for (local, inner) in worker.index.spilled.drain() {
             self.spilled.insert(lo + local, inner);
         }
-
-        // Fold in the worker's metric counts (a build worker's own handles are detached), matching
-        // what the serial replay records on the full index.
-        self.spills.inc_by(worker.index.spills.get());
-        self.pruned.inc_by(worker.index.pruned.get());
-        self.keys.inc_by(worker.index.keys.get());
-        let items = worker.index.items.get();
-        self.items.inc_by(items);
-
-        // A worker only ever holds in-memory entries, so its item gauge is non-negative and fits
-        // in a usize.
-        usize::try_from(items).expect("worker item count fits usize")
     }
 
     /// Visits inline and spilled values.
@@ -1039,16 +1027,17 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_spill_install_range_counts() {
+    fn test_spill_counts_live() {
         deterministic::Runner::default().start(|context| async move {
-            // The full index that build workers fold into. It spills once a partition holds two
-            // entries.
+            // The full index that build workers install into. It spills once a partition holds
+            // two entries.
             let mut full = new_index_spilling(context.child("full"));
             assert_eq!(full.spills(), 0);
 
             // A build worker covering the whole partition range (offset 0, so the inner index's
-            // globally-addressed methods are usable directly). Its detached counter records every
-            // spill event, including one whose partition later de-spills (fully drained via remove).
+            // globally-addressed methods are usable directly). It holds clones of the full
+            // index's metric handles, so every spill event counts there as it happens, including
+            // one whose partition later de-spills (fully drained via remove).
             let mut worker = full.new_range(0, full.partition_count());
             worker.get_mut_or_insert(&[0x10, 0x01], 1);
             worker.get_mut_or_insert(&[0x10, 0x02], 2); // second key in partition 0x10 -> spills
@@ -1057,10 +1046,9 @@ mod tests {
             worker.index.remove(&[0x20, 0x01]);
             worker.index.remove(&[0x20, 0x02]); // ...then fully drains, de-spilling
             assert_eq!(worker.index.spilled_count(), 1);
-            assert_eq!(worker.index.spills(), 2); // cumulative: the de-spilled partition still counts
+            assert_eq!(full.spills(), 2); // cumulative: the de-spilled partition still counts
 
-            // Folding the worker in carries its cumulative count into the full index's metric,
-            // matching what a serial build over the same operations would have recorded.
+            // Installing moves the structures without touching the already-live counts.
             full.install_range(worker);
             assert_eq!(full.spilled_count(), 1);
             assert_eq!(full.spills(), 2);
@@ -1068,15 +1056,16 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_install_range_carries_pruned() {
+    fn test_worker_prunes_count_live() {
         deterministic::Runner::default().start(|context| async move {
             let mut full = new_index(context.child("full"));
             assert_eq!(full.pruned(), 0);
 
             // A worker covering the whole partition range (offset 0, so the inner index's
             // globally-addressed methods are usable directly). Give a key two values, then delete
-            // both through a cursor (the same path the parallel build's deletes take) so the
-            // worker records prunes that the full index never sees directly.
+            // both through a cursor (the same path the parallel build's deletes take). The worker
+            // holds clones of the full index's metric handles, so the prunes count there
+            // immediately, matching what the serial build records.
             let mut worker = full.new_range(0, full.partition_count());
             worker.index.insert(&[0x10, 0x01], 1);
             worker.index.insert(&[0x10, 0x01], 2);
@@ -1086,11 +1075,9 @@ mod tests {
                     cursor.delete();
                 }
             }
-            assert_eq!(worker.index.pruned(), 2);
-            assert_eq!(full.pruned(), 0);
+            assert_eq!(full.pruned(), 2);
 
-            // Installing the worker folds its prune count into the full index (matching the serial
-            // build, which records prunes on the full index directly).
+            // Installing moves the structures without touching the already-live counts.
             full.install_range(worker);
             assert_eq!(full.pruned(), 2);
         });
@@ -1118,7 +1105,7 @@ mod tests {
 
             // Installing must remap both the inline partition and the spilled entry to the
             // worker's global range.
-            assert_eq!(full.install_range(worker), 3);
+            full.install_range(worker);
             assert_eq!(full.spilled_count(), 1);
             assert_eq!(full.keys(), 3);
             assert_eq!(full.items(), 3);

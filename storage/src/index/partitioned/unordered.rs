@@ -62,26 +62,23 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         partition_index_and_sub_key::<P>(key).0
     }
 
-    /// The range's slots match this index's translator. It allocates just `count` slots, so
-    /// per-worker memory is the range, not the full `2^(8*P)`. Each slot's metric handles are
-    /// detached (never registered): they only accumulate the counts that [Self::install_range]
-    /// folds back into the full index's per-partition handles.
+    /// The range's slots match this index's translator and share each covered partition's
+    /// metric handles (clones of the same registered metrics), so worker mutations count on the
+    /// partition's own metrics live. It allocates just `count` slots, so per-worker memory is
+    /// the range, not the full `2^(8*P)`.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
         let partitions = (0..count)
-            .map(|i| self.partitions[offset + i].detached())
+            .map(|i| self.partitions[offset + i].empty_clone())
             .collect();
         RangeIndex { partitions, offset }
     }
 
-    /// Absorbs each slot's maps wholesale into the matching partition, folding the slot's metric
-    /// counts into that partition's registered handles.
-    fn install_range(&mut self, worker: RangeIndex<T, V, P>) -> usize {
+    /// Absorbs each slot's maps wholesale into the matching partition.
+    fn install_range(&mut self, worker: RangeIndex<T, V, P>) {
         let lo = worker.offset;
-        let mut items = 0;
         for (local, slot) in worker.partitions.into_iter().enumerate() {
-            items += self.partitions[lo + local].absorb(slot);
+            self.partitions[lo + local].absorb(slot);
         }
-        items
     }
 
     /// Visits inline and overflow values.
@@ -257,9 +254,9 @@ mod tests {
                 cursor.insert(4);
             }
 
-            // Installing must remap the slots to the worker's global range and count every
+            // Installing must remap the slots to the worker's global range and preserve every
             // value, including the chained one.
-            assert_eq!(full.install_range(worker), 4);
+            full.install_range(worker);
             assert_eq!(full.keys(), 3);
             assert_eq!(full.items(), 4);
             assert_eq!(
@@ -277,16 +274,18 @@ mod tests {
         });
     }
 
-    /// A worker's cursor deletes (the parallel build's delete path) accumulate on its detached
-    /// `pruned` handle and must fold into the full index's metric at install.
+    /// A worker's cursor deletes (the parallel build's delete path) count on the covered
+    /// partition's shared `pruned` handle as they happen, matching what the serial build
+    /// records.
     #[test_traced]
-    fn test_install_range_carries_pruned() {
+    fn test_worker_prunes_count_live() {
         deterministic::Runner::default().start(|context| async move {
             let mut full = new_index(context.child("full"));
             assert_eq!(full.pruned(), 0);
 
-            // Give one translated key two values, then delete both through a cursor so the
-            // worker records prunes the full index never sees directly.
+            // Give one translated key two values, then delete both through a cursor. The worker
+            // slots hold clones of their partitions' metric handles, so the prunes count on the
+            // full index immediately.
             let mut worker = full.new_range(0, full.partition_count());
             assert!(worker.get_mut_or_insert(&[0x10, 0x01], 1).is_none());
             {
@@ -300,10 +299,10 @@ mod tests {
                     cursor.delete();
                 }
             }
+            assert_eq!(full.pruned(), 2);
 
-            // Installing folds the prune count in (matching the serial build, which records
-            // prunes on the full index directly).
-            assert_eq!(full.install_range(worker), 0);
+            // Installing moves the structures without touching the already-live counts.
+            full.install_range(worker);
             assert_eq!(full.pruned(), 2);
             assert_eq!(full.keys(), 0);
             assert_eq!(full.items(), 0);
