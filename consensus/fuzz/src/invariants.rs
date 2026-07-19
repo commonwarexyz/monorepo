@@ -224,6 +224,70 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     S::PublicKey: Eq + Hash + Clone,
     L: Elector<S>,
 {
+    // Invariant: certificate_derived_leader_agreement
+    // Every reporter that derives a leader for the same view must derive the
+    // same participant. Missing entries are deliberately ignored: Reporter
+    // records a leader only after observing a certificate for the preceding
+    // view, so incomplete observation can suppress this check but cannot make
+    // two present observations disagree.
+    //
+    // Source: the `simplex::elector` configuration contract requires all
+    // honest participants to agree on each round's leader. The instantiated
+    // protocol's "Embedded VRF" documentation additionally requires every
+    // certificate type for a view to yield the same seed, which selects the
+    // following view's leader.
+    let mut leaders: HashMap<u64, S::PublicKey> = HashMap::new();
+    let mut leader_conflicts: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+    for reporter in reporters {
+        let observed = reporter.leaders.lock();
+        for (view, leader) in observed.iter() {
+            let view = view.get();
+            match leaders.entry(view) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(leader.clone());
+                }
+                std::collections::hash_map::Entry::Occupied(entry) if entry.get() != leader => {
+                    leader_conflicts
+                        .entry(view)
+                        .or_default()
+                        .extend([entry.get().as_ref().to_vec(), leader.as_ref().to_vec()]);
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+            }
+        }
+    }
+    if let Some((view, conflicting)) = leader_conflicts.first_key_value() {
+        panic!(
+            "Invariant violation: reporters derived conflicting leaders in view {view}: {conflicting:?}; all conflicts: {leader_conflicts:?}"
+        );
+    }
+
+    // Invariant: contiguous_certificate_progression
+    // With a genesis floor, observing a certificate at view v > 1 implies
+    // that some certificate exists at v-1: a quorum at v contains correct
+    // participants, and correct participants can enter v only from a
+    // certificate at v-1. Check the union rather than individual reporters so
+    // that partial observations cause false negatives, never false positives.
+    //
+    // Source: the Simplex paper's protocol and safety proof advance a process
+    // from a view only with a block or dummy-block certificate. The
+    // instantiated protocol documents the same rule in "Genesis",
+    // "Specification for View v", and "Joining Consensus", with notarization,
+    // nullification, and finalization certificates as its progress proofs.
+    let mut certified_views = BTreeSet::new();
+    for reporter in reporters {
+        certified_views.extend(reporter.certified.lock().iter().map(|view| view.get()));
+    }
+    for &view in &certified_views {
+        if view > 1 {
+            assert!(
+                certified_views.contains(&(view - 1)),
+                "Invariant violation: certificate progression skips predecessor view {} before certified view {view}",
+                view - 1
+            );
+        }
+    }
+
     // Invariant: no_fault_evidence_against_correct_signers
     // Fault proofs (ConflictingNotarize, ConflictingFinalize, NullifyFinalize)
     // are signature-verified by the reporter before being recorded. For
@@ -293,6 +357,8 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     let mut seen_finalize_payload: HashMap<(u64, S::PublicKey), Sha256Digest> = HashMap::new();
     let mut notarize_conflicts: BTreeMap<(u64, Vec<u8>), BTreeSet<Sha256Digest>> = BTreeMap::new();
     let mut finalize_conflicts: BTreeMap<(u64, Vec<u8>), BTreeSet<Sha256Digest>> = BTreeMap::new();
+    let mut correct_vote_views: BTreeSet<(u64, Vec<u8>)> = BTreeSet::new();
+    let mut correct_raw_notarize_payloads: BTreeMap<u64, BTreeSet<Sha256Digest>> = BTreeMap::new();
     let mut notarization_cert_payloads: BTreeMap<u64, BTreeSet<Sha256Digest>> = BTreeMap::new();
     let mut nullification_cert_views: BTreeSet<u64> = BTreeSet::new();
     let mut finalization_cert_payloads: BTreeMap<u64, BTreeSet<Sha256Digest>> = BTreeMap::new();
@@ -316,6 +382,11 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                         "Invariant violation: correct signer {:?} has notarize vote at genesis view 0",
                         pk.as_ref()
                     );
+                    correct_vote_views.insert((view.get(), pk.as_ref().to_vec()));
+                    correct_raw_notarize_payloads
+                        .entry(view.get())
+                        .or_default()
+                        .insert(*digest);
                     record_payload_conflict(
                         &mut seen_notarize_payload,
                         &mut notarize_conflicts,
@@ -337,6 +408,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                         "Invariant violation: correct signer {:?} has nullify vote at genesis view 0",
                         pk.as_ref()
                     );
+                    correct_vote_views.insert((view.get(), pk.as_ref().to_vec()));
                     seen_nullify
                         .entry(view.get())
                         .or_default()
@@ -360,6 +432,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                         "Invariant violation: correct signer {:?} has finalize vote at genesis view 0",
                         pk.as_ref()
                     );
+                    correct_vote_views.insert((view.get(), pk.as_ref().to_vec()));
                     seen_finalize
                         .entry(view.get())
                         .or_default()
@@ -405,6 +478,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                 if !correct(pk) {
                     continue;
                 }
+                correct_vote_views.insert((view, pk.as_ref().to_vec()));
                 record_payload_conflict(
                     &mut seen_notarize_payload,
                     &mut notarize_conflicts,
@@ -436,6 +510,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                 if !correct(pk) {
                     continue;
                 }
+                correct_vote_views.insert((view, pk.as_ref().to_vec()));
                 seen_nullify.entry(view).or_default().insert(pk.clone());
             }
         }
@@ -465,6 +540,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                 if !correct(pk) {
                     continue;
                 }
+                correct_vote_views.insert((view, pk.as_ref().to_vec()));
                 seen_finalize.entry(view).or_default().insert(pk.clone());
                 record_payload_conflict(
                     &mut seen_finalize_payload,
@@ -570,6 +646,75 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                 "Invariant violation: vote equivocation in view {v}: {equivocators:?} both nullified and finalized",
             );
         }
+    }
+
+    // Invariant: correct_view_entry_requires_predecessor_certificate
+    // Every vote attributed to a correct signer above view 1 proves that the
+    // signer entered that view, which requires a certificate at the preceding
+    // view. Direct votes and signers exposed by attributable certificates are
+    // both evidence of participation. The predecessor is required only in the
+    // aggregate certified-view union: this does not infer local possession,
+    // observation order, or signers for non-attributable certificates.
+    //
+    // Source: the Simplex paper's view-transition protocol permits voting in a
+    // new view only after leaving the prior view with a value or skip
+    // certificate. The instantiated protocol preserves this rule in
+    // "Specification for View v" and "Joining Consensus", while extending the
+    // progress certificates to its certification and finalization behavior.
+    let mut premature_votes = BTreeSet::new();
+    for (view, signer) in &correct_vote_views {
+        if *view > 1 && !certified_views.contains(&(view - 1)) {
+            premature_votes.insert((*view, signer.clone()));
+        }
+    }
+    if let Some((view, signer)) = premature_votes.first() {
+        panic!(
+            "Invariant violation: correct signer {signer:?} voted in view {view} without a certificate at predecessor view {}; all violations: {premature_votes:?}",
+            view - 1
+        );
+    }
+
+    // Invariant: honest_leader_payload_coherence
+    // When the uniquely derived leader is correct, all raw notarize votes from
+    // correct participants and every observed notarization/certification
+    // certificate in that view must concern one payload. A Byzantine, missing,
+    // or conflicting leader is outside this predicate; conflicting leaders
+    // have already been rejected by certificate_derived_leader_agreement.
+    //
+    // Source: the Simplex paper's proposal rule accepts a value from the
+    // designated leader and its quorum-intersection safety proof excludes two
+    // notarized non-dummy values. The instantiated voter round strengthens the
+    // observable premise: its proposal is the leader's first notarize vote,
+    // and its equivocation handling prevents a correct leader from supplying
+    // multiple proposal payloads.
+    let leader_is_correct = |leader: &S::PublicKey| {
+        reporters.first().is_some_and(|reporter| {
+            reporter
+                .participants
+                .index(leader)
+                .is_some_and(|idx| !byzantine.contains(&usize::from(idx)))
+        })
+    };
+    let mut honest_leader_conflicts: BTreeMap<u64, BTreeSet<Sha256Digest>> = BTreeMap::new();
+    for (&view, leader) in &leaders {
+        if !leader_is_correct(leader) {
+            continue;
+        }
+        let mut payloads = correct_raw_notarize_payloads
+            .get(&view)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(certified) = notarization_cert_payloads.get(&view) {
+            payloads.extend(certified);
+        }
+        if payloads.len() > 1 {
+            honest_leader_conflicts.insert(view, payloads);
+        }
+    }
+    if let Some((view, payloads)) = honest_leader_conflicts.first_key_value() {
+        panic!(
+            "Invariant violation: correct leader has conflicting proposal payloads in view {view}: {payloads:?}; all conflicts: {honest_leader_conflicts:?}"
+        );
     }
 
     // Invariant: finalize_vote_requires_notarization
@@ -1114,14 +1259,18 @@ mod tests {
         participants: &[id_mock::PublicKey],
         schemes: &[id_mock::Scheme],
     ) -> Reporter<TestRng, id_mock::Scheme, RoundRobin, Sha256Digest> {
-        Reporter::new(
+        let reporter = Reporter::new(
             test_rng(),
             ReporterConfig {
                 participants: Set::try_from(participants.to_vec()).expect("unique keys"),
                 scheme: schemes[0].clone(),
                 elector: RoundRobin::default(),
             },
-        )
+        );
+        // Most vote fixtures exercise isolated view-5 behavior. Model the
+        // genesis-started harness history that enabled entry into that view.
+        reporter.certified.lock().extend((1..=4).map(View::new));
+        reporter
     }
 
     fn proposal(view: u64, parent: u64, payload: u8) -> Proposal<Sha256Digest> {
@@ -1134,6 +1283,87 @@ mod tests {
 
     fn round(view: u64) -> Round {
         Round::new(Epoch::new(0), View::new(view))
+    }
+
+    #[test]
+    fn matching_and_missing_leader_observations_pass() {
+        let (participants, schemes) = vote_fixture();
+        let rep_a = vote_reporter(&participants, &schemes);
+        let rep_b = vote_reporter(&participants, &schemes);
+        rep_a
+            .leaders
+            .lock()
+            .insert(View::new(5), participants[0].clone());
+        // rep_b intentionally lacks view 5: incomplete observation must not
+        // create a false positive.
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep_a, rep_b]);
+    }
+
+    #[test]
+    #[should_panic(expected = "reporters derived conflicting leaders in view 5")]
+    fn conflicting_certificate_derived_leaders_are_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let rep_a = vote_reporter(&participants, &schemes);
+        let rep_b = vote_reporter(&participants, &schemes);
+        rep_a
+            .leaders
+            .lock()
+            .insert(View::new(5), participants[0].clone());
+        rep_b
+            .leaders
+            .lock()
+            .insert(View::new(5), participants[1].clone());
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep_a, rep_b]);
+    }
+
+    #[test]
+    fn certificate_progression_accepts_aggregate_predecessor_history() {
+        let (participants, schemes) = vote_fixture();
+        let rep_a = vote_reporter(&participants, &schemes);
+        let rep_b = vote_reporter(&participants, &schemes);
+        rep_a.certified.lock().clear();
+        rep_b.certified.lock().clear();
+        rep_a.certified.lock().insert(View::new(1));
+        rep_b.certified.lock().insert(View::new(2));
+        // Neither reporter has complete history, but the applicable aggregate
+        // does. View 1 is the valid genesis boundary.
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep_a, rep_b]);
+    }
+
+    #[test]
+    #[should_panic(expected = "certificate progression skips predecessor view 2")]
+    fn certificate_progression_gap_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let rep = vote_reporter(&participants, &schemes);
+        rep.certified.lock().clear();
+        rep.certified.lock().extend([View::new(1), View::new(3)]);
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    fn correct_view_entry_accepts_predecessor_from_another_reporter() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep_a = vote_reporter(&participants, &schemes);
+        let rep_b = vote_reporter(&participants, &schemes);
+        rep_a.certified.lock().clear();
+        rep_b.certified.lock().clear();
+        rep_b.certified.lock().insert(View::new(1));
+        rep_a.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(2, 1, 0xA)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep_a, rep_b]);
+    }
+
+    #[test]
+    #[should_panic(expected = "voted in view 2 without a certificate at predecessor view 1")]
+    fn correct_vote_without_predecessor_certificate_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.certified.lock().clear();
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(2, 1, 0xA)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
     }
 
     #[test]
@@ -1271,9 +1501,22 @@ mod tests {
         parent: u64,
         payload: u8,
     ) -> SimplexNotarization<id_mock::Scheme, Sha256Digest> {
-        let votes: Vec<_> = schemes[..Q]
+        notarization_activity_from(schemes, &[0, 1, 2], view, parent, payload)
+    }
+
+    fn notarization_activity_from(
+        schemes: &[id_mock::Scheme],
+        signers: &[usize],
+        view: u64,
+        parent: u64,
+        payload: u8,
+    ) -> SimplexNotarization<id_mock::Scheme, Sha256Digest> {
+        assert_eq!(signers.len(), Q);
+        let votes: Vec<_> = signers
             .iter()
-            .map(|scheme| Notarize::sign(scheme, proposal(view, parent, payload)).unwrap())
+            .map(|&signer| {
+                Notarize::sign(&schemes[signer], proposal(view, parent, payload)).unwrap()
+            })
             .collect();
         SimplexNotarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap()
     }
@@ -1302,6 +1545,69 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal(view, parent, payload)).unwrap())
             .collect();
         SimplexFinalization::from_finalizes(&schemes[0], &votes, &Sequential).unwrap()
+    }
+
+    #[test]
+    fn leader_based_invariants_skip_missing_leader_observation() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(5, 4, 0xA)).unwrap(),
+        ));
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[2], proposal(5, 4, 0xB)).unwrap(),
+        ));
+        // Without a retained leader, honest-leader coherence may not draw a
+        // conclusion from the divergent raw observations.
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    fn correct_leader_single_payload_passes() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.leaders
+            .lock()
+            .insert(View::new(5), participants[0].clone());
+        for signer in [0, 1, 2] {
+            rep.report(Activity::Notarize(
+                Notarize::sign(&schemes[signer], proposal(5, 4, 0xA)).unwrap(),
+            ));
+        }
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    #[should_panic(expected = "correct leader has conflicting proposal payloads in view 5")]
+    fn divergent_payloads_under_correct_leader_are_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.leaders
+            .lock()
+            .insert(View::new(5), participants[0].clone());
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[0], proposal(5, 4, 0xA)).unwrap(),
+        ));
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(5, 4, 0xB)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(&HashSet::new(), &[rep]);
+    }
+
+    #[test]
+    fn payload_coherence_excludes_byzantine_leaders() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.leaders
+            .lock()
+            .insert(View::new(5), participants[0].clone());
+        for (signer, payload) in [(0, 0xA), (0, 0xB), (1, 0xA), (2, 0xB)] {
+            rep.report(Activity::Notarize(
+                Notarize::sign(&schemes[signer], proposal(5, 4, payload)).unwrap(),
+            ));
+        }
+        let byzantine = HashSet::from([0]);
+        check_vote_invariants_with_byzantine(&byzantine, &[rep]);
     }
 
     #[test]
@@ -1625,14 +1931,16 @@ mod tests {
         participants: &[Ed25519PublicKey],
         schemes: &[ThresholdScheme],
     ) -> Reporter<TestRng, ThresholdScheme, RoundRobin, Sha256Digest> {
-        Reporter::new(
+        let reporter = Reporter::new(
             test_rng(),
             ReporterConfig {
                 participants: Set::try_from(participants.to_vec()).expect("unique keys"),
                 scheme: schemes[0].clone(),
                 elector: RoundRobin::default(),
             },
-        )
+        );
+        reporter.certified.lock().extend((1..=4).map(View::new));
+        reporter
     }
 
     fn threshold_notarization(
