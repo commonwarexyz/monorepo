@@ -538,39 +538,22 @@ async fn materialize_in_place<S: crate::Storage>(
         (stretch_end, &suffix),
     ];
 
-    let mut crcs = Vec::new();
-    let mut last_span = None;
-    for chunk in first_chunk..=last_chunk {
-        let lo = chunk * BLOCK;
-        let hi = suffix_end.min(lo + BLOCK);
-        // A chunk assembled from process memory (payload, gap
-        // zeros, tail-buffer or overlay-sourced prefix/suffix) is
-        // verified by construction; a checked disk read-back
-        // confers its expected CRC's provenance (see
-        // [`expected_span_crc`]).
-        let verified =
-            (chunk != first_chunk || prefix_verified) && (chunk != last_chunk || suffix_verified);
-        // Splice-rewritten chunks keep their span in the overlay
-        // and defer their CRC (base mode); everything else streams
-        // it over the pieces.
-        let spliced =
-            (chunk == first_chunk && !prefix.is_empty()) || (chunk == last_chunk && has_suffix);
-        let update = if spliced && staged.is_none() {
-            CrcUpdate::Pending {
-                bytes: copy_over(&pieces, lo, hi),
-                verified,
-            }
-        } else {
-            CrcUpdate::Ready(ChunkState {
-                crc: ChunkCrc::Ready(crc_over(&pieces, lo, hi)),
-                verified,
-            })
-        };
-        crcs.push((chunk, update));
-        if chunk == last_chunk {
-            last_span = Some((chunk, copy_over(&pieces, lo, hi)));
-        }
-    }
+    // A chunk assembled from process memory (payload, gap zeros,
+    // tail-buffer or overlay-sourced prefix/suffix) is verified by
+    // construction; a checked disk read-back confers its expected CRC's
+    // provenance (see [`expected_span_crc`]). The edge chunks whose spans
+    // keep bytes beyond the write are splice-rewrite candidates.
+    let (crcs, last_span) = assemble_crcs(
+        &pieces,
+        first_chunk,
+        last_chunk,
+        suffix_end,
+        staged.is_some(),
+        |chunk| (chunk == first_chunk && !prefix.is_empty()) || (chunk == last_chunk && has_suffix),
+        |chunk| {
+            (chunk != first_chunk || prefix_verified) && (chunk != last_chunk || suffix_verified)
+        },
+    );
 
     let bytes = match zeros {
         Some(zeros) => IoBufs::from(vec![zeros, payload]),
@@ -626,31 +609,18 @@ fn materialize_fresh<S: crate::Storage>(
 
     let first_chunk = chunk_of(chunk_base);
     let last_chunk = chunk_of(stretch_end - 1);
-    let mut crcs = Vec::new();
-    let mut last_span = None;
-    for chunk in first_chunk..=last_chunk {
-        let lo = chunk * BLOCK;
-        let hi = stretch_end.min(lo + BLOCK);
-        // Assembled purely from process memory (lead zeros + the
-        // payload): verified by construction. A chunk written from
-        // a sub-block lead (base mode) is a splice-rewrite
-        // candidate: keep its span in the overlay and defer its CRC.
-        let update = if chunk == first_chunk && lead > 0 && staged.is_none() {
-            CrcUpdate::Pending {
-                bytes: copy_over(&pieces, lo, hi),
-                verified: true,
-            }
-        } else {
-            CrcUpdate::Ready(ChunkState {
-                crc: ChunkCrc::Ready(crc_over(&pieces, lo, hi)),
-                verified: true,
-            })
-        };
-        crcs.push((chunk, update));
-        if chunk == last_chunk {
-            last_span = Some((chunk, copy_over(&pieces, lo, hi)));
-        }
-    }
+    // Assembled purely from process memory (lead zeros + the payload):
+    // verified by construction. A chunk written from a sub-block lead
+    // (base mode) is a splice-rewrite candidate.
+    let (crcs, last_span) = assemble_crcs(
+        &pieces,
+        first_chunk,
+        last_chunk,
+        stretch_end,
+        staged.is_some(),
+        |chunk| chunk == first_chunk && lead > 0,
+        |_| true,
+    );
 
     let bytes = match zeros {
         Some(zeros) => IoBufs::from(vec![zeros, payload]),
@@ -824,6 +794,49 @@ fn copy_over(pieces: &[(u64, &[u8])], start: u64, end: u64) -> Vec<u8> {
     }
     debug_assert_eq!(out.len() as u64, end - start, "pieces must cover the range");
     out
+}
+
+/// A stretch's chunk CRC updates plus its last chunk's span bytes.
+type CrcAssembly = (Vec<(u64, CrcUpdate)>, Option<(u64, Vec<u8>)>);
+
+/// Stream the CRC updates for chunks `[first, last]` of a stretch whose
+/// logical content is `pieces` (contiguous `(start, bytes)` spans ending
+/// at `span_end`). A chunk `spliced` in base mode keeps its span in the
+/// overlay and defers its CRC ([`CrcUpdate::Pending`]); every other chunk
+/// computes eagerly, carrying its by-construction `verified` provenance.
+/// Returns the updates plus the last chunk's span bytes.
+fn assemble_crcs(
+    pieces: &[(u64, &[u8])],
+    first: u64,
+    last: u64,
+    span_end: u64,
+    staged: bool,
+    spliced: impl Fn(u64) -> bool,
+    verified: impl Fn(u64) -> bool,
+) -> CrcAssembly {
+    let mut crcs = Vec::new();
+    let mut last_span = None;
+    for chunk in first..=last {
+        let lo = chunk * BLOCK;
+        let hi = span_end.min(lo + BLOCK);
+        let verified = verified(chunk);
+        let update = if spliced(chunk) && !staged {
+            CrcUpdate::Pending {
+                bytes: copy_over(pieces, lo, hi),
+                verified,
+            }
+        } else {
+            CrcUpdate::Ready(ChunkState {
+                crc: ChunkCrc::Ready(crc_over(pieces, lo, hi)),
+                verified,
+            })
+        };
+        crcs.push((chunk, update));
+        if chunk == last {
+            last_span = Some((chunk, copy_over(pieces, lo, hi)));
+        }
+    }
+    (crcs, last_span)
 }
 
 /// The expected CRC of `chunk`'s current span under the merged view — the
@@ -1129,6 +1142,41 @@ fn publish_staged(inner: &BlobInner, staged: &mut StagedBlob, stretch: Stretch) 
     }
 }
 
+/// The surviving halves of a split run: the prefix, then the suffix.
+type SplitRun = (Option<(u64, RunMeta)>, Option<(u64, RunMeta)>);
+
+/// Split the run covering one chunk around that chunk: the surviving
+/// prefix `[old_logical, chunk_start)` keeps the extent with its capacity
+/// ending where the chunk begins (the chunk's old block is deferred-freed
+/// separately), and the surviving suffix `[chunk_start + BLOCK, old_end)`
+/// keeps the remainder. Either half is `None` when empty.
+fn split_run(old_logical: u64, old_run: RunMeta, chunk_start: u64) -> SplitRun {
+    let old_end = old_logical + old_run.len;
+    let chunk_end = chunk_start + BLOCK;
+    let prefix = (old_logical < chunk_start).then(|| {
+        (
+            old_logical,
+            RunMeta {
+                len: chunk_start - old_logical,
+                capacity: chunk_start - old_logical,
+                ..old_run
+            },
+        )
+    });
+    let suffix = (old_end > chunk_end).then(|| {
+        (
+            chunk_end,
+            RunMeta {
+                physical: old_run.physical + (chunk_end - old_logical),
+                len: old_end - chunk_end,
+                capacity: old_run.capacity.saturating_sub(chunk_end - old_logical),
+                born: old_run.born,
+            },
+        )
+    });
+    (prefix, suffix)
+}
+
 /// Remap one staged-COW'd chunk: split the merged covering run around it in
 /// the overlay (mirrors [`cow_remap`] without touching published state).
 fn cow_remap_staged(inner: &BlobInner, staged: &mut StagedBlob, chunk_start: u64, fresh: RunMeta) {
@@ -1136,36 +1184,18 @@ fn cow_remap_staged(inner: &BlobInner, staged: &mut StagedBlob, chunk_start: u64
         .covering(inner, chunk_start)
         .expect("COW of unbacked chunk");
     debug_assert!(!old_private, "private chunks are written in place");
-    let old_end = old_logical + old_run.len;
-    let chunk_end = chunk_start + BLOCK;
+    let (prefix, suffix) = split_run(old_logical, old_run, chunk_start);
 
-    // Detach the source run from the merged view.
+    // Detach the source run from the merged view (a base run detaches by
+    // supersession).
     if staged.runs.remove(&old_logical).is_none() {
         staged.removed.insert(old_logical);
     }
-    if old_logical < chunk_start {
+    for (logical, meta) in prefix.into_iter().chain(suffix) {
         staged.runs.insert(
-            old_logical,
+            logical,
             StagedRun {
-                meta: RunMeta {
-                    len: chunk_start - old_logical,
-                    capacity: chunk_start - old_logical,
-                    ..old_run
-                },
-                private: old_private,
-            },
-        );
-    }
-    if old_end > chunk_end {
-        staged.runs.insert(
-            chunk_end,
-            StagedRun {
-                meta: RunMeta {
-                    physical: old_run.physical + (chunk_end - old_logical),
-                    len: old_end - chunk_end,
-                    capacity: old_run.capacity.saturating_sub(chunk_end - old_logical),
-                    born: old_run.born,
-                },
+                meta,
                 private: old_private,
             },
         );
@@ -1182,32 +1212,10 @@ fn cow_remap_staged(inner: &BlobInner, staged: &mut StagedBlob, chunk_start: u64
 /// Remap one COW'd chunk: split the covering run around it.
 fn cow_remap(inner: &mut BlobInner, chunk_start: u64, fresh: RunMeta) {
     let (old_logical, old_run) = inner.covering(chunk_start).expect("COW of unbacked chunk");
-    let old_end = old_logical + old_run.len;
-    let chunk_end = chunk_start + BLOCK;
-
+    let (prefix, suffix) = split_run(old_logical, old_run, chunk_start);
     inner.runs.remove(&old_logical);
-    if old_logical < chunk_start {
-        // The prefix keeps the extent; its capacity ends where the chunk
-        // begins (the chunk's old block is deferred-freed separately).
-        inner.runs.insert(
-            old_logical,
-            RunMeta {
-                len: chunk_start - old_logical,
-                capacity: chunk_start - old_logical,
-                ..old_run
-            },
-        );
-    }
-    if old_end > chunk_end {
-        inner.runs.insert(
-            chunk_end,
-            RunMeta {
-                physical: old_run.physical + (chunk_end - old_logical),
-                len: old_end - chunk_end,
-                capacity: old_run.capacity.saturating_sub(chunk_end - old_logical),
-                born: old_run.born,
-            },
-        );
+    for (logical, meta) in prefix.into_iter().chain(suffix) {
+        inner.runs.insert(logical, meta);
     }
     inner.runs.insert(chunk_start, fresh);
 }
