@@ -48,8 +48,7 @@ pub(crate) trait Partitioned: Unordered {
     /// The partition index that holds `key`.
     fn partition_of(key: &[u8]) -> usize;
 
-    /// Create a [Self::Range] covering partitions `[offset, offset + count)`. The range shares
-    /// self's metric handles, so its mutations count live.
+    /// Create a [Self::Range] covering partitions `[offset, offset + count)`.
     fn new_range(&self, offset: usize, count: usize) -> Self::Range;
 
     /// Move a populated `range`'s contents into self at the global slot range it was created

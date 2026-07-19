@@ -337,7 +337,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
     /// The range matches this index's translator and spill threshold, and shares its metric
     /// handles (clones of the same registered metrics), so worker mutations count live exactly
     /// as the serial build's do. It allocates just `count` partition slots, so per-worker memory
-    /// is the range, not the full `2^(8*P)` -- which is what makes a large `P` affordable.
+    /// is the range rather than the full `2^(8*P)`, which is what makes a large `P` affordable.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
         let partitions = (0..count)
             .map(|_| Partition::default())
@@ -364,7 +364,12 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
     fn install_range(&mut self, mut worker: RangeIndex<T, V, P>) {
         let lo = worker.offset;
         for (local, partition) in worker.index.partitions.iter_mut().enumerate() {
-            self.partitions[lo + local] = std::mem::take(partition);
+            let global = lo + local;
+            assert!(
+                self.partitions[global].is_empty() && self.spilled_partition(global).is_none(),
+                "install target range must be empty"
+            );
+            self.partitions[global] = std::mem::take(partition);
         }
 
         // Drain only the partitions that actually spilled (remapping local -> global), rather than
