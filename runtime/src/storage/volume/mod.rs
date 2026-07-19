@@ -482,115 +482,10 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
                 .and_then(|blobs| blobs.get(name))
                 .copied()
         };
-
-        if let Some(id) = known {
-            // Hydrate a dormant entry if this blob is not open yet.
-            let hydrated = {
-                let state = ready.state.lock();
-                if state.open.contains_key(&id) {
-                    None
-                } else {
-                    Some(state.dormant.get(&id).cloned().expect("known blob").1)
-                }
-            };
-            if let Some(entry) = hydrated {
-                let inner = recover::hydrate(&ready, &entry, partition).await?;
-                let mut state = ready.state.lock();
-                state.dormant.remove(&id);
-                state.open.insert(
-                    id,
-                    Arc::new(BlobCore {
-                        id,
-                        partition: partition.into(),
-                        name: name.to_vec(),
-                        version: entry.version,
-                        write_lock: AsyncMutex::new(()),
-                        inner: commonware_utils::sync::Mutex::new(inner),
-                    }),
-                );
-            }
-
-            let (core, size) = {
-                let mut state = ready.state.lock();
-                let core = state.open.get(&id).expect("hydrated").clone();
-                *state.handles.entry(id).or_insert(0) += 1;
-                let size = core.inner.lock().size;
-                (core, size)
-            };
-            if !versions.contains(&core.version) {
-                // Not a match: release the handle we just took.
-                drop(HandleTracker {
-                    ready: ready.clone(),
-                    id,
-                });
-                return Err(Error::BlobVersionMismatch {
-                    expected: versions,
-                    found: core.version,
-                });
-            }
-            let version = core.version;
-            let tracker = Arc::new(HandleTracker {
-                ready: ready.clone(),
-                id,
-            });
-            return Ok((
-                Blob {
-                    ready: ready.clone(),
-                    core,
-                    _tracker: tracker,
-                },
-                size,
-                version,
-            ));
+        match known {
+            Some(id) => open_known(&ready, id, partition, name, versions).await,
+            None => create_blob(&ready, partition, name, *versions.end()).await,
         }
-
-        // Create: new id, empty blob, durable via group commit.
-        let version = *versions.end();
-        let (id, core) = {
-            let mut state = ready.state.lock();
-            let id = state.next_id;
-            state.next_id += 1;
-            let core = Arc::new(BlobCore {
-                id,
-                partition: partition.into(),
-                name: name.to_vec(),
-                version,
-                write_lock: AsyncMutex::new(()),
-                inner: commonware_utils::sync::Mutex::new(state::BlobInner {
-                    committed_entry: None,
-                    ..Default::default()
-                }),
-            });
-            if !state.partitions.contains_key(partition) {
-                state.partition_epoch += 1;
-            }
-            state
-                .partitions
-                .entry(partition.into())
-                .or_default()
-                .insert(name.to_vec(), id);
-            state.open.insert(id, core.clone());
-            *state.handles.entry(id).or_insert(0) += 1;
-            state.meta_dirty = true;
-            (id, core)
-        };
-        // "An Ok result indicates the blob is durably created." The new
-        // blob is clean (its empty entry is served by assembly), so the
-        // commit captures just the namespace change.
-        commit::commit(&ready, &[id]).await?;
-        let tracker = Arc::new(HandleTracker {
-            ready: ready.clone(),
-            id,
-        });
-        Ok((
-            Blob {
-                ready: ready.clone(),
-                core,
-                _tracker: tracker,
-            },
-            0,
-            version,
-        ))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -686,6 +581,132 @@ async fn remove_task<S: crate::Storage>(
     // request here (see `metrics::Metrics::sync_requests`).
     ready.metrics.sync_requests.inc();
     commit::commit_locked(ready, &removed).await
+}
+
+/// Open blob `id`, already named in the volume: hydrate it out of the
+/// dormant map when no handle has it open, count the new handle, and
+/// check the version bound. The namespace lock MUST be held.
+async fn open_known<S: crate::Storage>(
+    ready: &Arc<Ready<S>>,
+    id: u64,
+    partition: &str,
+    name: &[u8],
+    versions: RangeInclusive<u16>,
+) -> Result<(Blob<S>, u64, u16), Error> {
+    // Hydrate a dormant entry if this blob is not open yet.
+    let hydrated = {
+        let state = ready.state.lock();
+        if state.open.contains_key(&id) {
+            None
+        } else {
+            Some(state.dormant.get(&id).cloned().expect("known blob").1)
+        }
+    };
+    if let Some(entry) = hydrated {
+        let inner = recover::hydrate(ready, &entry, partition).await?;
+        let mut state = ready.state.lock();
+        state.dormant.remove(&id);
+        state.open.insert(
+            id,
+            Arc::new(BlobCore {
+                id,
+                partition: partition.into(),
+                name: name.to_vec(),
+                version: entry.version,
+                write_lock: AsyncMutex::new(()),
+                inner: commonware_utils::sync::Mutex::new(inner),
+            }),
+        );
+    }
+
+    let (core, size) = {
+        let mut state = ready.state.lock();
+        let core = state.open.get(&id).expect("hydrated").clone();
+        *state.handles.entry(id).or_insert(0) += 1;
+        let size = core.inner.lock().size;
+        (core, size)
+    };
+    if !versions.contains(&core.version) {
+        // Not a match: release the handle we just took.
+        drop(HandleTracker {
+            ready: ready.clone(),
+            id,
+        });
+        return Err(Error::BlobVersionMismatch {
+            expected: versions,
+            found: core.version,
+        });
+    }
+    let version = core.version;
+    let tracker = Arc::new(HandleTracker {
+        ready: ready.clone(),
+        id,
+    });
+    Ok((
+        Blob {
+            ready: ready.clone(),
+            core,
+            _tracker: tracker,
+        },
+        size,
+        version,
+    ))
+}
+
+/// Create a new empty blob: assign an id, publish the name, and make the
+/// creation durable via group commit before the handle is returned. The
+/// namespace lock MUST be held.
+async fn create_blob<S: crate::Storage>(
+    ready: &Arc<Ready<S>>,
+    partition: &str,
+    name: &[u8],
+    version: u16,
+) -> Result<(Blob<S>, u64, u16), Error> {
+    let (id, core) = {
+        let mut state = ready.state.lock();
+        let id = state.next_id;
+        state.next_id += 1;
+        let core = Arc::new(BlobCore {
+            id,
+            partition: partition.into(),
+            name: name.to_vec(),
+            version,
+            write_lock: AsyncMutex::new(()),
+            inner: commonware_utils::sync::Mutex::new(state::BlobInner {
+                committed_entry: None,
+                ..Default::default()
+            }),
+        });
+        if !state.partitions.contains_key(partition) {
+            state.partition_epoch += 1;
+        }
+        state
+            .partitions
+            .entry(partition.into())
+            .or_default()
+            .insert(name.to_vec(), id);
+        state.open.insert(id, core.clone());
+        *state.handles.entry(id).or_insert(0) += 1;
+        state.meta_dirty = true;
+        (id, core)
+    };
+    // "An Ok result indicates the blob is durably created." The new
+    // blob is clean (its empty entry is served by assembly), so the
+    // commit captures just the namespace change.
+    commit::commit(ready, &[id]).await?;
+    let tracker = Arc::new(HandleTracker {
+        ready: ready.clone(),
+        id,
+    });
+    Ok((
+        Blob {
+            ready: ready.clone(),
+            core,
+            _tracker: tracker,
+        },
+        0,
+        version,
+    ))
 }
 
 impl<S: crate::Storage> crate::Blob for Blob<S> {
