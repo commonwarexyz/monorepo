@@ -404,8 +404,8 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
 /// parallel snapshot-build worker (created by [Index::new_range], folded back into a full index by
 /// [Index::install_range]). It exposes only the cursor operations, which map a key's global
-/// partition index to the worker's local slot; the other [Unordered] operations index partitions
-/// globally and are deliberately unavailable so they cannot be miscalled on a worker.
+/// partition index to the worker's local slot. The other [Unordered] operations index partitions
+/// globally and are deliberately unavailable, so they cannot be miscalled on a worker.
 #[commonware_macros::stability(ALPHA)]
 pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
     /// The worker's partitions, addressed by local slot (`global partition - offset`).
