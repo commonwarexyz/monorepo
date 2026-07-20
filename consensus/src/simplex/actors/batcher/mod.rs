@@ -3977,6 +3977,104 @@ mod tests {
         votes_below_finalized_within_activity_window_reported(secp256r1::fixture);
     }
 
+    fn constructed_votes_are_not_future_bounded<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+
+            // Setup reporter mock
+            let reporter = test_reporter(&mut context, &schemes[0]);
+
+            // Initialize batcher actor (participant 0)
+            let me = participants[0].clone();
+            let batcher_cfg = test_config(
+                schemes[0].clone(),
+                oracle.control(me.clone()),
+                reporter.clone(),
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            );
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
+
+            // Create voter mailbox for batcher to send to
+            let (voter_sender, _voter_receiver) = mailbox::new::<voter::Message<S, Sha256Digest>>(
+                context.child("mailbox"),
+                NZUsize!(1024),
+            );
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Start the batcher at view 1
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+            batcher_mailbox.update(
+                Span::none(),
+                View::new(1),
+                Participant::new(1),
+                View::zero(),
+                None,
+            );
+
+            // A locally constructed vote can be ahead of the batcher's view:
+            // the voter constructs votes before sending the update that
+            // advances it (e.g. after a certificate jump). It must be added
+            // to the verifier, not future-bounded like network input.
+            let future_view = View::new(6);
+            let proposal = Proposal::new(
+                Round::new(epoch, future_view),
+                View::new(1),
+                Sha256::hash(b"ahead"),
+            );
+            let notarize = Notarize::sign(&schemes[0], proposal).unwrap();
+            batcher_mailbox.constructed(Vote::Notarize(notarize));
+            context.sleep(Duration::from_millis(50)).await;
+
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("added_total 1"),
+                "constructed vote ahead of the batcher's view must be added: {metrics}"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_constructed_votes_are_not_future_bounded() {
+        constructed_votes_are_not_future_bounded(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        constructed_votes_are_not_future_bounded(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        constructed_votes_are_not_future_bounded(bls12381_threshold_std::fixture::<MinPk, _>);
+        constructed_votes_are_not_future_bounded(bls12381_threshold_std::fixture::<MinSig, _>);
+        constructed_votes_are_not_future_bounded(bls12381_multisig::fixture::<MinPk, _>);
+        constructed_votes_are_not_future_bounded(bls12381_multisig::fixture::<MinSig, _>);
+        constructed_votes_are_not_future_bounded(ed25519::fixture);
+        constructed_votes_are_not_future_bounded(secp256r1::fixture);
+    }
+
     fn latest_vote_metric_tracking<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,

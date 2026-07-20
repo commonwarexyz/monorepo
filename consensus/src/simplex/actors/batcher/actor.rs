@@ -73,6 +73,12 @@ where
     /// participant. `None` means no activity has been observed.
     last_activity: Vec<Option<SystemTime>>,
 
+    /// Number of observed participants that must be recently active for the
+    /// network to be considered responsive (see [Self::is_active]). We never
+    /// observe our own messages, so when we are a participant we count
+    /// ourselves as live by construction.
+    required_active: usize,
+
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
     added: Counter,
@@ -121,11 +127,16 @@ where
             Buckets::CRYPTOGRAPHY,
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
+        let mut required_active = participants.quorum::<N3f1>() as usize;
+        if scheme.me().is_some() {
+            required_active -= 1;
+        }
         (
             Self {
                 context: ContextCell::new(context),
 
                 last_activity: vec![None; participants.len()],
+                required_active,
                 scheme,
 
                 blocker: cfg.blocker,
@@ -191,10 +202,10 @@ where
         let recent =
             |activity: &Option<SystemTime>| activity.is_some_and(|activity| activity >= min_time);
 
-        // If there is not a quorum of recently active participants, then we "fail-open" since we
-        // know the network is not expected to be responsive.
+        // If fewer than the required number of participants are recently active, we "fail-open"
+        // since we know the network is not expected to be responsive.
         let active = self.last_activity.iter().filter(|a| recent(a)).count();
-        if active < self.scheme.participants().quorum::<N3f1>() as usize {
+        if active < self.required_active {
             return true;
         }
 
@@ -397,16 +408,13 @@ where
                         updated_view = current.view;
                     }
                     Message::Constructed(message) => {
-                        // Record activity for ourselves: we never receive our
-                        // own votes from the network, and a quorum-relative
-                        // threshold in is_active would misfire when we are not
-                        // a participant.
-                        if let Some(me) = self.scheme.me() {
-                            self.record_activity(me);
-                        }
-
-                        // Skip votes outside the tracked window
-                        if !self.window(finalized, current.view).admits_vote(view) {
+                        // Skip votes below the retention window. Our own votes
+                        // are not future-bounded: the voter constructs them
+                        // before sending the update that advances our view
+                        // (so they can be ahead of it after a certificate
+                        // jump), and admission bounds exist for untrusted
+                        // network input.
+                        if !self.window(finalized, current.view).retains(view) {
                             continue;
                         }
 
