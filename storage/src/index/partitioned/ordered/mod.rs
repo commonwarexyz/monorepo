@@ -141,7 +141,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Visit every value held across all partitions (inline and spilled), in unspecified order.
     #[commonware_macros::stability(ALPHA)]
-    fn for_each_value_impl(&self, mut f: impl FnMut(&V)) {
+    fn for_each_value(&self, mut f: impl FnMut(&V)) {
         for (p, partition) in self.partitions.iter().enumerate() {
             for v in partition.values_iter() {
                 f(v);
@@ -436,7 +436,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
     }
 
     fn for_each_value(&self, f: impl FnMut(&V)) {
-        self.index.for_each_value_impl(f);
+        self.index.for_each_value(f);
     }
 }
 
