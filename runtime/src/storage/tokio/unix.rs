@@ -1,17 +1,14 @@
 use super::Header;
-use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
+use crate::{storage::FloorState, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use cfg_if::cfg_if;
 use commonware_codec::Encode;
 use commonware_formatting::hex;
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     fs::File,
     io::IoSlice,
     os::{fd::AsRawFd, unix::fs::FileExt},
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 use tokio::task;
 
@@ -38,11 +35,9 @@ pub struct Blob {
     pool: BufferPool,
     /// Version recorded in the blob header, needed to rewrite it at sync.
     blob_version: u16,
-    /// The pruned floor: bytes below it were dropped. Seeded from the
-    /// header at open and persisted back at sync while `floor_dirty`.
-    floor: Arc<AtomicU64>,
-    /// Whether the in-RAM floor has advanced past the persisted one.
-    floor_dirty: Arc<AtomicBool>,
+    /// The pruned floor bookkeeping, seeded from the header at open and
+    /// persisted back through [Self::sync_inner] (see [FloorState]).
+    floor: Arc<Mutex<FloorState>>,
 }
 
 impl Blob {
@@ -60,8 +55,7 @@ impl Blob {
             file: Arc::new(file),
             pool,
             blob_version,
-            floor: Arc::new(AtomicU64::new(floor)),
-            floor_dirty: Arc::new(AtomicBool::new(false)),
+            floor: Arc::new(Mutex::new(FloorState::new(floor))),
         }
     }
 
@@ -70,25 +64,26 @@ impl Blob {
         partition: &str,
         name: &[u8],
         blob_version: u16,
-        floor: &AtomicU64,
-        floor_dirty: &AtomicBool,
+        floor: &Mutex<FloorState>,
     ) -> Result<(), Error> {
         // A dirty floor is rewritten into the header by the same sync that
-        // makes the pruned state durable. The flag clears only after a
-        // successful sync (a failure leaves it set for the next attempt),
-        // and only if no concurrent prune advanced the floor past the
-        // value written.
-        let dirty = floor_dirty.load(Ordering::Relaxed);
-        let synced_floor = floor.load(Ordering::Relaxed);
-        if dirty {
-            let header = Header::with_floor(blob_version, synced_floor);
-            Self::write_single_at(file, 0, &header.encode())?;
-        }
+        // makes the pruned state durable. The 16-byte write happens while
+        // the lock is held, so concurrent syncs land header images in
+        // snapshot order and a stale floor can never overwrite a fresher
+        // one (floors are monotone).
+        let epoch = {
+            let state = floor.lock();
+            if state.dirty() {
+                let header = Header::with_floor(blob_version, state.floor());
+                Self::write_single_at(file, 0, &header.encode())?;
+            }
+            state.epoch()
+        };
         file.sync_all()
             .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))?;
-        if dirty && floor.load(Ordering::Relaxed) == synced_floor {
-            floor_dirty.store(false, Ordering::Relaxed);
-        }
+        // The floor written above is durable, unless a prune advanced it
+        // mid-sync (a failure leaves the mark set for a retry).
+        floor.lock().mark_synced(epoch);
         Ok(())
     }
 
@@ -333,7 +328,7 @@ impl crate::Blob for Blob {
         let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via read_exact below.
         unsafe { bufs.set_len(len) };
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if offset < floor {
             return Err(Error::OffsetPruned(
                 self.partition.clone(),
@@ -388,7 +383,7 @@ impl crate::Blob for Blob {
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if offset < floor {
             return Err(Error::OffsetPruned(
                 self.partition.clone(),
@@ -414,7 +409,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if offset < floor {
             return Err(Error::OffsetPruned(
                 self.partition.clone(),
@@ -435,7 +430,7 @@ impl crate::Blob for Blob {
                 // `RWF_SYNC` only persists this write's bytes: with a dirty
                 // floor the header must be rewritten and fsynced too, so
                 // take the write-then-sync path below instead.
-                if !self.floor_dirty.load(Ordering::Relaxed) {
+                if !self.floor.lock().dirty() {
                     let file = self.file.clone();
                     return task::spawn_blocking(move || {
                         Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC))
@@ -451,10 +446,9 @@ impl crate::Blob for Blob {
         let name = self.name.clone();
         let blob_version = self.blob_version;
         let floor = self.floor.clone();
-        let floor_dirty = self.floor_dirty.clone();
         task::spawn_blocking(move || {
             Self::write_vectored_at(&file, offset, bufs, None)?;
-            Self::sync_inner(&file, &partition, &name, blob_version, &floor, &floor_dirty)
+            Self::sync_inner(&file, &partition, &name, blob_version, &floor)
         })
         .await
         .map_err(|_| Error::WriteFailed)?
@@ -472,20 +466,18 @@ impl crate::Blob for Blob {
         if offset > size {
             return Err(Error::BlobInsufficientLength);
         }
-        let old = self.floor.fetch_max(offset, Ordering::Relaxed);
-        if offset > old {
-            self.floor_dirty.store(true, Ordering::Relaxed);
+        if let Some(old) = self.floor.lock().advance(offset) {
             Self::punch_hole(&self.file, Header::DATA_OFFSET_U64 + old, offset - old);
         }
         Ok(())
     }
 
     fn floor(&self) -> u64 {
-        self.floor.load(Ordering::Relaxed)
+        self.floor.lock().floor()
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if len < floor {
             return Err(Error::OffsetPruned(
                 self.partition.clone(),
@@ -513,9 +505,8 @@ impl crate::Blob for Blob {
         let name = self.name.clone();
         let blob_version = self.blob_version;
         let floor = self.floor.clone();
-        let floor_dirty = self.floor_dirty.clone();
         task::spawn_blocking(move || {
-            Self::sync_inner(&file, &partition, &name, blob_version, &floor, &floor_dirty)
+            Self::sync_inner(&file, &partition, &name, blob_version, &floor)
         })
         .await
         .map_err(|e| {
@@ -531,10 +522,8 @@ impl crate::Blob for Blob {
         let name = self.name.clone();
         let blob_version = self.blob_version;
         let floor = self.floor.clone();
-        let floor_dirty = self.floor_dirty.clone();
         task::spawn_blocking(move || {
-            let result =
-                Self::sync_inner(&file, &partition, &name, blob_version, &floor, &floor_dirty);
+            let result = Self::sync_inner(&file, &partition, &name, blob_version, &floor);
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)

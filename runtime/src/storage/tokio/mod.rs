@@ -491,6 +491,13 @@ mod tests {
             blob.write_at_sync(4095, b"x").await,
             Err(crate::Error::OffsetPruned(_, _, 4096))
         ));
+        assert!(
+            matches!(
+                blob.write_at_sync(4095, Vec::<u8>::new()).await,
+                Err(crate::Error::OffsetPruned(_, _, 4096))
+            ),
+            "empty writes below the floor must fail like any other"
+        );
         assert!(matches!(
             blob.resize(4095).await,
             Err(crate::Error::OffsetPruned(_, _, 4096))
@@ -501,6 +508,47 @@ mod tests {
         assert_eq!(read.coalesce().as_ref(), &data[4096..4196]);
         blob.write_at(4096, b"x").await.unwrap();
         blob.resize(4096).await.unwrap();
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A stored floor beyond the logical size is rejected at open: it
+    /// means a crash persisted the header while losing an unsynced data
+    /// extension, or the floor bytes were torn.
+    #[tokio::test]
+    async fn test_open_rejects_floor_beyond_size() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_floor_size_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"floor").await.unwrap();
+        blob.write_at(0, vec![7u8; 64]).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let file_path = storage_directory.join("partition").join(hex(b"floor"));
+        let doctor = |floor: u64| {
+            let mut raw = std::fs::read(&file_path).unwrap();
+            raw[Header::MAGIC_LENGTH + 2 * Header::VERSION_LENGTH..Header::SIZE]
+                .copy_from_slice(&floor.to_be_bytes());
+            std::fs::write(&file_path, &raw).unwrap();
+        };
+
+        // One past the size must fail loud (recovery is restore-or-recreate).
+        doctor(65);
+        let result = storage.open("partition", b"floor").await;
+        assert!(
+            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("floor")),
+            "a floor beyond the size must be rejected as corrupt"
+        );
+
+        // A floor at exactly the size is valid.
+        doctor(64);
+        let (blob, len) = storage.open("partition", b"floor").await.unwrap();
+        assert_eq!(len, 64);
+        assert_eq!(blob.floor(), 64);
 
         drop(blob);
         let _ = std::fs::remove_dir_all(&storage_directory);
@@ -561,6 +609,81 @@ mod tests {
         assert_eq!(blob.floor(), 6000);
 
         drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A floor whose prune happened-before a completed sync must survive
+    /// racing syncs and prunes: no interleaving may clear the dirty mark
+    /// while the on-disk header still carries a stale floor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_prune_sync_floor_persistence() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_prune_race_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+        let storage = Storage::new(config, test_pool());
+
+        for round in 0..128u64 {
+            let name = format!("prune_race_{round}");
+            let (blob, _) = storage.open("partition", name.as_bytes()).await.unwrap();
+            blob.write_at(0, vec![7u8; 8192]).await.unwrap();
+            blob.sync().await.unwrap();
+            blob.prune(4096).await.unwrap();
+
+            // Two syncs race a further prune: one may snapshot the old
+            // floor, the other may complete with the new one.
+            let sync_a = tokio::spawn({
+                let blob = blob.clone();
+                let yields = round % 4;
+                async move {
+                    for _ in 0..yields {
+                        tokio::task::yield_now().await;
+                    }
+                    blob.sync().await.unwrap();
+                }
+            });
+            let sync_b = tokio::spawn({
+                let blob = blob.clone();
+                async move {
+                    blob.sync().await.unwrap();
+                }
+            });
+            if round % 2 == 0 {
+                tokio::task::yield_now().await;
+            }
+            blob.prune(8192).await.unwrap();
+            sync_a.await.unwrap();
+            sync_b.await.unwrap();
+
+            // This sync completes strictly after the prune to 8192, so a
+            // reopen must observe that floor.
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            // The on-disk header must parse and carry the synced floor.
+            let file_path = storage_directory
+                .join("partition")
+                .join(hex(name.as_bytes()));
+            let raw = std::fs::read(&file_path).unwrap();
+            let mut header_bytes = [0u8; Header::SIZE];
+            header_bytes.copy_from_slice(&raw[..Header::SIZE]);
+            let (_, _, floor) = Header::from(
+                header_bytes,
+                raw.len() as u64,
+                &(0..=0),
+                Header::DATA_OFFSET_U64,
+            )
+            .expect("on-disk header must parse");
+            assert_eq!(floor, 8192, "round {round}: synced floor lost");
+
+            let (blob, _) = storage.open("partition", name.as_bytes()).await.unwrap();
+            assert_eq!(
+                blob.floor(),
+                8192,
+                "round {round}: reopened floor regressed"
+            );
+            drop(blob);
+        }
+
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 

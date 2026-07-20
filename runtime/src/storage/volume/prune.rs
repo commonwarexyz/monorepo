@@ -8,8 +8,8 @@
 //! bytes reappear, never the reverse, and callers re-prune.
 
 use super::state::{BlobCore, Ready};
-use commonware_formatting::hex;
 use crate::Error;
+use commonware_formatting::hex;
 
 /// Prune bytes below `offset`, exactly: the floor IS `offset`, and reads,
 /// writes, and shrinks below it fail from this call on. Physical surgery
@@ -32,10 +32,7 @@ pub(super) fn prune_locked<S: crate::Storage>(
     // its dirty mark would linger forever (no commit captures a removed
     // id) and its frees are already queued by the unlink.
     if inner.removed() {
-        return Err(Error::BlobMissing(
-            blob.partition.clone(),
-            hex(&blob.name),
-        ));
+        return Err(Error::BlobMissing(blob.partition.clone(), hex(&blob.name)));
     }
     assert_eq!(
         inner.staged_batches(),

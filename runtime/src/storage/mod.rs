@@ -128,6 +128,10 @@ stability_scope!(BETA {
             expected: RangeInclusive<u16>,
             found: u16,
         },
+        InvalidFloor {
+            floor: u64,
+            size: u64,
+        },
     }
 
     impl HeaderError {
@@ -147,6 +151,11 @@ stability_scope!(BETA {
                 Self::VersionMismatch { expected, found } => {
                     crate::Error::BlobVersionMismatch { expected, found }
                 }
+                Self::InvalidFloor { floor, size } => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    format!("floor {floor} exceeds size {size}"),
+                ),
             }
         }
     }
@@ -226,6 +235,12 @@ stability_scope!(BETA {
         /// Parses and validates an existing header, returning the blob version,
         /// logical size, and pruned floor for a backend whose data begins at
         /// `data_offset`.
+        ///
+        /// A floor beyond the logical size is rejected: it means a crash
+        /// persisted the header while losing an unsynced data extension, or
+        /// the floor bytes themselves were torn. Recovery from that state is
+        /// restore-or-recreate. A torn floor WITHIN the size is undetectable
+        /// at this layer (no checksum covers the header).
         pub(crate) fn from(
             raw_bytes: [u8; Self::SIZE],
             raw_len: u64,
@@ -235,11 +250,14 @@ stability_scope!(BETA {
             let header: Self = Self::decode(raw_bytes.as_slice())
                 .expect("header decode should never fail for correct size input");
             header.validate(versions)?;
-            Ok((
-                header.blob_version,
-                raw_len.saturating_sub(data_offset),
-                header.floor,
-            ))
+            let size = raw_len.saturating_sub(data_offset);
+            if header.floor > size {
+                return Err(HeaderError::InvalidFloor {
+                    floor: header.floor,
+                    size,
+                });
+            }
+            Ok((header.blob_version, size, header.floor))
         }
 
         /// Validates the magic bytes, runtime version, and blob version.
@@ -299,6 +317,82 @@ stability_scope!(BETA {
                 blob_version,
                 floor,
             })
+        }
+    }
+
+    /// In-RAM pruned-floor bookkeeping for a raw blob, shared by every
+    /// handle clone behind one mutex.
+    ///
+    /// The floor persists through the blob header, which syncs rewrite
+    /// lazily: a prune advances the floor and marks it dirty, and a later
+    /// sync writes the header image back and clears the mark. Two rules
+    /// keep concurrent syncs and prunes from persisting a stale floor:
+    ///
+    /// - A sync snapshots the floor and issues the header write under a
+    ///   lock that serializes it against other syncs' snapshots (this
+    ///   mutex where the write is synchronous, a backend-owned lock
+    ///   otherwise), so header images land in snapshot order and a stale
+    ///   image can never overwrite a fresher one (floors are monotone).
+    /// - Every effective prune bumps `epoch`. A sync re-checks the epoch
+    ///   after its fsync via [`Self::mark_synced`] and clears `dirty`
+    ///   only if unchanged, so a prune that lands mid-sync keeps the
+    ///   floor dirty for the next sync.
+    #[derive(Debug)]
+    pub(crate) struct FloorState {
+        /// The pruned floor: bytes below it were dropped.
+        floor: u64,
+        /// Bumped by every effective prune (see the struct docs).
+        epoch: u64,
+        /// Whether the in-RAM floor has advanced past the persisted one.
+        dirty: bool,
+    }
+
+    impl FloorState {
+        /// Bookkeeping for a blob whose persisted floor is `floor`.
+        pub(crate) const fn new(floor: u64) -> Self {
+            Self {
+                floor,
+                epoch: 0,
+                dirty: false,
+            }
+        }
+
+        /// The pruned floor.
+        pub(crate) const fn floor(&self) -> u64 {
+            self.floor
+        }
+
+        /// The prune epoch, snapshotted by syncs for [`Self::mark_synced`].
+        pub(crate) const fn epoch(&self) -> u64 {
+            self.epoch
+        }
+
+        /// Whether the floor has advanced past the persisted one.
+        pub(crate) const fn dirty(&self) -> bool {
+            self.dirty
+        }
+
+        /// Advance the floor to `offset`, returning the previous floor
+        /// when effective (`None` leaves the state untouched). The caller
+        /// reclaims the returned range outside the lock.
+        pub(crate) const fn advance(&mut self, offset: u64) -> Option<u64> {
+            if offset <= self.floor {
+                return None;
+            }
+            let old = self.floor;
+            self.floor = offset;
+            self.epoch += 1;
+            self.dirty = true;
+            Some(old)
+        }
+
+        /// Record a completed sync that snapshotted at `epoch`: the floor
+        /// written by that sync is durable, so the dirty mark clears
+        /// unless a prune advanced the floor mid-sync.
+        pub(crate) const fn mark_synced(&mut self, epoch: u64) {
+            if self.epoch == epoch {
+                self.dirty = false;
+            }
         }
     }
 

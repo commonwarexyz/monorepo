@@ -825,8 +825,10 @@ stability_scope!(BETA {
         /// may retain bytes physically — storage granularity — but never
         /// serve them). Pruning is a mutation, not a durability point: the
         /// floor persists at the next [`Blob::sync`], and a crash may
-        /// regress it to the last synced floor — prefix bytes reappear,
-        /// never the reverse — so callers re-prune after recovery.
+        /// regress it to the last synced floor. The regressed range's
+        /// contents are unspecified — implementations may have already
+        /// reclaimed the space — so callers re-prune after recovery and
+        /// must not interpret bytes below the floor they last synced.
         /// `offset` must not exceed the blob's size, and per the
         /// writer-exclusivity contract must not race writes, resizes, or
         /// an open write batch on this blob.
@@ -834,7 +836,7 @@ stability_scope!(BETA {
 
         /// The pruned floor: the exact offset of the last effective
         /// [`Blob::prune`] (zero for a never-pruned blob). Bytes below it
-        /// fail. Zero for a never-pruned blob.
+        /// fail.
         fn floor(&self) -> u64;
     }
 

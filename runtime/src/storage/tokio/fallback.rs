@@ -1,15 +1,9 @@
 use super::Header;
-use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
+use crate::{storage::FloorState, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
-use commonware_utils::channel::oneshot;
-use std::{
-    io::SeekFrom,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
-};
+use commonware_utils::{channel::oneshot, sync::Mutex as StdMutex};
+use std::{io::SeekFrom, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -27,11 +21,9 @@ pub struct Blob {
     pool: BufferPool,
     /// Version recorded in the blob header, needed to rewrite it at sync.
     blob_version: u16,
-    /// The pruned floor: bytes below it were dropped. Seeded from the
-    /// header at open and persisted back at sync while `floor_dirty`.
-    floor: Arc<AtomicU64>,
-    /// Whether the in-RAM floor has advanced past the persisted one.
-    floor_dirty: Arc<AtomicBool>,
+    /// The pruned floor bookkeeping, seeded from the header at open and
+    /// persisted back through [Self::sync_inner] (see [FloorState]).
+    floor: Arc<StdMutex<FloorState>>,
 }
 
 impl Blob {
@@ -49,8 +41,7 @@ impl Blob {
             file: Arc::new(Mutex::new(file)),
             pool,
             blob_version,
-            floor: Arc::new(AtomicU64::new(floor)),
-            floor_dirty: Arc::new(AtomicBool::new(false)),
+            floor: Arc::new(StdMutex::new(FloorState::new(floor))),
         }
     }
 
@@ -82,18 +73,20 @@ impl Blob {
         partition: &str,
         name: &[u8],
         blob_version: u16,
-        floor: &AtomicU64,
-        floor_dirty: &AtomicBool,
+        floor: &StdMutex<FloorState>,
     ) -> Result<(), Error> {
         // A dirty floor is rewritten into the header by the same sync that
-        // makes the pruned state durable. The flag clears only after a
-        // successful sync (a failure leaves it set for the next attempt),
-        // and only if no concurrent prune advanced the floor past the
-        // value written.
-        let dirty = floor_dirty.load(Ordering::Relaxed);
-        let synced_floor = floor.load(Ordering::Relaxed);
+        // makes the pruned state durable. The async header write happens
+        // outside the floor lock, but every caller holds the blob's file
+        // mutex across this whole function, which serializes syncs and
+        // prunes on this backend, so header images still land in snapshot
+        // order.
+        let (dirty, header_floor, epoch) = {
+            let state = floor.lock();
+            (state.dirty(), state.floor(), state.epoch())
+        };
         if dirty {
-            let header = Header::with_floor(blob_version, synced_floor);
+            let header = Header::with_floor(blob_version, header_floor);
             file.seek(SeekFrom::Start(0))
                 .await
                 .map_err(|_| Error::WriteFailed)?;
@@ -104,9 +97,9 @@ impl Blob {
         file.sync_all()
             .await
             .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))?;
-        if dirty && floor.load(Ordering::Relaxed) == synced_floor {
-            floor_dirty.store(false, Ordering::Relaxed);
-        }
+        // The floor written above is durable, unless a prune advanced it
+        // mid-sync (a failure leaves the mark set for a retry).
+        floor.lock().mark_synced(epoch);
         Ok(())
     }
 }
@@ -125,7 +118,7 @@ impl crate::Blob for Blob {
         let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via read_exact below.
         unsafe { bufs.set_len(len) };
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if offset < floor {
             return Err(Error::OffsetPruned(
                 self.partition.clone(),
@@ -161,7 +154,7 @@ impl crate::Blob for Blob {
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let mut bufs = bufs.into();
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if offset < floor {
             return Err(Error::OffsetPruned(
                 self.partition.clone(),
@@ -179,7 +172,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         let mut bufs = bufs.into();
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if offset < floor {
             return Err(Error::OffsetPruned(
                 self.partition.clone(),
@@ -199,7 +192,6 @@ impl crate::Blob for Blob {
             &self.name,
             self.blob_version,
             &self.floor,
-            &self.floor_dirty,
         )
         .await
     }
@@ -221,19 +213,16 @@ impl crate::Blob for Blob {
         // serves non-Unix platforms through portable `tokio::fs` APIs,
         // which expose no way to deallocate a file range, so pruned bytes
         // keep their space until the blob is removed.
-        let old = self.floor.fetch_max(offset, Ordering::Relaxed);
-        if offset > old {
-            self.floor_dirty.store(true, Ordering::Relaxed);
-        }
+        let _ = self.floor.lock().advance(offset);
         Ok(())
     }
 
     fn floor(&self) -> u64 {
-        self.floor.load(Ordering::Relaxed)
+        self.floor.lock().floor()
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if len < floor {
             return Err(Error::OffsetPruned(
                 self.partition.clone(),
@@ -259,7 +248,6 @@ impl crate::Blob for Blob {
             &self.name,
             self.blob_version,
             &self.floor,
-            &self.floor_dirty,
         )
         .await
     }
@@ -271,18 +259,9 @@ impl crate::Blob for Blob {
         let name = self.name.clone();
         let blob_version = self.blob_version;
         let floor = self.floor.clone();
-        let floor_dirty = self.floor_dirty.clone();
         tokio::spawn(async move {
             let mut file = file.lock().await;
-            let result = Self::sync_inner(
-                &mut file,
-                &partition,
-                &name,
-                blob_version,
-                &floor,
-                &floor_dirty,
-            )
-            .await;
+            let result = Self::sync_inner(&mut file, &partition, &name, blob_version, &floor).await;
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)

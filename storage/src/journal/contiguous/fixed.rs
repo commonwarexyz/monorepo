@@ -25,7 +25,10 @@
 //! alone as `floor / CHUNK_SIZE` (the journal only ever prunes at item multiples, so the
 //! floor is always item-aligned). The floor is a mutation, not a durability point: it
 //! persists at the journal's next sync, and a crash may regress it to the last synced floor
-//! (prefix items reappear, never the reverse), so consumers re-prune after recovery.
+//! — never the reverse — so consumers re-prune after recovery. Whether regressed-range
+//! items hold their original bytes is backend-defined ([`commonware_runtime::Blob::prune`]):
+//! the volume resurfaces them, raw file backends may have reclaimed the space, and this
+//! journal never reads below its own boundary either way.
 //!
 //! # Recovery
 //!

@@ -1,4 +1,4 @@
-use super::Header;
+use super::{FloorState, Header};
 use crate::{
     deterministic::{AuditHasher, BoxDynRng},
     Buf, BufferPool, Handle, IoBufs, IoBufsMut,
@@ -7,14 +7,7 @@ use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::RngExt as _;
-use std::{
-    collections::BTreeMap,
-    ops::RangeInclusive,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
-};
+use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
 /// Writes not yet published by a sync, per blob (keyed by partition then
 /// blob name, in write order, at logical offsets). Shared by every handle
@@ -254,11 +247,9 @@ pub struct Blob {
     crash_log: Option<CrashLog>,
     /// Version recorded in the blob header, needed to rewrite it at sync.
     blob_version: u16,
-    /// The pruned floor: bytes below it were dropped. Seeded from the
-    /// header at open and persisted back at sync while `floor_dirty`.
-    floor: Arc<AtomicU64>,
-    /// Whether the in-RAM floor has advanced past the persisted one.
-    floor_dirty: Arc<AtomicBool>,
+    /// The pruned floor bookkeeping, seeded from the header at open and
+    /// persisted back through [Self::sync_inner] (see [FloorState]).
+    floor: Arc<Mutex<FloorState>>,
 }
 
 impl Blob {
@@ -281,43 +272,51 @@ impl Blob {
             pool,
             crash_log,
             blob_version,
-            floor: Arc::new(AtomicU64::new(floor)),
-            floor_dirty: Arc::new(AtomicBool::new(false)),
+            floor: Arc::new(Mutex::new(FloorState::new(floor))),
         }
     }
 
     fn sync_inner(&self) -> Result<(), crate::Error> {
-        // A dirty floor is rewritten into the header prefix while the
-        // content lock is held so the published image carries it. Header
-        // rewrites are deliberately NOT recorded in the crash log: recorded
-        // writes always land at or above the floor (the write guards), and
-        // the header is metadata the crash fan must not tear: real files
-        // get the same 16-byte header write inside the sync itself, and a
-        // torn header is caught by header validation at open.
-        let dirty = self.floor_dirty.load(Ordering::Relaxed);
-        let synced_floor = self.floor.load(Ordering::Relaxed);
-        let new_content = {
+        // A dirty floor is rewritten into the header prefix under the
+        // content lock, and the publish happens under the same lock, so
+        // published images land in snapshot order and always pair a
+        // zeroed range with a header floor covering it. Header rewrites
+        // are deliberately NOT recorded in the crash log: recorded writes
+        // always land at or above the floor (the write guards), and real
+        // files get the same 16-byte header write inside the sync itself.
+        // A torn header is only partially detectable at open: magic and
+        // version tears are caught, but the floor bytes (the only bytes
+        // that differ between rewrites) carry no checksum — a floor
+        // beyond the size is rejected, while a torn floor within the size
+        // is undetectable at this layer. Volume-backed usage never
+        // rewrites raw-blob headers (the volume's inner file is never
+        // pruned), so the exposure is limited to direct raw-blob
+        // consumers.
+        let epoch = {
             let mut content = self.content.write();
-            if dirty {
-                let header = Header::with_floor(self.blob_version, synced_floor);
-                content[..Header::SIZE].copy_from_slice(&header.encode());
-            }
-            content.clone()
-        };
+            let epoch = {
+                let state = self.floor.lock();
+                if state.dirty() {
+                    let header = Header::with_floor(self.blob_version, state.floor());
+                    content[..Header::SIZE].copy_from_slice(&header.encode());
+                }
+                state.epoch()
+            };
 
-        // Update partition content
-        let mut partitions = self.partitions.lock();
-        let partition = partitions
-            .get_mut(&self.partition)
-            .ok_or(crate::Error::PartitionMissing(self.partition.clone()))?;
-        let content = partition
-            .get_mut(&self.name)
-            .ok_or(crate::Error::BlobMissing(
-                self.partition.clone(),
-                hex(&self.name),
-            ))?;
-        *content = new_content;
-        drop(partitions);
+            // Update partition content
+            let mut partitions = self.partitions.lock();
+            let partition = partitions
+                .get_mut(&self.partition)
+                .ok_or(crate::Error::PartitionMissing(self.partition.clone()))?;
+            let stored = partition
+                .get_mut(&self.name)
+                .ok_or(crate::Error::BlobMissing(
+                    self.partition.clone(),
+                    hex(&self.name),
+                ))?;
+            *stored = content.clone();
+            epoch
+        };
 
         // The publish supersedes every record for this blob: the durable
         // image is now this handle's full content.
@@ -327,12 +326,9 @@ impl Blob {
             }
         }
 
-        // The flag clears only after a successful sync (a failure leaves it
-        // set for the next attempt), and only if no concurrent prune
-        // advanced the floor past the value written.
-        if dirty && self.floor.load(Ordering::Relaxed) == synced_floor {
-            self.floor_dirty.store(false, Ordering::Relaxed);
-        }
+        // The floor written above is durable, unless a prune advanced it
+        // mid-sync (a failure above leaves the mark set for a retry).
+        self.floor.lock().mark_synced(epoch);
         Ok(())
     }
 }
@@ -351,7 +347,7 @@ impl crate::Blob for Blob {
         let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via copy_from_slice below.
         unsafe { bufs.set_len(len) };
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if offset < floor {
             return Err(crate::Error::OffsetPruned(
                 self.partition.clone(),
@@ -380,7 +376,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), crate::Error> {
         let buf = bufs.into().coalesce();
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if offset < floor {
             return Err(crate::Error::OffsetPruned(
                 self.partition.clone(),
@@ -418,6 +414,14 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), crate::Error> {
         let bufs = bufs.into();
+        let floor = self.floor.lock().floor();
+        if offset < floor {
+            return Err(crate::Error::OffsetPruned(
+                self.partition.clone(),
+                hex(&self.name),
+                floor,
+            ));
+        }
         if !bufs.has_remaining() {
             return Ok(());
         }
@@ -432,14 +436,13 @@ impl crate::Blob for Blob {
         if offset > size {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        let old = self.floor.fetch_max(offset, Ordering::Relaxed);
-        if offset > old {
-            self.floor_dirty.store(true, Ordering::Relaxed);
-            // The in-memory analogue of hole punching: zero the newly
-            // pruned range in place. The zeroing is not recorded in the
-            // crash log either (see [Self::sync_inner]): it publishes at
-            // the same sync that persists the floor, so a crash rolls both
-            // back together.
+        // The in-memory analogue of hole punching: zero the newly pruned
+        // range in place, under the same content lock that publishes at
+        // sync, so every published image pairs the zeroed range with a
+        // covering floor. The zeroing is not recorded in the crash log
+        // either (see [Self::sync_inner]): it publishes at the same sync
+        // that persists the floor, so a crash rolls both back together.
+        if let Some(old) = self.floor.lock().advance(offset) {
             let start = Header::SIZE + old as usize;
             let stop = Header::SIZE + offset as usize;
             content[start..stop].fill(0);
@@ -448,11 +451,11 @@ impl crate::Blob for Blob {
     }
 
     fn floor(&self) -> u64 {
-        self.floor.load(Ordering::Relaxed)
+        self.floor.lock().floor()
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
-        let floor = self.floor.load(Ordering::Relaxed);
+        let floor = self.floor.lock().floor();
         if len < floor {
             return Err(crate::Error::OffsetPruned(
                 self.partition.clone(),
@@ -596,6 +599,13 @@ mod tests {
             blob.write_at_sync(15, b"x").await,
             Err(crate::Error::OffsetPruned(_, _, 16))
         ));
+        assert!(
+            matches!(
+                blob.write_at_sync(15, Vec::<u8>::new()).await,
+                Err(crate::Error::OffsetPruned(_, _, 16))
+            ),
+            "empty writes below the floor must fail like any other"
+        );
         assert!(matches!(
             blob.resize(15).await,
             Err(crate::Error::OffsetPruned(_, _, 16))
@@ -606,6 +616,43 @@ mod tests {
         assert_eq!(read.coalesce().as_ref(), &[7u8; 48]);
         blob.write_at(16, b"x").await.unwrap();
         blob.resize(16).await.unwrap();
+    }
+
+    /// A stored floor beyond the logical size is rejected at open: it
+    /// means a crash persisted the header while losing an unsynced data
+    /// extension, or the floor bytes were torn.
+    #[tokio::test]
+    async fn test_open_rejects_floor_beyond_size() {
+        let storage = Storage::new(test_pool());
+        let (blob, _) = storage.open("partition", b"floor").await.unwrap();
+        blob.write_at(0, vec![7u8; 64]).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let doctor = |floor: u64| {
+            let mut partitions = storage.partitions.lock();
+            let content = partitions
+                .get_mut("partition")
+                .unwrap()
+                .get_mut(&b"floor".to_vec())
+                .unwrap();
+            let header = Header::with_floor(0, floor);
+            content[..Header::SIZE].copy_from_slice(&header.encode());
+        };
+
+        // One past the size must fail loud (recovery is restore-or-recreate).
+        doctor(65);
+        let result = storage.open("partition", b"floor").await;
+        assert!(
+            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("floor")),
+            "a floor beyond the size must be rejected as corrupt"
+        );
+
+        // A floor at exactly the size is valid.
+        doctor(64);
+        let (blob, len) = storage.open("partition", b"floor").await.unwrap();
+        assert_eq!(len, 64);
+        assert_eq!(blob.floor(), 64);
     }
 
     #[tokio::test]
@@ -647,6 +694,82 @@ mod tests {
         drop(blob);
         let (blob, _) = storage.open("partition", b"prune").await.unwrap();
         assert_eq!(blob.floor(), 48);
+    }
+
+    /// A prune that happened-before a completed sync must be observed at
+    /// reopen: no interleaving of a stale in-flight sync may leave the
+    /// stored image carrying the older floor once a fresher sync
+    /// completed.
+    ///
+    /// The schedule is forced: one sync is parked at its publish while a
+    /// prune lands and a fresh sync races through the unlock window, so
+    /// at least some rounds the stale sync publishes last.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_concurrent_prune_sync_floor_persistence() {
+        const SIZE: u64 = 8192;
+        let storage = Storage::new(test_pool());
+        for round in 0..400u64 {
+            let name = format!("prune_race_{round}");
+            let (blob, _) = storage.open("partition", name.as_bytes()).await.unwrap();
+            blob.write_at(0, vec![7u8; SIZE as usize]).await.unwrap();
+            blob.sync().await.unwrap();
+            blob.prune(SIZE / 2).await.unwrap();
+
+            // Park a sync carrying the seeded floor at its publish.
+            let gate = storage.partitions.lock();
+            let stale = tokio::spawn({
+                let blob = blob.clone();
+                async move {
+                    blob.sync().await.unwrap();
+                }
+            });
+            let spin = std::time::Duration::from_nanos(20_000 * (round % 64));
+            let start = std::time::Instant::now();
+            while start.elapsed() < spin {
+                std::hint::spin_loop();
+            }
+
+            // Advance the floor, complete a sync strictly after it, and
+            // open the gate so both syncs race to publish.
+            let racer = tokio::spawn({
+                let blob = blob.clone();
+                async move {
+                    blob.prune(SIZE).await.unwrap();
+                    blob.sync().await.unwrap();
+                }
+            });
+            drop(gate);
+            racer.await.unwrap();
+            stale.await.unwrap();
+            drop(blob);
+
+            // The fresh sync completed after the prune to SIZE, so the
+            // stored header must parse and carry at least that floor.
+            {
+                let partitions = storage.partitions.lock();
+                let raw = partitions
+                    .get("partition")
+                    .unwrap()
+                    .get(name.as_bytes())
+                    .unwrap();
+                let mut header_bytes = [0u8; Header::SIZE];
+                header_bytes.copy_from_slice(&raw[..Header::SIZE]);
+                let (_, _, floor) =
+                    Header::from(header_bytes, raw.len() as u64, &(0..=0), Header::SIZE_U64)
+                        .expect("stored header must parse");
+                assert_eq!(floor, SIZE, "round {round}: synced floor lost");
+            }
+            let (blob, _) = storage.open("partition", name.as_bytes()).await.unwrap();
+            assert_eq!(
+                blob.floor(),
+                SIZE,
+                "round {round}: reopened floor regressed"
+            );
+            storage
+                .remove("partition", Some(name.as_bytes()))
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]
