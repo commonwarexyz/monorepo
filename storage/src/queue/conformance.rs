@@ -13,6 +13,9 @@ use core::num::{NonZeroU16, NonZeroUsize};
 use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+/// Workload size bound (the pre-single-blob workload drew up to four
+/// 64-item sections).
+const MAX_ITEMS: usize = 256;
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
@@ -41,7 +44,7 @@ impl StorageWorkload for QueueWorkload {
         )
         .await?;
 
-        let items_count = context.random_range(1..(ITEMS_PER_SECTION.get() as usize) * 4);
+        let items_count = context.random_range(1..MAX_ITEMS);
         let mut data = vec![Vec::new(); items_count];
         for item in data.iter_mut() {
             let size = context.random_range(0..256);
