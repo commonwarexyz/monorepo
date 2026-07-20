@@ -426,11 +426,6 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             Err(e) => return Err(e),
         };
 
-        // Make retained values durable before their entries: the index sync below flushes
-        // retained entries whose values may still be buffered, and an entry must never be
-        // adoptable ahead of its value bytes.
-        self.values.sync(section).await?;
-
         // Make the index truncation durable before the values are rewound: rewinding the
         // values frees their ranges for reuse by later appends, and a dropped index entry
         // that stayed durable would be adopted referencing whatever bytes a later append
@@ -465,9 +460,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             Err(e) => return Err(e),
         };
 
-        // Make retained values, then the index truncation, durable before the values are
-        // rewound (see Self::rewind).
-        self.values.sync(section).await?;
+        // Make the index truncation durable before the values are rewound (see Self::rewind).
         self.index.sync(section).await?;
 
         // Rewind values
@@ -932,9 +925,9 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Boot 2: the glob cannot be synced, so `rewind` must fail before either
-            // truncation is made durable, rather than let later appends reuse entry 1's
-            // still-durable value range.
+            // Boot 2: the glob cannot be synced, so `rewind` must fail rather than return
+            // with a values truncation that is not durable (later appends could otherwise
+            // reuse entry 1's still-durable value range).
             let faulty_values = SyncFaultContext {
                 inner: context.child("second"),
                 fail_partition: "test-values".into(),
@@ -949,17 +942,14 @@ mod tests {
             );
         });
 
-        // Neither truncation was synced, so the deterministic crash model recovers the
-        // exact pre-rewind state. A real backend may incidentally persist the truncations
-        // and recover the post-rewind state instead, which is equally consistent.
+        // The index truncation was made durable before the failure, so recovery completes
+        // the rewind: the dropped entry must not be adopted.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("third"), test_cfg(&context))
                     .await
                     .expect("Failed to reinit");
-            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-            assert_eq!(oversized.size(1).expect("size"), chunk);
-            assert_adopted_entries_consistent(&oversized).await;
+            assert_eq!(oversized.size(1).expect("size"), 0);
             oversized.destroy().await.expect("Failed to destroy");
         });
     }
