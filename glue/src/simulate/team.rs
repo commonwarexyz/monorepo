@@ -7,7 +7,7 @@ use super::{
     tracker::FinalizationUpdate,
 };
 use commonware_p2p::simulated::{Link, Oracle};
-use commonware_runtime::{deterministic, Handle, Supervisor as _};
+use commonware_runtime::{Handle, Supervisor as _, deterministic};
 use commonware_utils::channel::mpsc;
 use std::collections::{BTreeMap, HashSet};
 use tracing::info;

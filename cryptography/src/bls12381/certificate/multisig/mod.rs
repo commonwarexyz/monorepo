@@ -7,22 +7,22 @@
 pub mod mocks;
 
 use crate::{
+    Digest, PublicKey,
     bls12381::primitives::{
         group::Private,
         ops::{self, aggregate, batch},
         variant::Variant,
     },
     certificate::{Attestation, Namespace, Scheme, Signers, Subject, Verification},
-    Digest, PublicKey,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    ordered::{BiMap, Quorum, Set},
     Faults, Participant,
+    ordered::{BiMap, Quorum, Set},
 };
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -602,6 +602,7 @@ macro_rules! impl_certificate_bls12381_multisig {
 mod tests {
     use super::*;
     use crate::{
+        Signer as _,
         bls12381::primitives::{
             group::{Private, Scalar},
             ops::compute_public,
@@ -610,13 +611,12 @@ mod tests {
         certificate::{Attestation, Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
-        Signer as _,
     };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::BiMap, test_rng, Faults, N3f1, Participant, TryCollect};
+    use commonware_utils::{Faults, N3f1, Participant, TryCollect, ordered::BiMap, test_rng};
 
     const NAMESPACE: &[u8] = b"test-bls12381-multisig";
     const MESSAGE: &[u8] = b"test message";
@@ -718,11 +718,13 @@ mod tests {
     fn test_verifier_cannot_sign<V: Variant>() {
         let mut rng = test_rng();
         let (_, verifier) = setup_signers::<V>(&mut rng, 4);
-        assert!(verifier
-            .sign::<Sha256Digest>(TestSubject {
-                message: Bytes::from_static(MESSAGE)
-            })
-            .is_none());
+        assert!(
+            verifier
+                .sign::<Sha256Digest>(TestSubject {
+                    message: Bytes::from_static(MESSAGE)
+                })
+                .is_none()
+        );
     }
 
     #[test]
@@ -995,9 +997,11 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .is_none());
+        assert!(
+            schemes[0]
+                .assemble::<_, N3f1>(attestations, &Sequential)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1025,9 +1029,11 @@ mod tests {
         // Corrupt signer index to be out of range
         attestations[0].signer = Participant::new(999);
 
-        assert!(schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .is_none());
+        assert!(
+            schemes[0]
+                .assemble::<_, N3f1>(attestations, &Sequential)
+                .is_none()
+        );
     }
 
     #[test]

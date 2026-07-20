@@ -178,22 +178,22 @@ impl Tree {
             // Only continue walking upward when this loop owns the final strong
             // reference to `node`. Child links are weak, so `strong_count == 1`
             // means no live descendant or external handle still depends on it.
-            if Arc::strong_count(&node) == 1 {
-                if let Some(parent) = node.parent.lock().take() {
-                    // Move the parent `Arc` out of `node` before dropping
-                    // `node`. This leaves `node.parent = None`, so `drop(node)`
-                    // cannot recurse into the parent. The local `parent`
-                    // variable now owns that strong reference until we push it
-                    // onto `pending` for the next iteration.
-                    //
-                    // Because `Drop` will no longer observe this parent edge,
-                    // account for the stale weak child entry before releasing
-                    // `node`.
-                    let mut parent_inner = parent.inner.lock();
-                    parent_inner.children.mark_stale();
-                    drop(parent_inner);
-                    pending.push(parent);
-                }
+            if Arc::strong_count(&node) == 1
+                && let Some(parent) = node.parent.lock().take()
+            {
+                // Move the parent `Arc` out of `node` before dropping
+                // `node`. This leaves `node.parent = None`, so `drop(node)`
+                // cannot recurse into the parent. The local `parent`
+                // variable now owns that strong reference until we push it
+                // onto `pending` for the next iteration.
+                //
+                // Because `Drop` will no longer observe this parent edge,
+                // account for the stale weak child entry before releasing
+                // `node`.
+                let mut parent_inner = parent.inner.lock();
+                parent_inner.children.mark_stale();
+                drop(parent_inner);
+                pending.push(parent);
             }
             // If another strong owner still exists, dropping our handle only
             // decrements that count and the remaining ancestry stays reachable
@@ -222,7 +222,7 @@ impl Drop for Tree {
 mod tests {
     use super::*;
     use crate::{telemetry::metrics::raw::Gauge, utils::MetricHandle};
-    use futures::future::{pending, AbortHandle, Abortable};
+    use futures::future::{AbortHandle, Abortable, pending};
 
     fn aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
         let gauge = Gauge::default();

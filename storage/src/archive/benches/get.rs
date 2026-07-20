@@ -1,14 +1,14 @@
 //! Random key-lookup benchmark for Archive.
 
-use super::utils::{append_random, Archive, Key, Variant};
+use super::utils::{Archive, Key, Variant, append_random};
 use commonware_runtime::{
+    Runner,
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner,
 };
 use commonware_storage::archive::{Archive as ArchiveTrait, Identifier};
 use commonware_utils::TestRng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use futures::future::try_join_all;
 use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};

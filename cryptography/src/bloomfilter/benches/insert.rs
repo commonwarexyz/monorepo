@@ -1,6 +1,6 @@
-use commonware_cryptography::{blake3::Blake3, sha256::Sha256, BloomFilter, Hasher};
-use commonware_utils::{rational::BigRationalExt, TestRng};
-use criterion::{criterion_group, BatchSize, Criterion};
+use commonware_cryptography::{BloomFilter, Hasher, blake3::Blake3, sha256::Sha256};
+use commonware_utils::{TestRng, rational::BigRationalExt};
+use criterion::{BatchSize, Criterion, criterion_group};
 use num_rational::BigRational;
 use rand::Rng;
 use std::num::NonZeroUsize;

@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{deterministic::AuditHasher, Buf, BufferPool, Handle, IoBufs, IoBufsMut};
+use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, deterministic::AuditHasher};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
@@ -258,8 +258,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
-        Storage as _,
+        Blob, BufferPoolConfig, Storage as _, storage::tests::run_storage_tests,
+        telemetry::metrics::Registry,
     };
 
     fn test_pool() -> BufferPool {

@@ -1,11 +1,11 @@
 //! `clean` subcommand for `ec2`
 
 use crate::aws::{
+    Error, MONITORING_REGION,
     s3::{
         self, delete_bucket_and_contents, delete_bucket_config, get_bucket_name_if_exists,
         is_no_such_bucket_error,
     },
-    Error, MONITORING_REGION,
 };
 use aws_config::Region;
 use tracing::info;

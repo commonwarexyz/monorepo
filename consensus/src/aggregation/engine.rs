@@ -1,37 +1,37 @@
 //! Engine for the module.
 
 use super::{
-    metrics,
+    Config, metrics,
     safe_tip::SafeTip,
     types::{Ack, Activity, Error, Item, TipAck},
-    Config,
 };
 use crate::{
+    Automaton, Monitor, Reporter,
     aggregation::{scheme, types::Certificate},
     types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
-    Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{
-    certificate::{Provider, Scheme, Verifier},
     Digest,
+    certificate::{Provider, Scheme, Verifier},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
-    telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
+use commonware_utils::{N3f1, PrioritySet, futures::Pool as FuturesPool, ordered::Quorum};
 use futures::{
+    StreamExt,
     future::{self, Either},
-    pin_mut, StreamExt,
+    pin_mut,
 };
 use rand_core::CryptoRng;
 use std::{
@@ -151,15 +151,15 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
-        P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
-        D: Digest,
-        A: Automaton<Context = Height, Digest = D>,
-        Z: Reporter<Activity = Activity<P::Scheme, D>>,
-        M: Monitor<Index = Epoch>,
-        B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-        T: Strategy,
-    > Engine<E, P, D, A, Z, M, B, T>
+    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
+    P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
+    D: Digest,
+    A: Automaton<Context = Height, Digest = D>,
+    Z: Reporter<Activity = Activity<P::Scheme, D>>,
+    M: Monitor<Index = Epoch>,
+    B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    T: Strategy,
+> Engine<E, P, D, A, Z, M, B, T>
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<P, D, A, Z, M, B, T>) -> Self {
@@ -278,10 +278,11 @@ impl<
                 // Underflow safe: next >= self.tip is guaranteed by next()
                 if next.delta_from(self.tip).unwrap() < self.window {
                     trace!(%next, "requesting new digest");
-                    assert!(self
-                        .pending
-                        .insert(next, Pending::Unverified(BTreeMap::new()))
-                        .is_none());
+                    assert!(
+                        self.pending
+                            .insert(next, Pending::Unverified(BTreeMap::new()))
+                            .is_none()
+                    );
                     self.get_digest(next);
                     continue;
                 }
@@ -524,11 +525,11 @@ impl<
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
             .collect::<Vec<_>>();
-        if filtered.len() >= quorum as usize {
-            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &self.strategy) {
-                self.metrics.certificates.inc();
-                self.handle_certificate(certificate).await;
-            }
+        if filtered.len() >= quorum as usize
+            && let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &self.strategy)
+        {
+            self.metrics.certificates.inc();
+            self.handle_certificate(certificate).await;
         }
 
         Ok(())

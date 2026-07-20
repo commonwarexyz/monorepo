@@ -6,16 +6,16 @@ use crate::{
     types::{Epoch, Height},
 };
 use commonware_actor::{
-    mailbox::{self, Policy, Receiver, Sender},
     Feedback,
+    mailbox::{self, Policy, Receiver, Sender},
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_parallel::Sequential;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{channel::oneshot, NZUsize};
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_utils::{NZUsize, channel::oneshot};
 use rand_core::CryptoRng;
-use std::collections::{btree_map::Entry, BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque, btree_map::Entry};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<S: Scheme, D: Digest> {

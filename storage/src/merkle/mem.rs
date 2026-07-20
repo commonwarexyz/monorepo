@@ -5,8 +5,8 @@
 //! `mmr::mem::Mmr` and `mmb::mem::Mmb` via type aliases.
 
 use crate::merkle::{
-    batch, hasher::Hasher, proof as merkle_proof, Error, Family, Location, Position, Proof,
-    Readable,
+    Error, Family, Location, Position, Proof, Readable, batch, hasher::Hasher,
+    proof as merkle_proof,
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -176,7 +176,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Return a new iterator over the peaks.
-    pub fn peak_iterator(&self) -> impl Iterator<Item = (Position<F>, u32)> {
+    pub fn peak_iterator(&self) -> impl Iterator<Item = (Position<F>, u32)> + use<F, D> {
         F::peaks(self.size())
     }
 
@@ -482,11 +482,11 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
 mod tests {
     use super::*;
     use crate::merkle::{
-        hasher::Standard, Bagging, Bagging::ForwardFold, Error, Location, Position,
+        Bagging, Bagging::ForwardFold, Error, Location, Position, hasher::Standard,
     };
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Strategizer};
+    use commonware_runtime::{Runner as _, Strategizer, deterministic};
     use commonware_utils::NZUsize;
 
     type D = sha256::Digest;
@@ -587,9 +587,10 @@ mod tests {
                 mem.range_proof(&hasher, Location::new(5)..Location::new(11), 0),
                 Err(Error::RangeOutOfBounds(_))
             ));
-            assert!(mem
-                .range_proof(&hasher, Location::new(5)..Location::new(10), 0)
-                .is_ok());
+            assert!(
+                mem.range_proof(&hasher, Location::new(5)..Location::new(10), 0)
+                    .is_ok()
+            );
         });
     }
 
@@ -616,12 +617,14 @@ mod tests {
         executor.start(|_| async move {
             let hasher: H = Standard::new(ForwardFold);
 
-            assert!(Mem::<F, D>::init(Config {
-                nodes: vec![],
-                pruning_boundary: Location::new(0),
-                pinned_nodes: vec![],
-            })
-            .is_ok());
+            assert!(
+                Mem::<F, D>::init(Config {
+                    nodes: vec![],
+                    pruning_boundary: Location::new(0),
+                    pinned_nodes: vec![],
+                })
+                .is_ok()
+            );
 
             assert!(matches!(
                 Mem::<F, D>::init(Config {
@@ -644,12 +647,14 @@ mod tests {
             let mem = build::<F>(&hasher, 50);
             let prune_loc = Location::<F>::new(25);
             let pinned_nodes = mem.node_digests_to_pin(prune_loc);
-            assert!(Mem::<F, D>::init(Config {
-                nodes: vec![],
-                pruning_boundary: prune_loc,
-                pinned_nodes,
-            })
-            .is_ok());
+            assert!(
+                Mem::<F, D>::init(Config {
+                    nodes: vec![],
+                    pruning_boundary: prune_loc,
+                    pinned_nodes,
+                })
+                .is_ok()
+            );
         });
     }
 

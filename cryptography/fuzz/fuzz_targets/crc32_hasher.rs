@@ -3,10 +3,10 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    crc32::{Crc32 as OurCrc32, Digest},
     Hasher,
+    crc32::{Crc32 as OurCrc32, Digest},
 };
-use crc::{Crc, CRC_32_ISCSI};
+use crc::{CRC_32_ISCSI, Crc};
 use libfuzzer_sys::fuzz_target;
 
 /// Reference CRC32C implementation from the `crc` crate.

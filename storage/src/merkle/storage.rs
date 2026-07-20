@@ -1,6 +1,6 @@
 //! Async read-only trait for merkleized data structures.
 
-use crate::merkle::{mem::Mem, Error, Family, Position};
+use crate::merkle::{Error, Family, Position, mem::Mem};
 use commonware_cryptography::Digest;
 use core::future::Future;
 

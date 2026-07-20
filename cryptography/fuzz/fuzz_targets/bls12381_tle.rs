@@ -14,7 +14,7 @@ use commonware_cryptography::bls12381::{
         ops::{compute_public, sign_message},
         variant::{MinPk, MinSig, Variant},
     },
-    tle::{decrypt, encrypt, Block, Ciphertext},
+    tle::{Block, Ciphertext, decrypt, encrypt},
 };
 use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;

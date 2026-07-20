@@ -1,13 +1,13 @@
 //! Handshake conformance tests
 
 use crate::{
-    ed25519::PrivateKey,
-    handshake::{dial_end, dial_start, listen_end, listen_start, Context},
-    transcript::Transcript,
     Signer,
+    ed25519::PrivateKey,
+    handshake::{Context, dial_end, dial_start, listen_end, listen_start},
+    transcript::Transcript,
 };
 use commonware_codec::Encode;
-use commonware_conformance::{conformance_tests, Conformance};
+use commonware_conformance::{Conformance, conformance_tests};
 use commonware_math::algebra::Random;
 use rand::{RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;

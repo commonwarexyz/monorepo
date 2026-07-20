@@ -260,21 +260,21 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{
+        CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider, Receiver, Recipients,
+        Sender,
         authenticated::{
             discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
             relay::Relay,
         },
-        CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider, Receiver, Recipients,
-        Sender,
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::{ed25519, Signer as _};
+    use commonware_cryptography::{Signer as _, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock, Handle,
-        IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
+        BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
+        Spawner, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks, tokio,
     };
-    use commonware_utils::{channel::mpsc, hostname, ordered::Set, NZUsize, TryCollect, NZU32};
+    use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
     use rand_core::{CryptoRng, Rng};
     use std::{
         collections::HashSet,

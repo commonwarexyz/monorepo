@@ -1,21 +1,21 @@
 use crate::{
+    Channel, Recipients,
     authenticated::{
         data::EncodedData,
         discovery::{channels::Channels, types},
         relay::Relay,
     },
     utils::limited::Connected,
-    Channel, Recipients,
 };
 use commonware_actor::{
-    mailbox::{self, UnreliablePolicy},
     Feedback, Unreliable,
+    mailbox::{self, UnreliablePolicy},
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
-    channel::{oneshot, ring},
     NZUsize,
+    channel::{oneshot, ring},
 };
 use std::{collections::VecDeque, fmt};
 
@@ -149,11 +149,11 @@ impl<P: PublicKey> Connected for Messenger<P> {
 mod tests {
     use super::*;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer as _,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        deterministic, BufferPooler as _, IoBuf, Runner as _, Supervisor as _,
+        BufferPooler as _, IoBuf, Runner as _, Supervisor as _, deterministic,
     };
 
     #[test]

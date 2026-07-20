@@ -7,8 +7,8 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
-use tracing::{field, span, Event, Level, Subscriber};
-use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
+use tracing::{Event, Level, Subscriber, field, span};
+use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 /// An error that occurs when a trace assertion fails.
 #[derive(Error, Debug, Clone, Eq, PartialEq)]
@@ -334,7 +334,7 @@ where
             }
         }
 
-        let mut storage = self.0 .0.lock();
+        let mut storage = self.0.0.lock();
         storage.push(RecordedEvent {
             level,
             target: metadata.target().to_string(),

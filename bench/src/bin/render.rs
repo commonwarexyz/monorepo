@@ -1,6 +1,6 @@
 use crate::{
     config::{Benchmark, Gate},
-    results::{display_metrics, Comparison},
+    results::{Comparison, display_metrics},
 };
 use std::collections::BTreeSet;
 

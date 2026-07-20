@@ -4,15 +4,15 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
-    qmdb::any::{unordered::fixed::Db as AnyDb, FixedConfig as Config},
+    merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
+    qmdb::any::{FixedConfig as Config, unordered::fixed::Db as AnyDb},
     translator::OneCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -95,6 +95,8 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
         },
         translator: OneCap,
         init_cache_size: Some(NZUsize!(3)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -115,7 +117,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
     runner.start(|context| async move {
         let cfg = test_config(suffix, &context);
-        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
+        let db: Db<F> = Db::init(context.child("storage"), cfg)
             .await
             .expect("init unordered any db");
 
@@ -129,8 +131,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             );
         }
         let initial = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(initial).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(initial).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Build a parent batch, then build the child while the parent is still
         // pending so the child must resolve through base_diff plus the stale
@@ -158,8 +160,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
         // Commit the parent, then rebuild the same logical child from the
         // committed DB state. Both speculative roots must match.
-        db.apply_batch(parent).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         let mut batch = db.new_batch();
         for mutation in &input.child {
@@ -179,7 +181,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         );
 
         // Apply the pending child and verify the DB state matches.
-        db.apply_batch(pending_child).await.unwrap();
+        let (db, _) = db.apply_batch(pending_child).await.unwrap();
         assert_eq!(
             db.root(),
             committed_child.root(),

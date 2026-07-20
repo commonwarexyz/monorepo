@@ -5,10 +5,10 @@
 
 use super::Error;
 use commonware_codec::{
-    varint::{UInt, MAX_U32_VARINT_SIZE},
     Codec, EncodeSize, ReadExt as _, Write as _,
+    varint::{MAX_U32_VARINT_SIZE, UInt},
 };
-use commonware_runtime::{buffer::paged::Writer, Blob, Buf, IoBufMut, IoBufs};
+use commonware_runtime::{Blob, Buf, IoBufMut, IoBufs, buffer::paged::Writer};
 use std::{future::Future, io::Cursor};
 use zstd::{bulk::compress, decode_all};
 

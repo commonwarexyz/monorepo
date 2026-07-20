@@ -177,7 +177,7 @@ mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
+    use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
 
     #[test]
     fn test_codec_request() {

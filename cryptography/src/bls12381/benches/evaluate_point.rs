@@ -1,8 +1,8 @@
-use commonware_cryptography::bls12381::primitives::group::{Scalar, G1};
+use commonware_cryptography::bls12381::primitives::group::{G1, Scalar};
 use commonware_math::{algebra::Random, poly::Poly};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{test_rng, Faults, N3f1, NZUsize};
-use criterion::{criterion_group, BatchSize, Criterion};
+use commonware_utils::{Faults, N3f1, NZUsize, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_evaluate_point(c: &mut Criterion) {

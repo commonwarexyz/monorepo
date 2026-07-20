@@ -9,16 +9,16 @@
 //!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
 //!   optimizes for.
 
-use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
+use crate::common::{CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, seed_db, write_random_updates};
 use commonware_bench::{Benchmark, Metric, Workload};
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
+    BufferPooler, Metrics as _, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Metrics as _, Strategizer, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -26,8 +26,8 @@ use commonware_storage::{
     qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
-use criterion::{criterion_group, Criterion};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     marker::PhantomData,
@@ -329,6 +329,8 @@ pub(crate) fn any_fix_cfg_with_cache(
         journal_config: fix_log_cfg(pc),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -341,6 +343,8 @@ fn any_var_cfg_with_cache(
         journal_config: var_log_cfg(pc),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -354,6 +358,8 @@ pub(crate) fn cur_fix_cfg_with_cache(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -367,6 +373,8 @@ fn cur_var_cfg_with_cache(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -378,22 +386,22 @@ fn cur_var_cfg_with_cache(
 /// the workload optimized by bitmap-backed floor raising.
 #[boxed]
 async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
-    mut db: C,
+    db: C,
     num_keys: u64,
     churn_batches: u64,
     iters: u64,
 ) -> Duration {
-    seed_db(&mut db, num_keys).await;
+    let mut db = seed_db(db, num_keys).await;
     let num_updates = num_keys / 10;
     let mut rng = TestRng::new(99);
 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        (db, _) = db.apply_batch(merkleized).await.unwrap();
     }
-    db.commit().await.unwrap();
-    db.sync().await.unwrap();
+    let db = db.commit().await.unwrap();
+    let db = db.sync().await.unwrap();
 
     let mut total = Duration::ZERO;
     for _ in 0..iters {
@@ -478,13 +486,14 @@ where
     type Output = Digest;
 
     async fn setup(&mut self) {
-        let Some(db) = self.db.as_mut() else {
+        let Some(db) = self.db.take() else {
             panic!("database must be present during setup");
         };
-        seed_db(db, self.options.num_keys).await;
+        let mut db = seed_db(db, self.options.num_keys).await;
         if self.options.seed_sync {
-            db.sync().await.unwrap();
+            db = db.sync().await.unwrap();
         }
+        self.db = Some(db);
         if self.options.clear_cache {
             self.page_cache.clear();
         }
@@ -748,11 +757,7 @@ cfg_if::cfg_if! {
 }
 
 const fn main_num_keys(seed_sync: bool) -> &'static [u64] {
-    if seed_sync {
-        SYNC_NUM_KEYS
-    } else {
-        NUM_KEYS
-    }
+    if seed_sync { SYNC_NUM_KEYS } else { NUM_KEYS }
 }
 
 fn bench_merkleize(c: &mut Criterion) {

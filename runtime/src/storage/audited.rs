@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error, Handle, IoBufs, IoBufsMut};
+use crate::{Error, Handle, IoBufs, IoBufsMut, deterministic::Auditor};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -162,14 +162,14 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut,
+        Storage as _,
         deterministic::Auditor,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
         telemetry::metrics::Registry,
-        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut,
-        Storage as _,
     };
     use commonware_utils::sync::Mutex;
     use std::sync::Arc;

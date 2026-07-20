@@ -1,8 +1,8 @@
 use crate::qmdb::{
     any::{
-        operation::{update::sealed::Sealed, Update as UpdateTrait},
-        value::{FixedEncoding, ValueEncoding, VariableEncoding},
         FixedValue, VariableValue,
+        operation::{Update as UpdateTrait, update::sealed::Sealed},
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
     },
     operation::Key,
 };
@@ -45,6 +45,10 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
 
     fn key(&self) -> &K {
         &self.0
+    }
+
+    fn into_key(self) -> K {
+        self.0
     }
 
     fn value(&self) -> &V::Value {

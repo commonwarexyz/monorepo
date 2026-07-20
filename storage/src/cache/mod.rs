@@ -130,9 +130,9 @@ mod tests {
     use crate::journal::Error as JournalError;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::has_metric_value, Metrics as _, Runner, Supervisor as _,
+        Metrics as _, Runner, Supervisor as _, deterministic, telemetry::metrics::has_metric_value,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use rand::RngExt as _;
     use std::{collections::BTreeMap, num::NonZeroU16};
 

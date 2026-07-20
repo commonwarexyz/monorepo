@@ -5,10 +5,10 @@ use commonware_utils::{
     futures::{AbortablePool, Aborter},
 };
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{BTreeMap, btree_map::Entry},
     sync::Arc,
 };
-use tracing::{info_span, Span};
+use tracing::{Span, info_span};
 
 /// A set of local subscribers waiting for one block.
 ///
@@ -127,13 +127,13 @@ mod tests {
         types::{Height, Round},
     };
     use commonware_cryptography::{
+        Digestible,
         ed25519::PublicKey,
         sha256::{Digest, Sha256},
-        Digestible,
     };
     use commonware_macros::select;
     use commonware_p2p::Recipients;
-    use commonware_runtime::{deterministic, Clock, Runner as _};
+    use commonware_runtime::{Clock, Runner as _, deterministic};
     use commonware_utils::sync::Mutex;
     use futures::FutureExt;
     use std::sync::Arc;

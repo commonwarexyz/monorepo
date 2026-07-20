@@ -8,8 +8,9 @@
 use crate::{Hasher, Key, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer, BufferPooler};
+use commonware_runtime::{BufferPooler, buffer};
 use commonware_storage::{
+    Context,
     journal::contiguous::fixed::Config as FConfig,
     merkle::{
         full::Config as MmrConfig,
@@ -21,9 +22,8 @@ use commonware_storage::{
         operation::Committable,
         sync::compact,
     },
-    Context,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use std::num::NonZeroU64;
 use tracing::error;
 
@@ -95,13 +95,13 @@ where
     }
 
     async fn add_operations(
-        &mut self,
+        mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), qmdb::Error<mmr::Family>> {
+    ) -> Result<Self, qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
-            return Ok(());
+            return Ok(self);
         }
 
         let mut batch = self.new_batch();
@@ -111,14 +111,14 @@ where
                     batch = batch.append(value);
                 }
                 Operation::Commit(metadata, floor) => {
-                    let merkleized = batch.merkleize(self, metadata, floor).await;
-                    self.apply_batch(merkleized).await?;
-                    self.commit().await?;
+                    let merkleized = batch.merkleize(&self, metadata, floor).await;
+                    (self, _) = self.apply_batch(merkleized).await?;
+                    self = self.commit().await?;
                     batch = self.new_batch();
                 }
             }
         }
-        Ok(())
+        Ok(self)
     }
 
     fn current_floor(&self) -> u64 {

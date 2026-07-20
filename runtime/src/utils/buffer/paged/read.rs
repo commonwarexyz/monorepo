@@ -383,9 +383,9 @@ impl<B: Blob> Buf for Replay<B> {
 #[cfg(test)]
 mod tests {
     use super::{super::writer::Writer, *};
-    use crate::{deterministic, Runner as _, Storage as _};
+    use crate::{Runner as _, Storage as _, deterministic};
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{NZU16, NZUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
     const BUFFER_PAGES: usize = 2;

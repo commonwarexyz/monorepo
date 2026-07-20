@@ -1,22 +1,22 @@
 use crate::{
+    Error,
     telemetry::metrics::raw::Gauge,
     utils::{extract_panic_message, supervision::Tree},
-    Error,
 };
 use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, Once},
 };
 use futures::{
-    future::{select, Either},
+    FutureExt as _,
+    future::{Either, select},
     pin_mut,
     stream::{AbortHandle, Abortable, Aborted},
-    FutureExt as _,
 };
 use std::{
     any::Any,
     future::Future,
-    panic::{resume_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, resume_unwind},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -372,7 +372,7 @@ impl Aborter {
 #[cfg(test)]
 mod tests {
     use super::Handle;
-    use crate::{deterministic, Error, Metrics as _, Runner, Spawner, Supervisor as _};
+    use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::channel::oneshot;
     use futures::future;
 

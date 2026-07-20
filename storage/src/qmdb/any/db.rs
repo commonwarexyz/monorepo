@@ -2,26 +2,25 @@
 //!
 //! The impl blocks in this file define shared functionality across all Any QMDB variants.
 
-use super::operation::{update::Update, Operation};
+use super::operation::{Operation, update::Update};
 use crate::{
+    Context,
     index::Unordered as UnorderedIndex,
     journal::{
-        authenticated,
+        Error as JournalError, authenticated,
         contiguous::{Contiguous, Mutable},
-        Error as JournalError,
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        bitmap::Shared, build_snapshot_from_log, delete_known_loc, metrics::Metrics,
-        operation::Operation as OperationTrait, update_known_loc, Error,
+        Error, bitmap::Shared, delete_known_loc, metrics::Metrics,
+        operation::Operation as OperationTrait, update_known_loc,
     },
-    Context,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -118,6 +117,25 @@ pub struct Db<
 
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,
+}
+
+impl<F, E, U, C, I, H, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Db")
+            .field("bounds", &self.bounds())
+            .field("inactivity_floor_loc", &self.inactivity_floor_loc)
+            .finish_non_exhaustive()
+    }
 }
 
 // Shared read-only functionality.
@@ -410,10 +428,11 @@ where
     ///
     /// - Returns [crate::qmdb::Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [`crate::merkle::Family::MAX_LEAVES`].
+    #[boxed]
     pub(crate) async fn prune_log(
-        &mut self,
+        mut self,
         prune_loc: Location<F>,
-    ) -> Result<Location<F>, crate::qmdb::Error<F>> {
+    ) -> Result<(Self, Location<F>), crate::qmdb::Error<F>> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -421,7 +440,9 @@ where
             ));
         }
 
-        Ok(self.log.prune(prune_loc).await?)
+        let boundary;
+        (self.log, boundary) = self.log.prune(prune_loc).await?;
+        Ok((self, boundary))
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -438,13 +459,14 @@ where
             inactivity_floor = *self.inactivity_floor_loc,
         ),
     )]
-    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
+    #[boxed]
+    pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
-        let actual_pruned = self.prune_log(prune_loc).await?;
-        self.prune_bitmap(actual_pruned);
-        self.update_metrics();
-        Ok(())
+        let (mut db, actual_pruned) = self.prune_log(prune_loc).await?;
+        db.prune_bitmap(actual_pruned);
+        db.update_metrics();
+        Ok(db)
     }
 
     /// Returns a historical proof for `historical_size` operations, anchored at `start_loc`
@@ -531,12 +553,13 @@ where
             prev_size = *self.last_commit_loc + 1,
         ),
     )]
-    pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
+    #[boxed]
+    pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
 
         if rewind_size == current_size {
-            return Ok(());
+            return Ok(self);
         }
         if rewind_size == 0 || rewind_size > current_size {
             return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
@@ -570,7 +593,7 @@ where
                 match op {
                     Operation::CommitFloor(_, _) => {}
                     Operation::Update(update) => {
-                        let key = update.key().clone();
+                        let key = update.into_key();
                         let previous_loc = prior_state_by_key.get(&key).copied().flatten();
 
                         if loc >= rewind_size {
@@ -594,14 +617,14 @@ where
                     Operation::Delete(key) => {
                         let previous_loc = prior_state_by_key.get(&key).copied().flatten();
 
-                        if loc >= rewind_size {
-                            if let Some(previous_loc) = previous_loc {
-                                active_keys_delta += 1;
-                                undos.push(SnapshotUndo::Insert {
-                                    key: key.clone(),
-                                    new_loc: previous_loc,
-                                });
-                            }
+                        if loc >= rewind_size
+                            && let Some(previous_loc) = previous_loc
+                        {
+                            active_keys_delta += 1;
+                            undos.push(SnapshotUndo::Insert {
+                                key: key.clone(),
+                                new_loc: previous_loc,
+                            });
                         }
 
                         prior_state_by_key.insert(key, None);
@@ -615,10 +638,9 @@ where
             (rewind_floor, undos, active_keys_delta)
         };
 
-        // Journal rewind happens before in-memory undo application. If any later step fails, this
-        // handle may be internally diverged and must be dropped by the caller. This step is not
-        // restart-stable until a later commit/sync boundary.
-        self.log.rewind(rewind_size).await?;
+        // Journal rewind happens before in-memory undo application. This step is not
+        // restart-stable until a later commit/sync.
+        self.log = self.log.rewind(rewind_size).await?;
 
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below
         // rewind_size flip back to active in the loop below. `rewind_size >= bitmap.pruned_bits()`
@@ -677,7 +699,7 @@ where
             .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
         self.update_metrics();
 
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -695,19 +717,32 @@ where
 {
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
-    /// from grafted metadata).
+    /// from grafted metadata). `init_concurrency` is the index's snapshot-build concurrency
+    /// (see [crate::qmdb::SnapshotBuild::Concurrency]).
     ///
     /// # Panics
     ///
     /// Panics if the last operation is not a commit floor operation. Empty logs are handled
     /// upstream by [`crate::qmdb::any::init_with_bitmap`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn init_from_log(
+        context: E,
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
+        init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+        init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
         metrics: Metrics<E>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
+    ) -> Result<Self, crate::qmdb::Error<F>>
+    where
+        E: Spawner,
+        I: crate::qmdb::SnapshotBuild<F>,
+        C: 'static,
+    {
+        // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
+        // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
+        let log = Arc::new(log);
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let bounds = log.bounds();
             let last_commit_loc = Location::new(
@@ -717,15 +752,26 @@ where
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &log,
+                &*log,
                 Location::new(bounds.end),
                 |op| op.has_floor(),
             )
             .await?;
 
+            // Build the snapshot, collecting each replayed location's activity status.
+            let (active_keys, activity) = index
+                .build_snapshot(
+                    context,
+                    inactivity_floor_loc,
+                    &log,
+                    init_concurrency,
+                    init_buffer,
+                    cache_size,
+                )
+                .await?;
+
             // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
-            // [pruned_bits, bounds.start) correspond to pruned operations and remain 0; replay
-            // appends bits from the inactivity floor onward.
+            // [pruned_bits, bounds.start) correspond to pruned operations and remain 0.
             let bitmap = shared_bitmap.unwrap_or_else(|| {
                 let pruned_chunks =
                     (bounds.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
@@ -734,11 +780,12 @@ where
                 Arc::new(Shared::new(bm))
             });
 
-            // Extend the bitmap up to the inactivity floor (zero-fill).
+            // Extend the bitmap up to the inactivity floor (zero-fill), then append the replayed
+            // suffix, all under a single lock acquisition.
             {
                 let mut guard = bitmap.write();
                 // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
-                // inactivity floor; otherwise `extend_to` would silently leave gaps.
+                // inactivity floor. Anything past it would make `extend_to` silently leave gaps.
                 assert!(
                     guard.pruned_bits() <= *inactivity_floor_loc,
                     "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
@@ -746,36 +793,16 @@ where
                     *inactivity_floor_loc,
                 );
                 guard.extend_to(*inactivity_floor_loc);
+                for is_active in activity.iter() {
+                    guard.push(is_active);
+                }
             }
-
-            // Replay through `build_snapshot_from_log`. The closure fires synchronously between
-            // the helper's awaits, so each invocation does its own brief lock-update-release.
-            // Holding the guard across `.await` would not be `Send`-safe.
-            let active_keys = {
-                let bitmap = &bitmap;
-                build_snapshot_from_log(
-                    inactivity_floor_loc,
-                    &log,
-                    &mut index,
-                    cache_size,
-                    |is_active, old_loc| {
-                        let mut guard = bitmap.write();
-                        guard.push(is_active);
-                        if let Some(loc) = old_loc {
-                            guard.set_bit(*loc, false);
-                        }
-                    },
-                )
-                .await?
-            };
-
-            // CommitFloor convention: only the current `last_commit_loc` carries bit=1; earlier
-            // CommitFloors are 0. `build_snapshot_from_log` reports `is_active = (loc ==
-            // last_commit_loc)` for each CommitFloor op, so the per-op push above already
-            // encodes this.
 
             (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
         };
+
+        // The build has returned, so every worker clone of the log is dropped. Reclaim it.
+        let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
 
         // The bitmap must have exactly one bit per retained log location.
         if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size() {
@@ -816,11 +843,12 @@ where
             active_keys = self.active_keys as u64,
         ),
     )]
-    pub async fn sync(&mut self) -> Result<(), crate::qmdb::Error<F>> {
+    #[boxed]
+    pub async fn sync(mut self) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        self.log.sync().await?;
-        Ok(())
+        self.log = self.log.sync().await?;
+        Ok(self)
     }
 
     /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
@@ -828,9 +856,12 @@ where
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
     /// the Merkle state is not durably persisted, so recovery may be required on startup in the
     /// event of a crash (use [Self::sync] for the stronger guarantee).
-    pub async fn start_commit(&mut self) -> Result<Handle<()>, crate::qmdb::Error<F>> {
+    #[boxed]
+    pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
         self.metrics.start_commit_calls.inc();
-        Ok(self.log.start_commit().await?)
+        let (log, handle) = self.log.start_commit().await?;
+        self.log = log;
+        Ok((self, handle))
     }
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
@@ -845,13 +876,14 @@ where
             active_keys = self.active_keys as u64,
         ),
     )]
-    pub async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
+    #[boxed]
+    pub async fn commit(mut self) -> Result<Self, crate::qmdb::Error<F>> {
         // Runs the log's commit rather than awaiting a start_commit handle so journal-level
         // commit-duration metrics keep covering this path.
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
-        self.log.commit().await?;
-        Ok(())
+        self.log = self.log.commit().await?;
+        Ok(self)
     }
 
     /// Destroy the db, removing all data from disk.

@@ -1,5 +1,5 @@
-use commonware_utils::{bitmap::BitMap, TestRng};
-use criterion::{criterion_group, Criterion};
+use commonware_utils::{TestRng, bitmap::BitMap};
+use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
 

@@ -1,37 +1,33 @@
 //! Resolver service actor for QMDB sync over P2P.
 
-use super::{handler, mailbox, metrics::Metrics as ResolverMetrics, Mailbox};
+use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
+use crate::stateful::db::Shared;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
-use commonware_resolver::{p2p, Resolver as _};
+use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{GaugeExt, status},
 };
 use commonware_storage::{
     merkle::Family,
     qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::TracedAsyncRwLock,
-};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
 use rand_core::Rng;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
     time::Duration,
 };
 use tracing::{debug, info};
 
-type Op<DB> = <Arc<TracedAsyncRwLock<DB>> as SyncResolver>::Op;
-type DatabaseRoot<DB> = <Arc<TracedAsyncRwLock<DB>> as SyncResolver>::Digest;
+type Op<DB> = <Shared<DB> as SyncResolver>::Op;
+type DatabaseRoot<DB> = <Shared<DB> as SyncResolver>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
 type Pending<F, Op, D> = oneshot::Sender<Result<FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
 type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
@@ -50,7 +46,7 @@ where
     pub blocker: B,
 
     /// Local database used to serve incoming requests when available.
-    pub database: Option<Arc<TracedAsyncRwLock<DB>>>,
+    pub database: Option<Shared<DB>>,
 
     /// Maximum size of resolver mailbox backlogs.
     pub mailbox_size: NonZeroUsize,
@@ -82,7 +78,7 @@ enum State<DB> {
     /// Database is not attached yet.
     NoDb,
     /// Database is attached and can serve incoming requests.
-    HasDb(Arc<TracedAsyncRwLock<DB>>),
+    HasDb(Shared<DB>),
 }
 
 /// An action dispatched by incoming mailbox messages.
@@ -100,7 +96,7 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Arc<TracedAsyncRwLock<DB>>: SyncResolver<Family = F>,
+    Shared<DB>: SyncResolver<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
@@ -118,7 +114,7 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Arc<TracedAsyncRwLock<DB>>: SyncResolver<Family = F>,
+    Shared<DB>: SyncResolver<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
@@ -390,20 +386,20 @@ where
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519, sha256, Sha256};
+    use commonware_cryptography::{Sha256, ed25519, sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, full::Config as MmrJournalConfig, Location, Proof},
-        qmdb::any::{unordered::fixed, FixedConfig},
+        mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
+        qmdb::any::{FixedConfig, unordered::fixed},
         translator::TwoCap,
     };
-    use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
-    use std::{num::NonZeroU64, sync::Arc, time::Duration};
+    use commonware_utils::{NZU16, NZU64, NZUsize, channel::oneshot};
+    use std::{num::NonZeroU64, time::Duration};
 
     #[derive(Clone, Debug)]
     struct DummyProvider;
@@ -441,7 +437,7 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Arc<TracedAsyncRwLock<TestDb>> as SyncResolver>::Op;
+    type TestOp = <Shared<TestDb> as SyncResolver>::Op;
 
     type TestActor = Actor<
         deterministic::Context,
@@ -453,7 +449,7 @@ mod tests {
     >;
 
     fn test_config(
-        database: Option<Arc<TracedAsyncRwLock<TestDb>>>,
+        database: Option<Shared<TestDb>>,
     ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
         Config {
             peer_provider: DummyProvider,
@@ -507,17 +503,16 @@ mod tests {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 
-    async fn init_db(
-        context: deterministic::Context,
-        suffix: &str,
-    ) -> Arc<TracedAsyncRwLock<TestDb>> {
+    async fn init_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context))
             .await
             .expect("db init should succeed");
-        Arc::new(TracedAsyncRwLock::new("test", db))
+        Shared::new("test", db)
     }
 
     fn encoded_fetch_payload() -> Bytes {

@@ -56,7 +56,7 @@ use rand::rngs::SysRng;
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng as _, SeedableRng, UnwrapErr};
 use std::{
-    panic::{catch_unwind, AssertUnwindSafe, UnwindSafe},
+    panic::{AssertUnwindSafe, UnwindSafe, catch_unwind},
     time::{Duration, Instant},
 };
 

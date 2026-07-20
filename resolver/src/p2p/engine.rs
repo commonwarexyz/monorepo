@@ -1,25 +1,25 @@
 use super::{
+    Producer,
     config::Config,
     fetcher::{Config as FetcherConfig, Fetcher},
     inflight::Inflight,
     ingress::{FetchKey, Mailbox, Message},
-    metrics, wire, Producer,
+    metrics, wire,
 };
-use crate::{subscribers, Consumer, Delivery};
+use crate::{Consumer, Delivery, subscribers};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Blocker, Provider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
-use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
+use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
 use futures::future::{self, Either};
 use rand_core::Rng;
 use std::marker::PhantomData;
@@ -218,6 +218,19 @@ where
             _ = deadline_pending => {
                 self.fetcher.fetch(&mut sender);
             },
+            // Handle completed consumer deliveries before accepting new work:
+            // a fetch issued in reaction to a delivery's outcome must find the
+            // completed key no longer in flight, not be deduplicated against
+            // it and dropped when it completes.
+            delivery = self.inflight.next_delivery() => {
+                // If the delivery was aborted, its inflight entry was dropped (via
+                // Retain or shutdown) before the consumer finished validating.
+                let (peer, delivery, result) = match delivery {
+                    Ok(delivery) => delivery,
+                    Err(_) => continue,
+                };
+                self.handle_delivery(peer, delivery, result);
+            },
             // Handle mailbox messages
             Some(msg) = self.mailbox.recv() else {
                 error!("mailbox closed");
@@ -273,16 +286,6 @@ where
                         self.record_cancellations(count);
                     }
                 }
-            },
-            // Handle completed consumer deliveries
-            delivery = self.inflight.next_delivery() => {
-                // If the delivery was aborted, its inflight entry was dropped (via
-                // Retain or shutdown) before the consumer finished validating.
-                let (peer, delivery, result) = match delivery {
-                    Ok(delivery) => delivery,
-                    Err(_) => continue,
-                };
-                self.handle_delivery(peer, delivery, result);
             },
             // Handle completed server requests
             serve = self.serves.next_completed() => {

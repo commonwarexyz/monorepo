@@ -1,18 +1,19 @@
 //! An Any database implementation with an unordered key space and fixed-size values.
 
 use crate::{
+    Context,
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     merkle::{Family, Location},
     qmdb::{
-        any::{unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
         Error,
+        any::{FixedConfig as Config, FixedValue, unordered, value::FixedEncoding},
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::Array;
 
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
@@ -31,8 +32,15 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+    F: Family,
+    E: Context + Spawner,
+    K: Array,
+    V: FixedValue,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+> Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -49,18 +57,19 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
+        Context,
         index::partitioned::unordered::Index,
         journal::contiguous::fixed::Journal,
         merkle::{Family, Location},
         qmdb::{
-            any::{FixedConfig as Config, FixedValue},
             Error,
+            any::{FixedConfig as Config, FixedValue},
         },
         translator::Translator,
-        Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
+    use commonware_runtime::Spawner;
     use commonware_utils::Array;
 
     /// A key-value QMDB with a partitioned snapshot index.
@@ -84,19 +93,22 @@ pub mod partitioned {
     >;
 
     impl<
-            F: Family,
-            E: Context,
-            K: Array,
-            V: FixedValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, S>
+        F: Family,
+        E: Context + Spawner,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, S>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
-        pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
+        pub async fn init(
+            context: E,
+            cfg: Config<T, S, core::num::NonZeroUsize>,
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
         }
     }
@@ -120,35 +132,45 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
+        journal::{Error as JournalError, contiguous::Contiguous},
         merkle::{
-            mmr::{self, Location},
             Location as GenericLocation,
+            mmr::{self, Location},
         },
         qmdb::{
+            SnapshotBuild as _,
             any::{
-                test::{fixed_db_config, fixed_db_config_with_strategy},
-                unordered::{fixed::Operation, Update},
+                test::{
+                    colliding_digest, fixed_db_config, fixed_db_config_partitioned,
+                    fixed_db_config_with_strategy,
+                },
+                unordered::{Update, fixed::Operation},
             },
             verify_proof,
         },
-        translator::TwoCap,
+        translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
+        Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        mocks::{drive_pending_syncs, DelayedSyncContext, PendingSyncs},
-        reschedule, Clock as _, Metrics as _, Runner as _, Spawner as _, Strategizer as _,
-        Supervisor as _,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        reschedule,
     };
-    use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
     use core::num::NonZeroUsize;
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, Stream};
     use rand::Rng;
-    use std::{collections::HashMap, future::Future, time::Duration};
+    use std::{
+        collections::HashMap,
+        future::{Future, ready},
+        sync::Arc,
+        time::Duration,
+    };
 
     /// A generic type alias for an Any database parameterized by merkle family.
     type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
@@ -218,14 +240,15 @@ pub(crate) mod test {
     }
 
     /// Apply a single-key batch writing `key -> value`.
-    async fn apply_write(db: &mut DelayedTest, key: Digest, value: Digest) {
+    async fn apply_write(db: DelayedTest, key: Digest, value: Digest) -> DelayedTest {
         let merkleized = db
             .new_batch()
             .write(key, Some(value))
-            .merkleize(db, None)
+            .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db
     }
 
     /// A commit handle must not block database use while the backend sync is pending.
@@ -238,12 +261,13 @@ pub(crate) mod test {
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&0u64.to_be_bytes());
             let value0 = Sha256::hash(&100u64.to_be_bytes());
-            apply_write(&mut db, key0, value0).await;
+            db = apply_write(db, key0, value0).await;
 
             let starts_before = pending.starts();
             let entered_before = pending.entered();
             let completions_before = pending.completions();
-            let handle = db.start_commit().await.unwrap();
+            let handle;
+            (db, handle) = db.start_commit().await.unwrap();
             assert_eq!(
                 pending.starts(),
                 starts_before + 1,
@@ -263,7 +287,7 @@ pub(crate) mod test {
             assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
             let key1 = Sha256::hash(&1u64.to_be_bytes());
             let value1 = Sha256::hash(&200u64.to_be_bytes());
-            apply_write(&mut db, key1, value1).await;
+            db = apply_write(db, key1, value1).await;
             assert_eq!(
                 pending.completions(),
                 completions_before,
@@ -274,7 +298,8 @@ pub(crate) mod test {
             waiter.await.unwrap();
 
             // The mid-sync batch is durable after the next commit.
-            let handle = db.start_commit().await.unwrap();
+            let handle;
+            (db, handle) = db.start_commit().await.unwrap();
             handle.await.unwrap();
             let root = db.root();
             let size = db.bounds().end;
@@ -304,17 +329,19 @@ pub(crate) mod test {
                 .unwrap();
             let key0 = Sha256::hash(&0u64.to_be_bytes());
             let value0 = Sha256::hash(&100u64.to_be_bytes());
-            apply_write(&mut db, key0, value0).await;
+            db = apply_write(db, key0, value0).await;
 
             // Arm all future syncs to resolve to an injected error.
             pending.arm_fail();
 
-            let handle = db.start_commit().await.unwrap();
+            let handle;
+            (db, handle) = db.start_commit().await.unwrap();
             assert!(
                 handle.await.is_err(),
                 "the commit handle surfaces the failure"
             );
             let starts_before = pending.starts();
+            // A failed mutable method consumes the database per the failures-are-fatal contract.
             assert!(
                 matches!(
                     db.commit().await,
@@ -329,9 +356,6 @@ pub(crate) mod test {
                 starts_before,
                 "the surfaced error is the retained failure, not a fresh sync's"
             );
-
-            // Destroy may fail because database state is undefined after mutable method error.
-            let _ = db.destroy().await;
         });
     }
 
@@ -345,10 +369,11 @@ pub(crate) mod test {
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&0u64.to_be_bytes());
             let value0 = Sha256::hash(&100u64.to_be_bytes());
-            apply_write(&mut db, key0, value0).await;
+            db = apply_write(db, key0, value0).await;
 
             let starts_before = pending.starts();
-            let handle = db.start_commit().await.unwrap();
+            let handle;
+            (db, handle) = db.start_commit().await.unwrap();
             assert_eq!(
                 pending.starts(),
                 starts_before + 1,
@@ -358,7 +383,7 @@ pub(crate) mod test {
             // A non-trivial prune: the floor advanced past the seed commit.
             let floor = db.inactivity_floor_loc();
             assert!(*floor > 0);
-            {
+            let db = {
                 let mut prune = std::pin::pin!(db.prune(floor));
                 assert!(
                     prune.as_mut().now_or_never().is_none(),
@@ -393,8 +418,8 @@ pub(crate) mod test {
                 );
 
                 pending.unblock();
-                prune.await.unwrap();
-            }
+                prune.await.unwrap()
+            };
             handle.await.unwrap();
             db.destroy().await.unwrap();
         });
@@ -411,7 +436,7 @@ pub(crate) mod test {
             type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
             let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
-            let mut db = ParTest::init(context, cfg).await.unwrap();
+            let db = ParTest::init(context, cfg).await.unwrap();
 
             let mut rng = TestRng::new(7);
             let mut keys = Vec::with_capacity(4300);
@@ -423,8 +448,8 @@ pub(crate) mod test {
                 batch = batch.write(key, Some(value));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Mix in absent keys so some probes resolve to nothing.
             for _ in 0..100 {
@@ -463,7 +488,7 @@ pub(crate) mod test {
             >;
             let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("cancel", &context, strategy);
-            let mut db = ParTest::init(context.child("db"), cfg).await.unwrap();
+            let db = ParTest::init(context.child("db"), cfg).await.unwrap();
 
             // Populate and commit so later snapshots carry committed nodes.
             let mut rng = TestRng::new(11);
@@ -476,8 +501,8 @@ pub(crate) mod test {
                 batch = batch.write(key, Some(value));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let mut db = db.commit().await.unwrap();
 
             // Drop one merkleize after a single poll and race another against a timer, so the
             // future is abandoned at whatever stage it reached (possibly mid-hashing-job).
@@ -527,8 +552,8 @@ pub(crate) mod test {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 assert_eq!(db.get(&key).await.unwrap(), Some(value));
                 keys[0].1 = value;
                 for (key, value) in &keys[1..] {
@@ -571,9 +596,9 @@ pub(crate) mod test {
 
     /// Applies the given operations to the database.
     pub(crate) async fn apply_ops(
-        db: &mut AnyTest,
+        db: AnyTest,
         ops: Vec<Operation<mmr::Family, Digest, Digest>>,
-    ) {
+    ) -> AnyTest {
         let mut batch = db.new_batch();
         for op in ops {
             match op {
@@ -588,24 +613,25 @@ pub(crate) mod test {
                 }
             }
         }
-        let merkleized = batch.merkleize(db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db
     }
 
-    /// Helper: commit a batch of key-value writes and return the applied range (generic).
+    /// Helper: commit a batch of key-value writes and return the db and applied range (generic).
     async fn commit_writes_generic<F: Family>(
-        db: &mut AnyTestGeneric<F>,
+        db: AnyTestGeneric<F>,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> std::ops::Range<GenericLocation<F>> {
+    ) -> (AnyTestGeneric<F>, std::ops::Range<GenericLocation<F>>) {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
         }
-        let merkleized = batch.merkleize(db, metadata).await.unwrap();
-        let range = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        range
+        let merkleized = batch.merkleize(&db, metadata).await.unwrap();
+        let (db, range) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+        (db, range)
     }
 
     fn key(i: u64) -> Digest {
@@ -624,10 +650,10 @@ pub(crate) mod test {
             // Populate a database with churny operations (repeated updates and deletes drive the
             // collision resolution that the cache accelerates), then commit and drop it.
             let cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
-            let mut db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
-            apply_ops(&mut db, create_test_ops(10_000)).await;
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
+            let db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
+            let db = apply_ops(db, create_test_ops(10_000)).await;
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
             let root = db.root();
             drop(db);
 
@@ -650,10 +676,401 @@ pub(crate) mod test {
         });
     }
 
+    /// Build a `P`-partitioned unordered db with churny ops, then assert that reopening it with a
+    /// range of `init_concurrency` values (`1` for the serial path, `2` for the single-worker
+    /// de-interleave, counts that round down to fewer workers with wider ranges, and counts
+    /// above the partition count that clamp) all reconstruct the identical root and key-value
+    /// state: the parallel build replays the same immutable log, just split across workers
+    /// owning disjoint partition ranges.
+    #[commonware_macros::boxed]
+    async fn check_parallel_init_equivalence<const P: usize>(
+        context: deterministic::Context,
+        partition: &'static str,
+        concurrency_sweep: &[usize],
+    ) {
+        type PartDb<const P: usize, S> =
+            partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, P, S>;
+
+        /// The value each key holds after the three commits below. Keys deleted in commit 2 and
+        /// reinserted in commit 3 hold the reinserted value. Keys deleted and not reinserted are
+        /// absent. Updated keys hold the commit-2 value. The rest hold their commit-1 value.
+        fn expected_value(i: u64) -> Option<Digest> {
+            if i % 21 == 1 {
+                Some(Sha256::hash(&(i * 13).to_be_bytes()))
+            } else if i % 7 == 1 {
+                None
+            } else if i.is_multiple_of(3) {
+                Some(Sha256::hash(&((i + 1) * 11).to_be_bytes()))
+            } else {
+                Some(Sha256::hash(&(i * 7).to_be_bytes()))
+            }
+        }
+
+        /// Assert every key resolves to its expected value, catching a location filed under the
+        /// wrong key (which the root comparison alone cannot detect since the `any` root is a pure
+        /// function of the log).
+        async fn assert_expected_values<const P: usize, S: commonware_parallel::Strategy>(
+            db: &PartDb<P, S>,
+        ) {
+            for i in 0u64..4000 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected_value(i),
+                    "value mismatch for key {i}"
+                );
+            }
+        }
+
+        let cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+            .await
+            .unwrap();
+
+        // Commit 1: insert every key.
+        let mut batch = db.new_batch();
+        for i in 0u64..4000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&(i * 7).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
+        let mut batch = db.new_batch();
+        for i in (0u64..4000).step_by(3) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&((i + 1) * 11).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        for i in (1u64..4000).step_by(7) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            batch = batch.write(k, None);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // Commit 3: reinsert a third of the deleted keys, so the replayed log contains
+        // delete-then-reinsert sequences for the parallel build to resolve.
+        let mut batch = db.new_batch();
+        for i in (1u64..4000).step_by(21) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&(i * 13).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let db = db.sync().await.unwrap();
+        let root = db.root();
+        let active_keys = db.active_keys;
+        drop(db);
+
+        // Reopen with a range of concurrency values. All rebuild from the same log and must
+        // match the original root, the original active-key count (counted per actual key, so
+        // translated-key collision chains contribute each of their members), and serve the
+        // expected value for every key.
+        for &concurrency in concurrency_sweep {
+            let mut cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
+            cfg.init_concurrency = NonZeroUsize::new(concurrency).unwrap();
+            let ctx = context
+                .child("reopen")
+                .with_attribute("concurrency", concurrency);
+            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            assert_eq!(
+                db.root(),
+                root,
+                "root mismatch at P={P} concurrency={concurrency}"
+            );
+            assert_eq!(
+                db.active_keys, active_keys,
+                "active-key count mismatch at P={P} concurrency={concurrency}"
+            );
+            assert_expected_values(&db).await;
+            drop(db);
+        }
+    }
+
+    /// `P=2` allocates 65,536 hash sub-indexes per index instance (each pre-sizing its map), which
+    /// is too memory-heavy for the default suite, and the range/offset arithmetic is shared with
+    /// the ordered variant's P=2 coverage -- so the unordered sweep runs at P=1 only.
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_p1_parallel_init_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            // Concurrency 201 (200 workers) rounds down to 128 equal two-partition ranges for
+            // P=1 (count=256) and 301 exceeds the partition count and clamps. Both must
+            // reconstruct the same root without panicking.
+            check_parallel_init_equivalence::<1>(
+                context,
+                "unordered_parallel_equiv_p1",
+                &[1, 2, 3, 5, 9, 201, 301],
+            )
+            .await;
+        });
+    }
+
+    /// A fresh db's log holds only the auto-appended CommitFloor. A multi-worker reopen must
+    /// handle the keyless single-op replay (every routed batch empty).
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_fresh_db_parallel_init() {
+        deterministic::Runner::default().start(|context| async move {
+            type FreshDb<S> =
+                partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
+
+            let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_fresh", &context);
+            let db = FreshDb::<Sequential>::init(context.child("create"), cfg)
+                .await
+                .unwrap();
+            let root = db.root();
+            drop(db);
+
+            let mut cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_fresh", &context);
+            cfg.init_concurrency = NZUsize!(4);
+            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+        });
+    }
+
+    /// A replay failure during a parallel build must join every worker before surfacing the
+    /// error: no worker may outlive the failed build, retaining a clone of the log and its
+    /// partition-range allocation (the [crate::qmdb::SnapshotBuild] cleanup invariant).
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_parallel_init_replay_failure_drains_workers() {
+        deterministic::Runner::default().start(|context| async move {
+            type FailDb<S> =
+                partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
+
+            // Populate a db so the log has committed operations to replay.
+            let cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail", &context);
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0u64..100 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&(i * 7).to_be_bytes());
+                batch = batch.write(k, Some(v));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen the op log directly (init's reads run before faults are enabled) and build
+            // against a fresh index, mirroring init's parallel snapshot build.
+            let cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail", &context);
+            let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                context.child("log"),
+                cfg.journal_config,
+            )
+            .await
+            .unwrap();
+            let floor = Location::new(log.bounds().start);
+            let log = Arc::new(log);
+            let mut index = crate::index::partitioned::unordered::Index::<OneCap, Location, 1>::new(
+                context.child("index"),
+                OneCap,
+            );
+
+            // Every read now fails, and the failure necessarily surfaces through the replay
+            // stream: the reopened journal's page cache is fresh (only the buffer pool is shared
+            // across configs, never cached pages), so replay's first item forces a storage read,
+            // and with far fewer ops than the routing batch size no batch reaches a worker, so
+            // workers never read the log themselves.
+            context.storage_fault_config().write().read_rate = Some(1.0);
+            let result = index
+                .build_snapshot(
+                    context.child("build"),
+                    floor,
+                    &log,
+                    NZUsize!(4),
+                    NZUsize!(1 << 21),
+                    None,
+                )
+                .await;
+            assert!(result.is_err(), "replay must fail under read faults");
+
+            // Every worker was joined before the error surfaced: nothing else may retain the log.
+            assert_eq!(Arc::strong_count(&log), 1);
+
+            context.storage_fault_config().write().read_rate = None;
+        });
+    }
+
+    /// A read-only log view whose random-access reads always fail. During a parallel build only
+    /// the workers read the log directly (collision resolution, with the init cache disabled), so
+    /// this fails a worker's read while the router's replay stream succeeds.
+    struct FailingReads<C>(C);
+
+    impl<C: Contiguous<Item: Sync>> Contiguous for FailingReads<C> {
+        type Item = C::Item;
+
+        fn bounds(&self) -> std::ops::Range<u64> {
+            self.0.bounds()
+        }
+
+        fn read(
+            &self,
+            position: u64,
+        ) -> impl Future<Output = Result<Self::Item, JournalError>> + Send + Sync {
+            ready(Err(JournalError::ItemPruned(position)))
+        }
+
+        fn read_many(
+            &self,
+            positions: &[u64],
+        ) -> impl Future<Output = Result<Vec<Self::Item>, JournalError>> + Send {
+            ready(Err(JournalError::ItemPruned(
+                positions.first().copied().unwrap_or_default(),
+            )))
+        }
+
+        fn try_read_sync(&self, _position: u64) -> Option<Self::Item> {
+            None
+        }
+
+        fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
+            positions.iter().map(|_| None).collect()
+        }
+
+        fn replay(
+            &self,
+            start_pos: u64,
+            buffer: NonZeroUsize,
+        ) -> impl Future<
+            Output = Result<
+                impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
+                JournalError,
+            >,
+        > + Send {
+            self.0.replay(start_pos, buffer)
+        }
+    }
+
+    /// A worker failure during a parallel build must surface through the worker join and leave
+    /// no worker retaining the log: the failing worker's channel closes, routing stops, and the
+    /// join returns the worker's error. This is the counterpart of the replay-failure test,
+    /// which fails the router's stream before any worker reads.
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_parallel_init_worker_failure_drains_workers() {
+        deterministic::Runner::default().start(|context| async move {
+            type FailDb<S> =
+                partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
+
+            // Populate with two keys that share a partition and translated sub-key, so the
+            // second key's replay resolves a collision by reading the first key's operation
+            // from the log.
+            let cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail", &context);
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+                .await
+                .unwrap();
+            let merkleized = db
+                .new_batch()
+                .write(colliding_digest(0x10, 1), Some(Sha256::hash(b"v1")))
+                .write(colliding_digest(0x10, 2), Some(Sha256::hash(b"v2")))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen the op log behind a wrapper that fails every random-access read, and build
+            // with the cache disabled so collision resolution must read the log.
+            let cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail", &context);
+            let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                context.child("log"),
+                cfg.journal_config,
+            )
+            .await
+            .unwrap();
+            let floor = Location::new(log.bounds().start);
+            let log = Arc::new(FailingReads(log));
+            let mut index = crate::index::partitioned::unordered::Index::<OneCap, Location, 1>::new(
+                context.child("index"),
+                OneCap,
+            );
+            let result = index
+                .build_snapshot(
+                    context.child("build"),
+                    floor,
+                    &log,
+                    NZUsize!(4),
+                    NZUsize!(1 << 21),
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(Error::Journal(JournalError::ItemPruned(_)))),
+                "worker read failure must surface through the join, got {result:?}"
+            );
+
+            // Every worker was joined before the error surfaced: nothing else may retain the log.
+            assert_eq!(Arc::strong_count(&log), 1);
+        });
+    }
+
+    /// A multi-worker build of an empty log must return the serial build's result (zero active
+    /// keys, an empty bitmap) rather than panicking on the last-commit bit.
+    #[test_traced("WARN")]
+    fn test_unordered_partitioned_parallel_init_empty_log() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut results = Vec::new();
+            for concurrency in [1usize, 4] {
+                let cfg =
+                    fixed_db_config_partitioned::<OneCap>("unordered_parallel_empty", &context);
+                let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                    context
+                        .child("log")
+                        .with_attribute("concurrency", concurrency),
+                    cfg.journal_config,
+                )
+                .await
+                .unwrap();
+                let log = Arc::new(log);
+                let mut index =
+                    crate::index::partitioned::unordered::Index::<OneCap, Location, 1>::new(
+                        context
+                            .child("index")
+                            .with_attribute("concurrency", concurrency),
+                        OneCap,
+                    );
+                let result = index
+                    .build_snapshot(
+                        context
+                            .child("build")
+                            .with_attribute("concurrency", concurrency),
+                        Location::new(0),
+                        &log,
+                        NonZeroUsize::new(concurrency).unwrap(),
+                        NZUsize!(1 << 21),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.0, 0);
+                results.push(result);
+            }
+            assert_eq!(results[0], results[1]);
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_any_unordered_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db_generic::<mmr::Family>(ctx.child("db")).await;
+            let db = open_db_generic::<mmr::Family>(ctx.child("db")).await;
             let k = key(1);
             let v = val(1);
             let batch = db
@@ -662,13 +1079,14 @@ pub(crate) mod test {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(batch).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&k).await.unwrap(), Some(v));
             assert_eq!(db.get_many(&[&k]).await.unwrap(), vec![Some(v)]);
-            db.commit().await.unwrap();
-            db.start_commit().await.unwrap().await.unwrap();
-            db.sync().await.unwrap();
-            db.prune(Location::new(0)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let (db, handle) = db.start_commit().await.unwrap();
+            handle.await.unwrap();
+            let db = db.sync().await.unwrap();
+            let _db = db.prune(Location::new(0)).await.unwrap();
 
             let metrics = ctx.encode();
             for expected in [
@@ -715,7 +1133,7 @@ pub(crate) mod test {
         >;
 
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = create_test_db(ctx.child("db")).await;
+            let db = create_test_db(ctx.child("db")).await;
 
             // Seed 2000 keys and commit so they live in the committed snapshot.
             let mut seed = db.new_batch();
@@ -723,8 +1141,8 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
@@ -845,40 +1263,40 @@ pub(crate) mod test {
     // -- Generic inner functions for parameterized batch tests --
 
     async fn batch_empty_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
         let root_before = db.root();
 
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_ne!(db.root(), root_before);
 
         // DB should still be functional.
-        commit_writes_generic(&mut db, [(key(0), Some(val(0)))], None).await;
+        let (db, _) = commit_writes_generic(db, [(key(0), Some(val(0)))], None).await;
         assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
         db.destroy().await.unwrap();
     }
 
     async fn batch_metadata_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
         let metadata = val(42);
 
-        commit_writes_generic(&mut db, [(key(0), Some(val(0)))], Some(metadata)).await;
+        let (db, _) = commit_writes_generic(db, [(key(0), Some(val(0)))], Some(metadata)).await;
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
         db.destroy().await.unwrap();
     }
 
     async fn batch_get_read_through_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
 
         let ka = key(0);
         let va = val(0);
-        commit_writes_generic(&mut db, [(ka, Some(va))], None).await;
+        let (db, _) = commit_writes_generic(db, [(ka, Some(va))], None).await;
 
         let kb = key(1);
         let vb = val(1);
@@ -902,14 +1320,15 @@ pub(crate) mod test {
     }
 
     async fn batch_get_on_merkleized_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
 
         let ka = key(0);
         let kb = key(1);
         let kc = key(2);
         let kd = key(3);
 
-        commit_writes_generic(&mut db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
+        let (db, _) =
+            commit_writes_generic(db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
 
         let va2 = val(100);
         let vc = val(2);
@@ -961,10 +1380,10 @@ pub(crate) mod test {
     }
 
     async fn batch_stacked_delete_recreate_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
         let ka = key(0);
 
-        commit_writes_generic(&mut db, [(ka, Some(val(0)))], None).await;
+        let (db, _) = commit_writes_generic(db, [(ka, Some(val(0)))], None).await;
 
         let parent_m = db
             .new_batch()
@@ -982,30 +1401,30 @@ pub(crate) mod test {
             .unwrap();
         assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
 
-        db.apply_batch(child_m).await.unwrap();
+        let (db, _) = db.apply_batch(child_m).await.unwrap();
         assert_eq!(db.get(&ka).await.unwrap(), Some(val(200)));
 
         db.destroy().await.unwrap();
     }
 
     async fn batch_apply_returns_range_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
 
         let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-        let range1 = commit_writes_generic(&mut db, writes, None).await;
+        let (db, range1) = commit_writes_generic(db, writes, None).await;
 
         assert_eq!(range1.start, GenericLocation::<F>::new(1));
         assert!(range1.end.saturating_sub(*range1.start) >= 6);
 
         let writes: Vec<_> = (5..10).map(|i| (key(i), Some(val(i)))).collect();
-        let range2 = commit_writes_generic(&mut db, writes, None).await;
+        let (db, range2) = commit_writes_generic(db, writes, None).await;
         assert_eq!(range2.start, range1.end);
 
         db.destroy().await.unwrap();
     }
 
     async fn batch_speculative_root_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
 
         let mut batch = db.new_batch();
         for i in 0..10 {
@@ -1014,7 +1433,7 @@ pub(crate) mod test {
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         let speculative_root = merkleized.root();
 
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.root(), speculative_root);
 
         db.destroy().await.unwrap();
@@ -1022,7 +1441,7 @@ pub(crate) mod test {
 
     async fn log_replay_inner<F: Family>(context: deterministic::Context) {
         let db_context = context.child("db");
-        let mut db = open_db_generic::<F>(db_context.child("db")).await;
+        let db = open_db_generic::<F>(db_context.child("db")).await;
 
         // Update the same key many times within a single batch.
         const UPDATES: u64 = 100;
@@ -1033,8 +1452,8 @@ pub(crate) mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         let root = db.root();
 
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.
@@ -1165,9 +1584,9 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.child("storage")).await;
+            let db = create_test_db(context.child("storage")).await;
             let ops = create_test_ops(20);
-            apply_ops(&mut db, ops.clone()).await;
+            let db = apply_ops(db, ops.clone()).await;
             let root_hash = db.root();
             let original_op_count = db.bounds().end;
 
@@ -1192,7 +1611,7 @@ pub(crate) mod test {
             // Add more operations to the database
             // (use different seed to avoid key collisions)
             let more_ops = create_test_ops_seeded(5, 1);
-            apply_ops(&mut db, more_ops.clone()).await;
+            let db = apply_ops(db, more_ops.clone()).await;
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
@@ -1232,7 +1651,7 @@ pub(crate) mod test {
             // after each batch is a commit-boundary historical size.
             let mut commit_boundary_sizes: Vec<Location> = Vec::new();
             for _ in 0..5 {
-                apply_ops(&mut db, create_test_ops(10)).await;
+                db = apply_ops(db, create_test_ops(10)).await;
                 commit_boundary_sizes.push(db.bounds().end);
             }
 
@@ -1301,7 +1720,7 @@ pub(crate) mod test {
             let mut offset = 0usize;
             let mut checkpoints = Vec::new();
             for chunk in [20usize, 15, 25, 30, 10] {
-                apply_ops(&mut db, ops[offset..offset + chunk].to_vec()).await;
+                db = apply_ops(db, ops[offset..offset + chunk].to_vec()).await;
                 offset += chunk;
 
                 let end_loc = db.bounds().end;
@@ -1313,7 +1732,7 @@ pub(crate) mod test {
             // Grow state past the checkpoints with an empty batch and verify all
             // historical proofs from that later state.
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             for (historical_size, root, reference_proof, reference_ops) in checkpoints {
                 let (historical_proof, historical_ops) = db
                     .historical_proof(historical_size, start_loc, max_ops)

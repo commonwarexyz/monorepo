@@ -10,11 +10,11 @@ use commonware_conformance::conformance_tests;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
+    Buf, BufMut, BufferPooler, Supervisor as _,
     buffer::paged::CacheRef,
     conformance::{StorageConformance, StorageWorkload},
-    Buf, BufMut, BufferPooler, Supervisor as _,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use oversized::Record;
 use rand::RngExt as _;
@@ -69,12 +69,12 @@ where
     let items = context.random_range(16..96);
     for i in 0..items {
         let item = seed.wrapping_add(i as u64);
-        journal.append(&item).await?;
+        (journal, _) = journal.append(&item).await?;
     }
-    journal.sync().await?;
+    let journal = journal.sync().await?;
 
     if items > 32 {
-        journal
+        let (journal, _) = journal
             .prune(crate::merkle::Location::new(items as u64 / 3))
             .await?;
         journal.sync().await?;
@@ -105,9 +105,10 @@ impl StorageWorkload for ContiguousFixedWorkload {
         context.fill(&mut data_to_write[..]);
 
         for item in data_to_write.iter() {
-            journal.append(item).await?;
+            (journal, _) = journal.append(item).await?;
         }
-        journal.sync().await
+        journal.sync().await?;
+        Ok(())
     }
 }
 
@@ -140,9 +141,10 @@ impl StorageWorkload for ContiguousVariableWorkload {
         }
 
         for item in data_to_write {
-            journal.append(&item).await?;
+            (journal, _) = journal.append(&item).await?;
         }
-        journal.sync().await
+        journal.sync().await?;
+        Ok(())
     }
 }
 

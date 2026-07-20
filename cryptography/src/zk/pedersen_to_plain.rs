@@ -390,10 +390,10 @@ mod conformance {
 }
 
 #[commonware_macros::stability(ALPHA)]
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(all(feature = "bls12381", any(test, feature = "fuzz")))]
 pub mod fuzz {
     use super::*;
-    use crate::bls12381::primitives::group::{Scalar as F, G1 as G};
+    use crate::bls12381::primitives::group::{G1 as G, Scalar as F};
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup};
     use commonware_parallel::Sequential;
@@ -583,7 +583,7 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod test {
-    use super::{fuzz, Claim, Proof, Setup};
+    use super::{Claim, Proof, Setup};
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::test::{F, G};
@@ -623,9 +623,10 @@ mod test {
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_fuzz() {
         minifuzz::test(|u| {
-            u.arbitrary::<fuzz::Plan>()?.run(u)?;
+            u.arbitrary::<super::fuzz::Plan>()?.run(u)?;
             Ok(())
         });
     }

@@ -2,8 +2,9 @@
 
 use crate::{Hasher, Key, Value};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, BufferPooler};
+use commonware_runtime::{BufferPooler, buffer::paged::CacheRef};
 use commonware_storage::{
+    Context,
     journal::contiguous::variable,
     merkle::mmr,
     qmdb::{
@@ -11,9 +12,8 @@ use commonware_storage::{
         immutable::fixed::{self, CompactConfig},
         sync::compact,
     },
-    Context,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use tracing::error;
 
 /// Database type alias.
@@ -50,16 +50,16 @@ where
     }
 
     async fn add_operations(
-        &mut self,
+        mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), qmdb::Error<mmr::Family>> {
+    ) -> Result<Self, qmdb::Error<mmr::Family>> {
         let Some(last) = operations.last() else {
             error!("operations must end with a commit");
-            return Ok(());
+            return Ok(self);
         };
         if !matches!(last, Operation::Commit(..)) {
             error!("operations must end with a commit");
-            return Ok(());
+            return Ok(self);
         }
 
         let mut batch = self.new_batch();
@@ -69,14 +69,14 @@ where
                     batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata, floor) => {
-                    let merkleized = batch.merkleize(self, metadata, floor).await;
-                    self.apply_batch(merkleized)?;
-                    self.sync().await?;
+                    let merkleized = batch.merkleize(&self, metadata, floor).await;
+                    (self, _) = self.apply_batch(merkleized)?;
+                    self = self.sync().await?;
                     batch = self.new_batch();
                 }
             }
         }
-        Ok(())
+        Ok(self)
     }
 
     fn current_floor(&self) -> u64 {

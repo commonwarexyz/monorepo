@@ -1,5 +1,5 @@
 use commonware_utils::bitmap::roaring::Bitmap;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use roaring::RoaringTreemap;
 use std::hint::black_box;
 

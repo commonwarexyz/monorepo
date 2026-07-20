@@ -1,8 +1,8 @@
 //! Benchmark sequential append performance.
 
-use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE};
+use super::{CACHE_SIZE, PAGE_SIZE, create_append, destroy_append};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Runner, Storage,
+    BufferPooler, Runner, Storage, buffer::paged::CacheRef, deterministic, tokio,
 };
 use commonware_utils::NZUsize;
 use criterion::Criterion;

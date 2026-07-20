@@ -1,6 +1,6 @@
 //! Utilities for working with histograms.
 
-use super::{raw, Histogram, MetricsExt as _};
+use super::{Histogram, MetricsExt as _, raw};
 use crate::{Clock, Metrics};
 use std::{future::Future, sync::Arc, time::SystemTime};
 
@@ -159,7 +159,7 @@ pub fn duration_histogram<M: Metrics>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Runner as _, Supervisor as _};
+    use crate::{Runner as _, Supervisor as _, deterministic};
     use std::time::Duration;
 
     #[test]

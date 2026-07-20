@@ -266,7 +266,7 @@ description = "Disseminate data over a wide-area network."`;
 
   it("should use fallback path when name is missing", () => {
     const cargoToml = `[package]
-edition = "2021"
+edition = "2024"
 description = "Some description"`;
 
     const info = parseCrateInfo(cargoToml, "fallback-path");

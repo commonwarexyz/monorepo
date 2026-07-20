@@ -23,27 +23,27 @@
 //! [`await_or_cancel`].
 
 use crate::stateful::{
+    Application, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
     db::{Anchor, DatabaseSet},
-    Application, Proposed, PruneConfig,
 };
 use commonware_consensus::{
+    Block, CertifiableBlock, Heightable, Roundable,
     marshal::{
+        Identifier,
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
-        Identifier,
     },
     types::{Height, Round},
-    Block, CertifiableBlock, Heightable, Roundable,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{
-    telemetry::{metrics::GaugeExt, traces::TracedExt as _},
     Clock, Metrics, Spawner,
+    telemetry::{metrics::GaugeExt, traces::TracedExt as _},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use futures::{stream, Stream, StreamExt};
+use futures::{Stream, StreamExt, stream};
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -920,40 +920,37 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        await_or_cancel, fetch_ancestor, FinalizeStatus, PrepareBatchesError, Processor, Prune,
-        Pruning,
+        FinalizeStatus, PrepareBatchesError, Processor, Prune, Pruning, await_or_cancel,
+        fetch_ancestor,
     };
     use crate::stateful::{
-        actor::metrics::Metrics as StatefulMetrics,
-        db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
         Application, Proposed, PruneConfig,
+        actor::metrics::Metrics as StatefulMetrics,
+        db::{Anchor, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
+        Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
         marshal::ancestry::BlockProvider,
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
-        Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
     };
     use commonware_cryptography::{
-        ed25519, sha256::Digest, Digest as _, Digestible, Hasher, Sha256, Signer as _,
+        Digest as _, Digestible, Hasher, Sha256, Signer as _, ed25519, sha256::Digest,
     };
+    use commonware_macros::boxed;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
+        ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, full::Config as MmrJournalConfig, Location},
+        mmr::{self, Location, full::Config as MmrJournalConfig},
         qmdb::{any, sync::Target},
         translator::TwoCap,
     };
     use commonware_utils::{
-        channel::oneshot,
-        non_empty_range,
-        range::NonEmptyRange,
-        sync::{Mutex, TracedAsyncRwLock},
-        NZUsize, NZU16, NZU64,
+        NZU16, NZU64, NZUsize, channel::oneshot, non_empty_range, range::NonEmptyRange, sync::Mutex,
     };
     use futures::{Stream, StreamExt};
     use std::{
@@ -961,8 +958,8 @@ mod tests {
         future::Future,
         num::NonZeroUsize,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -974,7 +971,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
-    type DbSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
+    type DbSet<E> = Shared<Qmdb<E>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1489,6 +1486,7 @@ mod tests {
             false
         }
 
+        #[boxed]
         async fn finalize(&mut self, block: Block) -> FinalizeStatus {
             self.processor
                 .finalize(self.context_cell.as_present(), &block)
@@ -1496,6 +1494,7 @@ mod tests {
                 .0
         }
 
+        #[boxed]
         async fn finalize_with_prune(
             &mut self,
             block: Block,
@@ -1575,6 +1574,8 @@ mod tests {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 
@@ -1793,10 +1794,12 @@ mod tests {
 
             assert!(harness.processor.pending.contains_key(&winner.digest()));
             assert!(harness.processor.pending.contains_key(&loser.digest()));
-            assert!(harness
-                .processor
-                .pending
-                .contains_key(&loser_child.digest()));
+            assert!(
+                harness
+                    .processor
+                    .pending
+                    .contains_key(&loser_child.digest())
+            );
 
             let status = harness.finalize(winner.clone()).await;
             assert_eq!(

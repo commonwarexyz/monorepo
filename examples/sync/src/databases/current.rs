@@ -16,21 +16,21 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_codec::FixedSize;
-use commonware_cryptography::{sha256, Hasher as CryptoHasher};
+use commonware_cryptography::{Hasher as CryptoHasher, sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer, BufferPooler};
+use commonware_runtime::{BufferPooler, buffer};
 use commonware_storage::{
+    Context,
     journal::contiguous::fixed::Config as FConfig,
-    mmr::{self, full::Config as MmrConfig, Location, Proof},
+    mmr::{self, Location, Proof, full::Config as MmrConfig},
     qmdb::{
         self,
-        any::unordered::{fixed::Operation as FixedOperation, Update},
+        any::unordered::{Update, fixed::Operation as FixedOperation},
         current::{self, FixedConfig as Config},
         operation::Committable,
     },
-    Context,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
@@ -73,6 +73,8 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
         grafted_metadata_partition: "grafted-mmr-metadata".into(),
         translator: Translator::default(),
         init_cache_size: Some(NZUsize!(1 << 16)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -112,12 +114,12 @@ where
     }
 
     async fn add_operations(
-        &mut self,
+        mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), qmdb::Error<mmr::Family>> {
+    ) -> Result<Self, qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             error!("operations must end with a commit");
-            return Ok(());
+            return Ok(self);
         }
 
         let mut batch = self.new_batch();
@@ -130,14 +132,14 @@ where
                     batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    let merkleized = batch.merkleize(self, metadata).await?;
-                    self.apply_batch(merkleized).await?;
-                    self.commit().await?;
+                    let merkleized = batch.merkleize(&self, metadata).await?;
+                    (self, _) = self.apply_batch(merkleized).await?;
+                    self = self.commit().await?;
                     batch = self.new_batch();
                 }
             }
         }
-        Ok(())
+        Ok(self)
     }
 
     fn current_floor(&self) -> u64 {

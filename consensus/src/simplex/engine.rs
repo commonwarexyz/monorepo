@@ -5,15 +5,15 @@ use super::{
     types::{Activity, Context},
 };
 use crate::{
-    simplex::{scheme::Scheme, Plan},
     CertifiableAutomaton, Relay, Reporter,
+    simplex::{Plan, scheme::Scheme},
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
 };
 use rand_core::CryptoRng;
 use tracing::debug;
@@ -43,16 +43,16 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
-        S: Scheme<D>,
-        L: Elector<S>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
-        F: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
-    > Engine<E, S, L, B, D, A, R, F, T>
+    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    S: Scheme<D>,
+    L: Elector<S>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
+    F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
+> Engine<E, S, L, B, D, A, R, F, T>
 {
     /// Create a new `simplex` consensus engine.
     pub fn new(mut context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {

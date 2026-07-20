@@ -26,20 +26,22 @@
 //! height.
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, fixed, variable},
     },
     merkle::{
-        full::{self, Merkle},
         Graftable, Location,
+        full::{self, Merkle},
     },
     qmdb::{
         self,
         any::{
+            FixedValue, VariableValue,
             db::Db as AnyDb,
-            operation::{update::Update, Operation},
+            operation::{Operation, update::Update},
             ordered::{
                 fixed::{Operation as OrderedFixedOp, Update as OrderedFixedUpdate},
                 variable::{Operation as OrderedVariableOp, Update as OrderedVariableUpdate},
@@ -48,30 +50,30 @@ use crate::{
                 fixed::{Operation as UnorderedFixedOp, Update as UnorderedFixedUpdate},
                 variable::{Operation as UnorderedVariableOp, Update as UnorderedVariableUpdate},
             },
-            FixedValue, VariableValue,
         },
         bitmap::Shared,
         current::{
-            db, grafting,
+            FixedConfig, VariableConfig, db, grafting,
             ordered::{
                 fixed::Db as CurrentOrderedFixedDb, variable::Db as CurrentOrderedVariableDb,
             },
             unordered::{
                 fixed::Db as CurrentUnorderedFixedDb, variable::Db as CurrentUnorderedVariableDb,
             },
-            FixedConfig, VariableConfig,
         },
         metrics::Metrics as AnyMetrics,
         operation::{Committable, Key, Operation as _},
-        sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
+        sync::{
+            Database, DatabaseConfig as Config, compact::ServeError, resolver::fetch_operations,
+        },
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
+use commonware_runtime::Spawner;
+use commonware_utils::{Array, bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -102,18 +104,20 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     metadata_partition: String,
     strategy: S,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     U: Update + Send + Sync + 'static,
-    I: IndexFactory<T, Value = Location<F>>,
+    I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
     T: Translator,
-    J: Mutable<Item = Operation<F, U>>,
+    J: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
@@ -149,9 +153,19 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
+    let snapshot_context = context.child("any_snapshot");
     let any_metrics = AnyMetrics::new(context.child("any"));
-    let any: AnyDb<F, E, J, I, H, U, N, S> =
-        AnyDb::init_from_log(index, log, Some(bitmap), cache_size, any_metrics).await?;
+    let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(
+        snapshot_context,
+        index,
+        log,
+        Some(bitmap),
+        init_concurrency,
+        init_buffer,
+        cache_size,
+        any_metrics,
+    )
+    .await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -243,7 +257,7 @@ macro_rules! impl_current_sync_database {
         impl<F, E, K, V, H, T, const N: usize, S> Database for $db<F, E, K, V, H, T, N, S>
         where
             F: Graftable,
-            E: Context,
+            E: Context + Spawner,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,
@@ -272,6 +286,8 @@ macro_rules! impl_current_sync_database {
                 let strategy = config.merkle_config.strategy.clone();
                 let translator = config.translator.clone();
                 let cache_size = config.init_cache_size;
+                let init_buffer = config.init_buffer;
+                let init_concurrency = config.init_concurrency;
                 build_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
                     context,
                     merkle_config,
@@ -280,6 +296,8 @@ macro_rules! impl_current_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                    init_concurrency,
+                    init_buffer,
                     cache_size,
                     metadata_partition,
                     strategy,
@@ -470,7 +488,7 @@ macro_rules! impl_current_resolver {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
+            type Error = ServeError<F, H::Digest>;
 
             async fn get_operations(
                 &self,
@@ -479,10 +497,10 @@ macro_rules! impl_current_resolver {
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
+            ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::<F>::KeyNotFound)?;
-                fetch_operations(
+                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
+                Ok(fetch_operations(
                     op_count,
                     start_loc,
                     max_ops,
@@ -492,7 +510,7 @@ macro_rules! impl_current_resolver {
                     },
                     |start_loc| db.any.pinned_nodes_at(start_loc),
                 )
-                .await
+                .await?)
             }
         }
     };

@@ -420,8 +420,8 @@ pub trait BufsMut: BufMut {
 mod tests {
     use super::*;
     use crate::{
-        extensions::{DecodeExt, ReadExt},
         Error, FixedArray,
+        extensions::{DecodeExt, ReadExt},
     };
     use bytes::Bytes;
     use core::marker::PhantomData;

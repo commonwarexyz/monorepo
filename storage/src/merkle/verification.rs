@@ -12,10 +12,10 @@
 //! past state of the structure rather than its current state.
 
 use crate::merkle::{
+    Bagging, Error, Family, Location, Position, Proof,
     hasher::Hasher,
     proof::{self as merkle_proof, Blueprint},
     storage::Storage,
-    Bagging, Error, Family, Location, Position, Proof,
 };
 use ahash::AHashMap;
 use commonware_cryptography::Digest;
@@ -404,12 +404,12 @@ mod tests {
             Bagging::{BackwardFold, ForwardFold},
             LocationRangeExt as _,
         },
-        mmb::{mem::Mmb, Location as MmbLocation},
-        mmr::{mem::Mmr, StandardHasher as Standard},
+        mmb::{Location as MmbLocation, mem::Mmb},
+        mmr::{StandardHasher as Standard, mem::Mmr},
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     fn test_digest(v: u8) -> Digest {
         Sha256::hash(&[v])

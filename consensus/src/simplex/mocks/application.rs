@@ -3,9 +3,9 @@
 
 use super::relay::Relay;
 use crate::{
-    simplex::{types::Context, Plan},
-    types::{Epoch, Round},
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
+    simplex::{Plan, types::Context},
+    types::{Epoch, Round},
 };
 use bytes::Bytes;
 use commonware_actor::Feedback;
@@ -13,7 +13,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use commonware_utils::channel::{
     fallible::{FallibleExt, OneshotExt},
     mpsc, oneshot,

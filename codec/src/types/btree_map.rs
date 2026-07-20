@@ -6,10 +6,10 @@
 extern crate alloc;
 
 use crate::{
+    RangeCfg,
     codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_map,
-    RangeCfg,
 };
 use alloc::collections::BTreeMap;
 use bytes::{Buf, BufMut};

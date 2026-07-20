@@ -1,21 +1,21 @@
 use crate::{
+    Channel, Recipients,
     authenticated::{
         data::EncodedData,
         lookup::{channels::Channels, types},
         relay::Relay,
     },
     utils::limited::Connected,
-    Channel, Recipients,
 };
 use commonware_actor::{
-    mailbox::{self, UnreliablePolicy},
     Feedback, Unreliable,
+    mailbox::{self, UnreliablePolicy},
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
-    channel::{oneshot, ring},
     NZUsize,
+    channel::{oneshot, ring},
 };
 use std::{collections::VecDeque, fmt};
 

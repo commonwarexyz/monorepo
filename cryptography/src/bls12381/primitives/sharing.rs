@@ -1,4 +1,4 @@
-use crate::bls12381::primitives::{group::Scalar, variant::Variant, Error};
+use crate::bls12381::primitives::{Error, group::Scalar, variant::Variant};
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
@@ -10,9 +10,9 @@ use commonware_macros::stability;
 use commonware_math::algebra::{FieldNTT, Ring};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
+use commonware_utils::{Faults, NZU32, Participant, ordered::Set};
 #[stability(ALPHA)]
-use commonware_utils::{ordered::BiMap, TryFromIterator};
-use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
+use commonware_utils::{TryFromIterator, ordered::BiMap};
 #[cfg(feature = "std")]
 use core::iter;
 use core::num::NonZeroU32;
@@ -441,7 +441,7 @@ impl<V: Variant> Read for Sharing<V> {
 mod tests {
     use super::*;
     use commonware_invariants::minifuzz;
-    use commonware_utils::{ordered::Map, TestRng};
+    use commonware_utils::{TestRng, ordered::Map};
 
     #[test]
     fn test_roots_of_unity_interpolator_large_total_returns_none() {
@@ -544,7 +544,7 @@ mod tests {
 mod fuzz {
     use super::*;
     use arbitrary::Arbitrary;
-    use commonware_utils::{N3f1, TestRng, NZU32};
+    use commonware_utils::{N3f1, NZU32, TestRng};
 
     impl<'a> Arbitrary<'a> for Mode {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {

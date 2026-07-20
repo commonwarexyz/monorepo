@@ -1,5 +1,6 @@
-use super::{verifier::offload, Verifier};
+use super::{Verifier, verifier::offload};
 use crate::{
+    Reporter,
     simplex::{
         actors::span::ViewSpan,
         scheme::Scheme,
@@ -9,16 +10,15 @@ use crate::{
         },
     },
     types::{Participant, Round as Rnd},
-    Reporter,
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::{ordered::Quorum, N3f1};
+use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::sync::Arc;
-use tracing::{info_span, Span};
+use tracing::{Span, info_span};
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -55,11 +55,11 @@ pub struct Round<
 }
 
 impl<
-        S: Scheme<D>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        R: Reporter<Activity = Activity<S, D>>,
-    > Round<S, B, D, R>
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    R: Reporter<Activity = Activity<S, D>>,
+> Round<S, B, D, R>
 {
     pub fn new(round: Rnd, scheme: Arc<S>, blocker: B, reporter: R) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();
@@ -240,37 +240,45 @@ impl<
     }
 
     /// Adds a vote that we constructed ourselves to the verifier.
+    ///
+    /// Duplicate nullifies are ignored (the voter re-sends its nullify vote on
+    /// every timeout retry).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a notarize or finalize vote is added more than once.
     pub fn add_constructed(&mut self, message: Vote<S, D>) {
         match &message {
             Vote::Notarize(notarize) => {
-                // Report activity
-                self.reporter.report(Activity::Notarize(notarize.clone()));
-
                 // Our own votes are already verified
                 assert!(
                     self.votes.insert_notarize(notarize.clone()),
                     "duplicate notarize"
                 );
+
+                // Report activity
+                self.reporter.report(Activity::Notarize(notarize.clone()));
             }
             Vote::Nullify(nullify) => {
+                // The voter re-sends its nullify on every timeout retry (the
+                // batcher's state does not survive a restart), so duplicates
+                // are expected and ignored.
+                if !self.votes.insert_nullify(nullify.clone()) {
+                    return;
+                }
+
                 // Report activity
                 self.reporter.report(Activity::Nullify(nullify.clone()));
-
-                // Our own votes are already verified
-                assert!(
-                    self.votes.insert_nullify(nullify.clone()),
-                    "duplicate nullify"
-                );
             }
             Vote::Finalize(finalize) => {
-                // Report activity
-                self.reporter.report(Activity::Finalize(finalize.clone()));
-
                 // Our own votes are already verified
                 assert!(
                     self.votes.insert_finalize(finalize.clone()),
                     "duplicate finalize"
                 );
+
+                // Report activity
+                self.reporter.report(Activity::Finalize(finalize.clone()));
             }
         }
 

@@ -1,7 +1,7 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
-    telemetry::metrics::{Metric, Registered, Registration},
     Metrics, Name, Supervisor,
+    telemetry::metrics::{Metric, Registered, Registration},
 };
 use criterion::criterion_main;
 

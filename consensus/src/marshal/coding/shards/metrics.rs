@@ -2,10 +2,10 @@
 
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::{
-        histogram::Buckets, Counter, CounterFamily, EncodeStruct, Gauge, Histogram, MetricsExt as _,
-    },
     Metrics as MetricsTrait,
+    telemetry::metrics::{
+        Counter, CounterFamily, EncodeStruct, Gauge, Histogram, MetricsExt as _, histogram::Buckets,
+    },
 };
 
 /// Per-peer label.

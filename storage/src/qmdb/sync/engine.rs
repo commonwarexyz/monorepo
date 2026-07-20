@@ -1,15 +1,15 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    merkle::{hasher::Standard as StandardHasher, Family, Location},
+    merkle::{Family, Location, hasher::Standard as StandardHasher},
     qmdb::{
         self,
         sync::{
+            Database, DbResolver, Error as SyncError, Journal, Metrics, Target,
             database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
             resolver::{FetchResult, Resolver},
             target::validate_update,
-            Database, DbResolver, Error as SyncError, Journal, Metrics, Target,
         },
     },
 };
@@ -18,15 +18,15 @@ use commonware_cryptography::Digest;
 use commonware_macros::{boxed, select};
 use commonware_runtime::Supervisor as _;
 use commonware_utils::{
+    NZU64,
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
         mpsc, oneshot,
     },
-    NZU64,
 };
 use futures::{
-    future::{pending, Either},
     StreamExt,
+    future::{Either, pending},
 };
 use mpsc::error::TryRecvError;
 use std::{
@@ -406,7 +406,7 @@ where
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
-        self.journal.resize(new_target.range.start()).await?;
+        self.journal = self.journal.resize(new_target.range.start()).await?;
         // Remove requests at or before the new start. The request at start
         // must be re-issued as a pinned-nodes request with the new target size.
         self.outstanding_requests
@@ -478,10 +478,10 @@ where
         if self.reached_current_target_reported {
             return;
         }
-        if let Some(sender) = self.reached_target_tx.as_ref() {
-            if !sender.send_lossy(self.target.clone()).await {
-                self.reached_target_tx = None;
-            }
+        if let Some(sender) = self.reached_target_tx.as_ref()
+            && !sender.send_lossy(self.target.clone()).await
+        {
+            self.reached_target_tx = None;
         }
         self.reached_current_target_reported = true;
     }
@@ -509,7 +509,7 @@ where
     /// This method finds operations that are contiguous with the current journal tip
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
-    pub(crate) async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
+    pub(crate) async fn apply_operations(mut self) -> Result<Self, Error<DB, R>> {
         let mut next_loc = self.journal.size();
 
         // Remove any batches of operations with stale data.
@@ -545,26 +545,15 @@ where
             // Remove the batch of operations that contains the next operation to apply.
             let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
             assert!(!operations.is_empty());
-            // Skip operations that are before the next location.
-            let skip_count = (next_loc - *range_start_loc) as usize;
-            let operations_count = operations.len() - skip_count;
-            let remaining_operations = operations.into_iter().skip(skip_count);
-            next_loc += operations_count as u64;
-            self.apply_operations_batch(remaining_operations).await?;
+            // Skip operations that are before the next location. The containment check when
+            // selecting the range (`next_loc <= range_end`) guarantees at least one operation
+            // at or after it, so the batch is never empty.
+            let operations = &operations[(next_loc - *range_start_loc) as usize..];
+            next_loc += operations.len() as u64;
+            self.journal = self.journal.append(operations).await?;
         }
 
-        Ok(())
-    }
-
-    /// Apply a batch of operations to the journal
-    async fn apply_operations_batch<I>(&mut self, operations: I) -> Result<(), Error<DB, R>>
-    where
-        I: IntoIterator<Item = DB::Op>,
-    {
-        for op in operations {
-            self.journal.append(op).await?;
-        }
-        Ok(())
+        Ok(self)
     }
 
     /// Check if sync is complete based on the current journal size and target
@@ -690,10 +679,8 @@ where
         }
 
         // Cache pinned nodes only from current-root-verified proofs.
-        if need_pinned {
-            if let Some(nodes) = pinned_nodes {
-                self.pinned_nodes = Some(nodes);
-            }
+        if need_pinned && let Some(nodes) = pinned_nodes {
+            self.pinned_nodes = Some(nodes);
         }
 
         // Store operations for later application.
@@ -728,9 +715,9 @@ where
             Event::BatchReceived(fetch_result) => {
                 self.handle_fetch_result(fetch_result)?;
                 self.schedule_requests()?;
-                self.apply_operations().await?;
-                self.record_progress();
-                Ok(NextStep::Continue(self))
+                let mut engine = self.apply_operations().await?;
+                engine.record_progress();
+                Ok(NextStep::Continue(engine))
             }
         }
     }
@@ -764,7 +751,7 @@ where
                 return self.handle_event(event).await;
             }
 
-            self.journal.sync().await?;
+            self.journal = self.journal.sync().await?;
 
             // Build the database from the completed sync
             let database = DB::from_sync_result(
@@ -823,14 +810,14 @@ mod tests {
         merkle::mmr::{Family as MmrFamily, Proof},
         qmdb::sync::requests::FetchFuture,
     };
-    use commonware_cryptography::{sha256, Sha256};
-    use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::{channel::oneshot, non_empty_range, NZU64};
+    use commonware_cryptography::{Sha256, sha256};
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{NZU64, channel::oneshot, non_empty_range};
     use std::{
         convert::Infallible,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -866,22 +853,22 @@ mod tests {
             Ok(Self { size })
         }
 
-        async fn resize(&mut self, start: Location<MmrFamily>) -> Result<(), Self::Error> {
+        async fn resize(mut self, start: Location<MmrFamily>) -> Result<Self, Self::Error> {
             self.size = *start;
-            Ok(())
+            Ok(self)
         }
 
-        async fn sync(&mut self) -> Result<(), Self::Error> {
-            Ok(())
+        async fn sync(self) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn size(&self) -> u64 {
             self.size
         }
 
-        async fn append(&mut self, _op: Self::Op) -> Result<(), Self::Error> {
-            self.size += 1;
-            Ok(())
+        async fn append(mut self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
+            self.size += ops.len() as u64;
+            Ok(self)
         }
     }
 

@@ -6,7 +6,7 @@ use crate::{
     report::Stats,
 };
 use commonware_runtime::{Blob, IoBufMut, IoBufs};
-use rand::{rngs::SmallRng, RngExt as _, SeedableRng};
+use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::time::Instant;
 
 /// Operations between deadline checks.
@@ -109,11 +109,11 @@ pub async fn run_write_loop(
 
         after_write(offset + io_size);
         writes_since_sync += 1;
-        if let SyncMode::Every(every) = sync_mode {
-            if writes_since_sync == every {
-                blob.sync().await?;
-                writes_since_sync = 0;
-            }
+        if let SyncMode::Every(every) = sync_mode
+            && writes_since_sync == every
+        {
+            blob.sync().await?;
+            writes_since_sync = 0;
         }
     }
 

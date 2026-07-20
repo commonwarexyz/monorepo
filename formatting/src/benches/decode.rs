@@ -5,8 +5,8 @@
 //! between the two prefix variants to exercise both stripping paths roughly
 //! 50/50).
 
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use criterion::{Criterion, criterion_group};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::hint::black_box;
 
 /// Inject whitespace at every 8th character, plus a `prefix` at the start.
