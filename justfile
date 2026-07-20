@@ -190,6 +190,10 @@ kani-table *args='':
 kani-segment *args='':
     cargo kani -p commonware-runtime -Z stubbing --harness segment_push_exact --harness segment_drop_front_exact --harness segment_truncate_hygiene {{ args }}
 
+# Run the Kani Allocator proof (seconds; see volume/alloc.rs)
+kani-alloc *args='':
+    cargo kani -p commonware-runtime -Z stubbing --harness allocator_symbolic_audited {{ args }}
+
 # Run zepter feature checks
 check-features:
     zepter run check && zepter format features

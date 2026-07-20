@@ -185,8 +185,8 @@ impl Allocator {
 
     /// Assert the free index's internal invariants: aligned, non-empty,
     /// coalesced, below the high-water mark, and an exact running total
-    /// (tests only).
-    #[cfg(test)]
+    /// (tests and Kani proofs only).
+    #[cfg(any(test, kani))]
     pub(super) fn audit(&self) {
         let mut total = 0;
         let mut prev_end = 0;
@@ -201,6 +201,95 @@ impl Allocator {
             total += len;
         }
         assert_eq!(total, self.free_bytes, "free byte total drifted");
+    }
+}
+
+// Bounded Kani proof harnesses over the real [`Allocator`] (run via
+// `just kani-alloc`). Only the generator-and-audit proof ships: the
+// mutation harnesses (allocate, free with coalescing and byte
+// conservation, rebuild) were built and stop-gated on solver budget —
+// allocate and rebuild exceeded uncontended 2400-second gates and free
+// a 1500-second gate, with zero failed property checks (formula depth,
+// not refutation). Mutation-level allocator coverage remains with the
+// volume model and the unit tests.
+#[cfg(kani)]
+mod verification {
+    mod proofs {
+        use super::super::{Allocator, OrderedMap, BLOCK};
+
+        /// Free-range bound per symbolic allocator: three ranges give
+        /// every relation the audit consults (a strictly lower
+        /// neighbor, adjacency on both sides, and a strictly higher
+        /// neighbor).
+        const ENTRIES: u64 = 3;
+
+        // Unwind bound: 6 covers the three-iteration generator and the
+        // audit's scan over at most three free ranges.
+
+        /// Geometry bound, in blocks, for generated free ranges and the
+        /// high-water mark. Aligned quantities are generated as small
+        /// block counts scaled by BLOCK: full-width byte offsets make
+        /// the bit-blasted formula intractable, while whole-block
+        /// magnitude adds no behavior — the audit is linear in whole
+        /// blocks. Twelve blocks fit three free ranges of one to three
+        /// blocks with gaps and slack below the mark, so every
+        /// relational shape the audit consults still occurs.
+        const MAX_BLOCKS: u64 = 12;
+
+        /// A symbolic allocator with up to [`ENTRIES`] free ranges and a
+        /// symbolic high-water mark, assumed into exactly the invariant
+        /// [`Allocator::audit`] asserts: ranges non-empty, BLOCK-aligned
+        /// (whole-block generation), disjoint and non-adjacent
+        /// (coalesced), strictly below `end`, with `free_bytes` their
+        /// exact sum. Ranges are generated in ascending order, which
+        /// reaches every audit-valid shape of at most ENTRIES ranges
+        /// within [`MAX_BLOCKS`]. `end` is additionally BLOCK-aligned:
+        /// the audit does not state that, but every mutation preserves
+        /// it from a rebuild over aligned extents, and extension
+        /// alignment is false without it.
+        /// [`allocator_symbolic_audited`] checks the construction
+        /// against the audit as its proof obligation.
+        fn any_allocator() -> Allocator {
+            let n: u64 = kani::any();
+            kani::assume(n <= ENTRIES);
+            let mut free = OrderedMap::new();
+            let mut free_bytes = 0u64;
+            let mut cursor = 0u64;
+            for i in 0..ENTRIES {
+                if i >= n {
+                    break;
+                }
+                let offset_blocks: u64 = kani::any();
+                let len_blocks: u64 = kani::any();
+                kani::assume(offset_blocks < MAX_BLOCKS && len_blocks < MAX_BLOCKS);
+                kani::assume(len_blocks > 0 && offset_blocks + len_blocks < MAX_BLOCKS);
+                kani::assume(offset_blocks * BLOCK > cursor);
+                free.insert(offset_blocks * BLOCK, len_blocks * BLOCK);
+                free_bytes += len_blocks * BLOCK;
+                cursor = (offset_blocks + len_blocks) * BLOCK;
+            }
+            let end_blocks: u64 = kani::any();
+            kani::assume(end_blocks <= MAX_BLOCKS && end_blocks * BLOCK > cursor);
+            Allocator {
+                free,
+                end: end_blocks * BLOCK,
+                free_bytes,
+            }
+        }
+
+        /// Every state [`any_allocator`] generates satisfies the real
+        /// audited invariant: the generator's assumptions (and the
+        /// [`coherent`] mirror built from them) are exactly the
+        /// invariant the other harnesses rely on.
+        #[kani::proof]
+        #[kani::unwind(6)]
+        fn allocator_symbolic_audited() {
+            let alloc = any_allocator();
+            alloc.audit();
+            // Skip the state's drop glue: Kani runs no leak checks and
+            // the container deallocation otherwise pads the formula.
+            std::mem::forget(alloc);
+        }
     }
 }
 

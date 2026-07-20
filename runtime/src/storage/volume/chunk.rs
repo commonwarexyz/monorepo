@@ -676,12 +676,105 @@ impl ChunkMap {
 }
 
 // Bounded Kani proof harnesses over the real [`Segment`] (run via
-// `just kani-segment`).
+// `just kani-segment`). ChunkMap-level harnesses (generator plus audit,
+// truncate_front, truncate, insert, and the mark_verified guard) were
+// built and stop-gated on solver budget: 900-second gates and one CBMC
+// out-of-memory, with zero failed property checks (formula depth, not
+// refutation). Map-level coverage remains with the volume model and the
+// unit tests.
 #[cfg(kani)]
 mod verification {
+    use super::{ChunkCrc, ChunkState, CrcPage, Segment, CRC_PAGE_CHUNKS, CRC_PAGE_WORDS};
+
+    /// A symbolic chunk state carrying a known CRC (the only kind
+    /// mutation installs: [`ChunkCrc::Unloaded`] is hydration-only).
+    fn any_known_state() -> ChunkState {
+        let crc = if kani::any() {
+            ChunkCrc::Ready(kani::any())
+        } else {
+            ChunkCrc::Pending
+        };
+        ChunkState {
+            crc,
+            verified: kani::any(),
+        }
+    }
+
+    /// The mask of live bit positions (slots in `[lead, len)`) within
+    /// 64-bit word `word` of a page based at chunk offset `base`.
+    fn live_mask(lead: u64, len: u64, base: u64, word: usize) -> u64 {
+        let lo = base + word as u64 * 64;
+        let live_lo = lead.max(lo);
+        let live_hi = len.min(lo + 64);
+        if live_hi <= live_lo {
+            0
+        } else if live_hi - live_lo == 64 {
+            u64::MAX
+        } else {
+            ((1u64 << (live_hi - live_lo)) - 1) << (live_lo - lo)
+        }
+    }
+
+    /// A symbolic segment of exactly `len` chunks (concrete at every
+    /// call site, at most one resident-mask word): symbolic dead lead,
+    /// unverified bits, and resident values, clean below the lead
+    /// exactly as the audit demands. Content is installed with
+    /// branch-free masked writes — data-dependent branches in the
+    /// generator loop stall CBMC's symbolic execution — and only mask
+    /// word 0 is populated (every higher word is live-masked to zero at
+    /// these lengths, and generating them anyway would force a
+    /// 16-iteration loop into every harness's unwind bound). Returns
+    /// the segment and its set unverified-bit count. `with_page`
+    /// controls whether the (single) CRC page is allocated, the one
+    /// shape choice.
+    fn any_segment(len: u64, with_page: bool) -> (Segment, u64) {
+        debug_assert!(len <= 64, "single-word generator");
+        let lead: u64 = kani::any();
+        kani::assume(lead < len);
+        let mut seg = Segment::new(len);
+        seg.lead = lead;
+        let mut unverified = 0;
+        for rel in 0..len {
+            let bit = rel >= lead && kani::any();
+            seg.unverified.set(rel, bit);
+            unverified += u64::from(bit);
+        }
+        if with_page {
+            let mut resident = [0u64; CRC_PAGE_WORDS];
+            resident[0] = kani::any::<u64>() & live_mask(lead, len, 0, 0);
+            let mut values = vec![0u32; Segment::page_cover(len, 0)];
+            for value in &mut values {
+                *value = kani::any();
+            }
+            seg.pages[0] = Some(Box::new(CrcPage { resident, values }));
+        }
+        (seg, unverified)
+    }
+
+    /// Whether no resident-mask bit is set outside the segment's live
+    /// slots `[lead, len)`. This is the stale-bit hygiene `push`,
+    /// `truncate`, and `drop_front` maintain. The in-tree audit cannot
+    /// see it (a stale bit at a live slot surfaces as a wrong CRC, not
+    /// a count drift), so the harnesses assert it directly.
+    fn resident_bits_hygienic(seg: &Segment) -> bool {
+        for (idx, page) in seg.pages.iter().enumerate() {
+            let Some(page) = page.as_deref() else {
+                continue;
+            };
+            let base = idx as u64 * CRC_PAGE_CHUNKS;
+            for (word, &bits) in page.resident.iter().enumerate() {
+                if bits & !live_mask(seg.lead, seg.len, base, word) != 0 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     mod proofs {
-        use super::super::{
-            ChunkCrc, ChunkState, CrcPage, Segment, CRC_PAGE_CHUNKS, CRC_PAGE_WORDS,
+        use super::{
+            super::{ChunkCrc, Segment},
+            any_known_state, any_segment, resident_bits_hygienic,
         };
 
         /// Segment-level chunk count, small enough for dense symbolic
@@ -692,90 +785,6 @@ mod verification {
         /// stop-gated, so multi-word masks and whole-page drops rely on
         /// the unit tests.
         const SEG_LEN: u64 = 12;
-
-        /// A symbolic chunk state carrying a known CRC (the only kind
-        /// mutation installs: [`ChunkCrc::Unloaded`] is hydration-only).
-        fn any_known_state() -> ChunkState {
-            let crc = if kani::any() {
-                ChunkCrc::Ready(kani::any())
-            } else {
-                ChunkCrc::Pending
-            };
-            ChunkState {
-                crc,
-                verified: kani::any(),
-            }
-        }
-
-        /// The mask of live bit positions (slots in `[lead, len)`) within
-        /// 64-bit word `word` of a page based at chunk offset `base`.
-        fn live_mask(lead: u64, len: u64, base: u64, word: usize) -> u64 {
-            let lo = base + word as u64 * 64;
-            let live_lo = lead.max(lo);
-            let live_hi = len.min(lo + 64);
-            if live_hi <= live_lo {
-                0
-            } else if live_hi - live_lo == 64 {
-                u64::MAX
-            } else {
-                ((1u64 << (live_hi - live_lo)) - 1) << (live_lo - lo)
-            }
-        }
-
-        /// A symbolic segment of exactly `len` chunks (concrete at every
-        /// call site): symbolic dead lead, unverified bits, and resident
-        /// values, clean below the lead exactly as the audit demands.
-        /// Content is installed with branch-free masked writes — data-
-        /// dependent branches in the generator loop stall CBMC's symbolic
-        /// execution — so the length stays concrete and the bits, values,
-        /// and lead carry all the symbolism. Returns the segment and its
-        /// set unverified-bit count. `with_page` controls whether the
-        /// (single) CRC page is allocated, the one shape choice.
-        fn any_segment(len: u64, with_page: bool) -> (Segment, u64) {
-            debug_assert!(len <= CRC_PAGE_CHUNKS, "single-page generator");
-            let lead: u64 = kani::any();
-            kani::assume(lead < len);
-            let mut seg = Segment::new(len);
-            seg.lead = lead;
-            let mut unverified = 0;
-            for rel in 0..len {
-                let bit = rel >= lead && kani::any();
-                seg.unverified.set(rel, bit);
-                unverified += u64::from(bit);
-            }
-            if with_page {
-                let mut resident = [0u64; CRC_PAGE_WORDS];
-                for (word, slot) in resident.iter_mut().enumerate() {
-                    *slot = kani::any::<u64>() & live_mask(lead, len, 0, word);
-                }
-                let mut values = vec![0u32; Segment::page_cover(len, 0)];
-                for value in &mut values {
-                    *value = kani::any();
-                }
-                seg.pages[0] = Some(Box::new(CrcPage { resident, values }));
-            }
-            (seg, unverified)
-        }
-
-        /// Whether no resident-mask bit is set outside the segment's live
-        /// slots `[lead, len)`. This is the stale-bit hygiene `push`,
-        /// `truncate`, and `drop_front` maintain. The in-tree audit cannot
-        /// see it (a stale bit at a live slot surfaces as a wrong CRC, not
-        /// a count drift), so the harnesses assert it directly.
-        fn resident_bits_hygienic(seg: &Segment) -> bool {
-            for (idx, page) in seg.pages.iter().enumerate() {
-                let Some(page) = page.as_deref() else {
-                    continue;
-                };
-                let base = idx as u64 * CRC_PAGE_CHUNKS;
-                for (word, &bits) in page.resident.iter().enumerate() {
-                    if bits & !live_mask(seg.lead, seg.len, base, word) != 0 {
-                        return false;
-                    }
-                }
-            }
-            true
-        }
 
         /// `Segment::drop_front` kills exactly the slots below the new
         /// lead (bits clear and are counted back exactly, values drop),

@@ -203,10 +203,10 @@ impl BlobInner {
         self.crcs.finalize(chunk, || Crc32::checksum(bytes));
     }
 
-    /// Assert this blob's structural invariants (tests only): run geometry,
-    /// tail-buffer coherence with the last backed chunk (the invariant whose
-    /// silent violation produced the stale-shadow data loss), chunk-state
-    /// coverage, counter exactness, and overlay residency.
+    /// Assert this blob's structural invariants (tests only): run geometry, tail-buffer coherence with the last backed
+    /// chunk (the invariant whose silent violation produced the
+    /// stale-shadow data loss), chunk-state coverage, counter exactness,
+    /// and overlay residency.
     #[cfg(test)]
     pub fn audit(&self) {
         // Run geometry: aligned starts, non-overlapping, exact capacity.
