@@ -973,6 +973,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_ancestry_from_stream() {
+        harness::ancestry_from_stream::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_ancestry_from_rebuild() {
+        harness::ancestry_from_rebuild::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_finalize_same_height_different_views() {
         harness::finalize_same_height_different_views::<CodingHarness>();
     }

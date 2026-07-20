@@ -6,6 +6,7 @@
 use crate::{
     Block,
     marshal::{
+        BlockID,
         ancestry::BlockProvider,
         core::{Buffer, CommitmentFallback, Mailbox, Variant},
     },
@@ -139,5 +140,16 @@ where
             )
         });
         async move { receiver?.await.ok() }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn get_descendant(
+        &self,
+        start: BlockID<<Self::Block as Digestible>::Digest>,
+        tip: BlockID<<Self::Block as Digestible>::Digest>,
+    ) -> impl Future<Output = Option<(Arc<Self::Block>, <Self::Block as Digestible>::Digest)>>
+    + Send
+    + 'static {
+        self.resolve_descendant(start, tip)
     }
 }

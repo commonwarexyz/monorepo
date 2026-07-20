@@ -929,7 +929,7 @@ mod tests {
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
-        marshal::ancestry::{Ancestry, BlockProvider},
+        marshal::ancestry::{Ancestry, BlockProvider}, marshal::{BlockID, ancestry::BlockProvider},
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
     };
@@ -953,6 +953,7 @@ mod tests {
     use futures::StreamExt;
     use std::{
         collections::{BTreeMap, VecDeque},
+        future,
         future::Future,
         num::NonZeroUsize,
         sync::{
@@ -1272,6 +1273,14 @@ mod tests {
             let parent = block.parent();
             async move { provider.fetch_by_digest(parent).map(Arc::new) }
         }
+
+        fn get_descendant(
+            &self,
+            _start: BlockID<Digest>,
+            _tip: BlockID<Digest>,
+        ) -> impl Future<Output = Option<(Arc<Self::Block>, Digest)>> + Send + 'static {
+            future::ready(None)
+        }
     }
 
     #[derive(Clone, Default)]
@@ -1311,6 +1320,14 @@ mod tests {
                     .flatten()
                     .map(Arc::new)
             }
+        }
+
+        fn get_descendant(
+            &self,
+            _start: BlockID<Digest>,
+            _tip: BlockID<Digest>,
+        ) -> impl Future<Output = Option<(Arc<Self::Block>, Digest)>> + Send + 'static {
+            future::ready(None)
         }
     }
 

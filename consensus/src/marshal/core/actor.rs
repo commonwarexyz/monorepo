@@ -8,12 +8,13 @@ use super::{
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
+    tree::ForkTree,
     variant::NoBuffer,
 };
 use crate::{
     Block, Epochable, Heightable, Reporter,
     marshal::{
-        Config, Identifier as BlockID, Start, Update,
+        BlockID, Config, Identifier, Start, Update,
         resolver::handler::{self, Annotation, Key, Request},
         store::{Blocks, Certificates},
     },
@@ -138,6 +139,8 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
+    // Candidate forks above the last finalized block
+    tree: ForkTree<V::Block>,
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
@@ -155,6 +158,8 @@ where
     finalized_height: Gauge,
     // Latest processed height
     processed_height: Gauge,
+    // Number of candidate blocks tracked above the finalized tip
+    pending_blocks: Gauge,
 }
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
@@ -224,6 +229,10 @@ where
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
         let processed_height = context.gauge("processed_height", "Processed height of application");
+        let pending_blocks = context.gauge(
+            "pending_blocks",
+            "Number of candidate blocks tracked above the finalized tip",
+        );
         if let Some(last_processed_height) = last_processed_height {
             let _ = processed_height.try_set(last_processed_height.get());
         }
@@ -251,12 +260,14 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                tree: ForkTree::new(),
                 dispatch_gate: DispatchGate::default(),
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
                 finalized_height,
                 processed_height,
+                pending_blocks,
             },
             Mailbox::new(sender),
             last_processed_height,
@@ -391,6 +402,10 @@ where
             // Load persisted cache epochs so find_block can discover blocks
             // written before the last shutdown.
             self.cache = self.cache.load_persisted_epochs().await;
+
+            // Rebuild the in-memory fork tree from cached candidate blocks.
+            self.rebuild_forks(tip.map(|(height, digest, _)| (height, digest)))
+                .await;
 
             // A configured floor follows the same path as `SetFloor`: verify it,
             // then apply a local anchor or fetch the anchor block.
@@ -599,15 +614,15 @@ where
                     // TODO: Instead of pulling out the entire block, determine the
                     // height directly from the archive by mapping the digest to
                     // the index, which is the same as the height.
-                    BlockID::Digest(digest) => self
+                    Identifier::Digest(digest) => self
                         .finalized_blocks
                         .get(ArchiveID::Key(&digest))
                         .await
                         .ok()
                         .flatten()
                         .map(|b| (b.height(), digest)),
-                    BlockID::Height(height) => self.get_info_by_height(height).await,
-                    BlockID::Latest => self.get_latest().await.map(|(h, d, _)| (h, d)),
+                    Identifier::Height(height) => self.get_info_by_height(height).await,
+                    Identifier::Latest => self.get_latest().await.map(|(h, d, _)| (h, d)),
                 };
                 response.send_lossy(info);
             }
@@ -802,18 +817,18 @@ where
                 response,
                 ..
             } => match identifier {
-                BlockID::Digest(digest) => {
+                Identifier::Digest(digest) => {
                     let result = self
                         .find_block_by_digest(buffer, digest)
                         .await
                         .map(Arc::unwrap_or_clone);
                     response.send_lossy(result);
                 }
-                BlockID::Height(height) => {
+                Identifier::Height(height) => {
                     let result = self.get_finalized_block(height).await;
                     response.send_lossy(result);
                 }
-                BlockID::Latest => {
+                Identifier::Latest => {
                     let block = match self.get_latest().await {
                         Some((_, digest, _)) => self.find_block_by_digest(buffer, digest).await,
                         None => None,
@@ -830,6 +845,15 @@ where
             }
             Message::GetProcessedHeight { response, .. } => {
                 response.send_lossy(self.stream.processed_height());
+            }
+            Message::GetDescendant {
+                start,
+                tip,
+                response,
+                ..
+            } => {
+                let block = self.resolve_descendant(start, tip).await;
+                response.send_lossy(block);
             }
             Message::HintFinalized {
                 height, targets, ..
@@ -1259,6 +1283,10 @@ where
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(Arc::clone(&block));
 
+        // Track the block as a fork candidate until a finalization decides
+        // its fate.
+        self.track_candidate(&block);
+
         if !self.floor.matches_pending_anchor(V::commitment(&block)) {
             return (self, false);
         }
@@ -1332,6 +1360,9 @@ where
         )
         .expect("failed to store floor anchor");
         self = self.sync_finalized().await;
+
+        // The floor anchor is finalized: re-anchor the fork tree above it.
+        self.finalize_forks(height, digest);
 
         if height > self.tip {
             application.report(Update::Tip(round, height, digest));
@@ -1952,6 +1983,17 @@ where
         }
     }
 
+    /// Get a finalized block from the immutable archive by digest.
+    async fn get_finalized_block_by_digest(
+        &self,
+        digest: &<V::Block as Digestible>::Digest,
+    ) -> Option<V::Block> {
+        match self.finalized_blocks.get(ArchiveID::Key(digest)).await {
+            Ok(stored) => stored.map(|stored| stored.into()),
+            Err(e) => panic!("failed to get block: {e}"),
+        }
+    }
+
     /// Get a finalization from the archive by height.
     async fn get_finalization_by_height(
         &self,
@@ -2051,6 +2093,10 @@ where
             }
         )
         .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
+
+        // The stored block extends the finalized chain: advance the fork tree
+        // root and prune candidates the finalization supersedes.
+        self.finalize_forks(height, digest);
 
         // The write above is buffered and readable before it is durable, so
         // hold dispatch at or above it until a sync covers it.
@@ -2162,6 +2208,141 @@ where
         self.find_block_in_storage_by_commitment(commitment)
             .await
             .map(Arc::new)
+    }
+
+    // -------------------- Fork Tree --------------------
+
+    /// Tracks `block` as a fork candidate until a finalization decides its
+    /// fate.
+    fn track_candidate(&mut self, block: &Arc<V::Block>) {
+        if self.tree.insert(block) {
+            let _ = self.pending_blocks.try_set(self.tree.len() as u64);
+        }
+    }
+
+    /// Records a newly finalized block, pruning fork candidates it
+    /// supersedes.
+    fn finalize_forks(&mut self, height: Height, digest: <V::Block as Digestible>::Digest) {
+        self.tree.finalize(height, digest);
+        let _ = self.pending_blocks.try_set(self.tree.len() as u64);
+    }
+
+    /// Rebuilds the in-memory fork tree from the prunable caches.
+    ///
+    /// The tree is anchored at the highest locally known finalized block and
+    /// repopulated with every cached candidate block above it. Candidates
+    /// that were only ever observed via broadcast (never cached) are not
+    /// restored.
+    async fn rebuild_forks(&mut self, anchor: Option<(Height, <V::Block as Digestible>::Digest)>) {
+        // Anchor at the highest stored block when it leads the highest known
+        // finalization: the block archive can durably lead the finalization
+        // archive after an unclean shutdown (their syncs are independent),
+        // and every stored block is a walkback-validated chain member. This
+        // also covers a genesis anchor written before any finalization.
+        let anchor = match self.finalized_blocks.last_index() {
+            Some(height) if anchor.is_none_or(|(known, _)| known < height) => self
+                .get_finalized_block(height)
+                .await
+                .map(|block| (height, block.digest())),
+            _ => anchor,
+        };
+        if let Some((height, digest)) = anchor {
+            self.tree.finalize(height, digest);
+        }
+
+        let tree = &mut self.tree;
+        self.cache
+            .visit_blocks(|stored| {
+                let block: V::Block = stored.into();
+                tree.insert(&Arc::new(block));
+            })
+            .await;
+        let _ = self.pending_blocks.try_set(self.tree.len() as u64);
+        debug!(blocks = self.tree.len(), "rebuilt fork tree");
+    }
+
+    /// Resolves the block at `start` within the locally known ancestry of
+    /// `tip`, returning it with the resolved tip digest.
+    ///
+    /// Returns `None` when `tip` is unknown locally, `start` does not lie on
+    /// the tip's chain, or the block at `start` is not locally available.
+    #[allow(clippy::type_complexity)]
+    async fn resolve_descendant(
+        &self,
+        start: BlockID<<V::Block as Digestible>::Digest>,
+        tip: BlockID<<V::Block as Digestible>::Digest>,
+    ) -> Option<(Arc<V::Block>, <V::Block as Digestible>::Digest)> {
+        // Resolve the tip to a digest. Height-identified tips can only name
+        // finalized blocks.
+        let tip = match tip {
+            BlockID::Digest(digest) => digest,
+            BlockID::Height(height) => self.get_finalized_block(height).await?.digest(),
+        };
+
+        // Resolve the tip to a candidate branch or a finalized block. The
+        // boundary is the height of the last finalized block in the tip's
+        // ancestry, when locally known: the fork tree root for a connected
+        // branch, or the tip itself when the tip is already finalized.
+        let (candidates, boundary, tip_height) = match self.tree.branch(&tip) {
+            Some(branch) => {
+                let tip_height = branch
+                    .blocks
+                    .last()
+                    .expect("branch must contain its tip")
+                    .height();
+                (branch.blocks, branch.root, tip_height)
+            }
+            None => {
+                let block = self.get_finalized_block_by_digest(&tip).await?;
+                (Vec::new(), Some(block.height()), block.height())
+            }
+        };
+
+        // Resolve the starting position to a height. A digest names a
+        // specific block: it is served directly when it is a candidate on
+        // this branch, and located in the finalized store otherwise.
+        let (start_height, located) = match start {
+            BlockID::Height(height) => (height, None),
+            BlockID::Digest(digest) => {
+                if let Some(block) = candidates.iter().find(|block| block.digest() == digest) {
+                    return Some((Arc::clone(block), tip));
+                }
+                let block = self.get_finalized_block_by_digest(&digest).await?;
+                (block.height(), Some(block))
+            }
+        };
+        if start_height > tip_height {
+            return None;
+        }
+
+        // Within the candidate segment: serve from the branch. A block
+        // located in the finalized store never resolves here: it is not a
+        // candidate on this branch (checked above), so a finalized block at
+        // a candidate height is provably not on the tip's chain. This is
+        // reachable when the block archive durably leads the fork tree root
+        // after an unclean shutdown.
+        if let Some(first) = candidates.first()
+            && start_height >= first.height()
+        {
+            if located.is_some() {
+                return None;
+            }
+            let offset = start_height
+                .delta_from(first.height())
+                .expect("start height must be at or above the first candidate")
+                .get() as usize;
+            return Some((Arc::clone(&candidates[offset]), tip));
+        }
+
+        // At or below the finalized boundary: the candidate segment must
+        // connect to the finalized chain, and the block must be stored (a
+        // digest-identified start was already located above).
+        boundary?;
+        let block = match located {
+            Some(block) => block,
+            None => self.get_finalized_block(start_height).await?,
+        };
+        Some((Arc::new(block), tip))
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total

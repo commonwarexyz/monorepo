@@ -1,7 +1,13 @@
-//! A stream that yields the ancestors of a block while prefetching parents.
+//! Streams over a block's ancestry.
+//!
+//! [AncestorStream] walks backward from a block toward genesis, prefetching
+//! parents as it goes. [DescendantStream] walks the same ancestry forward:
+//! starting from a chosen ancestor, it yields blocks in ascending height
+//! order until it reaches the tip whose ancestry defines the chain.
 
-use crate::{Block, Heightable, types::Height};
+use crate::{Block, Heightable, marshal::BlockID, types::Height};
 use commonware_cryptography::{Digest, Digestible};
+use commonware_macros::stability;
 use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use futures::{
     FutureExt, Stream,
@@ -21,6 +27,19 @@ pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Clone + Send + Unpin + 'st
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.
     fn peek(&self) -> Option<&B>;
+
+    /// Returns a forward stream over this ancestry's chain, yielding blocks
+    /// in ascending height order from `start` up to this ancestry's tip.
+    ///
+    /// `start` identifies where iteration begins within the chain: a height
+    /// or a digest on the chain.
+    ///
+    /// Only locally known blocks are served; no network fetches are issued.
+    /// Returns `None` when `start` does not lie in the locally known chain.
+    fn descendants(
+        &self,
+        start: BlockID<B::Digest>,
+    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send;
 }
 
 /// Creates an ancestry stream from a fixed sequence of blocks.
@@ -28,9 +47,10 @@ pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Clone + Send + Unpin + 'st
 /// Blocks are yielded in iterator order and no parent fetching is performed. This is useful when
 /// the caller wants to bound the ancestry available to the application.
 pub fn from_iter<B: Block>(blocks: impl IntoIterator<Item = Arc<B>>) -> impl Ancestry<B> {
-    BoundedAncestry {
-        blocks: blocks.into_iter().collect(),
-    }
+    let blocks: VecDeque<_> = blocks.into_iter().collect();
+    let mut chain: Vec<_> = blocks.iter().cloned().collect();
+    chain.sort_by_key(|block| block.height());
+    BoundedAncestry { blocks, chain }
 }
 
 /// Prepends a fixed sequence of blocks to an existing ancestry stream.
@@ -101,7 +121,11 @@ where
 
 #[derive(Clone)]
 struct BoundedAncestry<B: Block> {
+    /// Blocks remaining to yield, in caller-provided order.
     blocks: VecDeque<Arc<B>>,
+    /// The chain fixed at construction, ascending in height, serving forward
+    /// walks regardless of how much of the stream has been consumed.
+    chain: Vec<Arc<B>>,
 }
 
 impl<B: Block> Unpin for BoundedAncestry<B> {}
@@ -109,6 +133,25 @@ impl<B: Block> Unpin for BoundedAncestry<B> {}
 impl<B: Block> Ancestry<B> for BoundedAncestry<B> {
     fn peek(&self) -> Option<&B> {
         self.blocks.front().map(Arc::as_ref)
+    }
+
+    fn descendants(
+        &self,
+        start: BlockID<B::Digest>,
+    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send {
+        // A bounded ancestry is fully in memory: serve the chain fixed at
+        // construction from the start onward, in ascending height order.
+        let position = match start {
+            BlockID::Height(height) => self.chain.iter().position(|b| b.height() == height),
+            BlockID::Digest(digest) => self.chain.iter().position(|b| b.digest() == digest),
+        };
+        std::future::ready(position.map(|position| {
+            let chain = self.chain[position..].to_vec();
+            Self {
+                blocks: chain.clone().into(),
+                chain,
+            }
+        }))
     }
 }
 
@@ -156,8 +199,8 @@ where
     }
 }
 
-/// An interface for providing parent blocks.
-pub trait BlockProvider: Send + 'static {
+/// An interface for providing blocks from a locally known ancestry.
+pub trait BlockProvider: Clone + Send + 'static {
     /// The block type the provider walks.
     type Block: Block;
 
@@ -177,6 +220,27 @@ pub trait BlockProvider: Send + 'static {
         &self,
         block: &Self::Block,
     ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static;
+
+    /// Retrieve the block at `start` within the locally known ancestry of
+    /// `tip`, together with the resolved tip digest.
+    ///
+    /// The chain is defined by the ancestry of `tip`, which may be an
+    /// unfinalized candidate (a fork tracked by marshal) or a finalized
+    /// block. Finalized blocks are served from storage and candidates from
+    /// marshal's in-memory fork tree. Unlike [Self::subscribe_parent], this
+    /// lookup never waits and never fetches from the network.
+    ///
+    /// Returns `None` when `tip` is unknown locally, `start` does not lie in
+    /// the tip's locally known ancestry, or the block at `start` is not
+    /// locally available.
+    #[allow(clippy::type_complexity)]
+    fn get_descendant(
+        &self,
+        start: BlockID<<Self::Block as Digestible>::Digest>,
+        tip: BlockID<<Self::Block as Digestible>::Digest>,
+    ) -> impl Future<Output = Option<(Arc<Self::Block>, <Self::Block as Digestible>::Digest)>>
+    + Send
+    + 'static;
 }
 
 // Expected parent height and digest for a pending fetch.
@@ -209,6 +273,38 @@ impl<D: Digest> ExpectedParent<D> {
     }
 }
 
+// Asserts that `block` directly extends the chain link `last`.
+fn assert_extends<B: Block>(last: &(Height, B::Digest), block: &B) {
+    let (height, digest) = last;
+    assert_eq!(
+        block.height(),
+        height.next(),
+        "block must be contiguous in height"
+    );
+    assert_eq!(
+        block.parent(),
+        *digest,
+        "block must be contiguous in ancestry"
+    );
+}
+
+// Wraps `fetch`, recording its latency on success.
+fn timed_fetch<C, T>(
+    clock: &Arc<C>,
+    fetch_duration: &Timed,
+    fetch: impl Future<Output = Option<T>> + Send + 'static,
+) -> BoxFuture<'static, Option<T>>
+where
+    C: Clock,
+    T: Send + 'static,
+{
+    let timer = fetch_duration.timer(clock.as_ref());
+    let clock = clock.clone();
+    fetch
+        .map(move |result| result.inspect(|_| timer.observe(clock.as_ref())))
+        .boxed()
+}
+
 // Builds a pending parent fetch that records successful fetch latency and carries the
 // expected relationship for validation when the parent is delivered.
 fn timed_parent_fetch<C, M>(
@@ -222,17 +318,13 @@ where
     M: BlockProvider,
 {
     let expected = ExpectedParent::from_child(child);
-    let timer = fetch_duration.timer(clock.as_ref());
-    let clock = clock.clone();
-    marshal
-        .subscribe_parent(child)
-        .map(move |parent| {
-            parent.map(|parent| {
-                timer.observe(clock.as_ref());
-                (expected, parent)
-            })
-        })
-        .boxed()
+    timed_fetch(
+        clock,
+        fetch_duration,
+        marshal
+            .subscribe_parent(child)
+            .map(move |parent| parent.map(|parent| (expected, parent))),
+    )
 }
 
 /// Yields the ancestors of a block while prefetching parents, including the
@@ -240,6 +332,9 @@ where
 #[pin_project]
 pub struct AncestorStream<M: BlockProvider, C: Clock> {
     buffered: Vec<Arc<M::Block>>,
+    /// The digest of the highest initial block, identifying the chain this
+    /// stream walks.
+    tip: Option<<M::Block as Digestible>::Digest>,
     marshal: M,
     fetch_duration: Timed,
     clock: Arc<C>,
@@ -254,6 +349,7 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous.
+    #[stability(ALPHA)]
     pub(crate) fn new(
         clock: Arc<C>,
         marshal: M,
@@ -277,9 +373,11 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
             );
         });
 
+        let tip = buffered.last().map(|block| block.digest());
         Self {
             marshal,
             buffered,
+            tip,
             fetch_duration,
             clock,
             pending_child: None,
@@ -327,6 +425,26 @@ where
 {
     fn peek(&self) -> Option<&M::Block> {
         Self::peek(self)
+    }
+
+    fn descendants(
+        &self,
+        start: BlockID<<M::Block as Digestible>::Digest>,
+    ) -> impl Future<Output = Option<impl Ancestry<M::Block>>> + Send {
+        let tip = self.tip;
+        let marshal = self.marshal.clone();
+        let clock = self.clock.clone();
+        let fetch_duration = self.fetch_duration.clone();
+        async move {
+            let (block, tip) = marshal.get_descendant(start, BlockID::Digest(tip?)).await?;
+            Some(DescendantStream::new(
+                clock,
+                marshal,
+                block,
+                tip,
+                fetch_duration,
+            ))
+        }
     }
 }
 
@@ -425,6 +543,200 @@ where
     }
 }
 
+// A pending descendant fetch paired with the chain link it must extend.
+type PendingDescendantFetch<B> =
+    BoxFuture<'static, Option<((Height, <B as Digestible>::Digest), Arc<B>)>>;
+
+// Builds a pending fetch for the block directly above `parent` in `tip`'s
+// ancestry, recording successful fetch latency and carrying the link the
+// fetched block must extend.
+fn timed_descendant_fetch<C, M>(
+    clock: &Arc<C>,
+    marshal: &M,
+    parent: &M::Block,
+    tip: <M::Block as Digestible>::Digest,
+    fetch_duration: &Timed,
+) -> PendingDescendantFetch<M::Block>
+where
+    C: Clock,
+    M: BlockProvider,
+{
+    let link = (parent.height(), parent.digest());
+    timed_fetch(
+        clock,
+        fetch_duration,
+        marshal
+            .get_descendant(BlockID::Height(link.0.next()), BlockID::Digest(tip))
+            .map(move |block| block.map(|(block, _)| (link, block))),
+    )
+}
+
+/// Yields a tip's ancestry in ascending height order, from a chosen ancestor
+/// up to the tip itself.
+///
+/// The stream is armed with its first block and lazily fetches each following
+/// block from the provider (prefetching the next block while the previous one
+/// is consumed), mirroring [AncestorStream] in the opposite direction. It
+/// finishes once the tip is yielded, and ends early if the next block becomes
+/// unavailable locally (e.g. its branch was pruned by a finalization, or a
+/// finalized block was pruned while iterating).
+///
+/// # Panics
+///
+/// Panics if fetched blocks do not form a contiguous chain, which indicates
+/// local storage corruption.
+#[pin_project]
+pub struct DescendantStream<M: BlockProvider, C: Clock> {
+    /// The next block to yield.
+    buffered: Option<Arc<M::Block>>,
+    /// The digest of the tip; the stream finishes once it is yielded.
+    tip: <M::Block as Digestible>::Digest,
+    marshal: M,
+    fetch_duration: Timed,
+    clock: Arc<C>,
+    #[pin]
+    pending: OptionFuture<PendingDescendantFetch<M::Block>>,
+}
+
+impl<M: BlockProvider, C: Clock> DescendantStream<M, C> {
+    /// Creates a new [DescendantStream] armed with the first block of the
+    /// walk, ending at `tip`.
+    ///
+    /// `start` must lie in the ancestry of `tip`; providers validate this
+    /// when resolving the anchor (see [BlockProvider::get_descendant]).
+    pub(crate) fn new(
+        clock: Arc<C>,
+        marshal: M,
+        start: Arc<M::Block>,
+        tip: <M::Block as Digestible>::Digest,
+        fetch_duration: Timed,
+    ) -> Self {
+        Self {
+            buffered: Some(start),
+            tip,
+            marshal,
+            fetch_duration,
+            clock,
+            pending: None.into(),
+        }
+    }
+
+    /// Peeks at the next block in the stream without consuming it. Returns
+    /// [None] if the stream does not yet have a block available or has been
+    /// exhausted.
+    pub fn peek(&self) -> Option<&M::Block> {
+        self.buffered.as_deref()
+    }
+}
+
+impl<M, C> Ancestry<M::Block> for DescendantStream<M, C>
+where
+    M: BlockProvider,
+    C: Clock,
+{
+    fn peek(&self) -> Option<&M::Block> {
+        Self::peek(self)
+    }
+
+    fn descendants(
+        &self,
+        start: BlockID<<M::Block as Digestible>::Digest>,
+    ) -> impl Future<Output = Option<impl Ancestry<M::Block>>> + Send {
+        let tip = self.tip;
+        let marshal = self.marshal.clone();
+        let clock = self.clock.clone();
+        let fetch_duration = self.fetch_duration.clone();
+        async move {
+            let (block, tip) = marshal.get_descendant(start, BlockID::Digest(tip)).await?;
+            Some(Self::new(clock, marshal, block, tip, fetch_duration))
+        }
+    }
+}
+
+impl<M, C> Stream for DescendantStream<M, C>
+where
+    M: BlockProvider,
+    C: Clock,
+{
+    type Item = Arc<M::Block>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+
+        // If a block has been buffered, return it and queue the next fetch
+        // if the tip has not been reached.
+        if let Some(block) = this.buffered.take() {
+            if block.digest() != *this.tip {
+                let future = timed_descendant_fetch(
+                    this.clock,
+                    this.marshal,
+                    &block,
+                    *this.tip,
+                    this.fetch_duration,
+                );
+                *this.pending.as_mut() = Some(future).into();
+
+                // Explicitly poll the next future to kick off the fetch. If
+                // it's already ready, buffer it for the next poll.
+                match this.pending.as_mut().poll(cx) {
+                    Poll::Ready(Some(Some((link, child)))) => {
+                        assert_extends(&link, child.as_ref());
+                        *this.buffered = Some(child);
+                    }
+                    Poll::Ready(Some(None)) => {
+                        *this.pending.as_mut() = None.into();
+                    }
+                    Poll::Ready(None) | Poll::Pending => {}
+                }
+            } else {
+                // The tip has been reached; finish the stream.
+                *this.pending.as_mut() = None.into();
+            }
+
+            return Poll::Ready(Some(block));
+        }
+
+        match this.pending.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) | Poll::Ready(Some(None)) => {
+                *this.pending.as_mut() = None.into();
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Some((link, block)))) => {
+                assert_extends(&link, block.as_ref());
+                if block.digest() != *this.tip {
+                    let future = timed_descendant_fetch(
+                        this.clock,
+                        this.marshal,
+                        &block,
+                        *this.tip,
+                        this.fetch_duration,
+                    );
+                    *this.pending.as_mut() = Some(future).into();
+
+                    // Explicitly poll the next future to kick off the fetch.
+                    // If it's already ready, buffer it for the next poll.
+                    match this.pending.as_mut().poll(cx) {
+                        Poll::Ready(Some(Some((link, child)))) => {
+                            assert_extends(&link, child.as_ref());
+                            *this.buffered = Some(child);
+                        }
+                        Poll::Ready(Some(None)) => {
+                            *this.pending.as_mut() = None.into();
+                        }
+                        Poll::Ready(None) | Poll::Pending => {}
+                    }
+                } else {
+                    // The tip has been reached; finish the stream.
+                    *this.pending.as_mut() = None.into();
+                }
+
+                Poll::Ready(Some(block))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -492,6 +804,34 @@ mod test {
             self.subscriptions.lock().push(subscription);
             parent.map(Result::ok)
         }
+
+        fn get_descendant(
+            &self,
+            start: BlockID<Sha256Digest>,
+            tip: BlockID<Sha256Digest>,
+        ) -> impl Future<Output = Option<(Arc<Self::Block>, Sha256Digest)>> + Send + 'static
+        {
+            // Walk parent links from the tip down to locate the start on
+            // the tip's chain.
+            let result = (|| {
+                let BlockID::Digest(tip) = tip else {
+                    return None;
+                };
+                let mut cursor = tip;
+                loop {
+                    let block = self.0.iter().find(|b| b.digest() == cursor)?;
+                    let found = match start {
+                        BlockID::Height(height) => block.height() == height,
+                        BlockID::Digest(digest) => block.digest() == digest,
+                    };
+                    if found {
+                        return Some((Arc::new(block.clone()), tip));
+                    }
+                    cursor = block.parent;
+                }
+            })();
+            std::future::ready(result)
+        }
     }
 
     #[derive(Clone)]
@@ -504,6 +844,18 @@ mod test {
             _block: &Self::Block,
         ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             std::future::ready(Some(Arc::new(self.0.clone())))
+        }
+
+        fn get_descendant(
+            &self,
+            _start: BlockID<Sha256Digest>,
+            tip: BlockID<Sha256Digest>,
+        ) -> impl Future<Output = Option<(Arc<Self::Block>, Sha256Digest)>> + Send + 'static
+        {
+            let BlockID::Digest(tip) = tip else {
+                return std::future::ready(None);
+            };
+            std::future::ready(Some((Arc::new(self.0.clone()), tip)))
         }
     }
 
@@ -604,6 +956,25 @@ mod test {
             let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
             let stream = stream(&context, MockProvider::default(), [block.clone()]);
             assert_eq!(peek_height(stream), Some(block.height()));
+        });
+    }
+
+    #[test]
+    fn test_from_iter_descendants_survive_consumption() {
+        deterministic::Runner::default().start(|_| async move {
+            let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let child = Block::new::<Sha256>((), parent.digest(), Height::new(2), 2);
+            let mut ancestry = from_iter([Arc::new(child.clone()), Arc::new(parent.clone())]);
+
+            // Consuming the tip must not remove it from the chain served by
+            // forward walks.
+            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
+            let forward = ancestry
+                .descendants(BlockID::Digest(parent.digest()))
+                .await
+                .expect("start on chain");
+            let results = forward.collect::<Vec<_>>().await;
+            assert_eq!(results, vec![Arc::new(parent), Arc::new(child)]);
         });
     }
 
@@ -767,6 +1138,149 @@ mod test {
 
             let results = stream.collect::<Vec<_>>().await;
             assert_eq!(results, vec![Arc::new(block3)]);
+        });
+    }
+
+    /// Builds a chain of `len` contiguous blocks starting at height `start`.
+    fn make_chain(start: u64, len: u64) -> Vec<Block<Sha256Digest, ()>> {
+        let mut blocks = Vec::new();
+        let mut parent = Sha256Digest::EMPTY;
+        for height in start..start + len {
+            let block = Block::new::<Sha256>((), parent, Height::new(height), height);
+            parent = block.digest();
+            blocks.push(block);
+        }
+        blocks
+    }
+
+    fn descendant_stream<M>(
+        context: &deterministic::Context,
+        provider: M,
+        start: M::Block,
+        tip: Sha256Digest,
+    ) -> DescendantStream<M, deterministic::Context>
+    where
+        M: BlockProvider<Block = Block<Sha256Digest, ()>>,
+    {
+        let stream_context = context.child("descendant_stream");
+        let fetch_duration = timed(&stream_context);
+        DescendantStream::new(
+            Arc::new(stream_context),
+            provider,
+            Arc::new(start),
+            tip,
+            fetch_duration,
+        )
+    }
+
+    #[test]
+    fn test_descendant_walks_chain_to_tip() {
+        deterministic::Runner::default().start(|context| async move {
+            let chain = make_chain(0, 5);
+            let provider = MockProvider(chain.clone());
+
+            let stream = descendant_stream(&context, provider, chain[0].clone(), chain[4].digest());
+            let results = stream.collect::<Vec<_>>().await;
+            assert_eq!(
+                results,
+                chain.iter().cloned().map(Arc::new).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn test_descendant_single_block_when_start_is_tip() {
+        deterministic::Runner::default().start(|context| async move {
+            let chain = make_chain(3, 1);
+            let provider = MockProvider(chain.clone());
+
+            let mut stream =
+                descendant_stream(&context, provider, chain[0].clone(), chain[0].digest());
+            assert_eq!(stream.peek(), Some(&chain[0]));
+            assert_eq!(stream.next().await.as_deref(), Some(&chain[0]));
+            assert_eq!(stream.peek(), None);
+            assert_eq!(stream.next().await, None);
+        });
+    }
+
+    #[test]
+    fn test_descendant_missing_block_ends_stream() {
+        deterministic::Runner::default().start(|context| async move {
+            let chain = make_chain(0, 5);
+
+            // The block at height 2 is missing locally, so the provider can
+            // no longer connect the tip's chain to the next requested height;
+            // the walk ends after the anchor.
+            let mut stored = chain.clone();
+            stored.remove(2);
+            let provider = MockProvider(stored);
+
+            let stream = descendant_stream(&context, provider, chain[0].clone(), chain[4].digest());
+            let results = stream.collect::<Vec<_>>().await;
+            assert_eq!(results, vec![Arc::new(chain[0].clone())]);
+        });
+    }
+
+    #[test]
+    fn test_descendant_peek_available_through_ancestry_trait() {
+        deterministic::Runner::default().start(|context| async move {
+            fn peek_height(ancestry: impl Ancestry<Block<Sha256Digest, ()>>) -> Option<Height> {
+                ancestry.peek().map(Heightable::height)
+            }
+
+            let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let stream = descendant_stream(
+                &context,
+                MockProvider::default(),
+                block.clone(),
+                block.digest(),
+            );
+            assert_eq!(peek_height(stream), Some(block.height()));
+        });
+    }
+
+    #[test]
+    fn test_descendant_restarts_from_any_position() {
+        deterministic::Runner::default().start(|context| async move {
+            let chain = make_chain(0, 5);
+            let provider = MockProvider(chain.clone());
+
+            // A forward stream can itself be flipped to a new start on the
+            // same chain through the Ancestry trait.
+            let stream = descendant_stream(&context, provider, chain[0].clone(), chain[4].digest());
+            let restarted = stream
+                .descendants(BlockID::Height(Height::new(2)))
+                .await
+                .expect("restart within chain");
+            let results = restarted.collect::<Vec<_>>().await;
+            assert_eq!(
+                results,
+                chain[2..].iter().cloned().map(Arc::new).collect::<Vec<_>>()
+            );
+
+            // A start outside the chain resolves to nothing.
+            let provider = MockProvider(chain.clone());
+            let stream = descendant_stream(&context, provider, chain[0].clone(), chain[4].digest());
+            assert!(
+                stream
+                    .descendants(BlockID::Height(Height::new(9)))
+                    .await
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    #[should_panic = "block must be contiguous in height"]
+    fn test_descendant_panics_on_non_contiguous_fetched_block() {
+        deterministic::Runner::default().start(|context| async move {
+            // The provider serves a block that does not extend the anchor.
+            let anchor = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let lying = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(9), 9);
+            let provider = WrongParentProvider(lying);
+
+            let stream = descendant_stream(&context, provider, anchor, Sha256::fill(0xAB));
+            let _ = stream.collect::<Vec<_>>().await;
         });
     }
 }

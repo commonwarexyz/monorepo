@@ -1,10 +1,7 @@
 use super::{Variant, durability::Durable as _};
 use crate::{
     Reporter,
-    marshal::{
-        Identifier,
-        ancestry::{AncestorStream, Ancestry, BlockProvider},
-    },
+    marshal::{BlockID, Identifier},
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
 };
@@ -14,13 +11,11 @@ use commonware_actor::{
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
-use commonware_runtime::{
-    Clock, Handle,
-    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
-};
+use commonware_runtime::{Handle, telemetry::traces::TracedExt as _};
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
     collections::{BTreeMap, VecDeque, btree_map::Entry},
+    future::Future,
     sync::Arc,
 };
 use tracing::{Span, info_span};
@@ -112,6 +107,19 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         fallback: CommitmentFallback,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<Arc<V::Block>>,
+    },
+    /// A request to retrieve the block at `start` within the locally known
+    /// ancestry of `tip`, together with the resolved tip digest.
+    GetDescendant {
+        /// The span carried with this request.
+        span: Span,
+        /// The position of the block within the tip's ancestry.
+        start: BlockID<<V::Block as Digestible>::Digest>,
+        /// The block whose ancestry defines the chain.
+        tip: BlockID<<V::Block as Digestible>::Digest>,
+        /// A channel to send the resolved block and tip digest.
+        #[allow(clippy::type_complexity)]
+        response: oneshot::Sender<Option<(Arc<V::Block>, <V::Block as Digestible>::Digest)>>,
     },
     /// A hint to fetch a notarized block by round without adding another local subscriber.
     ///
@@ -293,6 +301,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Notarization { span, .. }
             | Self::Finalization { span, .. }
             | Self::GetProcessedHeight { span, .. }
+            | Self::GetDescendant { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
@@ -307,6 +316,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessedHeight { .. } => "get_processed_height",
+            Self::GetDescendant { .. } => "get_descendant",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::SubscribeByDigest { .. } => "subscribe_by_digest",
             Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
@@ -334,6 +344,10 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Height(height),
                 ..
             }
+            | Self::GetDescendant {
+                start: BlockID::Height(height),
+                ..
+            }
             | Self::GetFinalization { height, .. } => Some(*height) < current,
             // Hints only inform the actor about heights strictly above the floor
             Self::HintFinalized { height, .. } => Some(*height) <= current,
@@ -346,6 +360,10 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             | Self::GetInfo {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
+                ..
+            }
+            | Self::GetDescendant {
+                start: BlockID::Digest(_),
                 ..
             }
             | Self::GetProcessedHeight { .. } => false,
@@ -369,6 +387,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessedHeight { response, .. } => response.is_closed(),
+            Self::GetDescendant { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -622,29 +641,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         Self { sender }
     }
 
-    /// Create an ancestor stream that fetches missing parents by commitment.
-    ///
-    /// This stream is always a fetching stream. Callers must only use it after
-    /// they already have a block that is safe to verify, certify, build on, or
-    /// repair from. From that point, every parent walked by the stream is part of
-    /// a certified ancestry chain, and the stream can derive each missing
-    /// parent's height from its child before issuing a height-bound request.
-    ///
-    /// Do not use this to wait for pending candidate proposal data.
-    pub(crate) fn ancestor_stream<I, C>(
-        &self,
-        clock: Arc<C>,
-        initial: I,
-        fetch_duration: Timed,
-    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
-    where
-        Self: BlockProvider<Block = V::ApplicationBlock>,
-        I: IntoIterator<Item = Arc<V::ApplicationBlock>>,
-        C: Clock,
-    {
-        AncestorStream::new(clock, self.clone(), initial, fetch_duration)
-    }
-
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
     pub async fn get_info(
         &self,
@@ -806,28 +802,37 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         });
     }
 
-    /// Returns a stream over the ancestry of a given block, leading up to genesis.
+    /// Retrieves the block at `start` within the locally known ancestry of
+    /// `tip`, together with the resolved tip digest.
     ///
-    /// This stream may fetch missing parents because callers should only request
-    /// ancestry for data they already have locally and are willing to build on,
-    /// verify, certify, or repair from. It is not a candidate fetch path.
+    /// The chain is defined by the ancestry of `tip`, which may be a candidate
+    /// block above the last finalization (a fork tracked by marshal) or a
+    /// finalized block. This never fetches from the network: it serves
+    /// finalized blocks from storage and fork candidates from marshal's
+    /// in-memory ancestry tree.
     ///
-    /// If the starting block is not found, `None` is returned.
-    pub async fn ancestry<C>(
+    /// Backs the [BlockProvider::get_descendant] implementations of every
+    /// variant.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn resolve_descendant(
         &self,
-        clock: Arc<C>,
-        (fallback, start_digest): (DigestFallback, <V::Block as Digestible>::Digest),
-        fetch_duration: Timed,
-    ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V, C>>
-    where
-        Self: BlockProvider<Block = V::ApplicationBlock>,
-        C: Clock,
-    {
-        let receiver = self.subscribe_by_digest(start_digest, fallback);
-        receiver.await.ok().map(|block| {
-            let block = V::into_inner_shared(block);
-            self.ancestor_stream(clock, [block], fetch_duration)
-        })
+        start: BlockID<<V::Block as Digestible>::Digest>,
+        tip: BlockID<<V::Block as Digestible>::Digest>,
+    ) -> impl Future<Output = Option<(Arc<V::ApplicationBlock>, <V::Block as Digestible>::Digest)>>
+    + Send
+    + 'static {
+        let mailbox = self.clone();
+        async move {
+            let (response, receiver) = oneshot::channel();
+            let _ = mailbox.sender.enqueue(Message::GetDescendant {
+                span: info_span!("marshal.mailbox.get_descendant", tip = ?tip),
+                start,
+                tip,
+                response,
+            });
+            let (block, tip) = receiver.await.ok().flatten()?;
+            Some((V::into_inner_shared(block), tip))
+        }
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
@@ -968,6 +973,36 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         })
     }
 }
+
+commonware_macros::stability_scope!(ALPHA {
+    use crate::marshal::ancestry::{AncestorStream, Ancestry, BlockProvider};
+    use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
+
+    impl<S: Scheme, V: Variant> Mailbox<S, V> {
+        /// Create an ancestor stream that fetches missing parents by commitment.
+        ///
+        /// This stream is always a fetching stream. Callers must only use it after
+        /// they already have a block that is safe to verify, certify, build on, or
+        /// repair from. From that point, every parent walked by the stream is part of
+        /// a certified ancestry chain, and the stream can derive each missing
+        /// parent's height from its child before issuing a height-bound request.
+        ///
+        /// Do not use this to wait for pending candidate proposal data.
+        pub(crate) fn ancestor_stream<I, C>(
+            &self,
+            clock: Arc<C>,
+            initial: I,
+            fetch_duration: Timed,
+        ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
+        where
+            Self: BlockProvider<Block = V::ApplicationBlock>,
+            I: IntoIterator<Item = Arc<V::ApplicationBlock>>,
+            C: Clock,
+        {
+            AncestorStream::new(clock, self.clone(), initial, fetch_duration)
+        }
+    }
+});
 
 impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
     type Activity = Activity<S, V::Commitment>;

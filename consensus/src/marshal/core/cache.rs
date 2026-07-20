@@ -631,6 +631,35 @@ where
         None
     }
 
+    /// Visits every block held by the prunable caches (verified, notarized,
+    /// and certified) across all initialized epochs.
+    ///
+    /// Used to rebuild in-memory candidate state on startup. The same block
+    /// may be visited more than once if it is present in multiple archives.
+    pub(crate) async fn visit_blocks(&self, mut visit: impl FnMut(V::StoredBlock)) {
+        for cache in self.caches.values() {
+            let archives = [
+                &cache.verified_blocks,
+                &cache.notarized_blocks,
+                &cache.certified_blocks,
+            ];
+            for archive in archives {
+                let ranges: Vec<_> = archive.ranges().collect();
+                for (start, end) in ranges {
+                    for index in start..=end {
+                        let values = archive
+                            .get_all(index)
+                            .await
+                            .expect("failed to read cached blocks");
+                        for value in values.into_iter().flatten() {
+                            visit(value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Prune the view-indexed caches below the given round.
     pub(crate) async fn prune_by_view(mut self, round: Round) -> Self {
         // Remove and close prunable archives from older epochs

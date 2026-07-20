@@ -1375,6 +1375,18 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_ancestry_from_stream() {
+        harness::ancestry_from_stream::<InlineHarness>();
+        harness::ancestry_from_stream::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_ancestry_from_rebuild() {
+        harness::ancestry_from_rebuild::<InlineHarness>();
+        harness::ancestry_from_rebuild::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_finalize_same_height_different_views() {
         harness::finalize_same_height_different_views::<InlineHarness>();
         harness::finalize_same_height_different_views::<DeferredHarness>();
