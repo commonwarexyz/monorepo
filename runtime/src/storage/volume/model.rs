@@ -187,7 +187,11 @@
 //!    by construction — implementation state the model does not carry
 //!    (tail buffers, CRC caches, allocator bookkeeping, RAM counters) is
 //!    outside its reach, and a model that diverges from the code proves
-//!    nothing about the code.
+//!    nothing about the code. The exploration itself is double-checked by
+//!    an independent core: the `stateright` submodule drives this module's
+//!    `step` and invariant checks through the Stateright model checker,
+//!    whose parallel checkers also push the same workloads to budgets the
+//!    single-threaded BFS here cannot reach (see its module docs).
 //! 2. TRACE CONFORMANCE (the `conformance` module) checks that the
 //!    IMPLEMENTATION REFINES the model on enumerated histories: each
 //!    bounded workload is executed against the REAL volume, crashes are
@@ -255,6 +259,8 @@
 //! sync — crash-equivalent, since an uncommitted remove never happened).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+
+mod stateright;
 
 /// Total blocks (blocks 0/1 are superblock slots).
 const BLOCKS: usize = 12;
@@ -590,7 +596,8 @@ pub(super) struct Logical {
 
 /// Protocol safeguards. Production = all enabled; tests disable one at a
 /// time to prove the checker detects each corresponding bug class.
-#[derive(Clone, Copy, Debug)]
+/// Equality keys the Stateright harness's per-thread fan memo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Rules {
     /// Freeze snapshotted runs at snapshot time (not only at confirmation).
     /// Disabling reintroduces the panel's fatal-1: post-snapshot in-place
@@ -2662,7 +2669,7 @@ mod tests {
     /// Core workload: appends on two blobs, overwrites, commits, crashes.
     /// Covers group commit, the post-snapshot write window, shared tails,
     /// roll-forward, and rollback.
-    const CORE: &[Action] = &[
+    pub(super) const CORE: &[Action] = &[
         Action::Append(0),
         Action::Append(1),
         Action::Overwrite(0),
@@ -2749,7 +2756,7 @@ mod tests {
     /// Batch workload: cross-blob staging (fresh blocks and in-place
     /// shared-tail appends), publish, drop, and selective commits that must
     /// respect batch groups.
-    const BATCH: &[Action] = &[
+    pub(super) const BATCH: &[Action] = &[
         Action::Append(0),
         Action::BatchAppend(0),
         Action::BatchAppend(1),
@@ -2851,7 +2858,7 @@ mod tests {
     /// releases the pruned extents, and a crashed-away prune regresses to
     /// the committed floor (I7). Group capture treats prune as ordinary
     /// dirt, so batch interplay needs no dedicated menu entry.
-    const PRUNE: &[Action] = &[
+    pub(super) const PRUNE: &[Action] = &[
         Action::Append(0),
         Action::Append(1),
         Action::Prune(0),
@@ -3470,6 +3477,29 @@ mod tests {
         Ok(())
     }
 
+    /// Directed trace for `mutation_capture_gated_frees_detected`, shared
+    /// with the Stateright harness's sensitivity-parity test.
+    pub(super) const CAPTURE_GATED_FREES_TRACE: &[Action] = &[
+        // Commit a full block for blob 0 so its content has no shadow.
+        Action::Append(0),
+        Action::Append(0),
+        Action::Snapshot(0b01),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        // COW blob 0's committed block (dropping the old block), then
+        // confirm a commit that does NOT capture blob 0.
+        Action::Overwrite(0),
+        Action::Append(1),
+        Action::Snapshot(0b10),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        // The next commit allocates the (wrongly freed) block for its
+        // table and a crash exposes the clobbered fallback.
+        Action::Snapshot(0b01),
+        Action::WriteMeta,
+        Action::Crash,
+    ];
+
     /// Freeing an overwrite's dropped extent at the NEXT commit (instead of
     /// gating it on a commit that captures the blob) recycles a block the
     /// confirmed table still references: the next table write lands in it
@@ -3479,26 +3509,7 @@ mod tests {
     /// would be healed by the shadow splice.
     #[test]
     fn mutation_capture_gated_frees_detected() {
-        let trace: &[Action] = &[
-            // Commit a full block for blob 0 so its content has no shadow.
-            Action::Append(0),
-            Action::Append(0),
-            Action::Snapshot(0b01),
-            Action::WriteMeta,
-            Action::FsyncOk,
-            // COW blob 0's committed block (dropping the old block), then
-            // confirm a commit that does NOT capture blob 0.
-            Action::Overwrite(0),
-            Action::Append(1),
-            Action::Snapshot(0b10),
-            Action::WriteMeta,
-            Action::FsyncOk,
-            // The next commit allocates the (wrongly freed) block for its
-            // table and a crash exposes the clobbered fallback.
-            Action::Snapshot(0b01),
-            Action::WriteMeta,
-            Action::Crash,
-        ];
+        let trace = CAPTURE_GATED_FREES_TRACE;
         assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
         let rules = Rules {
             capture_gated_frees: false,
@@ -3595,6 +3606,25 @@ mod tests {
         );
     }
 
+    /// Directed trace for `mutation_manifest_fresh_shadow_detected`, shared
+    /// with the Stateright harness's sensitivity-parity test.
+    pub(super) const MANIFEST_FRESH_SHADOW_TRACE: &[Action] = &[
+        // Size 3: block 0 full, block 1 a partial (shadowed) tail.
+        Action::Append(0),
+        Action::Append(0),
+        Action::Append(0),
+        Action::Snapshot(ALL),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        // Dirty ONLY block 0 (COW), then crash with the commit's
+        // metadata written but unsynced: one outcome lands everything
+        // except the fresh shadow, which tears.
+        Action::Overwrite(0),
+        Action::Snapshot(ALL),
+        Action::WriteMeta,
+        Action::Crash,
+    ];
+
     /// A commit whose dirt avoids the tail block still writes a FRESH
     /// shadow, and recovery's splice is a raw byte copy: without the tail
     /// block in the manifest, the crash outcome that tears exactly the
@@ -3604,22 +3634,7 @@ mod tests {
     /// rolling back the one unacknowledged commit.
     #[test]
     fn mutation_manifest_fresh_shadow_detected() {
-        let trace: &[Action] = &[
-            // Size 3: block 0 full, block 1 a partial (shadowed) tail.
-            Action::Append(0),
-            Action::Append(0),
-            Action::Append(0),
-            Action::Snapshot(ALL),
-            Action::WriteMeta,
-            Action::FsyncOk,
-            // Dirty ONLY block 0 (COW), then crash with the commit's
-            // metadata written but unsynced: one outcome lands everything
-            // except the fresh shadow, which tears.
-            Action::Overwrite(0),
-            Action::Snapshot(ALL),
-            Action::WriteMeta,
-            Action::Crash,
-        ];
+        let trace = MANIFEST_FRESH_SHADOW_TRACE;
         assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
         let rules = Rules {
             manifest_fresh_shadow: false,
