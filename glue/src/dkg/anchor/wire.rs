@@ -6,14 +6,18 @@ use commonware_consensus::{
     types::Epoch,
 };
 
-/// First byte of a anchor boundary message.
+/// First byte of an anchor boundary message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) enum Tag {
-    /// Request the finalized boundary block and finalization for an epoch.
-    Request,
-    /// Response carrying the finalized boundary block and finalization.
-    Response,
+    /// Request the boundary finalization for an epoch.
+    FinalizationRequest,
+    /// Response carrying a boundary finalization.
+    FinalizationResponse,
+    /// Request the boundary block for an epoch.
+    BlockRequest,
+    /// Response carrying a finalized block.
+    BlockResponse,
 }
 
 impl FixedSize for Tag {
@@ -23,8 +27,10 @@ impl FixedSize for Tag {
 impl Write for Tag {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::Request => 0u8.write(writer),
-            Self::Response => 1u8.write(writer),
+            Self::FinalizationRequest => 0u8.write(writer),
+            Self::FinalizationResponse => 1u8.write(writer),
+            Self::BlockRequest => 2u8.write(writer),
+            Self::BlockResponse => 3u8.write(writer),
         }
     }
 }
@@ -34,43 +40,60 @@ impl Read for Tag {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         match u8::read(reader)? {
-            0 => Ok(Self::Request),
-            1 => Ok(Self::Response),
+            0 => Ok(Self::FinalizationRequest),
+            1 => Ok(Self::FinalizationResponse),
+            2 => Ok(Self::BlockRequest),
+            3 => Ok(Self::BlockResponse),
             n => Err(Error::InvalidEnum(n)),
         }
     }
 }
 
-/// Boundary response decoded from a peer.
-pub(crate) struct Response<S, V>
+/// Request decoded from a peer.
+pub(crate) enum Request {
+    /// Request the boundary finalization for an epoch.
+    Finalization(Epoch),
+    /// Request the boundary block for an epoch.
+    Block(Epoch),
+}
+
+/// Response decoded from a peer.
+pub(crate) enum Response<S, V, R>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
 {
-    pub(crate) finalization: Finalization<S, V::Commitment>,
-    pub(crate) block: V::Block,
+    /// Boundary finalization response.
+    Finalization(Finalization<S, V::Commitment>),
+    /// Finalized block response. The body remains encoded until the epoch and
+    /// responding peer match the outstanding request.
+    Block {
+        /// Epoch echoed from the request.
+        epoch: Epoch,
+        /// Encoded block body.
+        body: R,
+    },
 }
 
-/// Boundary response after decoding the tag and finalization.
-pub(crate) struct ResponseHeader<S, V, R>
-where
-    S: Scheme<V::Commitment>,
-    V: Variant,
-{
-    pub(crate) finalization: Finalization<S, V::Commitment>,
-    pub(crate) body: R,
-}
-
-/// Anchor boundary request/response.
+/// Anchor boundary protocol message.
 pub(crate) enum Message<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
 {
-    /// Request the finalized boundary block and finalization for `epoch`.
-    Request(Epoch),
-    /// Respond with the finalized boundary block and finalization.
-    Response(Response<S, V>),
+    /// Request the boundary finalization for `epoch`.
+    FinalizationRequest(Epoch),
+    /// Respond with a boundary finalization.
+    FinalizationResponse(Finalization<S, V::Commitment>),
+    /// Request the boundary block for `epoch`.
+    BlockRequest(Epoch),
+    /// Respond with a finalized block.
+    BlockResponse {
+        /// Epoch echoed from the request.
+        epoch: Epoch,
+        /// Requested finalized block.
+        block: V::Block,
+    },
 }
 
 impl<S, V> Write for Message<S, V>
@@ -80,14 +103,22 @@ where
 {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::Request(epoch) => {
-                Tag::Request.write(writer);
+            Self::FinalizationRequest(epoch) => {
+                Tag::FinalizationRequest.write(writer);
                 epoch.write(writer);
             }
-            Self::Response(response) => {
-                Tag::Response.write(writer);
-                response.finalization.write(writer);
-                response.block.write(writer);
+            Self::FinalizationResponse(finalization) => {
+                Tag::FinalizationResponse.write(writer);
+                finalization.write(writer);
+            }
+            Self::BlockRequest(epoch) => {
+                Tag::BlockRequest.write(writer);
+                epoch.write(writer);
+            }
+            Self::BlockResponse { epoch, block } => {
+                Tag::BlockResponse.write(writer);
+                epoch.write(writer);
+                block.write(writer);
             }
         }
     }
@@ -101,10 +132,10 @@ where
     fn encode_size(&self) -> usize {
         Tag::SIZE
             + match self {
-                Self::Request(epoch) => epoch.encode_size(),
-                Self::Response(response) => {
-                    response.finalization.encode_size() + response.block.encode_size()
-                }
+                Self::FinalizationRequest(epoch) => epoch.encode_size(),
+                Self::FinalizationResponse(finalization) => finalization.encode_size(),
+                Self::BlockRequest(epoch) => epoch.encode_size(),
+                Self::BlockResponse { epoch, block } => epoch.encode_size() + block.encode_size(),
             }
     }
 }
@@ -120,63 +151,62 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(match Tag::arbitrary(u)? {
-            Tag::Request => Self::Request(Epoch::arbitrary(u)?),
-            Tag::Response => Self::Response(Response {
-                finalization: Finalization::arbitrary(u)?,
+            Tag::FinalizationRequest => Self::FinalizationRequest(Epoch::arbitrary(u)?),
+            Tag::FinalizationResponse => Self::FinalizationResponse(Finalization::arbitrary(u)?),
+            Tag::BlockRequest => Self::BlockRequest(Epoch::arbitrary(u)?),
+            Tag::BlockResponse => Self::BlockResponse {
+                epoch: Epoch::arbitrary(u)?,
                 block: V::Block::arbitrary(u)?,
-            }),
+            },
         })
     }
 }
 
-/// Decode a boundary request.
-pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Epoch>, Error> {
+/// Decode a boundary protocol request.
+pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Request>, Error> {
     let tag = Tag::read(&mut reader)?;
-    if tag != Tag::Request {
-        return Ok(None);
+    match tag {
+        Tag::FinalizationRequest => Ok(Some(Request::Finalization(Epoch::decode(reader)?))),
+        Tag::BlockRequest => Ok(Some(Request::Block(Epoch::decode(reader)?))),
+        Tag::FinalizationResponse | Tag::BlockResponse => Ok(None),
     }
-    Ok(Some(Epoch::decode(reader)?))
 }
 
-/// Decode the tag and finalization of a boundary response.
-pub(crate) fn read_response_finalization<S, V, R>(
+/// Decode a boundary protocol response.
+pub(crate) fn read_response<S, V, R>(
     mut reader: R,
     certificate_cfg: &<S::Certificate as Read>::Cfg,
-) -> Result<Option<ResponseHeader<S, V, R>>, Error>
+) -> Result<Option<Response<S, V, R>>, Error>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
     R: Buf,
 {
     let tag = Tag::read(&mut reader)?;
-    if tag != Tag::Response {
-        return Ok(None);
+    match tag {
+        Tag::FinalizationResponse => Ok(Some(Response::Finalization(Finalization::decode_cfg(
+            reader,
+            certificate_cfg,
+        )?))),
+        Tag::BlockResponse => Ok(Some(Response::Block {
+            epoch: Epoch::read(&mut reader)?,
+            body: reader,
+        })),
+        Tag::FinalizationRequest | Tag::BlockRequest => Ok(None),
     }
-
-    let finalization = Finalization::read_cfg(&mut reader, certificate_cfg)?;
-    Ok(Some(ResponseHeader {
-        finalization,
-        body: reader,
-    }))
 }
 
-/// Decode the block body of a boundary response using an authenticated finalization.
-pub(crate) fn read_response_block<S, V>(
+/// Decode the body of a block response using its authenticated commitment.
+pub(crate) fn read_block<V>(
     reader: impl Buf,
-    finalization: Finalization<S, V::Commitment>,
+    commitment: V::Commitment,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
-) -> Result<Response<S, V>, Error>
+) -> Result<V::Block, Error>
 where
-    S: Scheme<V::Commitment>,
     V: Variant,
 {
-    let block_cfg = V::block_cfg(block_codec_config, finalization.proposal.payload);
-    let block = V::Block::decode_cfg(reader, &block_cfg)?;
-
-    Ok(Response {
-        finalization,
-        block,
-    })
+    let block_cfg = V::block_cfg(block_codec_config, commitment);
+    V::Block::decode_cfg(reader, &block_cfg)
 }
 
 #[cfg(all(test, feature = "arbitrary"))]

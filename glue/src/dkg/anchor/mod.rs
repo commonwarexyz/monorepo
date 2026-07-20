@@ -35,18 +35,29 @@
 //!   peer --Finalization--> Actor --verify (all-epoch)--> accepted
 //! ```
 //!
-//! The accepted finalization names a finalized block, but not its contents. The actor asks peers
-//! for the boundary block that holds the epoch's [`EpochInfo`]:
+//! The accepted finalization identifies the target epoch, but not its boundary block. The actor
+//! first asks every peer for the boundary finalization. These responses are small, so peers can
+//! answer in parallel without duplicating the boundary block:
 //!
 //! ```text
-//!                +-- Request(epoch) --> peer 1
+//!                +-- FinalizationRequest(epoch) --> peer 1
 //!                |
-//!   Actor -------+-- Request(epoch) --> peer 2 <-- Response(block + finalization)
+//!   Actor -------+-- FinalizationRequest(epoch) --> peer 2
 //!                |
-//!                +-- Request(epoch) --> peer 3
+//!                +-- FinalizationRequest(epoch) --> peer 3
+//!
+//!   peer 2 --FinalizationResponse(finalization)--> Actor
 //! ```
 //!
-//! If the boundary request remains unanswered and the actor verifies a newer finalization, that
+//! After verifying a boundary finalization, the actor requests its committed block only from that
+//! responder. Other verified responders are retained as failover candidates:
+//!
+//! ```text
+//!   Actor --BlockRequest(epoch)-------> peer 2
+//!   peer 2 --BlockResponse(epoch, block)--> Actor
+//! ```
+//!
+//! If boundary discovery remains unanswered and the actor verifies a newer finalization, that
 //! finalization supersedes the pending candidate. The actor then requests the boundary implied by
 //! the newer finalization: the final block of the previous epoch, which carries the newer epoch's
 //! [`EpochInfo`]. Older or equal finalizations are ignored while a request is pending, and late
@@ -54,7 +65,7 @@
 //!
 //! ```text
 //!   peer --Finalization(epoch = E + 1)--> Actor --verify (all-epoch)--> supersede
-//!   Actor --Request(E + 1)--> peers
+//!   Actor --FinalizationRequest(E + 1)--> peers
 //! ```
 //!
 //! The block's [`EpochInfo`] is packaged into an [`Artifact`] and
@@ -67,10 +78,11 @@
 //! ## Serving
 //!
 //! After a source of finalized blocks is attached, the actor enters service and answers peers'
-//! boundary requests for the rest of the process lifetime:
+//! finalization and block requests for the rest of the process lifetime:
 //!
 //! ```text
-//!   peer --Request(epoch)--> Actor --lookup--> Response(block + finalization) --> peer
+//!   peer --FinalizationRequest(epoch)--> Actor --lookup--> FinalizationResponse --> peer
+//!   peer --BlockRequest(epoch)---------> Actor --lookup--> BlockResponse --------> peer
 //! ```
 //!
 //! An epoch with no known boundary block is answered with nothing.
@@ -180,6 +192,8 @@ mod tests {
         source_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
         client_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
         client_boundary_receiver: SimReceiver<mocks::TestPublicKey>,
+        backup_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
+        backup_boundary_receiver: SimReceiver<mocks::TestPublicKey>,
         oracle: Oracle<mocks::TestPublicKey, deterministic::Context>,
         joiner: super::Mailbox<mocks::TestScheme, mocks::TestMarshalVariant>,
         boundary: mocks::TestBlock,
@@ -330,6 +344,11 @@ mod tests {
                 .register(BOUNDARY_CHANNEL, TEST_QUOTA)
                 .await
                 .expect("failed to register client boundaries");
+            let backup_boundaries = oracle
+                .control(participants[3].clone())
+                .register(BOUNDARY_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register backup boundaries");
 
             Self {
                 participants,
@@ -338,6 +357,8 @@ mod tests {
                 source_boundary_sender,
                 client_boundary_sender: client_boundaries.0,
                 client_boundary_receiver: client_boundaries.1,
+                backup_boundary_sender: backup_boundaries.0,
+                backup_boundary_receiver: backup_boundaries.1,
                 oracle,
                 joiner,
                 boundary,
@@ -376,17 +397,31 @@ mod tests {
             target
         }
 
-        /// Awaits the next boundary request the joiner broadcasts, as observed by
-        /// a peer, and returns the requested epoch.
-        async fn next_client_request(&mut self) -> Epoch {
-            let (_, message) = self
-                .client_boundary_receiver
-                .recv()
-                .await
-                .expect("boundary request");
+        async fn next_request(receiver: &mut SimReceiver<mocks::TestPublicKey>) -> wire::Request {
+            let (_, message) = receiver.recv().await.expect("boundary request");
             wire::read_request(message)
                 .expect("decode boundary request")
                 .expect("boundary request tag")
+        }
+
+        async fn next_finalization_request(
+            receiver: &mut SimReceiver<mocks::TestPublicKey>,
+        ) -> Epoch {
+            match Self::next_request(receiver).await {
+                wire::Request::Finalization(epoch) => epoch,
+                wire::Request::Block(_) => panic!("expected finalization request"),
+            }
+        }
+
+        async fn next_block_request(receiver: &mut SimReceiver<mocks::TestPublicKey>) -> Epoch {
+            match Self::next_request(receiver).await {
+                wire::Request::Block(epoch) => epoch,
+                wire::Request::Finalization(_) => panic!("expected block request"),
+            }
+        }
+
+        async fn next_client_request(&mut self) -> Epoch {
+            Self::next_finalization_request(&mut self.client_boundary_receiver).await
         }
     }
 
@@ -644,7 +679,226 @@ mod tests {
     }
 
     #[test]
-    fn rebroadcasts_boundary_request_when_unanswered() {
+    fn fetches_boundary_block_from_one_responder() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with(&mut context, false).await;
+            let mut subscription = harness.joiner.subscribe();
+            harness.send_target_finalization();
+
+            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            assert_eq!(
+                Harness::next_finalization_request(&mut harness.backup_boundary_receiver).await,
+                Epoch::new(1)
+            );
+
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<
+                    mocks::TestScheme,
+                    mocks::TestMarshalVariant,
+                >::FinalizationResponse(harness.boundary_finalization.clone())
+                .encode()
+                .to_vec(),
+                false,
+            );
+            assert_eq!(
+                Harness::next_block_request(&mut harness.client_boundary_receiver).await,
+                Epoch::new(1)
+            );
+
+            select! {
+                _ = harness.backup_boundary_receiver.recv() => {
+                    panic!("block request sent to an unselected responder");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            }
+
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
+                    epoch: Epoch::new(1),
+                    block: harness.boundary.clone(),
+                }
+                .encode()
+                .to_vec(),
+                false,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+
+            let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_artifact(
+                artifact,
+                &harness.boundary_finalization,
+                &harness.boundary_sharing,
+                &harness.participants,
+            );
+        });
+    }
+
+    #[test]
+    fn retries_boundary_block_with_another_responder() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with(&mut context, false).await;
+            let mut subscription = harness.joiner.subscribe();
+            harness.send_target_finalization();
+
+            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            assert_eq!(
+                Harness::next_finalization_request(&mut harness.backup_boundary_receiver).await,
+                Epoch::new(1)
+            );
+
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<
+                    mocks::TestScheme,
+                    mocks::TestMarshalVariant,
+                >::FinalizationResponse(harness.boundary_finalization.clone())
+                .encode()
+                .to_vec(),
+                false,
+            );
+            assert_eq!(
+                Harness::next_block_request(&mut harness.client_boundary_receiver).await,
+                Epoch::new(1)
+            );
+
+            harness.backup_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<
+                    mocks::TestScheme,
+                    mocks::TestMarshalVariant,
+                >::FinalizationResponse(harness.boundary_finalization.clone())
+                .encode()
+                .to_vec(),
+                false,
+            );
+            assert_eq!(
+                Harness::next_block_request(&mut harness.backup_boundary_receiver).await,
+                Epoch::new(1)
+            );
+
+            harness.backup_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
+                    epoch: Epoch::new(1),
+                    block: harness.boundary.clone(),
+                }
+                .encode()
+                .to_vec(),
+                false,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+
+            let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_artifact(
+                artifact,
+                &harness.boundary_finalization,
+                &harness.boundary_sharing,
+                &harness.participants,
+            );
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "silent responders must not be blocked");
+        });
+    }
+
+    #[test]
+    fn invalid_boundary_block_tries_another_responder_immediately() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with(&mut context, false).await;
+            let mut subscription = harness.joiner.subscribe();
+            harness.send_target_finalization();
+
+            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            assert_eq!(
+                Harness::next_finalization_request(&mut harness.backup_boundary_receiver).await,
+                Epoch::new(1)
+            );
+
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<
+                    mocks::TestScheme,
+                    mocks::TestMarshalVariant,
+                >::FinalizationResponse(harness.boundary_finalization.clone())
+                .encode()
+                .to_vec(),
+                false,
+            );
+            assert_eq!(
+                Harness::next_block_request(&mut harness.client_boundary_receiver).await,
+                Epoch::new(1)
+            );
+
+            harness.backup_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<
+                    mocks::TestScheme,
+                    mocks::TestMarshalVariant,
+                >::FinalizationResponse(harness.boundary_finalization.clone())
+                .encode()
+                .to_vec(),
+                false,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+
+            let (wrong_block, _) = boundary_block(
+                Epoch::new(2),
+                harness.participants[0].clone(),
+                &harness.participants,
+            );
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
+                    epoch: Epoch::new(1),
+                    block: wrong_block,
+                }
+                .encode()
+                .to_vec(),
+                false,
+            );
+
+            select! {
+                epoch = Harness::next_block_request(&mut harness.backup_boundary_receiver) => {
+                    assert_eq!(epoch, Epoch::new(1));
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("invalid block did not trigger immediate failover");
+                },
+            }
+
+            harness.backup_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
+                    epoch: Epoch::new(1),
+                    block: harness.boundary.clone(),
+                }
+                .encode()
+                .to_vec(),
+                false,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+
+            let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_artifact(
+                artifact,
+                &harness.boundary_finalization,
+                &harness.boundary_sharing,
+                &harness.participants,
+            );
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(blocked.contains(&(
+                harness.participants[1].clone(),
+                harness.participants[2].clone()
+            )));
+        });
+    }
+
+    #[test]
+    fn rebroadcasts_finalization_request_when_unanswered() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             // The source has no boundary block, so the joiner's request goes
@@ -777,6 +1031,21 @@ mod tests {
             harness.send_target_finalization();
             assert_eq!(harness.next_client_request().await, Epoch::new(1));
 
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<
+                    mocks::TestScheme,
+                    mocks::TestMarshalVariant,
+                >::FinalizationResponse(harness.boundary_finalization.clone())
+                .encode()
+                .to_vec(),
+                false,
+            );
+            assert_eq!(
+                Harness::next_block_request(&mut harness.client_boundary_receiver).await,
+                Epoch::new(1)
+            );
+
             let (newer_boundary, _) = boundary_block(
                 Epoch::new(2),
                 harness.participants[0].clone(),
@@ -785,14 +1054,12 @@ mod tests {
             harness.send_target_finalization_for(Epoch::new(2), newer_boundary.digest());
             assert_eq!(harness.next_client_request().await, Epoch::new(2));
 
-            harness.source_boundary_sender.send(
+            harness.client_boundary_sender.send(
                 Recipients::One(harness.participants[1].clone()),
-                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::Response(
-                    wire::Response {
-                        finalization: harness.boundary_finalization.clone(),
-                        block: harness.boundary.clone(),
-                    },
-                )
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
+                    epoch: Epoch::new(1),
+                    block: harness.boundary.clone(),
+                }
                 .encode()
                 .to_vec(),
                 false,
@@ -803,9 +1070,9 @@ mod tests {
             assert!(
                 !blocked.contains(&(
                     harness.participants[1].clone(),
-                    harness.participants[0].clone()
+                    harness.participants[2].clone()
                 )),
-                "late response for superseded boundary should not block source peer"
+                "late response for superseded boundary should not block peer"
             );
             assert!(matches!(
                 subscription.try_recv(),
@@ -832,32 +1099,22 @@ mod tests {
                 ),
                 &harness.schemes,
             );
-            let message = wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::Response(
-                wire::Response {
-                    finalization: terminal_finalization,
-                    block: harness.boundary.clone(),
-                },
-            )
-            .encode()
-            .to_vec();
-            let decoded = wire::read_response_finalization::<
+            let message = wire::Message::<
                 mocks::TestScheme,
                 mocks::TestMarshalVariant,
-                _,
-            >(
+            >::FinalizationResponse(terminal_finalization)
+            .encode()
+            .to_vec();
+            let decoded = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
                 message.as_slice(),
                 &harness.schemes[2].certificate_codec_config(),
             )
             .expect("terminal response decoded")
             .expect("terminal response tag");
-            let decoded =
-                wire::read_response_block::<mocks::TestScheme, mocks::TestMarshalVariant>(
-                    decoded.body,
-                    decoded.finalization,
-                    &(),
-                )
-                .expect("terminal response block decoded");
-            assert_eq!(decoded.finalization.epoch(), Epoch::new(u64::MAX));
+            let wire::Response::Finalization(decoded) = decoded else {
+                panic!("expected finalization response");
+            };
+            assert_eq!(decoded.epoch(), Epoch::new(u64::MAX));
 
             harness.source_boundary_sender.send(
                 Recipients::One(harness.participants[1].clone()),
@@ -938,15 +1195,15 @@ mod tests {
     }
 
     #[test]
-    fn serving_answers_boundary_requests_from_marshal() {
+    fn serving_answers_finalization_and_block_requests_from_marshal() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut harness = Harness::start(&mut context).await;
             harness.client_boundary_sender.send(
                 Recipients::One(harness.participants[0].clone()),
-                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::Request(Epoch::new(
-                    1,
-                ))
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::FinalizationRequest(
+                    Epoch::new(1),
+                )
                 .encode()
                 .to_vec(),
                 false,
@@ -957,24 +1214,47 @@ mod tests {
                 .recv()
                 .await
                 .expect("boundary response delivered");
-            let response = wire::read_response_finalization::<
-                mocks::TestScheme,
-                mocks::TestMarshalVariant,
-                _,
-            >(message, &harness.schemes[2].certificate_codec_config())
+            let response = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
+                message,
+                &harness.schemes[2].certificate_codec_config(),
+            )
             .expect("boundary response decoded")
             .expect("boundary response");
-            let response =
-                wire::read_response_block::<mocks::TestScheme, mocks::TestMarshalVariant>(
-                    response.body,
-                    response.finalization,
-                    &(),
-                )
-                .expect("boundary response block decoded");
+            let wire::Response::Finalization(finalization) = response else {
+                panic!("expected finalization response");
+            };
+            let commitment = finalization.proposal.payload;
+            assert_eq!(finalization, harness.boundary_finalization);
 
-            assert_eq!(response.block.digest(), harness.boundary.digest());
-            assert_eq!(response.block.height(), Height::new(1));
-            assert_eq!(response.finalization, harness.boundary_finalization);
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[0].clone()),
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockRequest(
+                    Epoch::new(1),
+                )
+                .encode()
+                .to_vec(),
+                false,
+            );
+            let (_peer, message) = harness
+                .client_boundary_receiver
+                .recv()
+                .await
+                .expect("block response delivered");
+            let response = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
+                message,
+                &harness.schemes[2].certificate_codec_config(),
+            )
+            .expect("block response decoded")
+            .expect("block response");
+            let wire::Response::Block { epoch, body } = response else {
+                panic!("expected block response");
+            };
+            assert_eq!(epoch, Epoch::new(1));
+            let block = wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &())
+                .expect("boundary block decoded");
+
+            assert_eq!(block.digest(), harness.boundary.digest());
+            assert_eq!(block.height(), Height::new(1));
         });
     }
 
@@ -985,7 +1265,7 @@ mod tests {
             let mut harness = Harness::start(&mut context).await;
             harness.client_boundary_sender.send(
                 Recipients::One(harness.participants[0].clone()),
-                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::Request(
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::FinalizationRequest(
                     Epoch::zero(),
                 )
                 .encode()

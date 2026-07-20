@@ -6,25 +6,22 @@ use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::Encode as _;
 use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
-    simplex::scheme::Scheme,
+    simplex::{scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::channel::fallible::OneshotExt as _;
-use futures::{
-    future::{self, Either},
-    join,
-};
+use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use tracing::debug;
 
 /// The boundary-serving phase of the anchor actor.
 ///
-/// Answers peers' boundary requests from the attached marshal. By construction
-/// it does not listen to the Simplex certificate channel or issue outbound
-/// discovery requests.
+/// Answers peers' boundary finalization and block requests from the attached
+/// marshal. By construction it does not listen to the Simplex certificate
+/// channel or issue outbound discovery requests.
 pub(super) struct Serving<E, S, V, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -84,8 +81,8 @@ where
                 debug!("boundary receiver closed, shutting down");
                 return;
             } => {
-                let epoch = match wire::read_request(message) {
-                    Ok(Some(epoch)) => epoch,
+                let request = match wire::read_request(message) {
+                    Ok(Some(request)) => request,
                     Ok(None) => continue,
                     Err(err) => {
                         commonware_p2p::block!(
@@ -97,27 +94,42 @@ where
                         continue;
                     }
                 };
-                let Some(response) = self.produce(epoch).await else {
-                    continue;
-                };
-                sender.send(
-                    Recipients::One(peer),
-                    wire::Message::<S, V>::Response(response).encode(),
-                    false,
-                );
+                match request {
+                    wire::Request::Finalization(epoch) => {
+                        let Some(finalization) = self.produce_finalization(epoch).await else {
+                            continue;
+                        };
+                        sender.send(
+                            Recipients::One(peer),
+                            wire::Message::<S, V>::FinalizationResponse(finalization).encode(),
+                            false,
+                        );
+                    }
+                    wire::Request::Block(epoch) => {
+                        let Some(block) = self.produce_block(epoch).await else {
+                            continue;
+                        };
+                        sender.send(
+                            Recipients::One(peer),
+                            wire::Message::<S, V>::BlockResponse { epoch, block }.encode(),
+                            false,
+                        );
+                    }
+                }
             },
         }
     }
 
-    async fn produce(&mut self, epoch: Epoch) -> Option<wire::Response<S, V>> {
+    async fn produce_finalization(
+        &mut self,
+        epoch: Epoch,
+    ) -> Option<Finalization<S, V::Commitment>> {
         let height = self.epocher.last(epoch.previous()?)?;
-        let (finalization, block) = join!(
-            self.marshal.get_finalization(height),
-            self.marshal.get_block(height)
-        );
-        Some(wire::Response {
-            finalization: finalization?,
-            block: block?,
-        })
+        self.marshal.get_finalization(height).await
+    }
+
+    async fn produce_block(&mut self, epoch: Epoch) -> Option<V::Block> {
+        let height = self.epocher.last(epoch.previous()?)?;
+        self.marshal.get_block(height).await
     }
 }
