@@ -1163,9 +1163,17 @@ fn cow_remap_staged(inner: &BlobInner, staged: &mut StagedBlob, chunk_start: u64
     let (prefix, suffix) = split_run(old_logical, old_run, chunk_start);
 
     // Detach the source run from the merged view (a base run detaches by
-    // supersession).
+    // supersession). An overlay source is itself non-private (asserted
+    // above), so it shadows a base run — an in-place extension, or a split
+    // descendant of one — and the replaced block belongs to that base run's
+    // extent. Mark the base run superseded too: shadowing by key collision
+    // alone is not durable (a staged shrink dropping the colliding overlay
+    // run would re-expose the base run, and its sweep would push the extent
+    // a second time — a double free at apply).
     if staged.runs.remove(&old_logical).is_none() {
         staged.removed.insert(old_logical);
+    } else if let Some((base_key, _)) = inner.covering(chunk_start) {
+        staged.removed.insert(base_key);
     }
     for (logical, meta) in prefix.into_iter().chain(suffix) {
         staged.runs.insert(

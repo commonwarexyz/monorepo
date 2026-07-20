@@ -1680,10 +1680,9 @@ async fn conformance_batch_prune() {
             Op::BatchApply,
             Op::Sync(0b001),
         ],
-        // Depth 6 reaches a staged cow-plus-shrink double free in the
-        // current accounting (its fix and directed pin land separately):
-        // raise the depth alongside them.
-        depth: 5,
+        // Depth 6 reaches the staged cow-plus-shrink double-free shape
+        // that `conformance_directed_batch_cow_shrink` pins directly.
+        depth: 6,
         window_masks: &[0b001],
         window_menu: &[Op::BatchOverwrite(0), Op::BatchResizeDown(0)],
         window_depth: 1,
@@ -1780,6 +1779,58 @@ async fn conformance_directed_batch_resize() {
         stats.exhaustive_points == stats.crash_points && stats.cases > 60,
         "suspiciously thin coverage: {stats:?}"
     );
+}
+
+/// Staged-COW-then-shrink extent accounting (found by the staged-resize
+/// enumeration, 2026-07-19): a staged COW that supersedes a NON-PRIVATE
+/// overlay run must mark the underlying base run removed, or a later
+/// staged shrink re-exposes the base run and its sweep pushes the same
+/// published extent into the replaced list a second time — a double
+/// defer-content-free that trips the extent-accounting audit here and
+/// the allocator's double-free assert in production. Trace 1 is the
+/// found shape (append into the shared tail block, overwrite below the
+/// committed size, shrink the block away). Trace 2 is the multi-block
+/// sibling: the COW leaves a PRIVATE run at the base key and a
+/// non-private suffix, so dropping the private run (which marks nothing
+/// removed) would re-expose the base run with its full extent,
+/// overlapping the suffix's own push.
+#[tokio::test]
+async fn conformance_directed_batch_cow_shrink() {
+    let mut stats = Stats::default();
+    let traces: &[&[Op]] = &[
+        &[
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::BatchAppend(0),
+            Op::BatchOverwrite(0),
+            Op::BatchResizeDown(0),
+            Op::BatchResizeDown(0),
+            Op::BatchApply,
+            Op::Sync(0b001),
+        ],
+        &[
+            Op::Append(0),
+            Op::Append(0),
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::BatchOverwrite(0),
+            Op::BatchResizeDown(0),
+            Op::BatchResizeDown(0),
+            Op::BatchResizeDown(0),
+            Op::BatchApply,
+            Op::Sync(0b001),
+        ],
+    ];
+    for trace in traces {
+        let mut rig = Rig::new().await;
+        for (i, &op) in trace.iter().enumerate() {
+            assert!(rig.enabled(op), "cow-shrink trace: {op:?} disabled at {i}");
+            rig.execute(op).await;
+            rig.crash_probe(&[], 2048, 43, &mut stats).await;
+        }
+    }
+    println!("directed batch cow-shrink stats: {stats:?}");
+    assert!(stats.cases > 40, "suspiciously few cases: {stats:?}");
 }
 
 /// The stale-tail directed family (blocker B1's shape): shrink a sparse
