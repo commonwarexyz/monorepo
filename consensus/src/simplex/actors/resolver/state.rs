@@ -137,6 +137,11 @@ impl<S: Scheme, D: Digest> State<S, D> {
     pub fn handle_certified(&mut self, view: View, success: bool) -> Vec<Effect> {
         let mut effects = Vec::new();
         if success {
+            // Certification passed: raise the floor to the notarization if we
+            // still hold it. This may occur before or after a nullification
+            // for the same view (and should always be favored). Finalization
+            // remains the stronger proof and can later supersede this floor
+            // at the same or higher view.
             if let Some(notarization) = self.notarizations.remove(&view)
                 && view > self.floor_view()
             {
@@ -144,6 +149,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 effects.push(self.prune());
             }
 
+            // Re-scan for missing nullifications: a floor raise landing
+            // mid-term pulls the fetch cursor back (see [Self::prune]), and a
+            // previously truncated scan can resume.
             effects.extend(self.fetch_missing(view));
         } else {
             self.notarizations.remove(&view);

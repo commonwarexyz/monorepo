@@ -66,6 +66,10 @@ pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
 pub enum Terms {
     /// Every view is its own term: a new leader is elected each view, and
     /// leader rotation itself bounds how long finality can stall.
+    ///
+    /// This variant is the only way to configure single-view terms:
+    /// [`Terms::Stable`] with a length of 1 is rejected at engine
+    /// construction.
     #[default]
     Single,
     /// Views are grouped into terms of `length` consecutive views served by

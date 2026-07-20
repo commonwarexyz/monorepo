@@ -120,11 +120,11 @@ where
             Buckets::CRYPTOGRAPHY,
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let last_activity = vec![None; participants.len()];
         (
             Self {
                 context: ContextCell::new(context),
 
+                last_activity: vec![None; participants.len()],
                 scheme,
 
                 blocker: cfg.blocker,
@@ -137,8 +137,6 @@ where
                 epoch: cfg.epoch,
                 term_length: cfg.term_length,
                 floor: cfg.floor,
-
-                last_activity,
 
                 mailbox_receiver: receiver,
 

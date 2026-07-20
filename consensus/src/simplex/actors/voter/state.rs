@@ -522,7 +522,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let added = round.add_nullification(nullification);
         let leader = added.then(|| round.leader()).flatten();
         self.nullification_views.insert(view);
-
         if let Some(leader) = leader {
             self.nullifications.get_or_create_by(&leader.key).inc();
         }
@@ -906,11 +905,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     ///
     /// A nullification nullifies all views in the rest of its term.
     fn first_unnullified_view(&self, after: View, before: View) -> Option<View> {
-        // Defensive: both callers already guarantee `after < before`.
-        if before <= after {
-            return None;
-        }
-
         let mut cursor = after.next();
         while cursor < before {
             if self.highest_nullification_in_term(cursor).is_none() {
