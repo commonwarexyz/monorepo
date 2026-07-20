@@ -338,7 +338,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         let bufs = bufs.into();
         let total_bytes = bufs.remaining() as u64;
         if total_bytes == 0 {
-            return Ok(());
+            // Forward so the inner blob's guards (e.g. below-floor writes) still apply.
+            return self.inner.write_at_sync(offset, bufs).await;
         }
 
         let (should_fail, partial_rate) = self.ctx.check_write_fault();

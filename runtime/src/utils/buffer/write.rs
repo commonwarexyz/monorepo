@@ -223,6 +223,37 @@ impl<B: Blob> Write<B> {
         Ok(())
     }
 
+    /// Drop the blob's bytes below `offset`, exactly, via the native [Blob::prune]: buffered
+    /// bytes are flushed first so the tip never spans the new floor. Pruning is a mutation,
+    /// not a durability point: the floor persists at the next [Self::sync], and a crash may
+    /// regress it to the last synced floor (see [Blob::prune]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `offset` exceeds the blob's logical size (including buffered data).
+    pub async fn prune(&mut self, offset: u64) -> Result<(), Error> {
+        assert!(
+            offset <= self.buffer.size(),
+            "prune beyond the logical size"
+        );
+        if let Some((buf, buf_offset)) = self.buffer.take() {
+            self.sync_state
+                .write_at(&self.blob, buf_offset, buf)
+                .await?;
+        }
+        // Pruning is a mutation: it must not race a started sync (writer exclusivity).
+        self.sync_state.wait_for_pending().await?;
+        self.blob.prune(offset).await?;
+        // The floor needs a later sync to persist.
+        self.sync_state.mark_dirty();
+        Ok(())
+    }
+
+    /// The pruned floor of the underlying blob (see [Blob::floor]).
+    pub fn floor(&self) -> u64 {
+        self.blob.floor()
+    }
+
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&mut self) -> Result<(), Error> {
         if let Some((buf, offset)) = self.buffer.take() {

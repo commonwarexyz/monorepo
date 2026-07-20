@@ -549,6 +549,7 @@ pub(crate) mod tests {
         test_read_empty_blob(&storage).await;
         test_overlapping_writes(&storage).await;
         test_resize_then_open(&storage).await;
+        test_prune_contract(&storage).await;
         test_partition_name_validation(&storage).await;
         test_blob_version_mismatch(&storage).await;
         test_read_zero_length(&storage).await;
@@ -1307,6 +1308,75 @@ pub(crate) mod tests {
         // Read back the data
         let read = blob.read_at(0, 5).await.unwrap().coalesce();
         assert_eq!(read, b"hello", "Resized data is incorrect");
+    }
+
+    /// Backend-independent prune contract: pruning beyond the size fails, the floor is
+    /// byte-exact, pruning at or below the floor is a monotonic no-op, and reads, writes,
+    /// and resizes below the floor fail with the floor.
+    async fn test_prune_contract<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_prune_contract", b"test_blob")
+            .await
+            .unwrap();
+        let data: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
+        blob.write_at(0, data.clone()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Pruning beyond the size fails and leaves the floor untouched.
+        assert!(matches!(
+            blob.prune(8193).await,
+            Err(crate::Error::BlobInsufficientLength)
+        ));
+        assert_eq!(blob.floor(), 0);
+
+        // The floor is byte-exact, even unaligned.
+        blob.prune(4103).await.unwrap();
+        assert_eq!(blob.floor(), 4103);
+
+        // Pruning at or below the floor is a monotonic no-op.
+        blob.prune(4103).await.unwrap();
+        blob.prune(16).await.unwrap();
+        assert_eq!(blob.floor(), 4103);
+
+        // Reads, writes, and resizes below the floor fail with the floor.
+        assert!(matches!(
+            blob.read_at(4102, 1).await,
+            Err(crate::Error::OffsetPruned(_, _, 4103))
+        ));
+        let buf = IoBufMut::with_capacity(1);
+        assert!(matches!(
+            blob.read_at_buf(4102, 1, buf).await,
+            Err(crate::Error::OffsetPruned(_, _, 4103))
+        ));
+        assert!(matches!(
+            blob.write_at(4102, b"x").await,
+            Err(crate::Error::OffsetPruned(_, _, 4103))
+        ));
+        assert!(matches!(
+            blob.write_at_sync(4102, b"x").await,
+            Err(crate::Error::OffsetPruned(_, _, 4103))
+        ));
+        assert!(
+            matches!(
+                blob.write_at_sync(4102, Vec::<u8>::new()).await,
+                Err(crate::Error::OffsetPruned(_, _, 4103))
+            ),
+            "empty writes below the floor must fail like any other"
+        );
+        assert!(matches!(
+            blob.resize(4102).await,
+            Err(crate::Error::OffsetPruned(_, _, 4103))
+        ));
+
+        // At the floor they succeed.
+        let read = blob.read_at(4103, 100).await.unwrap();
+        assert_eq!(read.coalesce().as_ref(), &data[4103..4203]);
+        blob.write_at(4103, b"x").await.unwrap();
+        blob.resize(4103).await.unwrap();
     }
 
     /// Test that partition names are validated correctly.

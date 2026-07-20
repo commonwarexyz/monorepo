@@ -442,7 +442,10 @@ impl crate::Blob for Blob {
         // covering floor. The zeroing is not recorded in the crash log
         // either (see [Self::sync_inner]): it publishes at the same sync
         // that persists the floor, so a crash rolls both back together.
-        if let Some(old) = self.floor.lock().advance(offset) {
+        // Bind the advance result so the floor lock guard drops before the
+        // zero-fill (which stays under the content lock).
+        let advanced = self.floor.lock().advance(offset);
+        if let Some(old) = advanced {
             let start = Header::SIZE + old as usize;
             let stop = Header::SIZE + offset as usize;
             content[start..stop].fill(0);
@@ -563,21 +566,15 @@ mod tests {
         }
     }
 
+    /// The prune contract itself is covered by the shared storage suite. This pins the
+    /// backend-specific punch: the pruned range is zeroed in place, the rest is untouched.
     #[tokio::test]
-    async fn test_prune_guards_and_punch() {
+    async fn test_prune_punch_zeroes_range() {
         let storage = Storage::new(test_pool());
         let (blob, _) = storage.open("partition", b"prune").await.unwrap();
         blob.write_at(0, vec![7u8; 64]).await.unwrap();
         blob.sync().await.unwrap();
 
-        // Pruning beyond the size fails and leaves the floor untouched.
-        assert!(matches!(
-            blob.prune(65).await,
-            Err(crate::Error::BlobInsufficientLength)
-        ));
-        assert_eq!(blob.floor(), 0);
-
-        // Prune zeroes the pruned range in place and leaves the rest.
         blob.prune(16).await.unwrap();
         assert_eq!(blob.floor(), 16);
         {
@@ -585,37 +582,6 @@ mod tests {
             assert_eq!(&content[Header::SIZE..Header::SIZE + 16], &[0u8; 16]);
             assert_eq!(&content[Header::SIZE + 16..], &[7u8; 48]);
         }
-
-        // Reads, writes, and resizes below the floor fail with the floor.
-        assert!(matches!(
-            blob.read_at(15, 1).await,
-            Err(crate::Error::OffsetPruned(_, _, 16))
-        ));
-        assert!(matches!(
-            blob.write_at(15, b"x").await,
-            Err(crate::Error::OffsetPruned(_, _, 16))
-        ));
-        assert!(matches!(
-            blob.write_at_sync(15, b"x").await,
-            Err(crate::Error::OffsetPruned(_, _, 16))
-        ));
-        assert!(
-            matches!(
-                blob.write_at_sync(15, Vec::<u8>::new()).await,
-                Err(crate::Error::OffsetPruned(_, _, 16))
-            ),
-            "empty writes below the floor must fail like any other"
-        );
-        assert!(matches!(
-            blob.resize(15).await,
-            Err(crate::Error::OffsetPruned(_, _, 16))
-        ));
-
-        // At the floor they succeed.
-        let read = blob.read_at(16, 48).await.unwrap();
-        assert_eq!(read.coalesce().as_ref(), &[7u8; 48]);
-        blob.write_at(16, b"x").await.unwrap();
-        blob.resize(16).await.unwrap();
     }
 
     /// A stored floor beyond the logical size is rejected at open: it

@@ -479,7 +479,10 @@ impl crate::Blob for Blob {
         // Best-effort deallocation of the newly pruned raw range while
         // keeping the file size. Errors are deliberately dropped: a
         // filesystem without hole punching degrades to unreclaimed space.
-        if let Some(old) = self.floor.lock().advance(offset) {
+        // Bind the advance result so the floor lock guard drops before the
+        // fallocate.
+        let advanced = self.floor.lock().advance(offset);
+        if let Some(old) = advanced {
             if let (Ok(start), Ok(len)) = (
                 libc::off_t::try_from(Header::DATA_OFFSET_U64 + old),
                 libc::off_t::try_from(offset - old),
@@ -750,67 +753,6 @@ mod tests {
 
         // Cleanup
         drop(blob3);
-        let _ = std::fs::remove_dir_all(&storage_directory);
-    }
-
-    #[tokio::test]
-    async fn test_prune_guards() {
-        // Verify prune validation, the byte-exact floor, and the below-floor guards.
-        let (storage, storage_directory) = create_test_storage();
-
-        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
-        let data: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
-        blob.write_at(0, data.clone()).await.unwrap();
-        blob.sync().await.unwrap();
-
-        // Pruning beyond the size fails and leaves the floor untouched.
-        assert!(matches!(
-            blob.prune(8193).await,
-            Err(crate::Error::BlobInsufficientLength)
-        ));
-        assert_eq!(blob.floor(), 0);
-
-        // The raw floor is byte-exact.
-        blob.prune(4096).await.unwrap();
-        assert_eq!(blob.floor(), 4096);
-
-        // Reads, writes, and resizes below the floor fail with the floor.
-        assert!(matches!(
-            blob.read_at(4095, 1).await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-        let buf = IoBufMut::with_capacity(1);
-        assert!(matches!(
-            blob.read_at_buf(4095, 1, buf).await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-        assert!(matches!(
-            blob.write_at(4095, b"x").await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-        assert!(matches!(
-            blob.write_at_sync(4095, b"x").await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-        assert!(
-            matches!(
-                blob.write_at_sync(4095, Vec::<u8>::new()).await,
-                Err(crate::Error::OffsetPruned(_, _, 4096))
-            ),
-            "empty writes below the floor must fail like any other"
-        );
-        assert!(matches!(
-            blob.resize(4095).await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-
-        // At the floor they succeed.
-        let read = blob.read_at(4096, 100).await.unwrap();
-        assert_eq!(read.coalesce().as_ref(), &data[4096..4196]);
-        blob.write_at(4096, b"x".to_vec()).await.unwrap();
-        blob.resize(4096).await.unwrap();
-
-        drop(blob);
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 

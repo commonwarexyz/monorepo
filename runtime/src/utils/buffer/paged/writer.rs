@@ -7,10 +7,6 @@
 //!
 //! [Writer::snapshot] captures a logical read view without consuming the writer.
 //!
-//! # Seal
-//!
-//! [Writer::seal] consumes the writer and turns it into an immutable [super::Sealed] view.
-//!
 //! # Paging
 //!
 //! Callers append and read logical bytes. The blob stores those bytes raw, so a byte's blob
@@ -506,14 +502,13 @@ impl<B: Blob> Writer<B> {
     /// writer.
     ///
     /// This writes buffered bytes to the blob but does not make them durable. Call
-    /// [`Self::sync`] or [`super::Sealed::sync`] if the returned handle's bytes must survive a
-    /// crash.
+    /// [`Self::sync`] if the returned handle's bytes must survive a crash.
     ///
     /// If this writer later rewinds or truncates into the returned handle's range, reads from that
     /// handle may observe unspecified contents.
     pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
-        Ok(self.sealed_handle(self.cache_ref.next_id()))
+        Ok(self.sealed_handle())
     }
 
     /// Flushes buffered data and makes all pending mutations durable.
@@ -698,8 +693,10 @@ impl<B: Blob> Writer<B> {
         self.id
     }
 
-    /// Construct an immutable read handle for the current blob state.
-    fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
+    /// Construct an immutable read handle for the current blob state, under a fresh
+    /// page-cache id: the writer keeps mutating its own cache namespace, so the handle
+    /// must not share it.
+    fn sealed_handle(&self) -> super::Sealed<B> {
         assert_eq!(
             self.buffer.offset % self.cache_ref.page_size(),
             0,
@@ -715,20 +712,8 @@ impl<B: Blob> Writer<B> {
             self.buffer.size(),
             partial_page,
             self.cache_ref.clone(),
-            id,
+            self.cache_ref.next_id(),
         )
-    }
-
-    /// Consume the write handle and return an immutable [`super::Sealed`] handle for the same
-    /// blob.
-    ///
-    /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
-    /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
-    /// [`super::Sealed::sync`].
-    pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
-        self.sync_state.wait_for_pending().await?;
-        self.flush_internal(true, false).await?;
-        Ok(self.sealed_handle(self.id))
     }
 }
 
@@ -1921,50 +1906,6 @@ mod tests {
             let (_, writes, full_syncs, _) = inner.snapshot();
             assert!(writes > 0);
             assert!(full_syncs > 0);
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    // Verifies seal cannot flush buffered bytes before pending start_sync finishes.
-    fn test_seal_waits_for_outstanding_start_sync_before_flushing() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let inner = SyncTrackingBlob::new();
-            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
-
-            let prior = writer.start_sync().await;
-            let deferred = next_pending_sync(&pending);
-            writer.append(b"hello world").await.unwrap();
-
-            let seal = context
-                .child("seal")
-                .spawn(move |_| async move { writer.seal().await });
-            // The seal has reached the pending sync wait.
-            deferred
-                .blocked
-                .await
-                .expect("seal never waited on start_sync");
-            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
-            assert_eq!(writes, 0);
-            assert_eq!(full_syncs, 0);
-            assert_eq!(range_syncs, 0);
-
-            // Release the started sync so seal can flush.
-            deferred.release.send(Ok(())).unwrap();
-            let sealed = seal.await.unwrap().unwrap();
-            prior.await.unwrap();
-            let read = sealed
-                .read_at(0, b"hello world".len())
-                .await
-                .unwrap()
-                .coalesce();
-            assert_eq!(read.as_ref(), b"hello world");
-            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
-            assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 1);
-            assert_eq!(range_syncs, 0);
         });
     }
 

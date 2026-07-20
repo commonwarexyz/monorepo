@@ -450,69 +450,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    #[tokio::test]
-    async fn test_prune_guards() {
-        let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_prune_guards_{}", random_suffix()));
-        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
-        let storage = Storage::new(config, test_pool());
-
-        let (blob, _) = storage.open("partition", b"prune").await.unwrap();
-        let data: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
-        blob.write_at(0, data.clone()).await.unwrap();
-        blob.sync().await.unwrap();
-
-        // Pruning beyond the size fails and leaves the floor untouched.
-        assert!(matches!(
-            blob.prune(8193).await,
-            Err(crate::Error::BlobInsufficientLength)
-        ));
-        assert_eq!(blob.floor(), 0);
-
-        // The raw floor is byte-exact.
-        blob.prune(4096).await.unwrap();
-        assert_eq!(blob.floor(), 4096);
-
-        // Reads, writes, and resizes below the floor fail with the floor.
-        assert!(matches!(
-            blob.read_at(4095, 1).await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-        let buf = crate::IoBufMut::with_capacity(1);
-        assert!(matches!(
-            blob.read_at_buf(4095, 1, buf).await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-        assert!(matches!(
-            blob.write_at(4095, b"x").await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-        assert!(matches!(
-            blob.write_at_sync(4095, b"x").await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-        assert!(
-            matches!(
-                blob.write_at_sync(4095, Vec::<u8>::new()).await,
-                Err(crate::Error::OffsetPruned(_, _, 4096))
-            ),
-            "empty writes below the floor must fail like any other"
-        );
-        assert!(matches!(
-            blob.resize(4095).await,
-            Err(crate::Error::OffsetPruned(_, _, 4096))
-        ));
-
-        // At the floor they succeed.
-        let read = blob.read_at(4096, 100).await.unwrap();
-        assert_eq!(read.coalesce().as_ref(), &data[4096..4196]);
-        blob.write_at(4096, b"x").await.unwrap();
-        blob.resize(4096).await.unwrap();
-
-        drop(blob);
-        let _ = std::fs::remove_dir_all(&storage_directory);
-    }
-
     /// A stored floor beyond the logical size is rejected at open: it
     /// means a crash persisted the header while losing an unsynced data
     /// extension, or the floor bytes were torn.

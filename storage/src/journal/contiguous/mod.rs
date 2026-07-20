@@ -630,22 +630,6 @@ mod blob_tests {
                     .1,
                 0
             );
-
-            let sealed = writer.seal().await.unwrap();
-            let sealed_blob = Blob::Sealed(sealed);
-            assert_insufficient_length(
-                sealed_blob
-                    .read_up_to(size, 1, IoBufMut::with_capacity(1))
-                    .await,
-            );
-            assert_eq!(
-                sealed_blob
-                    .read_up_to(size, 0, IoBufMut::with_capacity(0))
-                    .await
-                    .unwrap()
-                    .1,
-                0
-            );
         });
     }
 }

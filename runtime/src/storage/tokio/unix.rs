@@ -466,7 +466,9 @@ impl crate::Blob for Blob {
         if offset > size {
             return Err(Error::BlobInsufficientLength);
         }
-        if let Some(old) = self.floor.lock().advance(offset) {
+        // Bind the advance result so the floor lock guard drops before the punch.
+        let advanced = self.floor.lock().advance(offset);
+        if let Some(old) = advanced {
             Self::punch_hole(&self.file, Header::DATA_OFFSET_U64 + old, offset - old);
         }
         Ok(())
