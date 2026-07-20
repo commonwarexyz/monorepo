@@ -1,14 +1,14 @@
 [package]
-name = "commonware-hardforks"
+name = "commonware-upgrades"
 edition.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
-description = "Coordinate protocol upgrades at epoch boundaries."
+description = "Coordinate upgrades at synchronized boundaries."
 readme = "README.md"
 homepage.workspace = true
-repository = "https://github.com/commonwarexyz/monorepo/tree/main/hardforks"
-documentation = "https://docs.rs/commonware-hardforks"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/upgrades"
+documentation = "https://docs.rs/commonware-upgrades"
 
 [lints]
 workspace = true

@@ -1658,16 +1658,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-hardforks"
-version = "2026.7.0"
-dependencies = [
- "commonware-macros",
- "rapidhash",
- "strum",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "commonware-invariants"
 version = "2026.7.0"
 dependencies = [
@@ -2040,6 +2030,16 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-upgrades"
+version = "2026.7.0"
+dependencies = [
+ "commonware-macros",
+ "rapidhash",
+ "strum",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

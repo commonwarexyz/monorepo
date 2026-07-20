@@ -5,7 +5,7 @@
 )]
 #![no_std]
 
-commonware_macros::stability_scope!(BETA {
+commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;
 
     use alloc::vec::Vec;
@@ -13,9 +13,9 @@ commonware_macros::stability_scope!(BETA {
     use rapidhash::quality::RapidHasher;
     use thiserror::Error;
 
-    const COMMITMENT_NAMESPACE: &[u8] = b"_COMMONWARE_HARDFORKS_SCHEDULE_COMMITMENT";
+    const COMMITMENT_NAMESPACE: &[u8] = b"_COMMONWARE_UPGRADES_SCHEDULE_COMMITMENT";
 
-    macro_rules! hardforks {
+    macro_rules! upgrades {
         (
             $(#[$enum_meta:meta])*
             $visibility:vis enum $name:ident {
@@ -37,10 +37,10 @@ commonware_macros::stability_scope!(BETA {
             }
 
             impl $name {
-                /// All hardforks in hierarchy order.
+                /// All upgrades in hierarchy order.
                 pub const VARIANTS: &'static [Self] = &[$(Self::$variant),+];
 
-                /// Returns the human-readable hardfork name.
+                /// Returns the human-readable upgrade name.
                 pub fn name(self) -> &'static str {
                     self.into()
                 }
@@ -48,39 +48,39 @@ commonware_macros::stability_scope!(BETA {
         };
     }
 
-    hardforks! {
-        /// A Commonware protocol hardfork.
+    upgrades! {
+        /// A Commonware upgrade.
         ///
-        /// Declaration order defines the hardfork hierarchy.
-        pub enum Hardfork {
-            /// The Alameda hardfork.
+        /// Declaration order defines the upgrade hierarchy.
+        pub enum Upgrade {
+            /// The Alameda upgrade.
             Alameda,
         }
     }
 
-    /// An invalid hardfork schedule.
+    /// An invalid upgrade schedule.
     #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
     pub enum Error {
-        /// A hardfork has more than one configured activation epoch.
-        #[error("hardfork has more than one configured activation epoch")]
+        /// An upgrade has more than one configured activation epoch.
+        #[error("upgrade has more than one configured activation epoch")]
         Duplicate,
 
         /// A descendant is configured to activate before an explicitly configured ancestor.
-        #[error("hardfork activation epochs are not monotonic")]
+        #[error("upgrade activation epochs are not monotonic")]
         NonMonotonic,
     }
 
-    /// Hardfork activation epochs for a chain.
+    /// Upgrade activation epochs for a chain.
     ///
-    /// The schedule is ordered by [`Hardfork`]. Activating a hardfork implicitly activates every
+    /// The schedule is ordered by [`Upgrade`]. Activating an upgrade implicitly activates every
     /// ancestor, including ancestors omitted from the schedule.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct Schedule<E> {
-        activations: Vec<(Hardfork, E)>,
+        activations: Vec<(Upgrade, E)>,
     }
 
     impl<E> Schedule<E> {
-        /// Creates a builder for configuring hardfork activation epochs.
+        /// Creates a builder for configuring upgrade activation epochs.
         pub const fn builder() -> ScheduleBuilder<E> {
             ScheduleBuilder::new()
         }
@@ -95,9 +95,9 @@ commonware_macros::stability_scope!(BETA {
     }
 
     impl<E: Ord> Schedule<E> {
-        fn new(activations: impl IntoIterator<Item = (Hardfork, E)>) -> Result<Self, Error> {
+        fn new(activations: impl IntoIterator<Item = (Upgrade, E)>) -> Result<Self, Error> {
             let mut activations: Vec<_> = activations.into_iter().collect();
-            activations.sort_unstable_by_key(|(hardfork, _)| *hardfork);
+            activations.sort_unstable_by_key(|(upgrade, _)| *upgrade);
 
             for pair in activations.windows(2) {
                 let [(earlier, earlier_epoch), (later, later_epoch)] = pair else {
@@ -117,25 +117,25 @@ commonware_macros::stability_scope!(BETA {
     }
 
     impl<E: Copy + Ord> Schedule<E> {
-        /// Returns the effective activation epoch for `hardfork`.
+        /// Returns the effective activation epoch for `upgrade`.
         ///
-        /// If `hardfork` is omitted, the first configured descendant determines its activation
+        /// If `upgrade` is omitted, the first configured descendant determines its activation
         /// epoch. Returns `None` when neither it nor a descendant is configured.
-        pub fn activation_epoch(&self, hardfork: Hardfork) -> Option<E> {
+        pub fn activation_epoch(&self, upgrade: Upgrade) -> Option<E> {
             let index = self
                 .activations
-                .partition_point(|(candidate, _)| *candidate < hardfork);
+                .partition_point(|(candidate, _)| *candidate < upgrade);
             self.activations.get(index).map(|(_, epoch)| *epoch)
         }
 
-        /// Returns whether `hardfork` is active at `epoch`.
-        pub fn is_active(&self, hardfork: Hardfork, epoch: E) -> bool {
-            self.activation_epoch(hardfork)
+        /// Returns whether `upgrade` is active at `epoch`.
+        pub fn is_active(&self, upgrade: Upgrade, epoch: E) -> bool {
+            self.activation_epoch(upgrade)
                 .is_some_and(|activation| epoch >= activation)
         }
 
-        /// Returns the latest hardfork active at `epoch`.
-        pub fn latest(&self, epoch: E) -> Option<Hardfork> {
+        /// Returns the latest upgrade active at `epoch`.
+        pub fn latest(&self, epoch: E) -> Option<Upgrade> {
             let index = self
                 .activations
                 .partition_point(|(_, activation)| *activation <= epoch);
@@ -156,8 +156,8 @@ commonware_macros::stability_scope!(BETA {
             hasher.write(COMMITMENT_NAMESPACE);
             hasher.write_u64(self.activations.len() as u64);
 
-            for (hardfork, epoch) in &self.activations {
-                let ordinal = Hardfork::VARIANTS.partition_point(|candidate| candidate < hardfork);
+            for (upgrade, epoch) in &self.activations {
+                let ordinal = Upgrade::VARIANTS.partition_point(|candidate| candidate < upgrade);
                 hasher.write_u64(ordinal as u64);
                 epoch.hash(&mut hasher);
             }
@@ -169,7 +169,7 @@ commonware_macros::stability_scope!(BETA {
     /// Builds a [`Schedule`] from user-defined activation epochs.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct ScheduleBuilder<E> {
-        activations: Vec<(Hardfork, E)>,
+        activations: Vec<(Upgrade, E)>,
     }
 
     impl<E> ScheduleBuilder<E> {
@@ -179,9 +179,9 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
-        /// Configures `hardfork` to activate at `epoch`.
-        pub fn activate(mut self, hardfork: Hardfork, epoch: E) -> Self {
-            self.activations.push((hardfork, epoch));
+        /// Configures `upgrade` to activate at `epoch`.
+        pub fn activate(mut self, upgrade: Upgrade, epoch: E) -> Self {
+            self.activations.push((upgrade, epoch));
             self
         }
     }
@@ -189,7 +189,7 @@ commonware_macros::stability_scope!(BETA {
     impl<E: Ord> ScheduleBuilder<E> {
         /// Builds and validates the schedule.
         ///
-        /// Input order does not matter. Equal activation epochs are allowed, but each hardfork
+        /// Input order does not matter. Equal activation epochs are allowed, but each upgrade
         /// may appear only once and descendants cannot activate before explicitly configured
         /// ancestors.
         pub fn build(self) -> Result<Schedule<E>, Error> {
@@ -201,8 +201,8 @@ commonware_macros::stability_scope!(BETA {
     mod tests {
         use super::*;
 
-        hardforks! {
-            enum TestHardfork {
+        upgrades! {
+            enum TestUpgrade {
                 First,
                 SecondVariant,
                 Third,
@@ -213,51 +213,51 @@ commonware_macros::stability_scope!(BETA {
         struct Epoch(u64);
 
         #[test]
-        fn hardfork_metadata() {
-            assert_eq!(Hardfork::VARIANTS, &[Hardfork::Alameda]);
-            assert_eq!(Hardfork::Alameda.name(), "Alameda");
+        fn upgrade_metadata() {
+            assert_eq!(Upgrade::VARIANTS, &[Upgrade::Alameda]);
+            assert_eq!(Upgrade::Alameda.name(), "Alameda");
             assert_eq!(
-                TestHardfork::VARIANTS,
+                TestUpgrade::VARIANTS,
                 &[
-                    TestHardfork::First,
-                    TestHardfork::SecondVariant,
-                    TestHardfork::Third,
+                    TestUpgrade::First,
+                    TestUpgrade::SecondVariant,
+                    TestUpgrade::Third,
                 ]
             );
-            assert_eq!(TestHardfork::SecondVariant.name(), "Second Variant");
+            assert_eq!(TestUpgrade::SecondVariant.name(), "Second Variant");
         }
 
         #[test]
         fn activation_boundary() {
             let schedule = Schedule::builder()
-                .activate(Hardfork::Alameda, Epoch(10))
+                .activate(Upgrade::Alameda, Epoch(10))
                 .build()
                 .unwrap();
 
             assert_eq!(
-                schedule.activation_epoch(Hardfork::Alameda),
+                schedule.activation_epoch(Upgrade::Alameda),
                 Some(Epoch(10))
             );
-            assert!(!schedule.is_active(Hardfork::Alameda, Epoch(9)));
-            assert!(schedule.is_active(Hardfork::Alameda, Epoch(10)));
+            assert!(!schedule.is_active(Upgrade::Alameda, Epoch(9)));
+            assert!(schedule.is_active(Upgrade::Alameda, Epoch(10)));
             assert_eq!(schedule.latest(Epoch(9)), None);
-            assert_eq!(schedule.latest(Epoch(10)), Some(Hardfork::Alameda));
+            assert_eq!(schedule.latest(Epoch(10)), Some(Upgrade::Alameda));
         }
 
         #[test]
         fn empty_schedule() {
             let schedule = Schedule::<Epoch>::builder().build().unwrap();
 
-            assert_eq!(schedule.activation_epoch(Hardfork::Alameda), None);
-            assert!(!schedule.is_active(Hardfork::Alameda, Epoch(u64::MAX)));
+            assert_eq!(schedule.activation_epoch(Upgrade::Alameda), None);
+            assert!(!schedule.is_active(Upgrade::Alameda, Epoch(u64::MAX)));
             assert_eq!(schedule.latest(Epoch(u64::MAX)), None);
         }
 
         #[test]
-        fn builder_rejects_duplicate_hardforks() {
+        fn builder_rejects_duplicate_upgrades() {
             let error = Schedule::builder()
-                .activate(Hardfork::Alameda, Epoch(5))
-                .activate(Hardfork::Alameda, Epoch(10))
+                .activate(Upgrade::Alameda, Epoch(5))
+                .activate(Upgrade::Alameda, Epoch(10))
                 .build()
                 .unwrap_err();
 
@@ -267,19 +267,19 @@ commonware_macros::stability_scope!(BETA {
         #[test]
         fn schedule_commitment() {
             let schedule = Schedule::builder()
-                .activate(Hardfork::Alameda, 10u64)
+                .activate(Upgrade::Alameda, 10u64)
                 .build()
                 .unwrap();
             let same = Schedule::builder()
-                .activate(Hardfork::Alameda, 10u64)
+                .activate(Upgrade::Alameda, 10u64)
                 .build()
                 .unwrap();
             let different = Schedule::builder()
-                .activate(Hardfork::Alameda, 11u64)
+                .activate(Upgrade::Alameda, 11u64)
                 .build()
                 .unwrap();
 
-            assert_eq!(schedule.commitment(), 0x6ec3_14dd_d98a_3e00);
+            assert_eq!(schedule.commitment(), 0x9cd2_f289_ae47_2c0f);
             assert_eq!(schedule.commitment(), same.commitment());
             assert_ne!(schedule.commitment(), different.commitment());
             assert_ne!(schedule.commitment(), Schedule::<u64>::default().commitment());

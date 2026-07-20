@@ -3,7 +3,7 @@ set -eo pipefail
 
 no_std_packages=(
   commonware-codec
-  commonware-hardforks
+  commonware-upgrades
   commonware-utils
   commonware-cryptography
   commonware-math
