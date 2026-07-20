@@ -563,6 +563,130 @@ mod tests {
             .expect("failed to seed notarized block");
     }
 
+    struct MissingBlockStore<T> {
+        inner: T,
+        missing: Height,
+    }
+
+    impl<T: crate::marshal::store::Blocks> crate::marshal::store::Blocks for MissingBlockStore<T> {
+        type Block = T::Block;
+        type Error = T::Error;
+
+        async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
+            self.inner.put(block).await
+        }
+
+        async fn sync(&mut self) -> Result<(), Self::Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&mut self) -> Result<commonware_runtime::Handle<()>, Self::Error> {
+            self.inner.start_sync().await
+        }
+
+        async fn get(
+            &self,
+            id: commonware_storage::archive::Identifier<'_, <Self::Block as Digestible>::Digest>,
+        ) -> Result<Option<Self::Block>, Self::Error> {
+            if let commonware_storage::archive::Identifier::Index(index) = &id
+                && *index == self.missing.get()
+            {
+                return Ok(None);
+            }
+            self.inner.get(id).await
+        }
+
+        async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+            self.inner.prune(min).await
+        }
+
+        fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+            self.inner.missing_items(start, max)
+        }
+
+        fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+            self.inner.next_gap(value)
+        }
+
+        fn last_index(&self) -> Option<Height> {
+            self.inner.last_index()
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_rebuild_preserves_tip_when_archive_last_block_is_missing() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let partition_prefix = format!("rebuild-archive-miss-{me}");
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
+            let block_three = make_raw_block(block_two.digest(), Height::new(3), 300);
+            let block_four = make_raw_block(block_three.digest(), Height::new(4), 400);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(3)),
+                    View::new(2),
+                    StandardHarness::commitment(&block_three),
+                ),
+                &schemes,
+                QUORUM,
+            );
+
+            seed_inconsistent_restart_state(
+                context.child("storage"),
+                &partition_prefix,
+                &[
+                    block_one,
+                    block_two,
+                    block_three.clone(),
+                    block_four.clone(),
+                ],
+                &[(Height::new(3), finalization)],
+            )
+            .await;
+            seed_cache_block(
+                context.child("storage"),
+                &partition_prefix,
+                Epoch::zero(),
+                View::new(4),
+                &block_four,
+            )
+            .await;
+
+            let (mailbox, _buffer, _resolver, _actor_handle) =
+                start_standard_actor_with_block_store(
+                    context.child("validator"),
+                    &partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::manual_ack(),
+                    None::<RecordingBuffer>,
+                    Start::Genesis(genesis),
+                    |inner| MissingBlockStore {
+                        inner,
+                        missing: Height::new(4),
+                    },
+                )
+                .await;
+
+            let descendant = BlockProvider::get_descendant(
+                &mailbox,
+                Height::new(3).into(),
+                (&block_four.digest()).into(),
+            )
+            .await
+            .expect("cached candidate should remain connected to the finalized tip");
+            assert_eq!(descendant.0.digest(), block_three.digest());
+        });
+    }
+
     // Verifies that a validator whose finalized-blocks archive is missing
     // the block at the tip (has finalization for height 2 but only block 1)
     // fetches the missing block from a peer on restart.
@@ -4000,6 +4124,38 @@ mod tests {
         P: Provider<Scope = Epoch, Scheme = S>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
+        start_standard_actor_with_block_store(
+            context,
+            partition_prefix,
+            provider,
+            application,
+            buffer,
+            start,
+            std::convert::identity,
+        )
+        .await
+    }
+
+    async fn start_standard_actor_with_block_store<R, Buf, P, FB>(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: P,
+        application: R,
+        buffer: Option<Buf>,
+        start: Start<S, D, B>,
+        wrap: impl FnOnce(immutable::Archive<deterministic::Context, D, B>) -> FB,
+    ) -> (
+        Mailbox<S, Standard<B>>,
+        Option<Buf>,
+        RecordingResolver,
+        commonware_runtime::Handle<()>,
+    )
+    where
+        R: Reporter<Activity = Update<B>>,
+        P: Provider<Scope = Epoch, Scheme = S>,
+        FB: crate::marshal::store::Blocks<Block = B>,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
+    {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -4075,6 +4231,7 @@ mod tests {
         )
         .await
         .expect("failed to initialize finalized blocks archive");
+        let finalized_blocks = wrap(finalized_blocks);
         let (actor, mailbox, _) = Actor::init(
             context.child("actor"),
             finalizations_by_height,

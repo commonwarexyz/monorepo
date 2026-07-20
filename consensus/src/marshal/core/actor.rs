@@ -2243,7 +2243,8 @@ where
             Some(height) if anchor.is_none_or(|(known, _)| known < height) => self
                 .get_finalized_block(height)
                 .await
-                .map(|block| (height, block.digest())),
+                .map(|block| (height, block.digest()))
+                .or(anchor),
             _ => anchor,
         };
         if let Some((height, digest)) = anchor {
