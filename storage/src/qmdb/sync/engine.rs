@@ -29,11 +29,7 @@ use futures::{
     future::{Either, pending},
 };
 use mpsc::error::TryRecvError;
-use std::{
-    collections::BTreeMap,
-    fmt::Debug,
-    num::NonZeroU64,
-};
+use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Type alias for sync engine errors
 type Error<DB, R> =
