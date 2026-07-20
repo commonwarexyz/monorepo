@@ -1908,13 +1908,6 @@ where
 /// Activity represents all possible activities that can occur in the consensus protocol.
 /// This includes both regular consensus messages and fault evidence.
 ///
-/// # Completeness
-///
-/// Reports are not exhaustive: votes that arrive at or below the finalized
-/// tip are dropped before verification, so per-validator activity (e.g. used
-/// for rewards) can miss late votes and equivocation at or below the tip is
-/// not reported.
-///
 /// # Verification
 ///
 /// Some activities issued by consensus are not guaranteed to be cryptographically verified (i.e. if not needed

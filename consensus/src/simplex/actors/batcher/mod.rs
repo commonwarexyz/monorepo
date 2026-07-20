@@ -6,7 +6,7 @@ mod verifier;
 use crate::{
     Relay, Reporter,
     simplex::config::ForwardingPolicy,
-    types::{Epoch, TermLength, View},
+    types::{Epoch, TermLength, View, ViewDelta},
 };
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
@@ -27,15 +27,15 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     /// Strategy for parallel operations.
     pub strategy: T,
 
+    pub activity_timeout: ViewDelta,
     pub skip_timeout: Duration,
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
     pub term_length: TermLength,
     pub forwarding: ForwardingPolicy,
 
-    /// Highest finalized view at startup; votes and certificates at or below
-    /// it are dropped (producing no activity reports) even before the voter's
-    /// first update.
+    /// Highest finalized view at startup; anchors the tracked window before
+    /// the voter's first update.
     pub floor: View,
 }
 
@@ -179,6 +179,7 @@ mod tests {
     /// Batcher [Config] fields that vary across tests; everything else is
     /// fixed by [test_config].
     struct BatcherOptions {
+        activity_timeout: ViewDelta,
         skip_timeout: Duration,
         term_length: TermLength,
         forwarding: ForwardingPolicy,
@@ -188,6 +189,7 @@ mod tests {
     impl Default for BatcherOptions {
         fn default() -> Self {
             Self {
+                activity_timeout: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(5),
                 term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
@@ -212,6 +214,7 @@ mod tests {
             reporter,
             relay,
             strategy: Sequential,
+            activity_timeout: options.activity_timeout,
             skip_timeout: options.skip_timeout,
             epoch,
             mailbox_size: NZUsize!(128),
@@ -3680,7 +3683,7 @@ mod tests {
         votes_skipped_for_finalized_views(secp256r1::fixture);
     }
 
-    fn startup_votes_below_floor_not_reported<S, F>(mut fixture: F)
+    fn startup_votes_below_activity_window_not_reported<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3716,6 +3719,7 @@ mod tests {
                 MockRelay::new(),
                 epoch,
                 BatcherOptions {
+                    activity_timeout: ViewDelta::new(2),
                     floor,
                     ..Default::default()
                 },
@@ -3792,24 +3796,185 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            // The stale below-floor vote must not have produced any activity
+            // The stale vote below the activity window must not have produced
+            // any activity (votes within `activity_timeout` of the floor are
+            // still reported)
             assert!(
                 reporter.notarizes.lock().get(&stale_view).is_none(),
-                "votes below the restored floor must not be reported before the first update"
+                "votes below the activity window must not be reported before the first update"
             );
         });
     }
 
     #[test_traced]
-    fn test_startup_votes_below_floor_not_reported() {
-        startup_votes_below_floor_not_reported(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        startup_votes_below_floor_not_reported(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        startup_votes_below_floor_not_reported(bls12381_threshold_std::fixture::<MinPk, _>);
-        startup_votes_below_floor_not_reported(bls12381_threshold_std::fixture::<MinSig, _>);
-        startup_votes_below_floor_not_reported(bls12381_multisig::fixture::<MinPk, _>);
-        startup_votes_below_floor_not_reported(bls12381_multisig::fixture::<MinSig, _>);
-        startup_votes_below_floor_not_reported(ed25519::fixture);
-        startup_votes_below_floor_not_reported(secp256r1::fixture);
+    fn test_startup_votes_below_activity_window_not_reported() {
+        startup_votes_below_activity_window_not_reported(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        startup_votes_below_activity_window_not_reported(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        startup_votes_below_activity_window_not_reported(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        startup_votes_below_activity_window_not_reported(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        startup_votes_below_activity_window_not_reported(bls12381_multisig::fixture::<MinPk, _>);
+        startup_votes_below_activity_window_not_reported(bls12381_multisig::fixture::<MinSig, _>);
+        startup_votes_below_activity_window_not_reported(ed25519::fixture);
+        startup_votes_below_activity_window_not_reported(secp256r1::fixture);
+    }
+
+    fn votes_below_finalized_within_activity_window_reported<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+
+            // Setup reporter mock
+            let reporter = test_reporter(&mut context, &schemes[0]);
+
+            // Initialize batcher actor (participant 0)
+            let me = participants[0].clone();
+            let batcher_cfg = test_config(
+                schemes[0].clone(),
+                oracle.control(me.clone()),
+                reporter.clone(),
+                MockRelay::new(),
+                epoch,
+                BatcherOptions {
+                    activity_timeout: ViewDelta::new(2),
+                    ..Default::default()
+                },
+            );
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
+
+            // Create voter mailbox for batcher to send to
+            let (voter_sender, _voter_receiver) = mailbox::new::<voter::Message<S, Sha256Digest>>(
+                context.child("mailbox"),
+                NZUsize!(1024),
+            );
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Register a peer on the network and link it to us
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let (mut peer_sender, _receiver) = oracle
+                .control(participants[1].clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(participants[1].clone(), me.clone(), link)
+                .await
+                .unwrap();
+
+            // Start the batcher and advance past the straggler's view
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+            let finalized = View::new(10);
+            batcher_mailbox.update(
+                Span::none(),
+                finalized.next(),
+                Participant::new(1),
+                finalized,
+                None,
+            );
+
+            // Send a vote below the activity window, which must be ignored
+            let stale_view = View::new(7);
+            let stale_proposal = Proposal::new(
+                Round::new(epoch, stale_view),
+                View::new(6),
+                Sha256::hash(b"stale"),
+            );
+            let stale = Notarize::sign(&schemes[1], stale_proposal).unwrap();
+            peer_sender.send(
+                Recipients::One(me.clone()),
+                Vote::Notarize(stale).encode(),
+                true,
+            );
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Send a straggler vote at or below the finalized tip but within
+            // the activity window, which must still be reported
+            let window_view = View::new(9);
+            let window_proposal = Proposal::new(
+                Round::new(epoch, window_view),
+                View::new(8),
+                Sha256::hash(b"window"),
+            );
+            let window = Notarize::sign(&schemes[1], window_proposal.clone()).unwrap();
+            peer_sender.send(Recipients::One(me), Vote::Notarize(window).encode(), true);
+            while reporter
+                .notarizes
+                .lock()
+                .get(&window_view)
+                .and_then(|payloads| payloads.get(&window_proposal.payload))
+                .is_none_or(|participants| participants.is_empty())
+            {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // The below-window vote must not have produced any activity
+            assert!(
+                reporter.notarizes.lock().get(&stale_view).is_none(),
+                "votes below the activity window must not be reported"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_votes_below_finalized_within_activity_window_reported() {
+        votes_below_finalized_within_activity_window_reported(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        votes_below_finalized_within_activity_window_reported(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        votes_below_finalized_within_activity_window_reported(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        votes_below_finalized_within_activity_window_reported(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        votes_below_finalized_within_activity_window_reported(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        votes_below_finalized_within_activity_window_reported(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        votes_below_finalized_within_activity_window_reported(ed25519::fixture);
+        votes_below_finalized_within_activity_window_reported(secp256r1::fixture);
     }
 
     fn latest_vote_metric_tracking<S, F>(mut fixture: F)

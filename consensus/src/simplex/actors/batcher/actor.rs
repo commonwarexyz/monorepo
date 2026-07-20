@@ -2,14 +2,14 @@ use super::{Config, Mailbox, Message, Round};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
-        Plan,
+        Plan, Window,
         actors::voter,
         config::ForwardingPolicy,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Proposal, Vote},
     },
-    types::{Epoch, Participant, Round as Rnd, TermLength, View},
+    types::{Epoch, Participant, Round as Rnd, TermLength, View, ViewDelta},
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Digest;
@@ -62,6 +62,7 @@ where
     relay: Rl,
     strategy: T,
 
+    activity_timeout: ViewDelta,
     skip_timeout: Duration,
     forwarding: ForwardingPolicy,
     epoch: Epoch,
@@ -132,6 +133,7 @@ where
                 relay: cfg.relay,
                 strategy: cfg.strategy,
 
+                activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 forwarding: cfg.forwarding,
                 epoch: cfg.epoch,
@@ -198,6 +200,17 @@ where
 
         // Return true if we have recent activity from the participant.
         recent(&self.last_activity[usize::from(participant)])
+    }
+
+    /// Returns the window of views the batcher tracks, given the voter's
+    /// last-published finalized and current views.
+    const fn window(&self, finalized: View, current: View) -> Window {
+        Window {
+            finalized,
+            current,
+            activity_timeout: self.activity_timeout,
+            term_length: self.term_length,
+        }
     }
 
     /// Maps `missing` participants to targeted forward recipients, excluding self.
@@ -384,13 +397,16 @@ where
                         updated_view = current.view;
                     }
                     Message::Constructed(message) => {
-                        // Record activity for ourselves.
+                        // Record activity for ourselves: we never receive our
+                        // own votes from the network, and a quorum-relative
+                        // threshold in is_active would misfire when we are not
+                        // a participant.
                         if let Some(me) = self.scheme.me() {
                             self.record_activity(me);
                         }
 
-                        // Ignore non-useful votes.
-                        if view <= finalized {
+                        // Skip votes outside the tracked window
+                        if !self.window(finalized, current.view).admits_vote(view) {
                             continue;
                         }
 
@@ -430,9 +446,8 @@ where
                 let view = message.view();
                 self.record_peer_activity(&sender);
 
-                // Ignore certificates below the highest finalized view since they aren't useful.
-                // Allow certificates from arbitrarily-future views since they advance our view.
-                if view <= finalized {
+                // Skip certificates outside the tracked window
+                if !self.window(finalized, current.view).admits_certificate(view) {
                     continue;
                 }
 
@@ -545,18 +560,8 @@ where
                 let view = message.view();
                 self.record_peer_activity(&sender);
 
-                // Ignore votes at or below the finalized tip. Votes dropped here are
-                // never verified or reported: activity reports miss votes that arrive
-                // after finalization (relevant to reporters tracking participation),
-                // and equivocation at or below the tip is not detected or reported
-                // since fault evidence is only collected for views still in progress.
-                if view <= finalized {
-                    continue;
-                }
-
-                // Ignore votes from arbitrarily-future views (DOS via memory
-                // exhaustion); see [`View::admits`] for the allowed window.
-                if !current.view.admits(view, self.term_length) {
+                // Skip votes outside the tracked window
+                if !self.window(finalized, current.view).admits_vote(view) {
                     continue;
                 }
 
@@ -605,6 +610,11 @@ where
                 }
 
                 // Skip verification and construction for views at or below finalized.
+                //
+                // We still admit votes at or below finalized (see
+                // [Window::retains]) because we want to notify the reporter of
+                // all votes within the activity timeout (even if we don't need
+                // them in the voter).
                 if updated_view <= finalized {
                     continue;
                 }
@@ -706,12 +716,13 @@ where
                 .instrument(span)
                 .await;
 
-                // Drop any rounds at or below the highest finalized view (votes
-                // for those views are no longer accepted). Guarded to avoid a
-                // tree split on every message: `finalized` only advances on
-                // view updates.
-                if work.first_key_value().is_some_and(|(&v, _)| v <= finalized) {
-                    work = work.split_off(&finalized.next());
+                // Drop any rounds that are no longer retained
+                let window = self.window(finalized, current.view);
+                while work
+                    .first_key_value()
+                    .is_some_and(|(&view, _)| !window.retains(view))
+                {
+                    work.pop_first();
                 }
             },
         }

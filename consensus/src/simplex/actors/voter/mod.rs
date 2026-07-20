@@ -1142,7 +1142,7 @@ mod tests {
 
             // Establish Prune Floor (50 - 10 + 5 = 45)
             //
-            // Theoretical interesting floor is 50-10 = 40.
+            // Theoretical retention floor is 50-10 = 40.
             // We want journal pruned at 45.
             let lf_target = View::new(50);
             let journal_floor_target = lf_target
@@ -1217,10 +1217,10 @@ mod tests {
                 _ => panic!("unexpected resolver message"),
             }
 
-            // Send notarization below oldest interesting view (42)
+            // Send notarization below oldest tracked view (42)
             //
             // problematic_view (42) < journal_floor_target (45)
-            // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
+            // Window::retains(42): 42 >= floor (LF(50) - AT(10) = 40)
             let problematic_view = journal_floor_target.saturating_sub(ViewDelta::new(3));
             let proposal_bft = Proposal::new(
                 Round::new(Epoch::new(333), problematic_view),
