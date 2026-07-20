@@ -1,0 +1,23 @@
+[package]
+name = "commonware-hardforks"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Coordinate protocol upgrades at epoch boundaries."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/hardforks"
+documentation = "https://docs.rs/commonware-hardforks"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-macros = { workspace = true, default-features = false }
+rapidhash = { workspace = true, default-features = false }
+strum = { workspace = true, default-features = false, features = ["derive"] }
+thiserror = { workspace = true, default-features = false }
+
+[lib]
+bench = false

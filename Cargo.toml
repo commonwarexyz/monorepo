@@ -14,6 +14,7 @@ members = [
     "deployer",
     "formatting",
     "glue",
+    "hardforks",
     "macros",
     "macros/impl",
     "math",
@@ -126,6 +127,7 @@ commonware-cryptography = { version = "2026.7.0", path = "cryptography", default
 commonware-deployer = { version = "2026.7.0", path = "deployer", default-features = false }
 commonware-formatting = { version = "2026.7.0", path = "formatting", default-features = false }
 commonware-glue = { version = "2026.7.0", path = "glue" }
+commonware-hardforks = { version = "2026.7.0", path = "hardforks" }
 commonware-invariants = { version = "2026.7.0", path = "invariants" }
 commonware-macros = { version = "2026.7.0", path = "macros", default-features = false }
 commonware-macros-impl = { version = "2026.7.0", path = "macros/impl" }
@@ -188,6 +190,7 @@ rand = { version = "0.10.2", default-features = false }
 rand_chacha = { version = "0.10.0", default-features = false }
 rand_core = { version = "0.10.1", default-features = false }
 rand_distr = "0.6.0"
+rapidhash = { version = "4.5.1", default-features = false }
 ratatui = "0.30.2"
 rayon = { version = "1.12.0", default-features = false }
 reqwest = "0.13.4"
@@ -197,6 +200,7 @@ serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 sha2 = { version = "0.11.0", default-features = false }
 shlex = "2.0.1"
+strum = { version = "0.28.0", default-features = false, features = ["derive"] }
 syn = "2.0.119"
 sysinfo = "0.39.6"
 thiserror = { version = "2.0.18", default-features = false }

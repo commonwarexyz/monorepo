@@ -22,6 +22,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [glue](./glue/README.md): Default constructions that span multiple primitives.
+* [hardforks](./hardforks/README.md): Coordinate protocol upgrades at epoch boundaries.
 * [math](./math/README.md): Create and manipulate mathematical objects.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
 * [parallel](./parallel/README.md): Parallelize fold operations with pluggable execution strategies.
