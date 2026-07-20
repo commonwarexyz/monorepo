@@ -85,9 +85,9 @@ impl WriteBuffers {
 ///
 /// Each variant owns all buffers and FDs needed by the kernel plus progress
 /// cursors. The loop calls [build_sqe](Self::build_sqe) to produce the next
-/// SQE, [on_cqe](Self::on_cqe) to evaluate completions, and
-/// [complete](Self::complete) or [timeout](Self::timeout) to produce the
-/// terminal [Output].
+/// SQE and [on_cqe](Self::on_cqe) to evaluate completions and produce the
+/// terminal [Output]. [timeout](Self::timeout) and [fail](Self::fail)
+/// resolve requests the kernel never completed.
 ///
 // SAFETY: `WriteBuffers::Vectored` owns both the `IoBufs` backing storage and
 // the scratch `libc::iovec` array used to describe it to the kernel. The
@@ -113,7 +113,7 @@ pub(super) enum Request {
 ///
 /// Buffers travel inside the payloads (including error variants), so ownership
 /// always returns to the caller once the kernel has retired the operation.
-/// Error payloads are boxed: [Error] is large, errors are cold, and outputs
+/// Error payloads are boxed: [enum@Error] is large, errors are cold, and outputs
 /// move through the waiter slot on every operation, so success-path moves
 /// should not pay for error-variant width.
 pub(super) enum Output {
