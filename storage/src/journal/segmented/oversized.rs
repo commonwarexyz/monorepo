@@ -427,8 +427,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     ///
     /// Both of `section`'s truncations are durable before this returns: a crash recovers
     /// to either the pre-rewind or the post-rewind state. Removals of later sections
-    /// carry the storage layer's removal durability. If this call fails or is cancelled,
-    /// the journal must be dropped: reinitialization restores a consistent state.
+    /// carry the storage layer's removal durability.
     pub async fn rewind(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
         // Rewind index first (this also removes sections after `section`)
         self.index.rewind(section, index_size).await?;
