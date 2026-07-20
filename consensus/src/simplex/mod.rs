@@ -126,10 +126,11 @@
 //!   length, see [`elector::Terms`]) and we are still in the same term, we locally time out the
 //!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
 //!   entered in the current term.
-//! * Votes for views at or below the highest finalized view are ignored on arrival: they produce no
-//!   activity reports, and equivocation at or below the finalized tip is not detected or reported.
-//!   Downstream systems consuming per-vote activity (rewards, slashing) only observe votes for views
-//!   still in progress.
+//! * Votes are tracked down to `activity_timeout` views below the highest finalized view: late
+//!   votes in that window are still reported (and equivocation there is still detected), even
+//!   though they are no longer verified or used for certificate construction. Votes below the
+//!   window are ignored on arrival, so downstream systems consuming per-vote activity (rewards,
+//!   slashing) never observe them.
 //!
 //! ## Protocol Properties
 //!
@@ -406,7 +407,7 @@ pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use crate::types::Round;
+        use crate::types::{Round, TermLength, View, ViewDelta};
         use commonware_cryptography::PublicKey;
         use commonware_p2p::Recipients;
 
@@ -416,6 +417,51 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod metrics;
+
+        /// The window of views an actor tracks, bounded below by retention
+        /// and above by admission policy.
+        #[derive(Clone, Copy)]
+        pub(crate) struct Viewport {
+            /// Highest finalized view observed.
+            pub finalized: View,
+            /// View currently being driven.
+            pub current: View,
+            /// Views retained below `finalized` (for reporting and backfill).
+            pub activity_timeout: ViewDelta,
+            /// Number of views in each leader term.
+            pub term_length: TermLength,
+        }
+
+        impl Viewport {
+            /// Returns the lowest view retained (genesis is never tracked).
+            pub const fn floor(&self) -> View {
+                self.finalized.saturating_sub(self.activity_timeout)
+            }
+
+            /// Returns whether `view` is retained: at or above the activity
+            /// floor and not genesis. Views up to `activity_timeout` below
+            /// `finalized` are kept so late votes are still reported (even
+            /// when no longer needed for progress).
+            pub const fn retains(&self, view: View) -> bool {
+                !view.is_zero() && view.get() >= self.floor().get()
+            }
+
+            /// Returns whether a vote at `view` is tracked: retained and no
+            /// further ahead than the next view or the first view of the next
+            /// term, bounding memory committed to unverified votes (see
+            /// [`View::admits`]).
+            pub const fn admits_vote(&self, view: View) -> bool {
+                self.retains(view) && self.current.admits(view, self.term_length)
+            }
+
+            /// Returns whether a certificate at `view` is tracked: certificates
+            /// are self-certifying and may arrive from arbitrarily far ahead
+            /// (letting a lagging participant fast-forward), so only retention
+            /// bounds them.
+            pub const fn admits_certificate(&self, view: View) -> bool {
+                self.retains(view)
+            }
+        }
 
         /// Describes how a payload should be broadcast to the network.
         pub enum Plan<P: PublicKey> {
@@ -2620,7 +2666,7 @@ mod tests {
                     }
                     // A few views may still nullify while lagging validators
                     // catch up after relinking, but a working skip timeout
-                    // bounds that to a handful of views, not the window.
+                    // bounds that to a handful of views, not the viewport.
                     let tolerated_missing = 3;
                     assert!(
                         found >= activity_timeout.get().saturating_sub(tolerated_missing),
@@ -6664,4 +6710,36 @@ mod tests {
     }
 
     test_for_all_fixtures!(twins, level = "INFO");
+
+    #[test]
+    fn test_viewport() {
+        let viewport = Viewport {
+            finalized: View::new(20),
+            current: View::new(25),
+            activity_timeout: ViewDelta::new(10),
+            term_length: TermLength::new(commonware_utils::NZU32!(10)),
+        };
+
+        // Genesis is never tracked
+        assert!(!viewport.retains(View::zero()));
+
+        // Retention floor is activity_timeout below finalized
+        assert_eq!(viewport.floor(), View::new(10));
+        assert!(!viewport.retains(View::new(9)));
+        assert!(viewport.retains(View::new(10)));
+
+        // Votes are admitted up to the next view or the next term start
+        assert!(viewport.admits_vote(View::new(10)));
+        assert!(viewport.admits_vote(View::new(25)));
+        assert!(viewport.admits_vote(View::new(26)));
+        assert!(viewport.admits_vote(View::new(31)));
+        assert!(!viewport.admits_vote(View::new(5)));
+        assert!(!viewport.admits_vote(View::new(27)));
+        assert!(!viewport.admits_vote(View::new(34)));
+
+        // Certificates are admitted from arbitrarily far ahead but still
+        // respect the retention floor
+        assert!(!viewport.admits_certificate(View::new(9)));
+        assert!(viewport.admits_certificate(View::new(10_000)));
+    }
 }

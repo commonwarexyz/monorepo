@@ -2,7 +2,7 @@ use super::round::Round;
 use crate::{
     Viewable,
     simplex::{
-        Floor,
+        Floor, Viewport,
         elector::Elector,
         metrics::{Leader, Timeout, TimeoutReason},
         scheme::Scheme,
@@ -80,40 +80,6 @@ impl ParentPayloadError {
             Self::MissingNullification { .. } | Self::ParentNotCertified { .. } => false,
         }
     }
-}
-
-/// The minimum view we are tracking both in-memory and on-disk.
-const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
-    last_finalized.saturating_sub(activity_timeout)
-}
-
-/// Whether or not a view is interesting to us.
-///
-/// This is a function of both `min_active` and whether `pending` is too far in
-/// the future relative to `current`.
-fn interesting(
-    activity_timeout: ViewDelta,
-    last_finalized: View,
-    current: View,
-    pending: View,
-    allow_unbounded_future: bool,
-    term_length: TermLength,
-) -> bool {
-    // If the view is genesis, skip it, genesis doesn't have votes
-    if pending.is_zero() {
-        return false;
-    }
-    if pending < min_active(activity_timeout, last_finalized) {
-        return false;
-    }
-    // If we don't allow unbounded future views, we still find two future views interesting:
-    // the next view and the first view of the next term. Certificates set
-    // `allow_unbounded_future` because they are self-certifying (see
-    // [`View::admits`]).
-    if !allow_unbounded_future && !current.admits(pending, term_length) {
-        return false;
-    }
-    true
 }
 
 /// Configuration for initializing [`State`].
@@ -239,8 +205,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
-    pub const fn min_active(&self) -> View {
-        min_active(self.activity_timeout, self.last_finalized)
+    pub fn min_active(&self) -> View {
+        self.viewport().floor()
     }
 
     /// Returns the term length of the elector.
@@ -248,28 +214,25 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.elector.terms().length()
     }
 
-    /// Returns whether a vote for `pending` is still relevant for progress.
-    pub fn is_interesting_vote(&self, pending: View) -> bool {
-        interesting(
-            self.activity_timeout,
-            self.last_finalized,
-            self.view,
-            pending,
-            false,
-            self.term_length(),
-        )
+    /// Returns the window of views this state machine tracks.
+    fn viewport(&self) -> Viewport {
+        Viewport {
+            finalized: self.last_finalized,
+            current: self.view,
+            activity_timeout: self.activity_timeout,
+            term_length: self.term_length(),
+        }
     }
 
-    /// Returns whether a certificate for `pending` is relevant for progress.
-    pub fn is_interesting_certificate(&self, pending: View) -> bool {
-        interesting(
-            self.activity_timeout,
-            self.last_finalized,
-            self.view,
-            pending,
-            true,
-            self.term_length(),
-        )
+    /// Returns whether a vote for `pending` is tracked (see [Viewport::admits_vote]).
+    pub fn admits_vote(&self, pending: View) -> bool {
+        self.viewport().admits_vote(pending)
+    }
+
+    /// Returns whether a certificate for `pending` is tracked (see
+    /// [Viewport::admits_certificate]).
+    pub fn admits_certificate(&self, pending: View) -> bool {
+        self.viewport().admits_certificate(pending)
     }
 
     /// Returns true when the local signer is the participant with index `idx`.
@@ -512,7 +475,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
 
-        // Skip to the start of the next term.
+        // Skip to the start of the next term. This needs no finalization
+        // guard: a nullification below `last_finalized` in an earlier term
+        // targets a view at or below it (`enter_view` only advances), and one
+        // in the same term cannot exist (see [Same-Term Vote
+        // Safety](crate::simplex#same-term-vote-safety)).
         let next_view = view.next_term_start(self.term_length());
         self.enter_view(next_view);
         self.set_leader(next_view, Some(&nullification.certificate));
@@ -3762,93 +3729,6 @@ mod tests {
                 "late-arriving finalization at the nullified view should unblock the finalize vote"
             );
         });
-    }
-
-    #[test]
-    fn test_interesting() {
-        let activity_timeout = ViewDelta::new(10);
-        let term_length = TermLength::new(NZU32!(10));
-
-        assert!(!interesting(
-            activity_timeout,
-            View::zero(),
-            View::zero(),
-            View::zero(),
-            false,
-            term_length,
-        ));
-
-        // Below min_active
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(5),
-            false,
-            term_length,
-        ));
-
-        // At min_active boundary
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(10),
-            false,
-            term_length,
-        ));
-
-        // strict mode allows only current.next and current.next_term_start above current
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(26),
-            false,
-            term_length,
-        ));
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(31),
-            false,
-            term_length,
-        ));
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            false,
-            term_length,
-        ));
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(34),
-            false,
-            term_length,
-        ));
-
-        // unbounded future still respects lower bound
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(9),
-            true,
-            term_length,
-        ));
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(10_000),
-            true,
-            term_length,
-        ));
     }
 
     #[test]

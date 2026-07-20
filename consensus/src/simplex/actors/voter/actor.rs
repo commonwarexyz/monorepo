@@ -730,8 +730,8 @@ impl<
         match msg {
             Message::Proposal { proposal, .. } => {
                 let view = proposal.view();
-                if !self.state.is_interesting_vote(view) {
-                    trace!(%view, "proposal is not interesting");
+                if !self.state.admits_vote(view) {
+                    trace!(%view, "proposal outside viewport");
                     return None;
                 }
                 trace!(%view, "received proposal");
@@ -747,8 +747,8 @@ impl<
             } => {
                 // Certificates can come from future views (they advance our view)
                 let view = certificate.view();
-                if !self.state.is_interesting_certificate(view) {
-                    trace!(%view, "certificate is not interesting");
+                if !self.state.admits_certificate(view) {
+                    trace!(%view, "certificate outside viewport");
                     return None;
                 }
 

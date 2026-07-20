@@ -61,15 +61,7 @@ impl<
         let elector = cfg.elector.build(cfg.scheme.participants());
         let terms = elector.terms();
         let term_length = terms.length();
-        if let elector::Terms::Stable {
-            length,
-            stall_timeout,
-        } = terms
-        {
-            assert!(
-                length.get() > 1,
-                "stable leaders require a term length greater than 1"
-            );
+        if let Some(stall_timeout) = terms.stall_timeout() {
             assert!(
                 stall_timeout > cfg.certification_timeout,
                 "stall timeout must be greater than certification timeout"
@@ -87,6 +79,7 @@ impl<
                 strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
+                activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 term_length,
                 forwarding: cfg.forwarding,

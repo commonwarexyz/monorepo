@@ -58,12 +58,11 @@ pub struct State<S: Scheme, D: Digest> {
     nullifications: BTreeMap<View, Certificate<S, D>>,
     /// Window of requests to send to the resolver.
     fetch_concurrent: usize,
-    /// Lowest anchor that fetch scans still need to consider. Anchors below
-    /// this cursor have already been requested or are covered by a stored
-    /// nullification; rescanning them would re-issue fetches for requests
-    /// already answered (e.g. by a notarization pending certification).
-    /// Re-fetches after certification failure bypass this cursor, and a
-    /// floor raise landing mid-term pulls it back to just above the floor.
+    /// Lowest anchor that fetch scans still need to consider (see
+    /// [Self::fetch_missing]). Anchors below this cursor have already been
+    /// requested or are covered by a stored nullification. A floor raise
+    /// landing mid-term pulls it back to just above the floor (see
+    /// [Self::prune]).
     fetch_floor: View,
     /// Number of views in each leader term.
     term_length: TermLength,
@@ -222,17 +221,13 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Return requests for any missing nullifications.
     ///
-    /// Scans the cursor view (never below the floor, and mid-term after a
-    /// floor-raise pull-back), then subsequent term anchors, advancing the
-    /// cursor past every view scanned so later calls do not re-request
-    /// them. Requests stay pending in the resolver until
-    /// answered or retained out (we must eventually receive a nullification
-    /// at the anchor or a notarization/finalization at a higher view). The
-    /// one case where a scanned term can lose its request — a floor raise
-    /// landing mid-term — pulls the cursor back (see [Self::prune]) so a
-    /// later scan re-requests the term tail. That rescan can also re-issue
-    /// anchors whose requests are still pending, which the resolver engine
-    /// deduplicates.
+    /// Scans from the cursor (never below the floor), requesting each term's
+    /// anchor and advancing the cursor past everything scanned. Requests
+    /// stay pending in the resolver until answered or retained out (we must
+    /// eventually receive a nullification at the anchor or a
+    /// notarization/finalization at a higher view). See the
+    /// [module docs](super) for the full strategy, including how mid-term
+    /// floor raises pull the cursor back.
     fn fetch_missing(&mut self, cause: View) -> Vec<Effect> {
         let mut effects = Vec::with_capacity(self.fetch_concurrent);
         let mut cursor = self.fetch_floor.max(self.floor_view().next());
@@ -259,13 +254,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .retain(|view, _| covers_above_floor(*view, term_length, floor));
         self.failed_views.retain(|view| *view > floor);
 
-        // A floor inside a partially-fetched term strands the rest of the
-        // term: the term's anchor request is retained out (its key is not
-        // above the floor), later-keyed requests accept nothing from this
-        // term, and the fetch cursor has already scanned past it. Pull the
-        // cursor back to just above the floor so a fetch scan re-requests
-        // the term tail once it falls below the current view (the cursor
-        // may exceed the current view here, so an eager fetch could not).
+        // A floor inside a partially-fetched term strands the term's tail
+        // (see the module docs). Pull the cursor back to just above the
+        // floor so a later scan re-requests the tail (the cursor may exceed
+        // the current view here, so an eager fetch could not).
         let next = floor.next();
         if !next.is_term_start(self.term_length) {
             self.fetch_floor = self.fetch_floor.min(next);

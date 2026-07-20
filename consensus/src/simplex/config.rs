@@ -132,9 +132,10 @@ where
 
     /// Reporter for the consensus engine.
     ///
-    /// All activity for views still in progress is exported; votes that arrive at or below
-    /// the highest finalized view are dropped without being reported (see the completeness
-    /// note on [`crate::simplex::types::Activity`]). Consider wrapping with
+    /// Activity is exported for every tracked view, including votes that arrive up to
+    /// `activity_timeout` views below the highest finalized view; votes below that window
+    /// are dropped without being reported. Reported votes are not guaranteed to be
+    /// verified (see [`crate::simplex::types::Activity`]). Consider wrapping with
     /// [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter
     /// and verify activities based on scheme attributability.
     pub reporter: F,
