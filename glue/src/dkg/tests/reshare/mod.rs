@@ -1,5 +1,5 @@
 use crate::simulate::{action::Crash, exit::ProcessedHeightAtLeast, plan::PlanBuilder};
-use commonware_consensus::types::{Epoch, Epocher, FixedEpocher};
+use commonware_consensus::types::{Epoch, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
@@ -100,15 +100,35 @@ fn state_sync_next_player_plan(
     signer_epoch: Epoch,
     boundary: BoundaryEpochInfos,
 ) -> PlanBuilder<ReshareEngine> {
-    let delayed = engine.participants[delayed_index].clone();
     let midpoint = FixedEpocher::new(EPOCH_LENGTH)
         .midpoint(next_player_epoch)
         .expect("test epoch should be supported");
+    state_sync_next_player_plan_starting_at(
+        engine,
+        final_epoch,
+        delayed_index,
+        midpoint,
+        next_player_epoch,
+        signer_epoch,
+        boundary,
+    )
+}
+
+fn state_sync_next_player_plan_starting_at(
+    engine: ReshareEngine,
+    final_epoch: u64,
+    delayed_index: usize,
+    start_height: Height,
+    next_player_epoch: Epoch,
+    signer_epoch: Epoch,
+    boundary: BoundaryEpochInfos,
+) -> PlanBuilder<ReshareEngine> {
+    let delayed = engine.participants[delayed_index].clone();
     let configured_floor = engine.state_sync_floor();
     let sync_floor = configured_floor.unwrap_or_else(|| {
-        midpoint
+        start_height
             .previous()
-            .expect("midpoint must have a sync floor")
+            .expect("start height must have a sync floor")
     });
     let max_sync_floor = configured_floor.unwrap_or_else(|| final_height(next_player_epoch.get()));
     let registrations = engine.registrations.clone();
@@ -117,7 +137,7 @@ fn state_sync_next_player_plan(
     reshare_plan_with_boundary(engine, final_epoch, boundary)
         .crash(Crash::DelayRound {
             participants: vec![delayed.clone()],
-            round: height_round(midpoint),
+            round: height_round(start_height),
         })
         .property(StateSyncMembership::new(
             schedule,
@@ -390,10 +410,11 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
     let engine = ReshareEngine::with_committee(6, 4).with_state_sync_floor(state_sync_floor);
     let delayed = engine.participants[5].clone();
     let state_sync_starts = engine.state_sync_starts.clone();
-    let result = state_sync_next_player_plan(
+    let result = state_sync_next_player_plan_starting_at(
         engine,
         3,
         5,
+        state_sync_floor,
         next_player_epoch,
         next_player_epoch.next(),
         BoundaryEpochInfos::new(4),
