@@ -161,13 +161,24 @@ pub fn any_fix_cfg_with(
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
 ) -> AnyFixedConfig<EightCap, Rayon> {
+    any_fix_cfg_full(ctx, items_per_blob, page_cache_size, ())
+}
+
+/// Shared fixed-value config construction, generic over the index's snapshot-build concurrency.
+pub fn any_fix_cfg_full<B>(
+    ctx: &(impl BufferPooler + Strategizer),
+    items_per_blob: NonZeroU64,
+    page_cache_size: NonZeroUsize,
+    init_concurrency: B,
+) -> AnyFixedConfig<EightCap, Rayon, B> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, page_cache_size);
     AnyFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
-        init_concurrency: NZUsize!(1),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency,
     }
 }
 
@@ -181,6 +192,7 @@ pub fn imm_fix_cfg_with(
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
     }
 }
 
@@ -199,7 +211,8 @@ pub fn cur_fix_cfg_with(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
-        init_concurrency: NZUsize!(1),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -219,7 +232,8 @@ pub fn any_var_digest_cfg_with(
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
-        init_concurrency: NZUsize!(1),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -240,7 +254,8 @@ pub fn cur_var_digest_cfg_with(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
-        init_concurrency: NZUsize!(1),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -268,7 +283,8 @@ pub fn any_var_vec_cfg_with(
         ),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
-        init_concurrency: NZUsize!(1),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -294,7 +310,8 @@ pub fn cur_var_vec_cfg_with(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
-        init_concurrency: NZUsize!(1),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 

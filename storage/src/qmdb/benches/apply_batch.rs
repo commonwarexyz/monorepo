@@ -1,8 +1,8 @@
 //! Benchmarks for applying already-merkleized QMDB batches.
 
 use crate::common::{
-    AnyOFixP256Db, AnyUFixDb, CHUNK_SIZE, Digest, ImmFixDb, PAGE_CACHE_SIZE, any_fix_cfg_with,
-    imm_fix_cfg_with, make_fixed_value, seed_db,
+    AnyOFixP256Db, AnyUFixDb, CHUNK_SIZE, Digest, ImmFixDb, PAGE_CACHE_SIZE, any_fix_cfg_full,
+    any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
@@ -15,7 +15,7 @@ use commonware_storage::{
     merkle::mmb::Family as Mmb,
     qmdb::any::traits::{BatchableDb, UnmerkleizedBatch},
 };
-use commonware_utils::{NZU64, TestRng};
+use commonware_utils::{NZU64, NZUsize, TestRng};
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
 use std::{
@@ -78,7 +78,7 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
 async fn open_ord_db(ctx: &Context) -> ODb {
     ODb::init(
         ctx.child("storage"),
-        any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
+        any_fix_cfg_full(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1)),
     )
     .await
     .unwrap()

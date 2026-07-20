@@ -46,7 +46,7 @@
 mod common;
 
 use common::{
-    AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_with, gen_random_kv, make_fixed_value,
+    AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_full, gen_random_kv, make_fixed_value,
 };
 use commonware_runtime::{
     Runner as _, Supervisor as _,
@@ -222,8 +222,9 @@ fn generate(
 
     let cfg = Config::default().with_storage_directory(folder);
     let elapsed = Runner::new(cfg).start(|ctx| async move {
-        // Generate with the same index flavor the bench reopens with.
-        let config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE);
+        // Generate with the same index flavor the bench reopens with (concurrency 1: generation
+        // opens an empty db, so there is nothing to build in parallel).
+        let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1));
         match index {
             IndexKind::Ordered => {
                 let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
@@ -295,9 +296,8 @@ fn time_init(
     }
 
     Runner::new(cfg.clone()).start(|ctx| async move {
-        let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE);
+        let mut config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, concurrency);
         config.init_cache_size = cache_size;
-        config.init_concurrency = concurrency;
         let start = Instant::now();
         match index {
             IndexKind::Ordered => {

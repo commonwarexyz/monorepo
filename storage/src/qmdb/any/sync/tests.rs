@@ -9,7 +9,7 @@ use crate::{
     merkle::{self, Location, mmr},
     qmdb::{
         self,
-        any::{test::fixed_db_config, traits::DbAny},
+        any::{test::fixed_db_config_partitioned, traits::DbAny},
         operation::Operation as OperationTrait,
         sync::{
             self, Engine, Target,
@@ -2286,6 +2286,7 @@ mod harnesses {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
                 pooler,
+                (),
             )
         }
 
@@ -2567,6 +2568,7 @@ mod harnesses {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
                 pooler,
+                (),
             )
         }
 
@@ -2587,7 +2589,8 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx);
+            let config =
+                crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx, ());
             Self::Db::init(ctx, config).await.unwrap()
         }
 
@@ -3022,7 +3025,7 @@ fn test_sync_build_honors_init_concurrency() {
 
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let cfg = fixed_db_config::<TwoCap>("sync_honors_init_concurrency", &context);
+        let cfg = fixed_db_config_partitioned::<TwoCap>("sync_honors_init_concurrency", &context);
 
         // Build a committed source db (the test config's `init_concurrency` is `0`).
         let db = PartDb::init(context.child("source"), cfg.clone())
@@ -3059,8 +3062,9 @@ fn test_sync_build_honors_init_concurrency() {
             Some(pinned.clone()),
             non_empty_range!(lower, upper),
             1024,
-            cfg.init_cache_size,
             NZUsize!(1),
+            cfg.init_buffer,
+            cfg.init_cache_size,
         )
         .await
         .unwrap();
@@ -3080,8 +3084,9 @@ fn test_sync_build_honors_init_concurrency() {
             Some(pinned),
             non_empty_range!(lower, upper),
             1024,
-            cfg.init_cache_size,
             NZUsize!(3),
+            cfg.init_buffer,
+            cfg.init_cache_size,
         )
         .await
         .unwrap();

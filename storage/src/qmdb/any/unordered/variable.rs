@@ -120,7 +120,7 @@ pub mod partitioned {
         /// discarded and the state of the db will be as of the last committed operation.
         pub async fn init(
             context: E,
-            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
+            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
         }
@@ -183,7 +183,8 @@ pub(crate) mod test {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
-            init_concurrency: NZUsize!(1),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 

@@ -125,7 +125,7 @@ pub mod partitioned {
         /// discarded and the state of the db will be as of the last committed operation.
         pub async fn init(
             context: E,
-            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
+            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
         }
@@ -173,14 +173,18 @@ pub(crate) mod test {
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) type VarConfig =
-        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
+    pub(crate) type VarConfig<B = ()> =
+        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential, B>;
 
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 
-    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
+    pub(crate) fn create_test_config<B>(
+        seed: u64,
+        pooler: &impl BufferPooler,
+        init_concurrency: B,
+    ) -> VarConfig<B> {
         let page_cache =
             CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
@@ -202,14 +206,15 @@ pub(crate) mod test {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
-            init_concurrency: NZUsize!(1),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency,
         }
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context);
+        let config = create_test_config(seed, &context, ());
         AnyTest::init(context, config).await.unwrap()
     }
 
@@ -242,7 +247,7 @@ pub(crate) mod test {
             }
 
             // Commit 1: insert every key.
-            let cfg = create_test_config(77, &context);
+            let cfg = create_test_config(77, &context, NZUsize!(1));
             let db = PartDb::<Sequential>::init(context.child("populate"), cfg)
                 .await
                 .unwrap();
@@ -274,8 +279,11 @@ pub(crate) mod test {
             drop(db);
 
             for concurrency in [1usize, 4] {
-                let mut cfg = create_test_config(77, &context);
-                cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
+                let cfg = create_test_config(
+                    77,
+                    &context,
+                    core::num::NonZeroUsize::new(concurrency).unwrap(),
+                );
                 let ctx = context
                     .child("reopen")
                     .with_attribute("concurrency", concurrency);

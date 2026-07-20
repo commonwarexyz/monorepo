@@ -68,7 +68,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::Spawner;
-use commonware_utils::{NZUsize, bitmap::BitMap, cache::Clock, channel::mpsc};
+use commonware_utils::{bitmap::BitMap, cache::Clock, channel::mpsc};
 use core::num::NonZeroUsize;
 use futures::{StreamExt as _, future::join_all, pin_mut};
 use std::sync::Arc;
@@ -256,24 +256,20 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
     }
 }
 
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot. Each buffer fill pays a thread hand-off to the storage layer, so the buffer is sized
-/// to amortize that hand-off across tens of thousands of operations (at the cost of this much
-/// memory per replay).
-const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 21);
-
 /// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
-/// `cache_size` bounds a `(location -> key)` cache that lets collision resolution resolve
-/// candidates from memory instead of re-reading the log; `None` disables it.
+/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
+/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
+/// instead of re-reading the log; `None` disables it.
 pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
@@ -284,9 +280,7 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    let stream = reader
-        .replay(*inactivity_floor_loc, SNAPSHOT_READ_BUFFER_SIZE)
-        .await?;
+    let stream = reader.replay(*inactivity_floor_loc, init_buffer).await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
 
@@ -512,6 +506,7 @@ async fn build_snapshot_serial<F, C, I>(
     inactivity_floor_loc: Location<F>,
     reader: &C,
     snapshot: &mut I,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
@@ -527,6 +522,7 @@ where
         inactivity_floor_loc,
         reader,
         snapshot,
+        init_buffer,
         cache_size,
         |is_active, old_loc| {
             activity.push(is_active);
@@ -548,6 +544,7 @@ async fn build_snapshot_parallel<F, E, C, I>(
     inactivity_floor_loc: Location<F>,
     log: &Arc<C>,
     init_concurrency: NonZeroUsize,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
@@ -561,7 +558,14 @@ where
 
     // No workers: build on this task.
     if workers == 0 {
-        return build_snapshot_serial(inactivity_floor_loc, &**log, snapshot, cache_size).await;
+        return build_snapshot_serial(
+            inactivity_floor_loc,
+            &**log,
+            snapshot,
+            init_buffer,
+            cache_size,
+        )
+        .await;
     }
 
     let floor = *inactivity_floor_loc;
@@ -603,7 +607,7 @@ where
     // after init has already failed. The stream is also released before the join.
     let end = log.bounds().end;
     let routing_result: Result<(), Error<F>> = async {
-        let stream = log.replay(floor, SNAPSHOT_READ_BUFFER_SIZE).await?;
+        let stream = log.replay(floor, init_buffer).await?;
         pin_mut!(stream);
         let mut batches: Vec<RoutedBatch<_>> = (0..workers)
             .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
@@ -685,14 +689,17 @@ where
 pub trait SnapshotBuild<F: Family>:
     sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
 {
+    /// The build's concurrency knob: `()` for index types that build serially, and a task count
+    /// for index types that build in parallel (including the calling task, so `1` builds
+    /// entirely on the calling task).
+    type Concurrency: Copy + Send + 'static;
+
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
     ///
-    /// `init_concurrency` bounds how many tasks an index type that builds in parallel uses,
-    /// including the calling task (`1` builds entirely on the calling task). Index types that
-    /// build serially ignore it. `cache_size` bounds each build's `(location -> key)` cache
-    /// (`None` disables it).
+    /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
+    /// build's `(location -> key)` cache (`None` disables it).
     // In-crate callers await this future at concrete index types, so the flexibility an explicit
     // `Send` bound on the returned future would add is unused.
     #[allow(async_fn_in_trait)]
@@ -701,22 +708,15 @@ pub trait SnapshotBuild<F: Family>:
         _context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
+        _init_concurrency: Self::Concurrency,
+        init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        // This index type builds serially, so `init_concurrency` has no effect. Warn on an
-        // explicit concurrency rather than silently ignore it.
-        if init_concurrency.get() > 1 {
-            tracing::warn!(
-                init_concurrency,
-                "init_concurrency configured but this index builds serially; ignoring"
-            );
-        }
-        build_snapshot_serial(inactivity_floor_loc, &**log, self, cache_size).await
+        build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
     }
 }
 
@@ -736,17 +736,25 @@ mod sealed {
     }
 }
 
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {}
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
+    type Concurrency = ();
+}
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
+    type Concurrency = ();
+}
+
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
+    type Concurrency = NonZeroUsize;
+
     async fn build_snapshot<E, C>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
         init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
@@ -759,6 +767,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             inactivity_floor_loc,
             log,
             init_concurrency,
+            init_buffer,
             cache_size,
         )
         .await
@@ -768,12 +777,15 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
+    type Concurrency = NonZeroUsize;
+
     async fn build_snapshot<E, C>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
         init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
@@ -786,6 +798,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             inactivity_floor_loc,
             log,
             init_concurrency,
+            init_buffer,
             cache_size,
         )
         .await

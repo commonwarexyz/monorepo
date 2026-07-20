@@ -97,7 +97,10 @@ pub mod partitioned {
     {
         /// Initializes a [Db] authenticated database from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization.
-        pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
+        pub async fn init(
+            context: E,
+            config: Config<T, S, core::num::NonZeroUsize>,
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
     }
@@ -108,7 +111,10 @@ pub mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::current::{tests::fixed_config, unordered::tests as shared},
+        qmdb::current::{
+            tests::{fixed_config, fixed_config_partitioned},
+            unordered::tests as shared,
+        },
         translator::{OneCap, TwoCap},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -451,7 +457,7 @@ pub mod test {
             }
         }
 
-        let cfg = fixed_config::<OneCap>(partition, &context);
+        let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
         let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
             .await
             .unwrap();
@@ -492,7 +498,7 @@ pub mod test {
         // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
         // match the original root and serve the expected value for every key.
         for &concurrency in concurrency_sweep {
-            let mut cfg = fixed_config::<OneCap>(partition, &context);
+            let mut cfg = fixed_config_partitioned::<OneCap>(partition, &context);
             cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
             let ctx = context
                 .child("reopen")

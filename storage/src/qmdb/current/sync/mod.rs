@@ -104,8 +104,9 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
-    init_concurrency: NonZeroUsize,
     metadata_partition: String,
     strategy: S,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
@@ -159,8 +160,9 @@ where
         index,
         log,
         Some(bitmap),
-        cache_size,
         init_concurrency,
+        init_buffer,
+        cache_size,
         any_metrics,
     )
     .await?;
@@ -284,6 +286,7 @@ macro_rules! impl_current_sync_database {
                 let strategy = config.merkle_config.strategy.clone();
                 let translator = config.translator.clone();
                 let cache_size = config.init_cache_size;
+                let init_buffer = config.init_buffer;
                 let init_concurrency = config.init_concurrency;
                 build_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
                     context,
@@ -293,8 +296,9 @@ macro_rules! impl_current_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
-                    cache_size,
                     init_concurrency,
+                    init_buffer,
+                    cache_size,
                     metadata_partition,
                     strategy,
                 )

@@ -93,7 +93,10 @@ pub mod partitioned {
     > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
-        pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
+        pub async fn init(
+            context: E,
+            config: Config<T, S, core::num::NonZeroUsize>,
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
     }
@@ -106,7 +109,10 @@ pub mod test {
         mmr,
         qmdb::{
             Error,
-            current::{ordered::tests as shared, tests::fixed_config},
+            current::{
+                ordered::tests as shared,
+                tests::{fixed_config, fixed_config_partitioned},
+            },
         },
         translator::OneCap,
     };
@@ -240,7 +246,7 @@ pub mod test {
             }
         }
 
-        let cfg = fixed_config::<OneCap>(partition, &context);
+        let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
         let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
             .await
             .unwrap();
@@ -281,7 +287,7 @@ pub mod test {
         // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
         // match the original root and serve the expected value for every key.
         for &concurrency in concurrency_sweep {
-            let mut cfg = fixed_config::<OneCap>(partition, &context);
+            let mut cfg = fixed_config_partitioned::<OneCap>(partition, &context);
             cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
             let ctx = context
                 .child("reopen")

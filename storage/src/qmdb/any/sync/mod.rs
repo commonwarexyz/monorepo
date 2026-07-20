@@ -63,8 +63,9 @@ async fn build_db<F, E, U, I, H, C, T, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
-    init_concurrency: NonZeroUsize,
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
@@ -105,8 +106,9 @@ where
         index,
         log,
         None,
-        cache_size,
         init_concurrency,
+        init_buffer,
+        cache_size,
         metrics,
     )
     .await?;
@@ -149,6 +151,7 @@ macro_rules! impl_sync_database {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
                 let cache_size = config.init_cache_size;
+                let init_buffer = config.init_buffer;
                 let init_concurrency = config.init_concurrency;
                 build_db::<F, _, $update<K, V>, _, H, _, T, S>(
                     context,
@@ -158,8 +161,9 @@ macro_rules! impl_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
-                    cache_size,
                     init_concurrency,
+                    init_buffer,
+                    cache_size,
                 )
                 .await
             }

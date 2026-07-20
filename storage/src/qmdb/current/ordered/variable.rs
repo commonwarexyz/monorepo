@@ -102,7 +102,7 @@ pub mod partitioned {
         /// Initializes a [Db] from the given `config`.
         pub async fn init(
             context: E,
-            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }

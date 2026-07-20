@@ -105,7 +105,10 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
-        pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
+        pub async fn init(
+            context: E,
+            cfg: Config<T, S, core::num::NonZeroUsize>,
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
         }
     }
@@ -137,7 +140,10 @@ pub(crate) mod test {
         qmdb::{
             SnapshotBuild as _,
             any::{
-                test::{colliding_digest, fixed_db_config, fixed_db_config_with_strategy},
+                test::{
+                    colliding_digest, fixed_db_config, fixed_db_config_partitioned,
+                    fixed_db_config_with_strategy,
+                },
                 unordered::{Update, fixed::Operation},
             },
             verify_proof,
@@ -492,7 +498,7 @@ pub(crate) mod test {
             }
         }
 
-        let cfg = fixed_db_config::<OneCap>(partition, &context);
+        let cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
         let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
             .await
             .unwrap();
@@ -544,7 +550,7 @@ pub(crate) mod test {
         // translated-key collision chains contribute each of their members), and serve the
         // expected value for every key.
         for &concurrency in concurrency_sweep {
-            let mut cfg = fixed_db_config::<OneCap>(partition, &context);
+            let mut cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
             cfg.init_concurrency = NonZeroUsize::new(concurrency).unwrap();
             let ctx = context
                 .child("reopen")
@@ -590,14 +596,15 @@ pub(crate) mod test {
             type FreshDb<S> =
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
-            let cfg = fixed_db_config::<OneCap>("unordered_parallel_fresh", &context);
+            let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_fresh", &context);
             let db = FreshDb::<Sequential>::init(context.child("create"), cfg)
                 .await
                 .unwrap();
             let root = db.root();
             drop(db);
 
-            let mut cfg = fixed_db_config::<OneCap>("unordered_parallel_fresh", &context);
+            let mut cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_fresh", &context);
             cfg.init_concurrency = NZUsize!(4);
             let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
                 .await
@@ -616,7 +623,8 @@ pub(crate) mod test {
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
             // Populate a db so the log has committed operations to replay.
-            let cfg = fixed_db_config::<OneCap>("unordered_parallel_replay_fail", &context);
+            let cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail", &context);
             let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
                 .await
                 .unwrap();
@@ -634,7 +642,8 @@ pub(crate) mod test {
 
             // Reopen the op log directly (init's reads run before faults are enabled) and build
             // against a fresh index, mirroring init's parallel snapshot build.
-            let cfg = fixed_db_config::<OneCap>("unordered_parallel_replay_fail", &context);
+            let cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail", &context);
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
                 cfg.journal_config,
@@ -655,7 +664,14 @@ pub(crate) mod test {
             // workers never read the log themselves.
             context.storage_fault_config().write().read_rate = Some(1.0);
             let result = index
-                .build_snapshot(context.child("build"), floor, &log, NZUsize!(4), None)
+                .build_snapshot(
+                    context.child("build"),
+                    floor,
+                    &log,
+                    NZUsize!(4),
+                    NZUsize!(1 << 21),
+                    None,
+                )
                 .await;
             assert!(result.is_err(), "replay must fail under read faults");
 
@@ -729,7 +745,8 @@ pub(crate) mod test {
             // Populate with two keys that share a partition and translated sub-key, so the
             // second key's replay resolves a collision by reading the first key's operation
             // from the log.
-            let cfg = fixed_db_config::<OneCap>("unordered_parallel_worker_fail", &context);
+            let cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail", &context);
             let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
                 .await
                 .unwrap();
@@ -747,7 +764,8 @@ pub(crate) mod test {
 
             // Reopen the op log behind a wrapper that fails every random-access read, and build
             // with the cache disabled so collision resolution must read the log.
-            let cfg = fixed_db_config::<OneCap>("unordered_parallel_worker_fail", &context);
+            let cfg =
+                fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail", &context);
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
                 cfg.journal_config,
@@ -761,7 +779,14 @@ pub(crate) mod test {
                 OneCap,
             );
             let result = index
-                .build_snapshot(context.child("build"), floor, &log, NZUsize!(4), None)
+                .build_snapshot(
+                    context.child("build"),
+                    floor,
+                    &log,
+                    NZUsize!(4),
+                    NZUsize!(1 << 21),
+                    None,
+                )
                 .await;
             assert!(
                 matches!(result, Err(Error::Journal(JournalError::ItemPruned(_)))),
@@ -780,7 +805,8 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|context| async move {
             let mut results = Vec::new();
             for concurrency in [1usize, 4] {
-                let cfg = fixed_db_config::<OneCap>("unordered_parallel_empty", &context);
+                let cfg =
+                    fixed_db_config_partitioned::<OneCap>("unordered_parallel_empty", &context);
                 let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                     context
                         .child("log")
@@ -805,6 +831,7 @@ pub(crate) mod test {
                         Location::new(0),
                         &log,
                         NonZeroUsize::new(concurrency).unwrap(),
+                        NZUsize!(1 << 21),
                         None,
                     )
                     .await

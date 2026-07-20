@@ -898,6 +898,7 @@ pub(crate) mod harnesses {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
         }
     }
 
@@ -1255,6 +1256,7 @@ mod compact_variable_mmr {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
         }
     }
 
@@ -2011,6 +2013,7 @@ mod compact_variable_mmb {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
         }
     }
 

@@ -119,7 +119,7 @@ pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy> {
+pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle_config: MerkleConfig<S>,
 
@@ -133,22 +133,26 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
-    /// Number of tasks that build the init-time snapshot, including the init task itself
-    /// (which replays and routes the log); `1` builds entirely on the init task. Only the
-    /// partitioned index types build in parallel.
-    pub init_concurrency: NonZeroUsize,
+    /// Size (in bytes) of the read buffer used to replay the log during init.
+    pub init_buffer: NonZeroUsize,
+
+    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]):
+    /// `()` for index types that build serially, and the number of build tasks (including the
+    /// init task itself, which replays and routes the log, so `1` builds entirely on the init
+    /// task) for index types that build in parallel.
+    pub init_concurrency: B,
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
-pub type FixedConfig<T, S> = Config<T, FConfig, S>;
+pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
+pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Initialize an `Any` authenticated db from the given config.
 pub async fn init<F, E, U, H, T, I, J, S>(
     context: E,
-    cfg: Config<T, J::Config, S>,
+    cfg: Config<T, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -169,7 +173,7 @@ where
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<T, J::Config, S>,
+    cfg: Config<T, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
@@ -207,8 +211,9 @@ where
         index,
         log,
         bitmap,
-        cfg.init_cache_size,
         cfg.init_concurrency,
+        cfg.init_buffer,
+        cfg.init_cache_size,
         metrics,
     )
     .await
@@ -261,6 +266,21 @@ pub(crate) mod test {
         pooler: &impl BufferPooler,
         strategy: S,
     ) -> FixedConfig<T, S> {
+        fixed_db_config_full(suffix, pooler, strategy, ())
+    }
+
+    /// Shared config construction for every fixed-value flavor, generic over the strategy and
+    /// the index's snapshot-build concurrency.
+    pub(crate) fn fixed_db_config_full<
+        T: Translator + Default,
+        S: commonware_parallel::Strategy,
+        B,
+    >(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+        strategy: S,
+        init_concurrency: B,
+    ) -> FixedConfig<T, S, B> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -279,14 +299,41 @@ pub(crate) mod test {
             },
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
-            init_concurrency: NZUsize!(1),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency,
         }
+    }
+
+    /// Like [fixed_db_config], typed for a partitioned index at the serial concurrency.
+    pub(crate) fn fixed_db_config_partitioned<T: Translator + Default>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> FixedConfig<T, Sequential, NonZeroUsize> {
+        fixed_db_config_full(suffix, pooler, Sequential, NZUsize!(1))
+    }
+
+    /// Like [variable_db_config], typed for a partitioned index at the serial concurrency.
+    pub(crate) fn variable_db_config_partitioned<T: Translator + Default>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> VariableConfig<T, ((), ()), Sequential, NonZeroUsize> {
+        variable_db_config_full(suffix, pooler, NZUsize!(1))
     }
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ()), Sequential> {
+        variable_db_config_full(suffix, pooler, ())
+    }
+
+    /// Shared config construction for every variable-value flavor, generic over the index's
+    /// snapshot-build concurrency.
+    pub(crate) fn variable_db_config_full<T: Translator + Default, B>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+        init_concurrency: B,
+    ) -> VariableConfig<T, ((), ()), Sequential, B> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
@@ -307,7 +354,8 @@ pub(crate) mod test {
             },
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
-            init_concurrency: NZUsize!(1),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency,
         }
     }
 
@@ -1408,14 +1456,14 @@ pub(crate) mod test {
             $cb!($($args)*, uv, UnorderedVariable, mmr::Family, variable_db_config);
             $cb!($($args)*, of, OrderedFixed, mmr::Family, fixed_db_config);
             $cb!($($args)*, ov, OrderedVariable, mmr::Family, variable_db_config);
-            $cb!($($args)*, ufp1, UnorderedFixedP1, mmr::Family, fixed_db_config);
-            $cb!($($args)*, uvp1, UnorderedVariableP1, mmr::Family, variable_db_config);
-            $cb!($($args)*, ofp1, OrderedFixedP1, mmr::Family, fixed_db_config);
-            $cb!($($args)*, ovp1, OrderedVariableP1, mmr::Family, variable_db_config);
-            $cb!($($args)*, ufp2, UnorderedFixedP2, mmr::Family, fixed_db_config);
-            $cb!($($args)*, uvp2, UnorderedVariableP2, mmr::Family, variable_db_config);
-            $cb!($($args)*, ofp2, OrderedFixedP2, mmr::Family, fixed_db_config);
-            $cb!($($args)*, ovp2, OrderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, ufp1, UnorderedFixedP1, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, uvp1, UnorderedVariableP1, mmr::Family, variable_db_config_partitioned);
+            $cb!($($args)*, ofp1, OrderedFixedP1, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, ovp1, OrderedVariableP1, mmr::Family, variable_db_config_partitioned);
+            $cb!($($args)*, ufp2, UnorderedFixedP2, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, uvp2, UnorderedVariableP2, mmr::Family, variable_db_config_partitioned);
+            $cb!($($args)*, ofp2, OrderedFixedP2, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, ovp2, OrderedVariableP2, mmr::Family, variable_db_config_partitioned);
         };
     }
 
@@ -1426,14 +1474,14 @@ pub(crate) mod test {
             $cb!($($args)*, uv, UnorderedVariable, mmr::Family, variable_db_config);
             $cb!($($args)*, of, OrderedFixed, mmr::Family, fixed_db_config);
             $cb!($($args)*, ov, OrderedVariable, mmr::Family, variable_db_config);
-            $cb!($($args)*, ufp1, UnorderedFixedP1, mmr::Family, fixed_db_config);
-            $cb!($($args)*, uvp1, UnorderedVariableP1, mmr::Family, variable_db_config);
-            $cb!($($args)*, ofp1, OrderedFixedP1, mmr::Family, fixed_db_config);
-            $cb!($($args)*, ovp1, OrderedVariableP1, mmr::Family, variable_db_config);
-            $cb!($($args)*, ufp2, UnorderedFixedP2, mmr::Family, fixed_db_config);
-            $cb!($($args)*, uvp2, UnorderedVariableP2, mmr::Family, variable_db_config);
-            $cb!($($args)*, ofp2, OrderedFixedP2, mmr::Family, fixed_db_config);
-            $cb!($($args)*, ovp2, OrderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, ufp1, UnorderedFixedP1, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, uvp1, UnorderedVariableP1, mmr::Family, variable_db_config_partitioned);
+            $cb!($($args)*, ofp1, OrderedFixedP1, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, ovp1, OrderedVariableP1, mmr::Family, variable_db_config_partitioned);
+            $cb!($($args)*, ufp2, UnorderedFixedP2, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, uvp2, UnorderedVariableP2, mmr::Family, variable_db_config_partitioned);
+            $cb!($($args)*, ofp2, OrderedFixedP2, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, ovp2, OrderedVariableP2, mmr::Family, variable_db_config_partitioned);
             $cb!($($args)*, uf_mmb, MmbUnorderedFixed, mmb::Family, fixed_db_config);
             $cb!($($args)*, uv_mmb, MmbUnorderedVariable, mmb::Family, variable_db_config);
             $cb!($($args)*, of_mmb, MmbOrderedFixed, mmb::Family, fixed_db_config);
