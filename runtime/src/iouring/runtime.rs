@@ -36,17 +36,13 @@ use crate::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
         task::Label, validate_label,
     },
-    utils::{self, Join, Panicker, signal::Stopper, supervision::Tree},
+    utils::{self, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
 use commonware_utils::{channel::oneshot, sync::Mutex, sys_rng};
-use futures::{
-    FutureExt as _,
-    future::{AbortHandle, Abortable, Aborted},
-    task::{ArcWake, waker},
-};
+use futures::task::{ArcWake, waker};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 use rayon::ThreadPoolBuilder;
@@ -445,10 +441,7 @@ impl crate::Runner for Runner {
             time: Instant::now() + duration.min(MAX_SLEEP),
             registered: false,
         });
-        let _ = Tasks::register(&executor.tasks, async move {
-            collector.await;
-            Ok(())
-        });
+        let _ = Tasks::register(&executor.tasks, collector);
 
         // Get metrics
         let label = Label::root();
@@ -585,38 +578,29 @@ impl crate::Runner for Runner {
 
 /// Type-erased boundary for a task in the arena.
 ///
-/// The concrete future and its join state live inline in the task's single
-/// `Arc` allocation, so the only dynamic dispatch on the poll path is this
-/// trait: inside the monomorphized [TaskCell] methods the compiler sees the
-/// concrete future type end to end.
+/// The concrete future lives inline in the task's single `Arc` allocation,
+/// so the only dynamic dispatch on the poll path is this trait: inside the
+/// monomorphized [TaskCell] methods the compiler sees the concrete future
+/// type end to end.
 trait Erased: Send + Sync {
     /// Poll the stored future, returning true when this call completed it
     /// (the caller then frees the task's arena slot).
     fn poll(self: Arc<Self>) -> bool;
 
-    /// Resolve the task without polling: drop the future in place and park a
-    /// [Error::Closed] result for any join handle.
+    /// Resolve the task without polling: drop the future in place (which
+    /// resolves any join handle with [Error::Closed]).
     fn clear(&self);
 
     /// The arena slot owning this task.
     fn slot(&self) -> usize;
 }
 
-/// Result rendezvous between a task and its [Handle].
-enum JoinState<T> {
-    /// The task is still running; the handle's waker parks here.
-    Pending(Option<task::Waker>),
-    /// The terminal result is parked for the handle.
-    Ready(Result<T, Error>),
-    /// The handle already took the result.
-    Taken,
-}
-
-/// A spawned task: one allocation holding the concrete future, the join
-/// state its handle polls, and the identity behind its raw-vtable waker.
-struct TaskCell<F, T>
+/// A spawned task: one allocation holding the concrete future and the
+/// identity behind its raw-vtable waker. Results reach the task's handle
+/// through the wrapper built by [Handle::init], not through the cell.
+struct TaskCell<F>
 where
-    F: Future<Output = Result<T, Error>>,
+    F: Future<Output = ()>,
 {
     /// Arena slot to free at completion.
     slot: usize,
@@ -627,16 +611,11 @@ where
     ///
     /// `None` once the future completed or teardown cleared it.
     future: Affine<RefCell<Option<F>>>,
-    /// Parked result and handle waker. Handles are polled on the executor
-    /// thread (tasks run inline); off-thread polls panic like every other
-    /// runtime operation.
-    join: Affine<RefCell<JoinState<T>>>,
 }
 
-impl<F, T> TaskCell<F, T>
+impl<F> TaskCell<F>
 where
-    F: Future<Output = Result<T, Error>> + Send + 'static,
-    T: Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
 {
     /// Waker vtable sharing the task's own allocation: cloning bumps the
     /// task's strong count and waking enqueues the task pointer directly, so
@@ -692,106 +671,45 @@ where
             tasks.queue(Arc::clone(self) as Arc<dyn Erased>);
         }
     }
-
-    /// Park `result` for the handle and wake it.
-    ///
-    /// Tolerates an already-resolved join so completion and teardown can both
-    /// call it.
-    fn finish(&self, result: Result<T, Error>) {
-        let waker = self.join.with(|join| {
-            let mut join = join.borrow_mut();
-            let JoinState::Pending(waker) = &mut *join else {
-                return None;
-            };
-            let waker = waker.take();
-            *join = JoinState::Ready(result);
-            waker
-        });
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
 }
 
-impl<F, T> Erased for TaskCell<F, T>
+impl<F> Erased for TaskCell<F>
 where
-    F: Future<Output = Result<T, Error>> + Send + 'static,
-    T: Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
 {
     fn poll(self: Arc<Self>) -> bool {
         let waker = self.waker();
         let mut cx = task::Context::from_waker(&waker);
-        let polled = self.future.with(|cell| {
+        self.future.with(|cell| {
             let mut slot = cell.borrow_mut();
             // A duplicate wake may re-poll a completed task: its slot was
             // already freed, so report no completion.
-            let future = slot.as_mut()?;
+            let Some(future) = slot.as_mut() else {
+                return false;
+            };
             // SAFETY: the future lives inside this task's Arc allocation and
             // is never moved out of it: completion (below) and teardown
             // ([Erased::clear]) both drop it in place by overwriting the
             // option with None.
             let future = unsafe { Pin::new_unchecked(future) };
             match future.poll(&mut cx) {
-                Poll::Ready(result) => {
+                Poll::Ready(()) => {
                     *slot = None;
-                    Some(Some(result))
+                    true
                 }
-                Poll::Pending => Some(None),
+                Poll::Pending => false,
             }
-        });
-        match polled {
-            // Completed on this poll: park the result and free the slot.
-            Some(Some(result)) => {
-                self.finish(result);
-                true
-            }
-            // Still pending.
-            Some(None) => false,
-            // Already completed by an earlier poll.
-            None => false,
-        }
+        })
     }
 
     fn clear(&self) {
         self.future.with(|cell| {
             *cell.borrow_mut() = None;
         });
-        self.finish(Err(Error::Closed));
     }
 
     fn slot(&self) -> usize {
         self.slot
-    }
-}
-
-impl<F, T> Join<T> for TaskCell<F, T>
-where
-    F: Future<Output = Result<T, Error>> + Send + 'static,
-    T: Send + 'static,
-{
-    fn poll_join(&self, cx: &mut task::Context<'_>) -> Poll<Result<T, Error>> {
-        self.join.with(|join| {
-            let mut join = join.borrow_mut();
-            match &mut *join {
-                JoinState::Pending(waker) => {
-                    match waker {
-                        Some(waker) => waker.clone_from(cx.waker()),
-                        None => *waker = Some(cx.waker().clone()),
-                    }
-                    Poll::Pending
-                }
-                JoinState::Ready(_) => {
-                    let JoinState::Ready(result) = std::mem::replace(&mut *join, JoinState::Taken)
-                    else {
-                        unreachable!("join state verified ready above");
-                    };
-                    Poll::Ready(result)
-                }
-                // Match the receiver-backed handle: polling after the result
-                // was taken resolves closed.
-                JoinState::Taken => Poll::Ready(Err(Error::Closed)),
-            }
-        })
     }
 }
 
@@ -861,19 +779,18 @@ impl Tasks {
         }))
     }
 
-    /// Register a task for `future`, returning its cell (which doubles as
-    /// the join point for the spawner's handle).
+    /// Register a task for `future` and queue its first poll.
     ///
-    /// Returns `None` when the executor is already tearing down.
-    fn register<F, T>(arc_self: &Arc<Self>, future: F) -> Option<Arc<TaskCell<F, T>>>
+    /// Returns false (dropping the future) when the executor is already
+    /// tearing down.
+    fn register<F>(arc_self: &Arc<Self>, future: F) -> bool
     where
-        F: Future<Output = Result<T, Error>> + Send + 'static,
-        T: Send + 'static,
+        F: Future<Output = ()> + Send + 'static,
     {
         let cell = {
             let mut running = arc_self.running.lock();
             if running.closed {
-                return None;
+                return false;
             }
             let slot = running.free.pop().unwrap_or_else(|| {
                 running.slots.push(None);
@@ -883,15 +800,14 @@ impl Tasks {
                 slot,
                 tasks: Arc::downgrade(arc_self),
                 future: Affine::new(RefCell::new(Some(future))),
-                join: Affine::new(RefCell::new(JoinState::Pending(None))),
             });
             running.slots[slot] = Some(Arc::clone(&cell) as Arc<dyn Erased>);
             cell
         };
 
         // Queue the first poll.
-        arc_self.queue(Arc::clone(&cell) as Arc<dyn Erased>);
-        Some(cell)
+        arc_self.queue(cell as Arc<dyn Erased>);
+        true
     }
 
     /// Enqueue an already registered task to be polled.
@@ -1023,40 +939,19 @@ impl crate::Spawner for Context {
         }
 
         // Wrap the future with panic catching, abort support, and cleanup.
-        // The task cell parks the result for the handle directly, so no
-        // completion channel is allocated.
         let executor = self.executor();
         let future = f(self);
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let panicker = executor.panicker.clone();
-        let tree = Arc::clone(&parent);
-        let metric_handle = metric.clone();
-        let wrapped = async move {
-            let result =
-                Abortable::new(AssertUnwindSafe(future).catch_unwind(), abort_registration).await;
-            let output = match result {
-                Ok(Ok(value)) => Ok(value),
-                Ok(Err(panic)) => {
-                    panicker.notify(panic);
-                    Err(Error::Exited)
-                }
-                Err(Aborted) => Err(Error::Closed),
-            };
+        let (task, handle) = Handle::init(
+            future,
+            metric.clone(),
+            executor.panicker.clone(),
+            Arc::clone(&parent),
+        );
 
-            // Mark the task as aborted and abort all descendants.
-            tree.abort();
-
-            // Finish the metric.
-            metric_handle.finish();
-
-            output
-        };
-
-        // Register the task; its cell doubles as the handle's join point.
-        let handle = match Tasks::register(&executor.tasks, wrapped) {
-            Some(cell) => Handle::from_join(cell, abort_handle, metric),
-            None => Handle::closed(metric),
-        };
+        // Register the task, unless the executor is already tearing down.
+        if !Tasks::register(&executor.tasks, task) {
+            return Handle::closed(metric);
+        }
 
         // Register the task on the parent
         if let Some(aborter) = handle.aborter() {

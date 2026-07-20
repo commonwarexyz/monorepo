@@ -45,27 +45,10 @@ where
         abort_handle: AbortHandle,
         metric: MetricHandle,
     },
-    #[cfg_attr(not(feature = "iouring"), allow(dead_code))]
-    Join {
-        join: Arc<dyn Join<T>>,
-        abort_handle: AbortHandle,
-        metric: MetricHandle,
-    },
     Completion {
         future: Abortable<Completion<T>>,
         abort_handle: AbortHandle,
     },
-}
-
-/// Join point exposing a spawned task's parked result to its [Handle].
-///
-/// Implemented by executor task cells that store the result inline in the
-/// task allocation instead of sending it through a channel.
-#[cfg_attr(not(feature = "iouring"), allow(dead_code))]
-pub(crate) trait Join<T>: Send + Sync {
-    /// Poll for the task's result, storing or refreshing `cx`'s waker while
-    /// the task is still running.
-    fn poll_join(&self, cx: &mut Context<'_>) -> Poll<Result<T, Error>>;
 }
 
 /// Normalizes receiver-backed and future-backed completions behind one abortable future.
@@ -166,22 +149,6 @@ where
         }
     }
 
-    /// Returns a handle backed by a task cell's inline join state.
-    #[cfg_attr(not(feature = "iouring"), allow(dead_code))]
-    pub(crate) fn from_join(
-        join: Arc<dyn Join<T>>,
-        abort_handle: AbortHandle,
-        metric: MetricHandle,
-    ) -> Self {
-        Self {
-            state: HandleState::Join {
-                join,
-                abort_handle,
-                metric,
-            },
-        }
-    }
-
     /// Returns a handle backed by a completion future.
     pub fn from_future<F>(future: F) -> Self
     where
@@ -229,17 +196,6 @@ where
                 // metric cleanup right away.
                 metric.finish();
             }
-            HandleState::Join {
-                abort_handle,
-                metric,
-                ..
-            } => {
-                abort_handle.abort();
-
-                // We might never poll the join again after aborting it, so run
-                // the metric cleanup right away.
-                metric.finish();
-            }
             HandleState::Completion { abort_handle, .. } => {
                 abort_handle.abort();
             }
@@ -250,11 +206,6 @@ where
     pub(crate) fn aborter(&self) -> Option<Aborter> {
         match &self.state {
             HandleState::Task {
-                abort_handle,
-                metric,
-                ..
-            } => Some(Aborter::new(abort_handle.clone(), metric.clone())),
-            HandleState::Join {
                 abort_handle,
                 metric,
                 ..
@@ -275,7 +226,6 @@ where
             HandleState::Task { receiver, .. } => Pin::new(receiver)
                 .poll(cx)
                 .map(|result| result.unwrap_or_else(|_| Err(Error::Closed))),
-            HandleState::Join { join, .. } => join.poll_join(cx),
             HandleState::Completion { future, .. } => Pin::new(future)
                 .poll(cx)
                 .map(|result| result.unwrap_or(Err(Error::Aborted))),
