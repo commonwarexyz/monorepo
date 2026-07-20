@@ -5,14 +5,13 @@ use crate::{
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use core::num::NonZeroUsize;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 /// Why a resolver fetch was requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FetchReason {
     MissingNullification,
     CertificationFailed,
-    SatisfiedByFailedNotarization,
 }
 
 impl FetchReason {
@@ -21,7 +20,6 @@ impl FetchReason {
         match self {
             Self::MissingNullification => "missing_nullification",
             Self::CertificationFailed => "certification_failed",
-            Self::SatisfiedByFailedNotarization => "satisfied_by_failed_notarization",
         }
     }
 }
@@ -69,10 +67,6 @@ pub struct State<S: Scheme, D: Digest> {
     fetch_floor: View,
     /// Number of views in each leader term.
     term_length: TermLength,
-    /// Maps notarization view -> request views it satisfied.
-    /// When a higher-view notarization satisfies a lower-view request,
-    /// we track it here so we can re-request on certification failure.
-    satisfied_by: HashMap<View, BTreeSet<View>>,
     /// Views where certification has failed. Only nullifications
     /// are accepted for these views.
     failed_views: HashSet<View>,
@@ -89,7 +83,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
             fetch_concurrent: fetch_concurrent.get(),
             fetch_floor: View::zero(),
             term_length,
-            satisfied_by: HashMap::new(),
             failed_views: HashSet::new(),
         }
     }
@@ -105,12 +98,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Handle a new certificate and return any effects the resolver actor should apply.
-    ///
-    /// The `request` parameter is the view that was originally requested
-    /// when this certificate was fetched. If the certificate is a notarization
-    /// at a higher view, we track that the request was "satisfied by" this
-    /// notarization so we can re-request on certification failure.
-    pub fn handle(&mut self, certificate: Certificate<S, D>, request: Option<View>) -> Vec<Effect> {
+    pub fn handle(&mut self, certificate: Certificate<S, D>) -> Vec<Effect> {
         let cause = certificate.view();
         self.current_view = self.current_view.max(cause);
         let mut effects = Vec::new();
@@ -130,9 +118,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 let view = notarization.view();
                 if view > self.floor_view() {
                     self.notarizations.insert(view, notarization);
-                    if let Some(request) = request {
-                        self.satisfied_by.entry(view).or_default().insert(request);
-                    }
                 }
             }
             Certificate::Finalization(finalization) => {
@@ -149,6 +134,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Handle a certification result from the voter.
+    ///
+    /// A failure does not re-request the views the failed notarization was
+    /// fetched for: the actor answers their responses with the certification
+    /// verdict, so the resolver engine retries those requests itself.
     pub fn handle_certified(&mut self, view: View, success: bool) -> Vec<Effect> {
         let mut effects = Vec::new();
         if success {
@@ -159,7 +148,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 effects.push(self.prune());
             }
 
-            self.satisfied_by.remove(&view);
             effects.extend(self.fetch_missing(view));
         } else {
             self.notarizations.remove(&view);
@@ -171,19 +159,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
                     cause: view,
                     reason: FetchReason::CertificationFailed,
                 });
-            }
-
-            if let Some(satisfied_views) = self.satisfied_by.remove(&view) {
-                for v in satisfied_views {
-                    if !self.needs_nullification(v) {
-                        continue;
-                    }
-                    effects.push(Effect::Fetch {
-                        view: v,
-                        cause: view,
-                        reason: FetchReason::SatisfiedByFailedNotarization,
-                    });
-                }
             }
         }
         effects
@@ -273,7 +248,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
         let term_length = self.term_length;
         self.nullifications
             .retain(|view, _| covers_above_floor(*view, term_length, floor));
-        self.satisfied_by.retain(|view, _| *view > floor);
         self.failed_views.retain(|view| *view > floor);
 
         // A floor inside a partially-fetched term strands the rest of the
@@ -307,6 +281,7 @@ mod tests {
     use crate::{simplex::scheme::ed25519, types::Epoch};
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_utils::{NZU32, NZUsize, test_rng};
+    use std::collections::BTreeSet;
 
     const NAMESPACE: &[u8] = b"resolver-state";
     const EPOCH: Epoch = Epoch::new(9);
@@ -363,7 +338,7 @@ mod tests {
         let mut outstanding = BTreeSet::new();
 
         let nullification_v4 = build_nullification(&schemes, &verifier, EPOCH, View::new(4));
-        let effects = state.handle(Certificate::Nullification(nullification_v4.clone()), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v4.clone()));
         assert_eq!(effects[0], retain_outside(4, 4));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
@@ -373,7 +348,7 @@ mod tests {
         assert_eq!(outstanding_views(&outstanding), vec![1, 2]);
 
         let nullification_v2 = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
-        let effects = state.handle(Certificate::Nullification(nullification_v2.clone()), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v2.clone()));
         assert_eq!(effects[0], retain_outside(2, 2));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
@@ -383,7 +358,7 @@ mod tests {
         assert_eq!(outstanding_views(&outstanding), vec![1, 3]);
 
         let nullification_v1 = build_nullification(&schemes, &verifier, EPOCH, View::new(1));
-        let effects = state.handle(Certificate::Nullification(nullification_v1.clone()), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v1.clone()));
         assert_eq!(effects[0], retain_outside(1, 1));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
@@ -401,7 +376,7 @@ mod tests {
         let mut outstanding = BTreeSet::new();
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
-        let effects = state.handle(Certificate::Nullification(nullification_v14), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v14));
         assert_eq!(
             effects,
             vec![
@@ -415,12 +390,12 @@ mod tests {
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
         let nullification_v1 = build_nullification(&schemes, &verifier, EPOCH, View::new(1));
-        let effects = state.handle(Certificate::Nullification(nullification_v1), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v1));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![6, 11]);
 
         let nullification_v6 = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-        let effects = state.handle(Certificate::Nullification(nullification_v6), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v6));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![11]);
     }
@@ -432,7 +407,7 @@ mod tests {
             State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
 
         let nullification_v2 = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
-        state.handle(Certificate::Nullification(nullification_v2.clone()), None);
+        state.handle(Certificate::Nullification(nullification_v2.clone()));
 
         assert!(
             matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
@@ -443,14 +418,14 @@ mod tests {
         assert!(state.get(View::new(6)).is_none());
 
         let finalization_v3 = build_finalization(&schemes, &verifier, EPOCH, View::new(3));
-        state.handle(Certificate::Finalization(finalization_v3), None);
+        state.handle(Certificate::Finalization(finalization_v3));
         assert_eq!(state.nullifications.len(), 1);
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
 
         let finalization_v5 = build_finalization(&schemes, &verifier, EPOCH, View::new(5));
-        state.handle(Certificate::Finalization(finalization_v5), None);
+        state.handle(Certificate::Finalization(finalization_v5));
         assert!(state.nullifications.is_empty());
     }
 
@@ -462,16 +437,16 @@ mod tests {
         let mut outstanding = BTreeSet::new();
 
         let finalization_v3 = build_finalization(&schemes, &verifier, EPOCH, View::new(3));
-        let effects = state.handle(Certificate::Finalization(finalization_v3), None);
+        let effects = state.handle(Certificate::Finalization(finalization_v3));
         apply_effects(&mut outstanding, &effects);
 
         let nullification_v6 = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-        let effects = state.handle(Certificate::Nullification(nullification_v6), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v6));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![4]);
 
         let nullification_v2 = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
-        let effects = state.handle(Certificate::Nullification(nullification_v2.clone()), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v2.clone()));
         apply_effects(&mut outstanding, &effects);
 
         assert!(outstanding.is_empty());
@@ -490,22 +465,22 @@ mod tests {
             State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
 
         let finalization_v3 = build_finalization(&schemes, &verifier, EPOCH, View::new(3));
-        let effects = state.handle(Certificate::Finalization(finalization_v3), None);
+        let effects = state.handle(Certificate::Finalization(finalization_v3));
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(3))]);
 
         let nullification_v2 = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
-        let effects = state.handle(Certificate::Nullification(nullification_v2.clone()), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v2.clone()));
         assert_eq!(effects, vec![retain_outside(2, 5)]);
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
 
         let finalization_v5 = build_finalization(&schemes, &verifier, EPOCH, View::new(5));
-        let effects = state.handle(Certificate::Finalization(finalization_v5), None);
+        let effects = state.handle(Certificate::Finalization(finalization_v5));
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
         assert!(state.nullifications.is_empty());
 
-        let effects = state.handle(Certificate::Nullification(nullification_v2), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v2));
         assert!(effects.is_empty());
         assert!(state.nullifications.is_empty());
     }
@@ -518,21 +493,21 @@ mod tests {
 
         for view in 4..=6 {
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(view));
-            let effects = state.handle(Certificate::Nullification(nullification), None);
+            let effects = state.handle(Certificate::Nullification(nullification));
             apply_effects(&mut outstanding, &effects);
         }
         assert_eq!(state.current_view, View::new(6));
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
         let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(6));
-        let effects = state.handle(Certificate::Notarization(notarization), None);
+        let effects = state.handle(Certificate::Notarization(notarization));
         apply_effects(&mut outstanding, &effects);
         assert!(state.floor.is_none());
         assert_eq!(state.nullifications.len(), 3);
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
         let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(6));
-        let effects = state.handle(Certificate::Finalization(finalization.clone()), None);
+        let effects = state.handle(Certificate::Finalization(finalization.clone()));
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(6))]);
         apply_effects(&mut outstanding, &effects);
         assert!(
@@ -549,7 +524,7 @@ mod tests {
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(2), TermLength::ONE);
 
         let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(3));
-        let effects = state.handle(Certificate::Finalization(finalization.clone()), None);
+        let effects = state.handle(Certificate::Finalization(finalization.clone()));
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(3))]);
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
@@ -559,7 +534,7 @@ mod tests {
         );
 
         let nullification_v4 = build_nullification(&schemes, &verifier, EPOCH, View::new(4));
-        let effects = state.handle(Certificate::Nullification(nullification_v4.clone()), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v4.clone()));
         assert_eq!(effects, vec![retain_outside(4, 4)]);
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
@@ -569,7 +544,7 @@ mod tests {
         );
 
         let nullification_v1 = build_nullification(&schemes, &verifier, EPOCH, View::new(1));
-        let effects = state.handle(Certificate::Nullification(nullification_v1), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v1));
         assert!(effects.is_empty());
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
@@ -586,15 +561,12 @@ mod tests {
     }
 
     #[test]
-    fn certification_failure_re_requests_satisfied_views() {
+    fn certification_failure_re_requests_failed_view() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::ONE);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, EPOCH, View::new(5));
-        let effects = state.handle(
-            Certificate::Notarization(notarization_v5),
-            Some(View::new(2)),
-        );
+        let effects = state.handle(Certificate::Notarization(notarization_v5));
         assert_eq!(
             effects,
             vec![
@@ -604,34 +576,21 @@ mod tests {
                 fetch(4, 5, FetchReason::MissingNullification),
             ]
         );
-
-        assert!(state.satisfied_by.contains_key(&View::new(5)));
-        assert!(state.satisfied_by[&View::new(5)].contains(&View::new(2)));
         assert!(!state.is_failed(View::new(5)));
 
         let effects = state.handle_certified(View::new(5), false);
 
         assert!(state.is_failed(View::new(5)));
-        assert!(!state.satisfied_by.contains_key(&View::new(5)));
-        assert_eq!(
-            effects,
-            vec![
-                fetch(5, 5, FetchReason::CertificationFailed),
-                fetch(2, 5, FetchReason::SatisfiedByFailedNotarization),
-            ]
-        );
+        assert_eq!(effects, vec![fetch(5, 5, FetchReason::CertificationFailed)]);
     }
 
     #[test]
-    fn certification_success_clears_tracking() {
+    fn certification_success_sets_floor() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::ONE);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, EPOCH, View::new(5));
-        let effects = state.handle(
-            Certificate::Notarization(notarization_v5.clone()),
-            Some(View::new(2)),
-        );
+        let effects = state.handle(Certificate::Notarization(notarization_v5.clone()));
         assert_eq!(
             effects,
             vec![
@@ -641,7 +600,6 @@ mod tests {
                 fetch(4, 5, FetchReason::MissingNullification),
             ]
         );
-        assert!(state.satisfied_by.contains_key(&View::new(5)));
 
         let effects = state.handle_certified(View::new(5), true);
 
@@ -649,7 +607,6 @@ mod tests {
             matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
         );
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
-        assert!(!state.satisfied_by.contains_key(&View::new(5)));
         assert!(!state.is_failed(View::new(5)));
     }
 
@@ -661,17 +618,14 @@ mod tests {
         let mut outstanding = BTreeSet::new();
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
-        let effects = state.handle(Certificate::Nullification(nullification_v14), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v14));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1]);
 
         // The notarization answers the request for anchor 1, so the fetch
         // cursor advances to the next missing anchor instead of re-requesting.
         let notarization_v5 = build_notarization(&schemes, &verifier, EPOCH, View::new(5));
-        let effects = state.handle(
-            Certificate::Notarization(notarization_v5.clone()),
-            Some(View::new(1)),
-        );
+        let effects = state.handle(Certificate::Notarization(notarization_v5.clone()));
         assert_eq!(
             effects,
             vec![fetch(6, 5, FetchReason::MissingNullification)]
@@ -698,17 +652,14 @@ mod tests {
         let mut outstanding = BTreeSet::new();
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
-        let effects = state.handle(Certificate::Nullification(nullification_v14), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v14));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
         // A mid-term notarization answers the request for anchor 1, but once
         // certified it only covers views 1..=3 of term [1, 5].
         let notarization_v3 = build_notarization(&schemes, &verifier, EPOCH, View::new(3));
-        let effects = state.handle(
-            Certificate::Notarization(notarization_v3.clone()),
-            Some(View::new(1)),
-        );
+        let effects = state.handle(Certificate::Notarization(notarization_v3.clone()));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
@@ -736,10 +687,7 @@ mod tests {
         // fetch scan requests anchor 1, and the cursor jumps past the
         // current view to the next term anchor.
         let notarization_v4 = build_notarization(&schemes, &verifier, EPOCH, View::new(4));
-        let effects = state.handle(
-            Certificate::Notarization(notarization_v4.clone()),
-            Some(View::new(1)),
-        );
+        let effects = state.handle(Certificate::Notarization(notarization_v4.clone()));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1]);
 
@@ -758,7 +706,7 @@ mod tests {
         // the mid-term floor: view 5 is only coverable by a nullification
         // from term [1, 5], which the requests at anchors 6 and 11 reject.
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
-        let effects = state.handle(Certificate::Nullification(nullification_v14), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v14));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![5, 6, 11]);
     }
@@ -770,7 +718,7 @@ mod tests {
             State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
-        let effects = state.handle(Certificate::Nullification(nullification_v14), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v14));
         assert_eq!(
             effects,
             vec![
@@ -786,17 +734,14 @@ mod tests {
         // matter how many times it is delivered.
         let notarization_v5 = build_notarization(&schemes, &verifier, EPOCH, View::new(5));
         for _ in 0..3 {
-            let effects = state.handle(
-                Certificate::Notarization(notarization_v5.clone()),
-                Some(View::new(1)),
-            );
+            let effects = state.handle(Certificate::Notarization(notarization_v5.clone()));
             assert!(effects.is_empty(), "anchor re-requested: {effects:?}");
         }
 
         // A later certificate must only request newly-uncovered anchors, not
         // re-issue the outstanding ones (the p2p resolver owns retries).
         let nullification_v20 = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
-        let effects = state.handle(Certificate::Nullification(nullification_v20), None);
+        let effects = state.handle(Certificate::Nullification(nullification_v20));
         assert_eq!(
             effects,
             vec![
@@ -813,18 +758,15 @@ mod tests {
             State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
 
         let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
-        state.handle(Certificate::Nullification(nullification_v14), None);
+        state.handle(Certificate::Nullification(nullification_v14));
 
         let notarization_v5 = build_notarization(&schemes, &verifier, EPOCH, View::new(5));
-        state.handle(
-            Certificate::Notarization(notarization_v5),
-            Some(View::new(1)),
-        );
+        state.handle(Certificate::Notarization(notarization_v5));
 
-        // A nullification at view 1 covers the whole term [1, 5], so neither
-        // the failed view nor the satisfied anchor needs a re-request.
+        // A nullification at view 1 covers the whole term [1, 5], so the
+        // failed view needs no re-request.
         let nullification_v1 = build_nullification(&schemes, &verifier, EPOCH, View::new(1));
-        state.handle(Certificate::Nullification(nullification_v1), None);
+        state.handle(Certificate::Nullification(nullification_v1));
 
         let effects = state.handle_certified(View::new(5), false);
         assert!(state.is_failed(View::new(5)));
@@ -837,7 +779,7 @@ mod tests {
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::ONE);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, EPOCH, View::new(5));
-        let effects = state.handle(Certificate::Notarization(notarization_v5.clone()), None);
+        let effects = state.handle(Certificate::Notarization(notarization_v5.clone()));
         assert_eq!(
             effects,
             vec![
@@ -856,7 +798,7 @@ mod tests {
         assert_eq!(state.floor_view(), View::new(5));
 
         let finalization_v5 = build_finalization(&schemes, &verifier, EPOCH, View::new(5));
-        let effects = state.handle(Certificate::Finalization(finalization_v5.clone()), None);
+        let effects = state.handle(Certificate::Finalization(finalization_v5.clone()));
 
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization_v5)

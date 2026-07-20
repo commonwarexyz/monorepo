@@ -19,14 +19,18 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Sender, utils::StaticProvider};
 use commonware_parallel::Strategy;
-use commonware_resolver::{Fetch, Resolver as _, p2p};
+use commonware_resolver::{Fetch, Resolver, p2p};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::traces::TracedExt as _,
 };
-use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot},
+    ordered::Quorum,
+    sequence::U64,
+};
 use rand_core::CryptoRng;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info_span};
 
 /// Requests are made concurrently to multiple peers.
@@ -47,6 +51,10 @@ pub struct Actor<
     fetch_timeout: Duration,
 
     state: State<S, D>,
+
+    /// Responses to notarization deliveries, keyed by notarization view and
+    /// answered with the view's certification verdict (see [Self::certified]).
+    held: BTreeMap<View, Vec<oneshot::Sender<bool>>>,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
@@ -73,6 +81,8 @@ impl<
                 fetch_timeout: cfg.fetch_timeout,
 
                 state: State::new(cfg.fetch_concurrent, cfg.term_length),
+
+                held: BTreeMap::new(),
 
                 mailbox_receiver: receiver,
             },
@@ -143,13 +153,11 @@ impl<
                 let _guard = span.entered();
                 match message {
                     MailboxMessage::Certificate { certificate, .. } => {
-                        // Certificates from mailbox have no associated request view
-                        let effects = self.state.handle(certificate, None);
+                        let effects = self.state.handle(certificate);
                         self.apply_effects(&mut resolver, effects);
                     }
                     MailboxMessage::Certified { round, success, .. } => {
-                        let effects = self.state.handle_certified(round.view(), success);
-                        self.apply_effects(&mut resolver, effects);
+                        self.certified(&mut resolver, round.view(), success);
                     }
                 }
             },
@@ -162,10 +170,36 @@ impl<
         }
     }
 
-    /// Applies the side effects requested by [super::state::State] to the resolver.
-    fn apply_effects(
+    /// Handles a certification outcome from the voter.
+    ///
+    /// Responses held for the view's notarization deliveries are answered
+    /// with the verdict. Success completes those fetches. Failure blocks the
+    /// peers that served the uncertifiable notarization and the resolver
+    /// retries the still-pending requests, mirroring how [Self::validate]
+    /// treats peers that serve a notarization for a view already marked
+    /// failed. No copy of that notarization can certify anywhere, so the
+    /// view cannot finalize and honest participants nullify it: the retried
+    /// request is eventually answered by that covering nullification (or by
+    /// a certificate at a higher view).
+    fn certified<R: Resolver<Key = U64, Subscriber = ()>>(
         &mut self,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
+        resolver: &mut R,
+        view: View,
+        success: bool,
+    ) {
+        if let Some(responses) = self.held.remove(&view) {
+            for response in responses {
+                response.send_lossy(success);
+            }
+        }
+        let effects = self.state.handle_certified(view, success);
+        self.apply_effects(resolver, effects);
+    }
+
+    /// Applies the side effects requested by [super::state::State] to the resolver.
+    fn apply_effects<R: Resolver<Key = U64, Subscriber = ()>>(
+        &mut self,
+        resolver: &mut R,
         effects: Vec<Effect>,
     ) {
         for effect in effects {
@@ -182,6 +216,17 @@ impl<
                         resolver.retain(move |candidate, _| *candidate < start || *candidate > end);
                 }
                 Effect::RetainAbove(floor) => {
+                    // A certification at or below the floor may be aborted
+                    // rather than reported, so a response held for it would
+                    // wait forever. The requests it answered are obsolete
+                    // (retained out below): accept them so their fetches
+                    // complete without blocking the serving peers.
+                    let retained = self.held.split_off(&floor.next());
+                    for (_, responses) in std::mem::replace(&mut self.held, retained) {
+                        for response in responses {
+                            response.send_lossy(true);
+                        }
+                    }
                     let floor = U64::from(floor);
                     let _ = resolver.retain(move |candidate, _| *candidate > floor);
                 }
@@ -191,9 +236,9 @@ impl<
 
     /// Issues a resolver fetch for `view`, attaching a span that records why the
     /// fetch was needed and which view's processing caused it.
-    fn fetch(
+    fn fetch<R: Resolver<Key = U64, Subscriber = ()>>(
         &self,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
+        resolver: &mut R,
         view: View,
         cause: View,
         reason: FetchReason,
@@ -297,11 +342,11 @@ impl<
     }
 
     /// Handles a message from the [p2p::Engine].
-    fn handle_resolver(
+    fn handle_resolver<R: Resolver<Key = U64, Subscriber = ()>>(
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
+        resolver: &mut R,
     ) {
         match message {
             HandlerMessage::Deliver {
@@ -330,7 +375,22 @@ impl<
                     response.send_lossy(false);
                     return;
                 };
-                response.send_lossy(true);
+
+                // A notarization only answers the request if its proposal
+                // certifies, so hold the response and answer it with the
+                // certification verdict (see [Self::certified]). Other
+                // certificates are complete answers on their own.
+                match &parsed {
+                    Certificate::Notarization(notarization) => {
+                        self.held
+                            .entry(notarization.view())
+                            .or_default()
+                            .push(response);
+                    }
+                    _ => {
+                        response.send_lossy(true);
+                    }
+                }
 
                 // Notify voter as soon as possible
                 let resolved = info_span!(
@@ -341,8 +401,7 @@ impl<
                 );
                 resolved.in_scope(|| voter.resolved(parsed.clone()));
 
-                // Process message with the request view for tracking
-                let effects = self.state.handle(parsed, Some(view));
+                let effects = self.state.handle(parsed);
                 self.apply_effects(resolver, effects);
             }
             HandlerMessage::Produce { view, response } => {
@@ -376,8 +435,9 @@ mod tests {
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Runner, deterministic};
-    use commonware_utils::{NZU32, NZUsize};
+    use commonware_runtime::{Runner, Supervisor, deterministic};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
+    use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
     const EPOCH: Epoch = Epoch::new(9);
@@ -397,6 +457,46 @@ mod tests {
         }
     }
 
+    /// Tracks the set of pending requests the way the resolver engine would.
+    #[derive(Clone, Default)]
+    struct RecordingResolver {
+        outstanding: Arc<Mutex<BTreeSet<U64>>>,
+    }
+
+    impl RecordingResolver {
+        fn outstanding(&self) -> Vec<u64> {
+            self.outstanding.lock().iter().map(u64::from).collect()
+        }
+    }
+
+    impl Resolver for RecordingResolver {
+        type Key = U64;
+        type Subscriber = ();
+
+        fn fetch<F>(&mut self, key: F) -> Feedback
+        where
+            F: Into<Fetch<U64, ()>> + Send,
+        {
+            self.outstanding.lock().insert(key.into().key);
+            Feedback::Ok
+        }
+
+        fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<U64, ()>> + Send,
+        {
+            for key in keys {
+                self.fetch(key);
+            }
+            Feedback::Ok
+        }
+
+        fn retain(&mut self, predicate: impl Fn(&U64, &()) -> bool + Send + 'static) -> Feedback {
+            self.outstanding.lock().retain(|key| predicate(key, &()));
+            Feedback::Ok
+        }
+    }
+
     fn build_actor(context: deterministic::Context, scheme: TestScheme) -> TestActor {
         let (actor, _) = Actor::new(
             context,
@@ -412,6 +512,176 @@ mod tests {
             },
         );
         actor
+    }
+
+    #[test_async]
+    async fn apply_effects_maintains_resolver_pending_set() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+
+            // The first certificate opens the fetch window at the term anchors.
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
+            let effects = actor
+                .state
+                .handle(Certificate::Nullification(nullification));
+            actor.apply_effects(&mut resolver, effects);
+            assert_eq!(resolver.outstanding(), vec![1, 6, 11, 16]);
+
+            // A covering nullification retains out only its own term's requests
+            // (here, the request at its own view): views below its start and
+            // above its term end stay pending.
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
+            let effects = actor
+                .state
+                .handle(Certificate::Nullification(nullification));
+            actor.apply_effects(&mut resolver, effects);
+            assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
+
+            // A mid-term floor raise drops the requests below it and re-scans
+            // the stranded term tail (view 5).
+            let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(4));
+            let effects = actor.state.handle(Certificate::Finalization(finalization));
+            actor.apply_effects(&mut resolver, effects);
+            assert_eq!(resolver.outstanding(), vec![5, 11, 16]);
+
+            // A below-floor nullification covering the floor's term retains
+            // out the request at its term end (view 5), not just the request
+            // at its own view.
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
+            let effects = actor
+                .state
+                .handle(Certificate::Nullification(nullification));
+            actor.apply_effects(&mut resolver, effects);
+            assert_eq!(resolver.outstanding(), vec![11, 16]);
+
+            // A floor raise drops the request at the floor view itself and
+            // re-scans the stranded term tail (view 12).
+            let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(11));
+            let effects = actor.state.handle(Certificate::Finalization(finalization));
+            actor.apply_effects(&mut resolver, effects);
+            assert_eq!(resolver.outstanding(), vec![12, 16]);
+
+            // A nullification at the floor covering the floor's term retains
+            // out mid-term requests strictly inside its range.
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(11));
+            let effects = actor
+                .state
+                .handle(Certificate::Nullification(nullification));
+            actor.apply_effects(&mut resolver, effects);
+            assert_eq!(resolver.outstanding(), vec![16]);
+        });
+    }
+
+    #[test_async]
+    async fn notarization_response_answered_with_certification_verdict() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+
+            // The response to a notarization delivery is withheld until the
+            // voter reports the certification outcome.
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(6));
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: View::new(6),
+                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
+                        .encode(),
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert!(actor.held.contains_key(&View::new(6)));
+
+            // A failed certification rejects the response, so the resolver
+            // blocks the serving peer and retries the request itself.
+            actor.certified(&mut resolver, View::new(6), false);
+            assert!(actor.held.is_empty());
+            assert!(!receiver.await.unwrap());
+        });
+    }
+
+    #[test_async]
+    async fn certified_notarization_response_accepted() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(6));
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: View::new(6),
+                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
+                        .encode(),
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            actor.certified(&mut resolver, View::new(6), true);
+            assert!(actor.held.is_empty());
+            assert!(receiver.await.unwrap());
+        });
+    }
+
+    #[test_async]
+    async fn held_responses_accepted_when_floor_passes_them() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(6));
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: View::new(6),
+                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
+                        .encode(),
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert!(actor.held.contains_key(&View::new(6)));
+
+            // A floor raise past the notarization may abort its certification
+            // without a report, so the held response is accepted (the request
+            // it answered is retained out in the same batch).
+            let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(8));
+            let effects = actor.state.handle(Certificate::Finalization(finalization));
+            actor.apply_effects(&mut resolver, effects);
+            assert!(actor.held.is_empty());
+            assert!(receiver.await.unwrap());
+        });
     }
 
     #[test_async]
