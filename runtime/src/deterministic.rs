@@ -70,9 +70,9 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::{
-    SystemTimeExt,
+    Cached, SystemTimeExt,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
 };
@@ -86,6 +86,7 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
+use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
@@ -1197,17 +1198,17 @@ impl crate::Spawner for Context {
 
 // Rayon permits one permanent registry registration per OS thread. Cache the pool that
 // registered the executor thread so later requests and runners reuse it.
-commonware_utils::thread_local_cache!(static THREAD_POOL: commonware_parallel::ThreadPool);
+commonware_utils::thread_local_cache!(static THREAD_POOL: ThreadPool);
 
 /// Returns the single-threaded pool the executor thread registered with, created on first use.
 ///
 /// All pool work executes inline on the executor thread, so a larger pool would only
 /// add permanently unstarted workers.
-fn shared_thread_pool() -> Result<commonware_parallel::ThreadPool, rayon::ThreadPoolBuildError> {
-    let pool = commonware_utils::Cached::take(
+fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
+    let pool = Cached::take(
         &THREAD_POOL,
         || {
-            rayon::ThreadPoolBuilder::new()
+            ThreadPoolBuilder::new()
                 .num_threads(1)
                 .use_current_thread()
                 .build()

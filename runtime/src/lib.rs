@@ -3293,6 +3293,7 @@ mod tests {
         );
         test_buffer_pooler(runner, 64, 8);
     }
+
     #[cfg(feature = "iouring")]
     mod iouring_tests {
         use super::*;
