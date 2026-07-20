@@ -1532,7 +1532,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::destroy].
-    pub(crate) async fn destroy(self) -> Result<(), Error> {
+    pub(crate) async fn destroy(mut self) -> Result<(), Error> {
+        // Stage a reset intent in the offsets journal before removing anything: the blob
+        // removals are unordered, and a crashed partial removal would otherwise read as
+        // retained loss on reopen. With the intent staged, a reopen after any later
+        // interruption completes the reset (clearing the data partition with it) and
+        // yields a fresh, empty journal, while an interruption before the intent is
+        // durable recovers the original journal; the offsets journal's checkpoint teardown
+        // keeps the copy carrying the intent alive until last.
+        self.offsets.stage_clear_intent(0).await?;
+
         self.blobs.destroy().await?;
         self.offsets.destroy().await
     }
@@ -2241,9 +2250,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// # Crash Safety
     ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same partitions may observe partially removed state. Use [Self::init_at_size]
-    /// for a recoverable reset.
+    /// If interrupted, reopening the same partitions recovers either the original journal
+    /// (when the interruption preceded the durable reset intent) or a fresh, empty journal,
+    /// never a partially destroyed state.
     pub async fn destroy(self) -> Result<(), Error> {
         (*self.0).destroy().await
     }
@@ -5145,6 +5154,54 @@ mod tests {
                 assert_eq!(journal.read(7 + i).await.unwrap(), 700 + i);
             }
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Destroy's blob removals are unordered, so a crash partway can leave gaps that would
+    /// read as retained loss. The staged offsets reset intent makes a destroy interrupted
+    /// during blob removal reopen as an empty journal instead.
+    #[test_traced]
+    fn test_variable_destroy_interrupted_during_blob_removal_reopens_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "destroy-interrupted".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Drop the destroy with the offsets reset intent staged but nothing removed,
+            // then simulate partial unordered removal: an interior data blob is gone.
+            journal.0.blobs.halt_destroy = true;
+            {
+                let fut = journal.destroy();
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "destroy must park before its removal"
+                );
+            }
+            context
+                .remove(&cfg.data_partition(), Some(&1u64.to_be_bytes()))
+                .await
+                .unwrap();
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("interrupted destroy must reopen as an empty journal");
+            assert_eq!(journal.bounds(), 0..0);
             journal.destroy().await.unwrap();
         });
     }

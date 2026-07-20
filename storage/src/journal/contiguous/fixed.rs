@@ -401,14 +401,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             return Self::complete_staged_clear(context, cfg, checkpoint, clear_target).await;
         }
 
-        let blob_partition = Partition::select(&context, &cfg.partition).await?;
+        let (blob_partition, stored) = Partition::select(&context, &cfg.partition).await?;
         let partition = Partition::new(
             context.child("blobs"),
             blob_partition,
             cfg.page_cache,
             cfg.write_buffer,
         );
-        let mut pending = partition.open_all().await?;
+        let mut pending = partition.open_many(stored).await?;
 
         // Truncate any trailing non-chunk-aligned bytes on every blob before recovery. Items
         // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
@@ -1020,7 +1020,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::destroy].
-    pub(crate) async fn destroy(self) -> Result<(), Error> {
+    pub(crate) async fn destroy(mut self) -> Result<(), Error> {
+        // Stage a clear intent before removing anything: the blob removals are unordered,
+        // and a crashed partial removal would otherwise read as retained loss on reopen.
+        // With the intent staged, a reopen after any later interruption completes the clear
+        // and yields a fresh, empty journal (an interruption before the intent is durable
+        // recovers the original journal): the checkpoint teardown removes its stale copy
+        // first, so the copy carrying the intent survives every crash prefix.
+        self.checkpoint.stage_clear(0).await?;
+
         self.blobs.destroy().await?;
         self.checkpoint.destroy().await?;
         Ok(())
@@ -1070,7 +1078,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(&mut self, new_size: u64) -> Result<(), Error> {
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
@@ -1244,9 +1251,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Crash Safety
     ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same partition may observe partially removed state. Use [Self::init_at_size]
-    /// for a recoverable reset.
+    /// If interrupted, reopening the same partition recovers either the original journal
+    /// (when the interruption preceded the durable clear intent) or a fresh, empty journal,
+    /// never a partially destroyed state.
     pub async fn destroy(self) -> Result<(), Error> {
         (*self.0).destroy().await
     }
@@ -1768,6 +1775,86 @@ mod tests {
             Err(RuntimeError::PartitionMissing(_)) => Vec::new(),
             Err(err) => panic!("Failed to scan partition {partition}: {err}"),
         }
+    }
+
+    /// Destroy's blob removals are unordered, so a crash partway can leave gaps that would
+    /// read as retained loss. The staged clear intent makes a destroy interrupted during
+    /// blob removal reopen as an empty journal instead.
+    #[test_traced]
+    fn test_fixed_destroy_interrupted_during_blob_removal_reopens_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Drop the destroy with its intent staged but nothing removed, then simulate the
+            // unordered removal having gotten partway: an interior blob is gone.
+            journal.0.blobs.halt_destroy = true;
+            {
+                let fut = journal.destroy();
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "destroy must park before its removal"
+                );
+            }
+            context
+                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
+                .await
+                .unwrap();
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("interrupted destroy must reopen as an empty journal");
+            assert_eq!(journal.bounds(), 0..0);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Destroy is crash-safe through its checkpoint teardown: the metadata store removes
+    /// its stale copy first, so the staged clear intent survives a crash between the two
+    /// removals and reopening yields a fresh, empty journal.
+    #[test_traced]
+    fn test_fixed_destroy_interrupted_during_checkpoint_teardown_reopens_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // A second sync generation populates both checkpoint copies.
+            (journal, _) = journal.append(&test_digest(12)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+
+            // Drop the destroy parked between the two checkpoint-copy removals: the blob
+            // partition and the stale copy are gone; the surviving copy carries the intent.
+            journal.0.checkpoint.test_halt_metadata_destroy(true);
+            {
+                let fut = journal.destroy();
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "destroy must park between the checkpoint copies"
+                );
+            }
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("interrupted destroy must reopen as an empty journal");
+            assert_eq!(journal.bounds(), 0..0);
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]

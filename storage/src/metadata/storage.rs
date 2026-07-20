@@ -72,6 +72,11 @@ struct State<B: Blob, K: Span> {
 pub struct Metadata<E: Context, K: Span, V: Codec> {
     context: E,
 
+    /// Test-only: park [Self::destroy] between its two blob removals so tests can drop the
+    /// pending future with only the stale copy removed.
+    #[cfg(test)]
+    pub(crate) halt_destroy_between_blobs: bool,
+
     map: BTreeMap<K, V>,
     partition: String,
     state: State<E::Blob, K>,
@@ -118,6 +123,9 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         let _ = keys.try_set(map.len());
         Ok(Self {
             context,
+
+            #[cfg(test)]
+            halt_destroy_between_blobs: false,
 
             map,
             partition: cfg.partition,
@@ -500,12 +508,27 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     /// Remove the underlying blobs for this [Metadata].
     pub async fn destroy(self) -> Result<(), Error> {
         let state = self.state;
-        for (i, wrapper) in state.blobs.into_iter().enumerate() {
+        // Remove the stale copy before the current one: the current copy carries the
+        // newest durable state (e.g. a journal's staged clear intent), so it must survive
+        // a crash between the removals for recovery to observe that state.
+        let [left, right] = state.blobs;
+        let ordered = if state.cursor == 0 {
+            [(1, right), (0, left)]
+        } else {
+            [(0, left), (1, right)]
+        };
+        for (i, wrapper) in ordered {
             drop(wrapper.blob);
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
                 .await?;
             debug!(blob = i, "destroyed blob");
+
+            // Parks after each removal; tests drop the future at the first park.
+            #[cfg(test)]
+            if self.halt_destroy_between_blobs {
+                std::future::pending::<()>().await;
+            }
         }
         match self.context.remove(&self.partition, None).await {
             Ok(()) => {}

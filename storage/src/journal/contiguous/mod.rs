@@ -318,10 +318,11 @@ pub trait Mutable: Contiguous + Sized {
     ///
     /// # Crash Safety
     ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same storage may observe partially removed state. Use a reset operation
-    /// provided by the concrete type when the journal must remain recoverable.
-    fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+    /// If interrupted, reopening the same storage recovers either the original journal or a
+    /// fresh, empty journal, never a partially destroyed state.
+    fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send
+    where
+        Self: Sized;
 
     /// Rewinds the journal to the last item matching `predicate`, returning the resulting
     /// size. If no item matches, the journal is rewound to the pruning boundary, discarding

@@ -76,10 +76,11 @@ impl<E: Context> Partition<E> {
         }
     }
 
-    /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
-    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
-        let stored = Self::scan_names(&self.context, &self.name).await?;
-
+    /// Open every named blob as a [`Writer`], keyed by blob index.
+    pub(super) async fn open_many(
+        &self,
+        stored: Vec<Vec<u8>>,
+    ) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
         let mut blobs = BTreeMap::new();
         for name in stored {
             let hex_name = hex(&name);
@@ -92,6 +93,12 @@ impl<E: Context> Partition<E> {
             blobs.insert(index, writer);
         }
         Ok(blobs)
+    }
+
+    /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
+    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+        let stored = Self::scan_names(&self.context, &self.name).await?;
+        self.open_many(stored).await
     }
 
     /// Remove the given blob.
@@ -114,7 +121,7 @@ impl<E: Context> Partition<E> {
     /// legacy partition (`prefix` itself) if it contains data, otherwise `{prefix}-blobs`.
     /// Both containing data is corruption.
     // TODO(#2941): Remove legacy partition support
-    pub(super) async fn select(context: &E, prefix: &str) -> Result<String, Error> {
+    pub(super) async fn select(context: &E, prefix: &str) -> Result<(String, Vec<Vec<u8>>), Error> {
         let new_partition = format!("{prefix}-blobs");
         let legacy_blobs = Self::scan_names(context, prefix).await?;
         let new_blobs = Self::scan_names(context, &new_partition).await?;
@@ -126,9 +133,9 @@ impl<E: Context> Partition<E> {
         }
 
         if !legacy_blobs.is_empty() {
-            Ok(prefix.into())
+            Ok((prefix.into(), legacy_blobs))
         } else {
-            Ok(new_partition)
+            Ok((new_partition, new_blobs))
         }
     }
 }
@@ -149,6 +156,11 @@ pub(super) struct Writable<E: Context> {
 
     /// Cached owned snapshot of [Self::sealed].
     sealed_snapshot: Option<Arc<[Sealed<E::Blob>]>>,
+
+    /// Test-only: park [Self::destroy] before its removal so tests can drop the pending
+    /// future with the clear intent staged but nothing removed.
+    #[cfg(test)]
+    pub(super) halt_destroy: bool,
 }
 
 impl<E: Context> Writable<E> {
@@ -212,6 +224,8 @@ impl<E: Context> Writable<E> {
             tail,
             sealed,
             sealed_snapshot: None,
+            #[cfg(test)]
+            halt_destroy: false,
         })
     }
 
@@ -398,12 +412,27 @@ impl<E: Context> Writable<E> {
 
     /// Remove every blob and the partition itself.
     pub(super) async fn destroy(self) -> Result<(), Error> {
-        let tail_blob = self.tail_blob_index();
-        drop(self.tail);
-        for blob in self.oldest_blob_index..=tail_blob {
-            self.partition.remove(blob).await?;
+        // Close every handle first (open files cannot be removed on every platform), then
+        // remove the partition wholesale.
+        let Self {
+            partition,
+            tail,
+            sealed,
+            sealed_snapshot,
+            #[cfg(test)]
+            halt_destroy,
+            ..
+        } = self;
+        drop(tail);
+        drop(sealed);
+        drop(sealed_snapshot);
+
+        #[cfg(test)]
+        if halt_destroy {
+            std::future::pending::<()>().await;
         }
-        Partition::remove_all(&self.partition.context, &self.partition.name).await
+
+        Partition::remove_all(&partition.context, &partition.name).await
     }
 }
 

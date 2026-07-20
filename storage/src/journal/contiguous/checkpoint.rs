@@ -143,6 +143,12 @@ impl<E: Context> Checkpoint<E> {
         Ok(())
     }
 
+    /// Test-only: park the underlying metadata destroy between its two blob removals.
+    #[cfg(test)]
+    pub(super) const fn test_halt_metadata_destroy(&mut self, halt: bool) {
+        self.metadata.halt_destroy_between_blobs = halt;
+    }
+
     /// Remove the checkpoint's partition.
     pub(super) async fn destroy(self) -> Result<(), Error> {
         self.metadata.destroy().await?;
