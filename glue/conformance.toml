@@ -1,14 +1,10 @@
-["commonware_glue::stateful::actor::syncer::tests::conformance::CodecConformance<SyncState<TestScheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "334bc977cfa11a849de1b135da67dd6b2103608838a8a5fa2093b401ea161a78"
-
 ["commonware_glue::dkg::anchor::wire::tests::CodecConformance<Message<mocks::TestScheme,mocks::TestMarshalVariant\n>>"]
 n_cases = 65536
-hash = "0d6e85f0938ce300477cf7c675431f01528666eea8cb6d93efc48d70f3b803ea"
+hash = "1878e60f5fef8e6b20367fc6a46a079f7654e891532c9c030123c1d593ae294a"
 
 ["commonware_glue::dkg::anchor::wire::tests::CodecConformance<Tag>"]
 n_cases = 65536
-hash = "7cf90e43e614a55614d95269547add3d92c25b31040e8f3cce3761bd74986458"
+hash = "4a25fcaabb29660bed0370151db02bbc2def070423cbf6158edd486f945767d1"
 
 ["commonware_glue::dkg::reshare::store::conformance::CodecConformance<Event<MinSig,ed25519::PublicKey>>"]
 n_cases = 65536
@@ -37,6 +33,10 @@ hash = "240c5ef5d2a29ad2f22678bbe5f8360ae0ab628b68e792573a16dcd0d0f09c4d"
 ["commonware_glue::dkg::types::conformance::CodecConformance<Payload<MinSig,ed25519::PrivateKey>>"]
 n_cases = 8192
 hash = "89d51bef0703a3cc6ac96ae71daa453113fd55e70febcd765d0791cc7d8c612c"
+
+["commonware_glue::stateful::actor::syncer::tests::conformance::CodecConformance<SyncState<TestScheme,Sha256Digest>>"]
+n_cases = 65536
+hash = "334bc977cfa11a849de1b135da67dd6b2103608838a8a5fa2093b401ea161a78"
 
 ["commonware_glue::stateful::db::p2p::compact::handler::tests::conformance::CodecConformance<Request<mmr::Family,sha256::Digest>>"]
 n_cases = 65536

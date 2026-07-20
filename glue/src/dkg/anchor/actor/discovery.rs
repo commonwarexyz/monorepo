@@ -10,7 +10,10 @@ use commonware_codec::{Decode as _, Encode as _, Error as CodecError, Read};
 use commonware_consensus::{
     Epochable, Heightable,
     marshal::core::Variant,
-    simplex::{scheme::Scheme, types::Certificate},
+    simplex::{
+        scheme::Scheme,
+        types::{Certificate, Finalization},
+    },
     types::{Epoch, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::Signer;
@@ -24,25 +27,41 @@ use commonware_utils::{
 };
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
+use std::collections::VecDeque;
 use tracing::{debug, warn};
 
 #[derive(Debug)]
-enum BoundaryResponseError {
-    BlockCommitment,
+enum BoundaryBlockError {
+    Commitment,
     Decode(CodecError),
-    InvalidFinalization,
 }
 
-pub(super) struct Pending {
+struct Candidate<S, V>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+{
+    peer: S::PublicKey,
+    finalization: Finalization<S, V::Commitment>,
+}
+
+pub(super) struct Pending<S, V>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+{
     height: Height,
     epoch: Epoch,
+    in_flight: Option<Candidate<S, V>>,
+    candidates: VecDeque<Candidate<S, V>>,
 }
 
 /// The discovery phase of the anchor actor.
 ///
 /// Waits for subscribers, listens to the Simplex certificate channel, and uses
-/// the first verifiable target finalization to fetch the previous epoch boundary
-/// block. Once the boundary block yields the target epoch's public
+/// the first verifiable target finalization to discover the previous epoch's
+/// boundary finalization. It then fetches the committed block from one responder.
+/// Once the boundary block yields the target epoch's public
 /// [`Artifact`], discovery resolves all subscribers and can hand off to
 /// [`Serving`] after marshal is attached.
 pub(super) struct Discovery<E, S, V, T, B>
@@ -66,7 +85,7 @@ where
     pub(super) retry_timeout: NonZeroDuration,
     pub(super) artifact: Option<ActorArtifact<S, V>>,
     pub(super) subscribers: Vec<oneshot::Sender<ActorArtifact<S, V>>>,
-    pub(super) pending: Option<Pending>,
+    pub(super) pending: Option<Pending<S, V>>,
 }
 
 impl<E, S, V, T, B> Discovery<E, S, V, T, B>
@@ -133,7 +152,9 @@ where
                 debug!("boundary receiver closed, shutting down");
                 return;
             } => {
-                self.handle_boundary_response(peer, message);
+                if self.handle_boundary_response(peer, message, &mut boundary_sender) {
+                    deadline = self.context.current() + self.retry_timeout.get();
+                }
             },
             _ = retry => {
                 if let Some(epoch) = self.pending.as_ref().map(|pending| pending.epoch) {
@@ -148,8 +169,7 @@ where
                         self.resolve(artifact);
                         self.pending = None;
                     } else {
-                        debug!(%epoch, "re-requesting boundary block");
-                        Self::request_boundary(epoch, &mut boundary_sender);
+                        self.retry_boundary(&mut boundary_sender);
                         deadline = self.context.current() + self.retry_timeout.get();
                     }
                 }
@@ -225,6 +245,8 @@ where
             self.pending = Some(Pending {
                 height: Height::zero(),
                 epoch: Epoch::zero(),
+                in_flight: None,
+                candidates: VecDeque::new(),
             });
             return true;
         }
@@ -240,37 +262,46 @@ where
             );
             return false;
         };
-        Self::request_boundary(finalization.epoch(), boundary_sender);
+        Self::request_boundary_finalization(finalization.epoch(), boundary_sender);
         self.pending = Some(Pending {
             height,
             epoch: finalization.epoch(),
+            in_flight: None,
+            candidates: VecDeque::new(),
         });
         true
     }
 
-    /// Broadcast a request for the boundary block of `epoch` to all peers.
-    fn request_boundary(epoch: Epoch, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) {
+    /// Broadcast a request for the boundary finalization of `epoch` to all peers.
+    fn request_boundary_finalization(
+        epoch: Epoch,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) {
         boundary_sender.send(
             Recipients::All,
-            wire::Message::<S, V>::Request(epoch).encode(),
+            wire::Message::<S, V>::FinalizationRequest(epoch).encode(),
             false,
         );
     }
 
-    fn handle_boundary_response(&mut self, peer: S::PublicKey, message: impl Buf) {
-        let Some(pending) = self.pending.take() else {
-            return;
-        };
+    /// Handle a boundary protocol response, returning whether a new request was
+    /// sent so the caller can reset the retry deadline.
+    fn handle_boundary_response(
+        &mut self,
+        peer: S::PublicKey,
+        message: impl Buf,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        if self.pending.is_none() {
+            return false;
+        }
 
-        let response = match wire::read_response_finalization::<S, V, _>(
+        let response = match wire::read_response::<S, V, _>(
             message,
             &self.verifier.certificate_codec_config(),
         ) {
             Ok(Some(response)) => response,
-            Ok(None) => {
-                self.pending = Some(pending);
-                return;
-            }
+            Ok(None) => return false,
             Err(err) => {
                 commonware_p2p::block!(
                     self.blocker,
@@ -278,17 +309,32 @@ where
                     ?err,
                     "invalid bootstrap boundary response"
                 );
-                self.pending = Some(pending);
-                return;
+                return false;
             }
         };
-        let finalization = response.finalization;
-        let body = response.body;
+
+        match response {
+            wire::Response::Finalization(finalization) => {
+                self.handle_boundary_finalization(peer, finalization, boundary_sender)
+            }
+            wire::Response::Block { epoch, body } => {
+                self.handle_boundary_block(peer, epoch, body, boundary_sender)
+            }
+        }
+    }
+
+    fn handle_boundary_finalization(
+        &mut self,
+        peer: S::PublicKey,
+        finalization: Finalization<S, V::Commitment>,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        let mut pending = self.pending.take().expect("pending checked by caller");
 
         let Some(expected_finalization_epoch) = pending.epoch.previous() else {
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
             self.pending = Some(pending);
-            return;
+            return false;
         };
 
         let response_finalization_epoch = finalization.epoch();
@@ -299,62 +345,140 @@ where
                 "ignoring stale bootstrap boundary response"
             );
             self.pending = Some(pending);
-            return;
+            return false;
         }
 
         if response_finalization_epoch != expected_finalization_epoch {
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
             self.pending = Some(pending);
-            return;
+            return false;
         }
 
-        let response = match authenticate_boundary_response::<_, S, V, _>(
+        let duplicate = pending
+            .in_flight
+            .as_ref()
+            .is_some_and(|candidate| candidate.peer == peer)
+            || pending
+                .candidates
+                .iter()
+                .any(|candidate| candidate.peer == peer);
+        if duplicate {
+            self.pending = Some(pending);
+            return false;
+        }
+
+        if !finalization.verify(
             self.context.as_present_mut(),
             &self.verifier,
             &self.strategy,
-            &self.block_codec_config,
-            finalization,
-            body,
         ) {
-            Ok(response) => response,
-            Err(BoundaryResponseError::Decode(err)) => {
-                commonware_p2p::block!(
-                    self.blocker,
-                    peer,
-                    ?err,
-                    "invalid bootstrap boundary response"
-                );
-                self.pending = Some(pending);
-                return;
-            }
-            Err(
-                BoundaryResponseError::BlockCommitment | BoundaryResponseError::InvalidFinalization,
-            ) => {
-                commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
-                self.pending = Some(pending);
-                return;
-            }
-        };
-
-        match self.artifact_from_response(&pending, response) {
-            Some(artifact) => self.resolve(artifact),
-            None => {
-                commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
-                self.pending = Some(pending);
-            }
+            commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
+            self.pending = Some(pending);
+            return false;
         }
+
+        pending
+            .candidates
+            .push_back(Candidate { peer, finalization });
+        let requested = pending.in_flight.is_none();
+        if requested {
+            Self::request_next_block(&mut pending, boundary_sender);
+        }
+        self.pending = Some(pending);
+        requested
     }
 
-    fn artifact_from_response(
+    fn handle_boundary_block(
         &mut self,
-        pending: &Pending,
-        response: wire::Response<S, V>,
+        peer: S::PublicKey,
+        epoch: Epoch,
+        body: impl Buf,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        let mut pending = self.pending.take().expect("pending checked by caller");
+        let Some(candidate) = pending.in_flight.take() else {
+            self.pending = Some(pending);
+            return false;
+        };
+        if candidate.peer != peer || pending.epoch != epoch {
+            pending.in_flight = Some(candidate);
+            self.pending = Some(pending);
+            return false;
+        }
+
+        let commitment = candidate.finalization.proposal.payload;
+        let block =
+            match authenticate_boundary_block::<V>(&self.block_codec_config, commitment, body) {
+                Ok(block) => block,
+                Err(BoundaryBlockError::Decode(err)) => {
+                    commonware_p2p::block!(
+                        self.blocker,
+                        peer,
+                        ?err,
+                        "invalid bootstrap boundary block"
+                    );
+                    Self::request_next_block(&mut pending, boundary_sender);
+                    self.pending = Some(pending);
+                    return true;
+                }
+                Err(BoundaryBlockError::Commitment) => {
+                    commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary block");
+                    Self::request_next_block(&mut pending, boundary_sender);
+                    self.pending = Some(pending);
+                    return true;
+                }
+            };
+
+        let Some(artifact) = Self::artifact_from_block(&pending, candidate.finalization, block)
+        else {
+            commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary block");
+            Self::request_next_block(&mut pending, boundary_sender);
+            self.pending = Some(pending);
+            return true;
+        };
+        self.resolve(artifact);
+        false
+    }
+
+    fn retry_boundary(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) {
+        let pending = self
+            .pending
+            .as_mut()
+            .expect("retry requires pending boundary");
+        pending.in_flight = None;
+        Self::request_next_block(pending, boundary_sender);
+    }
+
+    fn request_next_block(
+        pending: &mut Pending<S, V>,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) {
+        let Some(candidate) = pending.candidates.pop_front() else {
+            debug!(epoch = %pending.epoch, "requesting boundary finalizations");
+            Self::request_boundary_finalization(pending.epoch, boundary_sender);
+            return;
+        };
+
+        let commitment = candidate.finalization.proposal.payload;
+        debug!(epoch = %pending.epoch, ?commitment, "requesting boundary block");
+        boundary_sender.send(
+            Recipients::One(candidate.peer.clone()),
+            wire::Message::<S, V>::BlockRequest(pending.epoch).encode(),
+            false,
+        );
+        pending.in_flight = Some(candidate);
+    }
+
+    fn artifact_from_block(
+        pending: &Pending<S, V>,
+        finalization: Finalization<S, V::Commitment>,
+        block: V::Block,
     ) -> Option<ActorArtifact<S, V>> {
-        if response.block.height() != pending.height {
+        if block.height() != pending.height {
             return None;
         }
 
-        let block = V::into_inner(response.block);
+        let block = V::into_inner(block);
         let Some(Payload::EpochInfo(info)) = block.payload() else {
             return None;
         };
@@ -364,7 +488,7 @@ where
 
         Some(Artifact {
             epoch: info.epoch,
-            finalization: Some(response.finalization),
+            finalization: Some(finalization),
             info,
         })
     }
@@ -377,38 +501,23 @@ where
     }
 }
 
-fn authenticate_boundary_response<R, S, V, T>(
-    rng: &mut R,
-    verifier: &S,
-    strategy: &T,
+fn authenticate_boundary_block<V: Variant>(
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
-    finalization: commonware_consensus::simplex::types::Finalization<S, V::Commitment>,
+    commitment: V::Commitment,
     body: impl Buf,
-) -> Result<wire::Response<S, V>, BoundaryResponseError>
-where
-    R: CryptoRng,
-    S: Scheme<V::Commitment>,
-    V: Variant,
-    T: Strategy,
-{
-    if !finalization.verify(rng, verifier, strategy) {
-        return Err(BoundaryResponseError::InvalidFinalization);
+) -> Result<V::Block, BoundaryBlockError> {
+    let block = wire::read_block::<V>(body, commitment, block_codec_config)
+        .map_err(BoundaryBlockError::Decode)?;
+    if V::commitment(&block) != commitment {
+        return Err(BoundaryBlockError::Commitment);
     }
-
-    let response = wire::read_response_block(body, finalization, block_codec_config)
-        .map_err(BoundaryResponseError::Decode)?;
-    if V::commitment(&response.block) != response.finalization.proposal.payload {
-        return Err(BoundaryResponseError::BlockCommitment);
-    }
-
-    Ok(response)
+    Ok(block)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dkg::tests::mocks;
-    use commonware_codec::Write as _;
     use commonware_coding::ReedSolomon;
     use commonware_consensus::{
         CertifiableBlock,
@@ -459,21 +568,35 @@ mod tests {
             .expect("finalization quorum")
     }
 
-    fn split_response<'a, S, V>(
-        message: &'a [u8],
+    fn decode_finalization_response<S, V>(
+        message: &[u8],
         verifier: &S,
-    ) -> (Finalization<S, V::Commitment>, &'a [u8])
+    ) -> Finalization<S, V::Commitment>
     where
         S: Scheme<V::Commitment>,
         V: Variant,
     {
-        let response = wire::read_response_finalization::<S, V, _>(
-            message,
-            &verifier.certificate_codec_config(),
-        )
-        .expect("response decoded")
-        .expect("response tag");
-        (response.finalization, response.body)
+        match wire::read_response::<S, V, _>(message, &verifier.certificate_codec_config())
+            .expect("response decoded")
+            .expect("response tag")
+        {
+            wire::Response::Finalization(finalization) => finalization,
+            wire::Response::Block { .. } => panic!("expected finalization response"),
+        }
+    }
+
+    fn split_block_response<'a, S, V>(message: &'a [u8], verifier: &S) -> (Epoch, &'a [u8])
+    where
+        S: Scheme<V::Commitment>,
+        V: Variant,
+    {
+        match wire::read_response::<S, V, _>(message, &verifier.certificate_codec_config())
+            .expect("response decoded")
+            .expect("response tag")
+        {
+            wire::Response::Block { epoch, body } => (epoch, body),
+            wire::Response::Finalization(_) => panic!("expected block response"),
+        }
     }
 
     fn threshold_fixture(
@@ -513,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_coding_finalization_is_rejected_before_block_decode() {
+    fn invalid_coding_finalization_is_rejected_before_block_request() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|mut context| async move {
             let fixture = threshold_fixture(&mut context);
@@ -550,32 +673,23 @@ mod tests {
                         .expect("participant count fits u16"),
                 ),
             ));
-            let mut message = Vec::new();
-            wire::Tag::Response.write(&mut message);
-            finalization.write(&mut message);
-            message.extend_from_slice(b"body must not be decoded");
+            let message = wire::Message::<TestThresholdScheme, TestCodingVariant>::FinalizationResponse(
+                finalization,
+            )
+            .encode()
+            .to_vec();
+            let finalization = decode_finalization_response::<
+                TestThresholdScheme,
+                TestCodingVariant,
+            >(&message, &verifier);
+            let authenticated = finalization.verify(&mut context, &verifier, &Sequential);
 
-            let (finalization, body) =
-                split_response::<TestThresholdScheme, TestCodingVariant>(&message, &verifier);
-            let result =
-                authenticate_boundary_response::<_, TestThresholdScheme, TestCodingVariant, _>(
-                    &mut context,
-                    &verifier,
-                    &Sequential,
-                    &(),
-                    finalization,
-                    body,
-                );
-
-            assert!(matches!(
-                result,
-                Err(BoundaryResponseError::InvalidFinalization)
-            ));
+            assert!(!authenticated);
         });
     }
 
     #[test]
-    fn valid_standard_response_decodes_after_authentication() {
+    fn valid_standard_block_decodes_after_finalization_authentication() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 4);
@@ -588,41 +702,41 @@ mod tests {
                 ),
                 &fixture.schemes,
             );
-            let message = wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::Response(
-                wire::Response {
-                    finalization,
-                    block: block.clone(),
-                },
-            )
-            .encode()
-            .to_vec();
-            let (finalization, body) =
-                split_response::<mocks::TestScheme, mocks::TestMarshalVariant>(
-                    &message,
-                    &fixture.schemes[0],
-                );
-
-            let response = authenticate_boundary_response::<
-                _,
+            let finalization_message = wire::Message::<
                 mocks::TestScheme,
                 mocks::TestMarshalVariant,
-                _,
-            >(
-                &mut context,
-                &fixture.schemes[0],
-                &Sequential,
-                &(),
-                finalization,
-                body,
-            )
-            .expect("standard response authenticated");
+            >::FinalizationResponse(finalization)
+            .encode()
+            .to_vec();
+            let finalization = decode_finalization_response::<
+                mocks::TestScheme,
+                mocks::TestMarshalVariant,
+            >(&finalization_message, &fixture.schemes[0]);
+            let authenticated = finalization.verify(&mut context, &fixture.schemes[0], &Sequential);
+            assert!(authenticated);
+            let commitment = finalization.proposal.payload;
+            let block_message =
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
+                    epoch: Epoch::zero(),
+                    block: block.clone(),
+                }
+                .encode()
+                .to_vec();
+            let (epoch, body) = split_block_response::<
+                mocks::TestScheme,
+                mocks::TestMarshalVariant,
+            >(&block_message, &fixture.schemes[0]);
+            assert_eq!(epoch, Epoch::zero());
+            let decoded =
+                authenticate_boundary_block::<mocks::TestMarshalVariant>(&(), commitment, body)
+                    .expect("standard block authenticated");
 
-            assert_eq!(response.block, block);
+            assert_eq!(decoded, block);
         });
     }
 
     #[test]
-    fn valid_coding_response_decodes_after_authentication() {
+    fn valid_coding_block_decodes_after_finalization_authentication() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 4);
@@ -643,36 +757,41 @@ mod tests {
                 ),
                 &fixture.schemes,
             );
-            let message =
-                wire::Message::<mocks::TestScheme, TestCodingVariant>::Response(wire::Response {
+            let finalization_message =
+                wire::Message::<mocks::TestScheme, TestCodingVariant>::FinalizationResponse(
                     finalization,
-                    block,
-                })
+                )
                 .encode()
                 .to_vec();
-            let (finalization, body) = split_response::<mocks::TestScheme, TestCodingVariant>(
-                &message,
+            let finalization = decode_finalization_response::<mocks::TestScheme, TestCodingVariant>(
+                &finalization_message,
                 &fixture.schemes[0],
             );
+            let authenticated = finalization.verify(&mut context, &fixture.schemes[0], &Sequential);
+            assert!(authenticated);
+            let block_message =
+                wire::Message::<mocks::TestScheme, TestCodingVariant>::BlockResponse {
+                    epoch: Epoch::zero(),
+                    block,
+                }
+                .encode()
+                .to_vec();
+            let (epoch, body) = split_block_response::<mocks::TestScheme, TestCodingVariant>(
+                &block_message,
+                &fixture.schemes[0],
+            );
+            assert_eq!(epoch, Epoch::zero());
+            let commitment = finalization.proposal.payload;
+            let decoded = authenticate_boundary_block::<TestCodingVariant>(&(), commitment, body)
+                .expect("coding block authenticated");
 
-            let response =
-                authenticate_boundary_response::<_, mocks::TestScheme, TestCodingVariant, _>(
-                    &mut context,
-                    &fixture.schemes[0],
-                    &Sequential,
-                    &(),
-                    finalization,
-                    body,
-                )
-                .expect("coding response authenticated");
-
-            assert_eq!(response.block.height(), Height::new(1));
-            assert_eq!(TestCodingVariant::commitment(&response.block), payload);
+            assert_eq!(decoded.height(), Height::new(1));
+            assert_eq!(TestCodingVariant::commitment(&decoded), payload);
         });
     }
 
     #[test]
-    fn valid_coding_response_decodes_with_certificate_verifier() {
+    fn valid_coding_block_decodes_with_certificate_verifier() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|mut context| async move {
             let fixture = threshold_fixture(&mut context);
@@ -697,29 +816,38 @@ mod tests {
                 ),
                 &fixture.schemes,
             );
-            let message =
-                wire::Message::<TestThresholdScheme, TestCodingVariant>::Response(wire::Response {
-                    finalization,
-                    block,
-                })
-                .encode()
-                .to_vec();
-            let (finalization, body) =
-                split_response::<TestThresholdScheme, TestCodingVariant>(&message, &verifier);
+            let finalization_message = wire::Message::<
+                TestThresholdScheme,
+                TestCodingVariant,
+            >::FinalizationResponse(finalization)
+            .encode()
+            .to_vec();
+            let finalization = decode_finalization_response::<
+                TestThresholdScheme,
+                TestCodingVariant,
+            >(&finalization_message, &verifier);
+            let authenticated = finalization.verify(&mut context, &verifier, &Sequential);
+            assert!(authenticated);
+            let block_message = wire::Message::<
+                TestThresholdScheme,
+                TestCodingVariant,
+            >::BlockResponse {
+                epoch: Epoch::zero(),
+                block,
+            }
+            .encode()
+            .to_vec();
+            let (epoch, body) = split_block_response::<
+                TestThresholdScheme,
+                TestCodingVariant,
+            >(&block_message, &verifier);
+            assert_eq!(epoch, Epoch::zero());
+            let commitment = finalization.proposal.payload;
+            let decoded = authenticate_boundary_block::<TestCodingVariant>(&(), commitment, body)
+                .expect("coding block authenticated");
 
-            let response =
-                authenticate_boundary_response::<_, TestThresholdScheme, TestCodingVariant, _>(
-                    &mut context,
-                    &verifier,
-                    &Sequential,
-                    &(),
-                    finalization,
-                    body,
-                )
-                .expect("coding response authenticated");
-
-            assert_eq!(response.block.height(), Height::new(1));
-            assert_eq!(TestCodingVariant::commitment(&response.block), payload);
+            assert_eq!(decoded.height(), Height::new(1));
+            assert_eq!(TestCodingVariant::commitment(&decoded), payload);
         });
     }
 }

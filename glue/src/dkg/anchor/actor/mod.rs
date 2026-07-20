@@ -46,7 +46,7 @@ where
     pub blocker: B,
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
-    /// How long to wait for a boundary response before re-broadcasting the request.
+    /// How long to wait before trying another boundary responder or re-broadcasting discovery.
     pub retry_timeout: NonZeroDuration,
     /// Mailbox capacity.
     pub mailbox_size: NonZeroUsize,
@@ -118,7 +118,7 @@ where
     /// The certificate backup channel is the mux backup receiver for the
     /// physical Simplex certificate channel. The boundary network is the
     /// anchor request channel used to fetch and later serve finalized boundary
-    /// blocks.
+    /// finalizations and blocks.
     pub fn start<BSE, BRE>(
         mut self,
         certificates: mpsc::Receiver<(Channel, P2pMessage<S::PublicKey>)>,
