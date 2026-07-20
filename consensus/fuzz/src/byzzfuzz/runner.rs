@@ -20,7 +20,6 @@ use crate::{
     },
     happens_before, invariants,
     simplex::Simplex,
-    simplex_audit::{RecordingReporter, summaries},
     sniff_sink, spawn_honest_validator,
     utils::Partition,
 };
@@ -28,7 +27,7 @@ use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_consensus::{
     Monitor as _,
-    simplex::mocks::relay,
+    simplex::mocks::{relay, reporter::Reporter},
     types::{Epoch, View},
 };
 use commonware_cryptography::{
@@ -42,12 +41,8 @@ use rand::RngExt as _;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 use tracing::{Dispatch, dispatcher};
 
-type ByzzReporter<P> = RecordingReporter<
-    deterministic::Context,
-    <P as Simplex>::Scheme,
-    <P as Simplex>::Elector,
-    Sha256Digest,
->;
+type ByzzReporter<P> =
+    Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
 
 /// Sample a per-iteration [`CertifyChoice`] for ByzzFuzz. `SingleCancel` and
 /// `SinglePending` always target [`BYZANTINE_IDX`]: ByzzFuzz keeps Byzantine
@@ -551,19 +546,19 @@ where
         }
 
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
-        let reporter_summaries = summaries(&reporters);
-        invariants::check_vote_invariants_with_byzantine(&byzantine, &reporter_summaries);
+        invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
 
         // State-extraction invariants assume each reporter is honest;
         // include only correct reporters here. Quorum thresholds still
         // derive from the full validator set, so `config.n` is unchanged.
         let correct_reporters: Vec<_> = reporters
-            .iter()
+            .into_iter()
             .enumerate()
-            .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter.clone()))
+            .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter))
             .collect();
 
-        invariants::check::<P>(config.n, correct_reporters.as_slice());
+        let states = invariants::extract(correct_reporters, config.n as usize);
+        invariants::check::<P>(config.n, states);
     });
 }
 

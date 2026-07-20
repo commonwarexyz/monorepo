@@ -295,6 +295,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_audit"
+path = "fuzz_targets/simplex_id_audit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_id_faulty_msg"
 path = "fuzz_targets/simplex_id_faulty_msg.rs"
 test = false
@@ -325,6 +332,13 @@ bench = false
 [[bin]]
 name = "simplex_cert_mock"
 path = "fuzz_targets/simplex_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_audit"
+path = "fuzz_targets/simplex_cert_mock_audit.rs"
 test = false
 doc = false
 bench = false
