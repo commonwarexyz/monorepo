@@ -1101,6 +1101,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// - Stale (all data strictly before `range.start`): resets to `range.start` using the
     ///   crash-safe clear path and returns an empty journal.
     /// - Overlap within [`range.start`, `range.end`]: prunes to `range.start`, exactly.
+    /// - Already pruned beyond the start (non-empty, pruning boundary above `range.start`):
+    ///   returns the journal as-is, matching `qmdb/sync/journal.rs`.
     /// - Data beyond `range.end`: returns [Error::ItemOutOfRange].
     ///
     /// # Arguments
@@ -1374,8 +1376,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// If the journal later rewinds or clears into the returned reader's range, subsequent
     /// reads from that range may observe unspecified contents. If the journal later PRUNES
-    /// into the reader's range, reads of the pruned positions may fail (the bytes drop at the
-    /// blob level and survive only while cached).
+    /// into the reader's range, reads of the pruned positions have THREE outcomes: a stale
+    /// success (the bytes survive in cache), a loud failure (the bytes dropped at the blob
+    /// level), or a MISDECODE — a cache page straddling the floor re-fetches with its pruned
+    /// prefix zeroed, and a zeroed varint length of 0 fabricates an empty item wherever the
+    /// codec accepts one. Consumers must never read below their own tracked pruning boundary.
     pub async fn snapshot(&mut self) -> Result<Reader<'static, E, V>, Error> {
         Ok(Reader {
             data: Blob::Sealed(self.data.snapshot().await.map_err(Error::Runtime)?),
@@ -1411,9 +1416,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// the new pruning boundary IS the requested position. Returns true if the boundary
     /// advanced.
     ///
-    /// Readers holding earlier snapshots may fail to read newly pruned positions (the bytes
-    /// drop at the blob level and survive only while cached); positions at or above the new
-    /// boundary stay readable everywhere.
+    /// Readers holding earlier snapshots and reading newly pruned positions see one of THREE
+    /// outcomes: a stale success (the bytes survive in cache), a loud failure (the bytes
+    /// dropped at the blob level), or a MISDECODE — a cache page straddling the floor
+    /// re-fetches with its pruned prefix zeroed, and a zeroed varint length of 0 fabricates
+    /// an empty item wherever the codec accepts one. Consumers must never read below their
+    /// own tracked pruning boundary. Positions at or above the new boundary stay readable
+    /// everywhere.
     ///
     /// Both blobs' dirty bytes and their new floors land in ONE commit. The floors are
     /// mutations whose durability follows that commit: a crash beforehand regresses them

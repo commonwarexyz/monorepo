@@ -92,7 +92,10 @@ async fn test_volume_prune_end_to_end() {
     // Monotonic: pruning below the floor is a no-op, beyond the size errs.
     blob.prune(4).await.unwrap();
     assert_eq!(blob.floor(), BLOCK + 7);
-    assert!(blob.prune(5 * BLOCK).await.is_err());
+    assert!(matches!(
+        blob.prune(5 * BLOCK).await,
+        Err(Error::BlobInsufficientLength)
+    ));
     audit_volume(&volume, false);
 
     // The floor persists at the next commit and across a clean reopen.
@@ -182,6 +185,45 @@ async fn test_volume_prune_past_all_refs_reopens() {
     assert_eq!(blob.floor(), 5 * BLOCK + 50);
     let got = blob.read_at(5 * BLOCK + 50, 50).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &vec![2u8; 50][..]);
+    audit_volume(&volume, true);
+}
+
+/// A staged shrink bottoming out exactly at a chunk-aligned pruned floor
+/// must clear the vacated chunk state wholesale: computing a boundary
+/// chunk below the floor marks dead state dirty and truncates a
+/// straddling segment into a fully dead one, both audit violations
+/// (found by the campaign's adversarial verification).
+#[tokio::test]
+async fn test_volume_batch_shrink_to_pruned_floor() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let volume = Volume::new(inner, pool, Config::default(), test_driver());
+    let (blob, _) = volume.open("p", b"journal").await.unwrap();
+    blob.write_at(0, IoBuf::from(vec![7u8; 10 * BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    blob.prune(5 * BLOCK).await.unwrap();
+
+    let mut batch = volume.batch().await.unwrap();
+    batch.resize(&blob, 5 * BLOCK).await.unwrap();
+    batch.apply().await.unwrap();
+    audit_volume(&volume, false);
+    blob.sync().await.unwrap();
+    audit_volume(&volume, true);
+    assert_eq!(blob.floor(), 5 * BLOCK);
+
+    // The vacated range regrows cleanly.
+    blob.write_at(5 * BLOCK, IoBuf::from(vec![9u8; BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    let got = blob
+        .read_at(5 * BLOCK, BLOCK as usize)
+        .await
+        .unwrap()
+        .coalesce();
+    assert_eq!(got.as_ref(), &vec![9u8; BLOCK as usize][..]);
     audit_volume(&volume, true);
 }
 
@@ -5209,7 +5251,7 @@ impl ScaleSoak {
     }
 
     /// Prune `name`'s prefix below `offset` and advance the ledger's
-    /// current floor to the chunk-rounded value. Pruning is a mutation:
+    /// current floor to the byte-exact offset. Pruning is a mutation:
     /// the blob's next commit publishes the floor.
     async fn prune(&mut self, name: &'static str, offset: u64) {
         self.blobs[name].prune(offset).await.unwrap();
@@ -5758,8 +5800,8 @@ async fn scale_soak_round(seed: u64) {
             // to a random offset between the current floor and the
             // committed size, clamped to the current size (a rewound side
             // blob may sit below its committed size, and pruning past the
-            // size errs). The impl rounds the floor DOWN to a chunk and
-            // the next commit publishes it. No batch outlives a churn
+            // size errs). The impl records the byte-exact floor and the
+            // next commit publishes it. No batch outlives a churn
             // step, so no prune can hit a blob a batch stages over (the
             // impl asserts on that).
             15 => {

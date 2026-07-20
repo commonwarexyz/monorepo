@@ -195,7 +195,14 @@
 //! about the OS and device, not checked facts), wall-clock effects,
 //! reader/writer async interleavings (see below), and staged batch resize
 //! (`Batch::resize` has no model action — its shrink-into-hole regressions
-//! are pinned by unit tests in `tests`). The checksum-extent lifecycle is
+//! are pinned by unit tests in `tests`). Batch operations over blobs with a
+//! NONZERO pruned floor are likewise unenumerated: `BatchOverwrite` is
+//! gated off at `floor > 0` and staged resize has no action, so only
+//! `BatchAppend` ever runs against a pruned blob. The `publish_overlay`
+//! shrink-to-floor defect lived exactly in that gap and is pinned by
+//! `tests::test_volume_batch_shrink_to_pruned_floor`. Enumerating batch
+//! ops over pruned blobs is a future model extension that needs a
+//! state-space budget. The checksum-extent lifecycle is
 //! also uncovered: the model inlines expected chunk content into the
 //! superblock-bound table, so the implementation's separately stored
 //! commit-written checksum extents — the whole-extent guard CRCs,

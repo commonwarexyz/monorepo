@@ -649,9 +649,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             .await?;
 
         // The journal's native prune must be this batch's FIRST staging over the journal's
-        // blob, so it runs before the sync staging. The prune stages the blob's durability
-        // itself; the sync covers the flushed nodes when the prune declines (the target moved
-        // less than one granularity chunk).
+        // blob, so it runs before the sync staging. An advancing prune stages the blob's
+        // durability itself. The trailing sync keeps the nodes `flush_internal` wrote covered
+        // even when the prune declines (a floor already at or past the byte-exact target
+        // stages nothing).
         self.journal.prune_into(*pos, batch).await?;
         self.journal.sync_into(batch).await?;
         self.journal_dirty = false;

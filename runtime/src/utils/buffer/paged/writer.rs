@@ -590,12 +590,13 @@ impl<B: Blob> Writer<B> {
     }
 
     /// Drop the blob's bytes below `offset` via [`Blob::prune`], flushing buffered bytes
-    /// first so the blob's physical size covers `offset`. The floor rounds down per the
-    /// backend's granularity, and its durability follows the blob's next sync.
+    /// first so the blob's physical size covers `offset`. The floor is byte-exact — it
+    /// becomes exactly `offset` — and its durability follows the blob's next sync (a
+    /// crash may regress it to the last synced floor).
     ///
-    /// Pages below the resulting floor may linger in the shared page cache and in this
-    /// writer's tip buffer, and pages straddling it re-fetch with their pruned prefix
-    /// zeroed. Reads below the floor therefore serve stale or zero bytes instead of
+    /// Pages below the floor may linger in the shared page cache and in this writer's
+    /// tip buffer, and pages straddling it re-fetch with their pruned prefix zeroed.
+    /// Reads below the floor therefore serve stale or zero bytes rather than reliably
     /// failing: callers must confine reads to offsets at or above the floor.
     ///
     /// # Panics

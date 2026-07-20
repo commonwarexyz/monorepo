@@ -7,7 +7,8 @@
 //! before the commit regresses the floor to the adopted commit's: prefix
 //! bytes reappear, never the reverse, and callers re-prune.
 
-use super::state::{check_not_removed, BlobCore, Ready};
+use super::state::{BlobCore, Ready};
+use commonware_formatting::hex;
 use crate::Error;
 
 /// Prune bytes below `offset`, exactly: the floor IS `offset`, and reads,
@@ -24,9 +25,18 @@ pub(super) fn prune_locked<S: crate::Storage>(
     offset: u64,
 ) -> Result<(), Error> {
     ready.check_poisoned()?;
-    check_not_removed(blob)?;
     let mut state = ready.state.lock();
     let mut inner = blob.inner.lock();
+    // Removal takes no write lock (see `publish_stretch`): re-check under
+    // the state and inner locks so a racing remove cannot be mutated —
+    // its dirty mark would linger forever (no commit captures a removed
+    // id) and its frees are already queued by the unlink.
+    if inner.removed() {
+        return Err(Error::BlobMissing(
+            blob.partition.clone(),
+            hex(&blob.name),
+        ));
+    }
     assert_eq!(
         inner.staged_batches(),
         0,

@@ -1463,6 +1463,11 @@ async fn fail_probe(prefix: &[Op], slot: u8, cap: usize, seed: u64, stats: &mut 
         rig.ctx()
     );
     assert!(
+        rig.blobs[&slot].prune(0).await.is_err(),
+        "{}: prune after a failed commit must fail",
+        rig.ctx()
+    );
+    assert!(
         rig.volume.batch().await.is_err(),
         "{}: batch after a failed commit must fail",
         rig.ctx()

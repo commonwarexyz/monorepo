@@ -172,11 +172,14 @@ impl<S: crate::Storage> Batch<S> {
         if len > u64::MAX - BLOCK {
             return Err(Error::OffsetOverflow);
         }
-        check_floor(&blob.core, len)?;
         let ready = self.ready.clone();
         let core = blob.core.clone();
         let staged = self.staged_mut(blob);
         let _guard = core.write_lock.lock().await;
+        // Under the write lock (and with the staged slot counted, which
+        // prune's assert observes): a racing prune can no longer raise the
+        // floor past this shrink between the check and the publish.
+        check_floor(&core, len)?;
         if staged.touched_only {
             staged.touched_only = false;
             // Staging begins now, against the blob's current size (see
@@ -821,7 +824,13 @@ fn publish_overlay(inner: &mut BlobInner, overlay: StagedBlob) {
         // staged regrow does not restore, so truncating at the final size
         // would keep vacated chunk states alive past their runs; the
         // regrown coverage's states reinstall from the overlay below.
-        if overlay.min_size == 0 {
+        let floor_chunk = chunk_of(inner.floor());
+        if overlay.min_size == 0 || chunk_of(overlay.min_size - 1) < floor_chunk {
+            // Nothing survives: every live chunk sits at or above the
+            // floor's chunk, and the shrink vacated all of them (a shrink
+            // bottoming out exactly at a chunk-aligned floor). A boundary
+            // chunk below the floor would mark dead state dirty and
+            // truncate a straddling segment into a fully dead one.
             inner.crcs_mut().clear();
             inner.retain_dirty_chunks(|_| false);
         } else {

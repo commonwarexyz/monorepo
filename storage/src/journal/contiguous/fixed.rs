@@ -294,7 +294,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Convert the blob's pruned floor to the pruning boundary. The journal only ever prunes
-    /// at item multiples, so a misaligned floor means foreign writes touched the blob.
+    /// at item multiples and `from_blob` rejects a misaligned stored floor as corruption, so
+    /// every caller passes an item-aligned floor.
     fn floor_to_boundary(floor: u64) -> u64 {
         debug_assert!(
             floor.is_multiple_of(Self::CHUNK_SIZE_U64),
@@ -331,7 +332,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 "blob has a partial item: {size} bytes"
             )));
         }
-        let bounds = Self::floor_to_boundary(raw.floor())..size / Self::CHUNK_SIZE_U64;
+        let floor = raw.floor();
+        if !floor.is_multiple_of(Self::CHUNK_SIZE_U64) {
+            return Err(Error::Corruption(format!(
+                "pruned floor splits an item: {floor} bytes (foreign write or item size change)"
+            )));
+        }
+        let bounds = Self::floor_to_boundary(floor)..size / Self::CHUNK_SIZE_U64;
 
         let blob = Writer::new(
             raw.clone(),
@@ -497,8 +504,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// If the journal later rewinds or truncates into the returned reader's range, subsequent
     /// reads from that range may observe unspecified contents. If the journal later PRUNES
-    /// into the reader's range, reads of the pruned positions may fail (the bytes drop at the
-    /// blob level and survive only while cached).
+    /// into the reader's range, reads of the pruned positions have THREE outcomes: a stale
+    /// success (the bytes survive in cache), a loud failure (the bytes dropped at the blob
+    /// level), or a MISDECODE — a cache page straddling the floor re-fetches with its pruned
+    /// prefix zeroed, and zeroed bytes can decode as a fabricated item wherever the codec
+    /// accepts them. Consumers must never read below their own tracked pruning boundary.
     pub async fn snapshot(&mut self) -> Result<Reader<'static, E, A>, Error> {
         Ok(Reader {
             blob: Blob::Sealed(self.blob.snapshot().await.map_err(Error::Runtime)?),
@@ -688,9 +698,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// the new pruning boundary IS the requested position. Returns true if the boundary
     /// advanced.
     ///
-    /// Readers holding earlier snapshots may fail to read newly pruned positions (the bytes
-    /// drop at the blob level and survive only while cached); positions at or above the new
-    /// boundary stay readable everywhere.
+    /// Readers holding earlier snapshots and reading newly pruned positions see one of THREE
+    /// outcomes: a stale success (the bytes survive in cache), a loud failure (the bytes
+    /// dropped at the blob level), or a MISDECODE — a cache page straddling the floor
+    /// re-fetches with its pruned prefix zeroed, and zeroed bytes can decode as a fabricated
+    /// item wherever the codec accepts them. Consumers must never read below their own
+    /// tracked pruning boundary. Positions at or above the new boundary stay readable
+    /// everywhere.
     ///
     /// The blob's dirty bytes and its new floor land in ONE commit. The floor itself is a
     /// mutation whose durability follows that commit: a crash beforehand regresses it (never
@@ -1826,6 +1840,62 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(journal.bounds(), 5..5);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A below-boundary clear removes the partition (one commit) and recreates the blob (a
+    /// second commit): the module docs claim a crash between the two recovers an EMPTY
+    /// journal at position 0, never fabricated items. Pin that claim by constructing the
+    /// intermediate state directly — the partition removed, nothing recreated — and then
+    /// re-clearing to the intended target the way the sync flows do on reopen.
+    #[test_traced]
+    fn test_fixed_journal_recreate_crash_window_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0u64..10 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.bounds(), 5..10);
+            drop(journal);
+
+            // The crash window's intermediate state: a below-boundary clear (to 3) has
+            // committed its removal but not the recreated image.
+            context.remove(&cfg.partition, None).await.unwrap();
+
+            // Recovery: the journal comes up EMPTY at position 0.
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+            assert!(matches!(
+                journal.read(0).await,
+                Err(Error::ItemOutOfRange(0))
+            ));
+
+            // A qmdb-sync-style re-clear to the intended target succeeds (see
+            // qmdb/sync/journal.rs and test_sync_journal_new_reclears_to_earlier_start).
+            journal.clear_to_size(3).await.unwrap();
+            let bounds = journal.bounds();
+            assert!(bounds.is_empty());
+            assert_eq!(bounds.start, 3);
+            let pos = journal.append(&test_digest(3)).await.unwrap();
+            assert_eq!(pos, 3);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // The re-cleared image persists across a plain reopen.
+            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 3..4);
+            assert_eq!(journal.read(3).await.unwrap(), test_digest(3));
             journal.destroy().await.unwrap();
         });
     }
