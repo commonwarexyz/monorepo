@@ -17,6 +17,7 @@ just regenerate-conformance -p commonware-codec -p commonware-storage
 ```
 
 Regeneration is an explicit approval of the new format. Do not use it merely to make a failing test pass.
+Conformance checks reject fixtures whose tests no longer exist, and regeneration removes them.
 
 ## New codec types
 

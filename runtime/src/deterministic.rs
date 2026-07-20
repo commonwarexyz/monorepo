@@ -1600,20 +1600,21 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        Blob, Metrics as _, Resolver, Runner as _, Spawner as _, Storage, Supervisor as _,
-        deterministic, reschedule,
+        Blob, Metrics as _, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
+        Supervisor as _, deterministic, reschedule,
     };
     use commonware_macros::test_traced;
+    use commonware_parallel::Strategy;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
-    use commonware_utils::channel::oneshot;
+    use commonware_utils::{NZUsize, channel::oneshot};
     #[cfg(feature = "external")]
     use futures::StreamExt;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
-    use futures::{stream::FuturesUnordered, task::noop_waker};
+    use futures::{FutureExt as _, stream::FuturesUnordered, task::noop_waker};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -2324,5 +2325,106 @@ mod tests {
             results1, results3,
             "different seeds should produce different patterns"
         );
+    }
+
+    #[test]
+    fn test_resolver() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Register DNS mappings
+            let ip1: IpAddr = "192.168.1.1".parse().unwrap();
+            let ip2: IpAddr = "192.168.1.2".parse().unwrap();
+            context.resolver_register("example.com", Some(vec![ip1, ip2]));
+
+            // Resolve registered hostname
+            let addrs = context.resolve("example.com").await.unwrap();
+            assert_eq!(addrs, vec![ip1, ip2]);
+
+            // Resolve unregistered hostname
+            let result = context.resolve("unknown.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+
+            // Remove mapping
+            context.resolver_register("example.com", None);
+            let result = context.resolve("example.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+        });
+    }
+
+    /// A strategy with parallelism greater than one must behave as configured under the
+    /// deterministic runtime even though no worker threads exist.
+    #[test]
+    fn test_parallel_strategy_spawn_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+            assert_eq!(strategy.parallelism(), 2);
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    /// Strategies share the pool registered with the executor thread, but each request must
+    /// retain its own planning parallelism and execute work. This covers multiple strategies
+    /// within one runner and a later runner on the same thread.
+    #[test]
+    fn test_strategies_reuse_pool_across_runners() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
+            assert_eq!(first.parallelism(), 1);
+            assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
+            let output = first
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2]);
+
+            let second = context.child("pool_b").strategy(NZUsize!(3)).manual();
+            assert_eq!(second.parallelism(), 3);
+            assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
+            let output = second
+                .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2, 3]);
+        });
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let third = context.child("pool_c").strategy(NZUsize!(4)).manual();
+            assert_eq!(third.parallelism(), 4);
+            assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
+            let output = third
+                .spawn(|strategy| strategy.map_collect_vec(0..4, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2, 3, 4]);
+        });
+    }
+
+    /// Tasks may suspend while a pool exists: pools have no worker tasks for the executor
+    /// to poll (a polled rayon worker loop would block or abort the runtime), so suspension
+    /// must leave the pool usable.
+    #[test]
+    fn test_pool_survives_suspension() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+            context.sleep(Duration::from_millis(10)).await;
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+            assert_eq!(output, vec![1, 2]);
+
+            context.sleep(Duration::from_millis(10)).await;
+            let sum = strategy.fold(0..100u64, || 0u64, |acc, i| acc + i, |a, b| a + b);
+            assert_eq!(sum, 4950);
+        });
     }
 }

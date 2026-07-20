@@ -188,11 +188,31 @@ fix-features:
 
 # Test conformance (optionally for specific crates: just test-conformance -p commonware-codec)
 test-conformance *args='':
-    just test --features arbitrary --profile conformance {{ args }}
+    just _conformance check {{ args }}
 
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
-    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests" just _conformance prune {{ args }}
+
+[private]
+_conformance mode *args='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    inventory="$(mktemp)"
+    trap 'rm -f "$inventory"' EXIT
+
+    cargo nextest list --features arbitrary --profile conformance --message-format json {{ args }} > "$inventory"
+
+    if [[ "{{ mode }}" == "check" ]]; then
+        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- check < "$inventory"
+    fi
+
+    just test --features arbitrary --profile conformance {{ args }}
+
+    if [[ "{{ mode }}" == "prune" ]]; then
+        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- prune < "$inventory"
+    fi
 
 # Find public items missing stability annotations.
 unstable-public *args='':
