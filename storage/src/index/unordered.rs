@@ -18,11 +18,6 @@ use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
 };
 
-/// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we
-/// will encounter. The hashmap will grow as needed, but this is a good starting point (covering the
-/// entire [crate::translator::OneCap] range).
-const INITIAL_CAPACITY: usize = 256;
-
 /// Implementation of [IndexEntry] for [OccupiedEntry].
 impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
     type Key = K;
@@ -67,12 +62,13 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         vacant.insert(v);
     }
 
-    /// Create a new index with the given translator and metrics registry.
+    /// Create a new index with the given translator and metrics registry. The maps start without
+    /// capacity and grow as needed, so unused indices (e.g. empty partitions) cost no memory.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         Self {
             translator: translator.clone(),
             overflow: HashMap::with_hasher(translator.clone()),
-            map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
+            map: HashMap::with_hasher(translator),
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
@@ -80,8 +76,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 
     /// Create an empty index with this index's translator and metric handles. Parallel
-    /// snapshot-build workers use it for their partition slots. The maps start without
-    /// capacity, since a worker slot often receives nothing.
+    /// snapshot-build workers use it for their partition slots.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn empty(&self) -> Self {
         Self {
