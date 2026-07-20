@@ -227,6 +227,34 @@ mod tests {
         Index::new(ctx, OneCap)
     }
 
+    /// A worker's value walk must visit every value it holds exactly once -- inline values and
+    /// overflow chains alike -- since the snapshot build derives the activity bitmap and
+    /// active-key counts from it.
+    #[test_traced]
+    fn test_range_for_each_value_visits_all_values_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let full = new_index(context.child("full"));
+
+            // Two keys in partition 0x80 that collide on the one-byte translated sub-key (an
+            // overflow chain), one distinct key beside them, and one key in partition 0x81.
+            let mut worker = full.new_range(0x80, 2);
+            assert!(worker.get_mut_or_insert(&[0x80, 0x01, 0xAA], 1).is_none());
+            assert!(worker.get_mut_or_insert(&[0x80, 0x01, 0xBB], 2).is_some());
+            {
+                let mut cursor = worker.get_mut(&[0x80, 0x01, 0xBB]).unwrap();
+                cursor.next();
+                cursor.insert(2);
+            }
+            assert!(worker.get_mut_or_insert(&[0x80, 0x02], 3).is_none());
+            assert!(worker.get_mut_or_insert(&[0x81, 0x07], 4).is_none());
+
+            let mut seen = Vec::new();
+            worker.for_each_value(|v| seen.push(*v));
+            seen.sort_unstable();
+            assert_eq!(seen, vec![1, 2, 3, 4]);
+        });
+    }
+
     /// A worker with a nonzero offset must land its slots at the global partitions
     /// `offset + local` when installed, carrying inline values and overflow chains (the
     /// key/item counts are live through the shared handles, so the `get` asserts are what pin

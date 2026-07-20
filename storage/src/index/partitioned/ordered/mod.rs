@@ -140,7 +140,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     }
 
     /// Visit every value held across all partitions (inline and spilled), in unspecified
-    /// order. Shared by the full index and a build worker's range view.
+    /// order. Shared by a build worker's range view over its local slots.
+    #[commonware_macros::stability(ALPHA)]
     fn for_each_value_impl(&self, mut f: impl FnMut(&V)) {
         for (p, partition) in self.partitions.iter().enumerate() {
             for v in partition.values_iter() {
