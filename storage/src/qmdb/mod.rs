@@ -689,9 +689,8 @@ where
 pub trait SnapshotBuild<F: Family>:
     sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
 {
-    /// The build's concurrency knob: `()` for index types that build serially, and a task count
-    /// for index types that build in parallel (including the calling task, so `1` builds
-    /// entirely on the calling task).
+    /// The concurrency configuration the build consumes. Index types that always build serially
+    /// declare `()`, so a setting they cannot use is unrepresentable.
     type Concurrency: Copy + Send + 'static;
 
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
