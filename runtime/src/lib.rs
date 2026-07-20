@@ -3168,6 +3168,105 @@ mod tests {
         });
     }
 
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_strategy<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Strategizer + Metrics,
+    {
+        runner.start(|context| async move {
+            // Create a strategy with a parallelism of 4.
+            let strategy = context.child("pool").strategy(NZUsize!(4));
+            assert_eq!(strategy.manual().parallelism(), 4);
+
+            // Use the strategy to sum a vector of numbers.
+            let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
+            assert_eq!(sum, 10000 * 9999 / 2);
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_nested_strategy_runs_inline<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Strategizer + Metrics,
+    {
+        runner.start(|context| async move {
+            let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default(), 4096, 64)]
+    #[case::deterministic_custom(
+        deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        ),
+        64,
+        8
+    )]
+    #[case::tokio(tokio::Runner::default(), 4096, 64)]
+    #[case::tokio_custom(
+        tokio::Runner::new(
+            tokio::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        ),
+        64,
+        8
+    )]
+    fn test_buffer_pooler<R: Runner>(
+        #[case] runner: R,
+        #[case] expected_network_max_per_class: u32,
+        #[case] expected_storage_max_per_class: u32,
+    ) where
+        R::Context: BufferPooler,
+    {
+        runner.start(|context| async move {
+            // Verify network pool is accessible and works (cache-line aligned)
+            let net_buf = context.network_buffer_pool().try_alloc(1024).unwrap();
+            assert!(net_buf.capacity() >= 1024);
+
+            // Verify storage pool is accessible and works (page-aligned)
+            let storage_buf = context.storage_buffer_pool().try_alloc(1024).unwrap();
+            assert!(storage_buf.capacity() >= 4096);
+
+            // Verify pools have expected configurations
+            assert!(
+                context
+                    .network_buffer_pool()
+                    .config()
+                    .size_classes()
+                    .all(|class| class.max_buffers.get() == expected_network_max_per_class)
+            );
+            assert!(
+                context
+                    .storage_buffer_pool()
+                    .config()
+                    .size_classes()
+                    .all(|class| class.max_buffers.get() == expected_storage_max_per_class)
+            );
+        });
+    }
+
     #[test]
     fn test_deterministic_resolver() {
         let executor = deterministic::Runner::default();
@@ -3189,6 +3288,83 @@ mod tests {
             context.resolver_register("example.com", None);
             let result = context.resolve("example.com").await;
             assert!(matches!(result, Err(Error::ResolveFailed(_))));
+        });
+    }
+
+    /// A strategy with parallelism greater than one must behave as configured under the
+    /// deterministic runtime even though no worker threads exist.
+    #[test]
+    fn test_deterministic_parallel_strategy_spawn_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+            assert_eq!(strategy.parallelism(), 2);
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    /// Strategies share the pool registered with the executor thread, but each request must
+    /// retain its own planning parallelism and execute work. This covers multiple strategies
+    /// within one runner and a later runner on the same thread.
+    #[test]
+    fn test_deterministic_strategies_reuse_pool_across_runners() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
+            assert_eq!(first.parallelism(), 1);
+            assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
+            let output = first
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2]);
+
+            let second = context.child("pool_b").strategy(NZUsize!(3)).manual();
+            assert_eq!(second.parallelism(), 3);
+            assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
+            let output = second
+                .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2, 3]);
+        });
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let third = context.child("pool_c").strategy(NZUsize!(4)).manual();
+            assert_eq!(third.parallelism(), 4);
+            assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
+            let output = third
+                .spawn(|strategy| strategy.map_collect_vec(0..4, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2, 3, 4]);
+        });
+    }
+
+    /// Tasks may suspend while a pool exists: pools have no worker tasks for the executor
+    /// to poll (a polled rayon worker loop would block or abort the runtime), so suspension
+    /// must leave the pool usable.
+    #[test]
+    fn test_deterministic_pool_survives_suspension() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+            context.sleep(Duration::from_millis(10)).await;
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+            assert_eq!(output, vec![1, 2]);
+
+            context.sleep(Duration::from_millis(10)).await;
+            let sum = strategy.fold(0..100u64, || 0u64, |acc, i| acc + i, |a, b| a + b);
+            assert_eq!(sum, 4950);
         });
     }
 
@@ -3342,182 +3518,6 @@ mod tests {
                         || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
                 );
             }
-        });
-    }
-
-    #[rstest]
-    #[case::deterministic(deterministic::Runner::default())]
-    #[case::tokio(tokio::Runner::default())]
-    fn test_strategy<R: Runner>(#[case] runner: R)
-    where
-        R::Context: Strategizer + Metrics,
-    {
-        runner.start(|context| async move {
-            // Create a strategy with a parallelism of 4.
-            let strategy = context.child("pool").strategy(NZUsize!(4));
-            assert_eq!(strategy.manual().parallelism(), 4);
-
-            // Use the strategy to sum a vector of numbers.
-            let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
-            assert_eq!(sum, 10000 * 9999 / 2);
-        });
-    }
-
-    #[rstest]
-    #[case::deterministic(deterministic::Runner::default())]
-    #[case::tokio(tokio::Runner::default())]
-    fn test_nested_strategy_runs_inline<R: Runner>(#[case] runner: R)
-    where
-        R::Context: Strategizer + Metrics,
-    {
-        runner.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
-
-            let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
-                .await;
-
-            assert_eq!(output, vec![1, 2]);
-        });
-    }
-
-    /// A strategy with parallelism greater than one must behave as configured under the
-    /// deterministic runtime even though no worker threads exist.
-    #[test]
-    fn test_deterministic_parallel_strategy_spawn_completes() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
-            assert_eq!(strategy.parallelism(), 2);
-
-            let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
-                .await;
-
-            assert_eq!(output, vec![1, 2]);
-        });
-    }
-
-    /// Strategies share the pool registered with the executor thread, but each request must
-    /// retain its own planning parallelism and execute work. This covers multiple strategies
-    /// within one runner and a later runner on the same thread.
-    #[test]
-    fn test_deterministic_strategies_reuse_pool_across_runners() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
-            assert_eq!(first.parallelism(), 1);
-            assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
-            let output = first
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
-                .now_or_never()
-                .expect("single-threaded pool should run spawned work inline");
-            assert_eq!(output, vec![1, 2]);
-
-            let second = context.child("pool_b").strategy(NZUsize!(3)).manual();
-            assert_eq!(second.parallelism(), 3);
-            assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
-            let output = second
-                .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
-                .now_or_never()
-                .expect("single-threaded pool should run spawned work inline");
-            assert_eq!(output, vec![1, 2, 3]);
-        });
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let third = context.child("pool_c").strategy(NZUsize!(4)).manual();
-            assert_eq!(third.parallelism(), 4);
-            assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
-            let output = third
-                .spawn(|strategy| strategy.map_collect_vec(0..4, |i| i + 1))
-                .now_or_never()
-                .expect("single-threaded pool should run spawned work inline");
-            assert_eq!(output, vec![1, 2, 3, 4]);
-        });
-    }
-
-    /// Tasks may suspend while a pool exists: pools have no worker tasks for the executor
-    /// to poll (a polled rayon worker loop would block or abort the runtime), so suspension
-    /// must leave the pool usable.
-    #[test]
-    fn test_deterministic_pool_survives_suspension() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
-            context.sleep(Duration::from_millis(10)).await;
-
-            let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
-                .await;
-            assert_eq!(output, vec![1, 2]);
-
-            context.sleep(Duration::from_millis(10)).await;
-            let sum = strategy.fold(0..100u64, || 0u64, |acc, i| acc + i, |a, b| a + b);
-            assert_eq!(sum, 4950);
-        });
-    }
-
-    #[rstest]
-    #[case::deterministic(deterministic::Runner::default(), 4096, 64)]
-    #[case::deterministic_custom(
-        deterministic::Runner::new(
-            deterministic::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        ),
-        64,
-        8
-    )]
-    #[case::tokio(tokio::Runner::default(), 4096, 64)]
-    #[case::tokio_custom(
-        tokio::Runner::new(
-            tokio::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        ),
-        64,
-        8
-    )]
-    fn test_buffer_pooler<R: Runner>(
-        #[case] runner: R,
-        #[case] expected_network_max_per_class: u32,
-        #[case] expected_storage_max_per_class: u32,
-    ) where
-        R::Context: BufferPooler,
-    {
-        runner.start(|context| async move {
-            // Verify network pool is accessible and works (cache-line aligned)
-            let net_buf = context.network_buffer_pool().try_alloc(1024).unwrap();
-            assert!(net_buf.capacity() >= 1024);
-
-            // Verify storage pool is accessible and works (page-aligned)
-            let storage_buf = context.storage_buffer_pool().try_alloc(1024).unwrap();
-            assert!(storage_buf.capacity() >= 4096);
-
-            // Verify pools have expected configurations
-            assert!(
-                context
-                    .network_buffer_pool()
-                    .config()
-                    .size_classes()
-                    .all(|class| class.max_buffers.get() == expected_network_max_per_class)
-            );
-            assert!(
-                context
-                    .storage_buffer_pool()
-                    .config()
-                    .size_classes()
-                    .all(|class| class.max_buffers.get() == expected_storage_max_per_class)
-            );
         });
     }
 }
