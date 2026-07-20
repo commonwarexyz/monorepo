@@ -300,7 +300,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     }
 
     /// Records that a certificate of `kind` exists, dropping its buffered votes.
-    pub(super) fn certify(&mut self, kind: Kind) {
+    pub(super) fn mark_certified(&mut self, kind: Kind) {
         match kind {
             Kind::Notarization => self.notarize.complete(),
             Kind::Nullification => self.nullify.complete(),
@@ -1873,7 +1873,7 @@ mod tests {
         );
         let round = Round::new(Epoch::new(0), View::new(1));
 
-        verifier.certify(Kind::Notarization);
+        verifier.mark_certified(Kind::Notarization);
         verifier.set_leader(Participant::new(0), None);
         assert!(verifier.get_leader_proposal().is_none());
 

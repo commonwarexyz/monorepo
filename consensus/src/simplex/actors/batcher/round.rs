@@ -92,8 +92,8 @@ impl<
     }
 
     /// Records that a certificate of `kind` exists, dropping its buffered votes.
-    pub fn certify(&mut self, kind: Kind) {
-        self.verifier.certify(kind);
+    pub fn mark_certified(&mut self, kind: Kind) {
+        self.verifier.mark_certified(kind);
     }
 
     /// Adds a vote from the network to this round's verifier.
