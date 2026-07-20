@@ -602,7 +602,6 @@ where
     // leave the workers running detached, retaining the log and their range allocations
     // after init has already failed. The stream is also released before the join.
     let end = log.bounds().end;
-    let last_commit = end.saturating_sub(1);
     let routing_result: Result<(), Error<F>> = async {
         let stream = log.replay(floor, SNAPSHOT_READ_BUFFER_SIZE).await?;
         pin_mut!(stream);
@@ -664,10 +663,11 @@ where
         total_items += 1;
     });
 
-    // `end > floor` (rather than `last_commit >= floor`) so an empty log sets no bit: with
-    // `end == 0`, the saturated `last_commit` of zero would spuriously pass the floor check
-    // and index past the empty bitmap.
-    if end > floor {
+    // The last operation is the final commit (a log always ends with one), which stays active.
+    // An empty log has none.
+    if let Some(last_commit) = end.checked_sub(1)
+        && last_commit >= floor
+    {
         active.set(last_commit - floor, true);
     }
 
