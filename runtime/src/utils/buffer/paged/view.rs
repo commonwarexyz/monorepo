@@ -1,10 +1,8 @@
-//! Shared view for the paged buffer's read-capable types.
+//! Borrowed read view over a paged blob.
 //!
-//! [`Writer`](super::Writer) and [`Sealed`](super::Sealed) read the same way: logical bytes in
-//! `[tail_offset, size)` come from an in-memory tail slice (the writer's tip buffer or the sealed
-//! blob's partial last page), and bytes in `[0, tail_offset)` come from the page cache, falling back
-//! to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
-//! exactly one place.
+//! [`Writer`](super::Writer) reads through a [`View`]: logical bytes in `[tail_offset, size)`
+//! come from an in-memory tail slice (the writer's tip buffer), and bytes in `[0, tail_offset)`
+//! come from the page cache, falling back to a blob read.
 
 use super::CacheRef;
 use crate::{Blob, Error, IoBufMut, IoBufs};

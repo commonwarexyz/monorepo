@@ -60,7 +60,7 @@
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use super::{Blob, Replay as BlobReplay};
+use super::Replay as BlobReplay;
 #[commonware_macros::stability(ALPHA)]
 use crate::{journal::authenticated, merkle};
 use crate::{
@@ -98,7 +98,7 @@ pub struct PreparedAppend<A> {
 ///
 /// `buffer` is a byte budget for each read batch, not an item count.
 fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
-    blob: Blob<'a, B>,
+    blob: &'a Writer<B>,
     bounds: Range<u64>,
     start_pos: u64,
     buffer: NonZeroUsize,
@@ -116,7 +116,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
             .checked_mul(A::SIZE as u64)
             .ok_or(Error::OffsetOverflow)?;
         state = Some(FixedReplayState::<B, A> {
-            replay: blob.replay_from(offset, buffer)?,
+            replay: BlobReplay::new(blob, offset, buffer)?,
             pos: start_pos,
             end_pos: bounds.end,
             items_per_batch: (buffer.get() / A::SIZE).max(1),
@@ -502,29 +502,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         batch.apply_sync().await.map_err(Error::Runtime)
     }
 
-    /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
-    /// creation, and the snapshot stays readable across concurrent appends.
-    ///
-    /// If the journal later rewinds or truncates into the returned reader's range, subsequent
-    /// reads from that range may observe unspecified contents. If the journal later PRUNES
-    /// into the reader's range, reads of the pruned positions have THREE outcomes: a stale
-    /// success (the bytes survive in cache), a loud failure (the bytes dropped at the blob
-    /// level), or a MISDECODE — a cache page straddling the floor re-fetches with its pruned
-    /// prefix zeroed, and zeroed bytes can decode as a fabricated item wherever the codec
-    /// accepts them. Consumers must never read below their own tracked pruning boundary.
-    pub async fn snapshot(&mut self) -> Result<Reader<'static, E, A>, Error> {
-        Ok(Reader {
-            blob: Blob::Sealed(self.blob.snapshot().await.map_err(Error::Runtime)?),
-            bounds: self.bounds.clone(),
-            metrics: self.metrics.clone(),
-            _phantom: PhantomData,
-        })
-    }
-
     /// A reader borrowing the journal's live state.
     pub(super) fn reader(&self) -> Reader<'_, E, A> {
         Reader {
-            blob: Blob::Writer(&self.blob),
+            blob: &self.blob,
             bounds: self.bounds.clone(),
             metrics: self.metrics.clone(),
             _phantom: PhantomData,
@@ -638,8 +619,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// * This operation is not guaranteed to survive restarts until `sync()` is
     ///   called.
-    /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
-    ///   rewind truncates into their range.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         match size.cmp(&self.bounds.end) {
             std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
@@ -699,15 +678,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Prune items at positions below `min_item_pos` (capped to the journal's size), exactly:
     /// the new pruning boundary IS the requested position. Returns true if the boundary
-    /// advanced.
-    ///
-    /// Readers holding earlier snapshots and reading newly pruned positions see one of THREE
-    /// outcomes: a stale success (the bytes survive in cache), a loud failure (the bytes
-    /// dropped at the blob level), or a MISDECODE — a cache page straddling the floor
-    /// re-fetches with its pruned prefix zeroed, and zeroed bytes can decode as a fabricated
-    /// item wherever the codec accepts them. Consumers must never read below their own
-    /// tracked pruning boundary. Positions at or above the new boundary stay readable
-    /// everywhere.
+    /// advanced. Positions at or above the new boundary stay readable.
     ///
     /// The blob's dirty bytes and its new floor land in ONE commit. The floor itself is a
     /// mutation whose durability follows that commit: a crash beforehand regresses it (never
@@ -891,9 +862,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 }
 
-/// A reader over a fixed journal.
-pub struct Reader<'a, E: Context, A> {
-    blob: Blob<'a, E::Blob>,
+/// A reader borrowing a fixed journal's live state.
+pub(super) struct Reader<'a, E: Context, A> {
+    blob: &'a Writer<E::Blob>,
     bounds: Range<u64>,
     metrics: Arc<Metrics<E>>,
     _phantom: PhantomData<A>,
@@ -939,7 +910,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         let hits = self
             .blob
             .read_many_into(&mut buf, &offsets, Journal::<E, A>::CHUNK_SIZE)
-            .await? as u64;
+            .await
+            .map_err(Error::Runtime)? as u64;
 
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
         for slice in buf.chunks_exact(A::SIZE) {
@@ -1033,7 +1005,11 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         let _timer = self.metrics.read_timer();
         let offset = self.locate(pos)?;
         self.metrics.cache_misses.inc();
-        let bufs = self.blob.read_at(offset, A::SIZE).await?;
+        let bufs = self
+            .blob
+            .read_at(offset, A::SIZE)
+            .await
+            .map_err(Error::Runtime)?;
         let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
         self.metrics.items_read.inc();
         Ok(item)
@@ -1072,7 +1048,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        replay_stream(self.blob.clone(), self.bounds.clone(), start_pos, buffer)
+        replay_stream(self.blob, self.bounds.clone(), start_pos, buffer)
     }
 }
 
@@ -1104,12 +1080,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        replay_stream(
-            Blob::Writer(&self.blob),
-            self.bounds.clone(),
-            start_pos,
-            buffer,
-        )
+        replay_stream(&self.blob, self.bounds.clone(), start_pos, buffer)
     }
 }
 
@@ -1316,15 +1287,13 @@ mod tests {
 
             // Replaying from 0 should fail since all items are pruned.
             {
-                let reader = journal.snapshot().await.unwrap();
-                let result = reader.replay(0, NZUsize!(1024)).await;
+                let result = journal.replay(0, NZUsize!(1024)).await;
                 assert!(matches!(result, Err(Error::ItemPruned(0))));
             }
 
             // Replaying from the pruning boundary should return an empty stream.
             {
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader
+                let stream = journal
                     .replay(journal.bounds().start, NZUsize!(1024))
                     .await
                     .expect("failed to replay journal from pruning boundary");
@@ -1436,8 +1405,7 @@ mod tests {
 
             // Replay should return all items.
             {
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
@@ -1454,8 +1422,7 @@ mod tests {
             // A partial replay starts mid-journal (mid-page and mid-chunk).
             {
                 const START_POS: u64 = 53;
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(START_POS, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(START_POS, NZUsize!(1024)).await.unwrap();
                 let mut count = 0;
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
@@ -1489,22 +1456,23 @@ mod tests {
             // Reopen with a fresh page cache so replay must hit storage, then inject read
             // faults: the stream must surface the error once and terminate.
             let cfg = test_cfg(&context);
-            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            let reader = journal.snapshot().await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 read_rate: Some(1.0),
                 ..Default::default()
             };
-            let stream = reader.replay(0, NZUsize!(1024)).await.unwrap();
-            pin_mut!(stream);
+            {
+                let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+                pin_mut!(stream);
 
-            assert!(matches!(
-                stream.next().await.unwrap(),
-                Err(Error::Runtime(_))
-            ));
-            assert!(stream.next().await.is_none());
+                assert!(matches!(
+                    stream.next().await.unwrap(),
+                    Err(Error::Runtime(_))
+                ));
+                assert!(stream.next().await.is_none());
+            }
 
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             journal.destroy().await.unwrap();
@@ -1747,8 +1715,7 @@ mod tests {
 
             // Replay from the boundary.
             {
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(110, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(110, NZUsize!(1024)).await.unwrap();
                 pin_mut!(stream);
                 let mut count = 0;
                 while let Some(result) = stream.next().await {
@@ -1998,49 +1965,6 @@ mod tests {
                 .catch_unwind()
                 .await;
             assert!(result.is_err());
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Snapshots freeze their bounds: appends and rewinds after the snapshot do not move it,
-    /// and unpruned positions stay readable.
-    #[test_traced]
-    fn test_snapshot_frozen_across_appends() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0u64..20 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-
-            let snapshot = journal.snapshot().await.unwrap();
-            assert_eq!(snapshot.bounds(), 0..20);
-
-            // Concurrent appends are invisible to the snapshot.
-            for i in 20u64..40 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            assert_eq!(snapshot.bounds(), 0..20);
-            assert!(matches!(
-                snapshot.read(20).await,
-                Err(Error::ItemOutOfRange(20))
-            ));
-            for i in 0u64..20 {
-                assert_eq!(snapshot.read(i).await.unwrap(), test_digest(i));
-            }
-
-            // A prune below the snapshot's range freezes the snapshot's BOUNDS, but the
-            // pruned bytes are gone at the blob level: only unpruned positions are guaranteed
-            // readable through the snapshot.
-            journal.prune(10).await.unwrap();
-            assert_eq!(snapshot.bounds(), 0..20);
-            for i in 10u64..20 {
-                assert_eq!(snapshot.read(i).await.unwrap(), test_digest(i));
-            }
 
             journal.destroy().await.unwrap();
         });

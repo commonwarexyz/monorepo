@@ -28,13 +28,11 @@ use crate::Error;
 
 mod cache;
 mod read;
-mod sealed;
 mod view;
 mod writer;
 
 pub use cache::CacheRef;
 pub use read::Replay;
-pub use sealed::Sealed;
 pub use writer::Writer;
 
 /// Ensure every requested range lies within the blob's size.
@@ -79,8 +77,8 @@ fn validate_read_ranges(
 /// and ranges that need cache/blob reads.
 ///
 /// `buf` holds one slot per range, back to back (validated by [validate_read_ranges]). `tail`
-/// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] this is the
-/// tip buffer, for [Sealed] the partial last page. Ranges entirely within `tail` are copied into
+/// holds the logical bytes at `[tail_offset, tail_offset + tail.len())` — the [Writer]'s tip
+/// buffer. Ranges entirely within `tail` are copied into
 /// place. Ranges fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
 /// pairs for the caller to read from the page cache or blob. `split_at_mut` yields disjoint
 /// per-range slots, so returned slices never alias.

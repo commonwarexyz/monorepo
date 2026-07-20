@@ -539,9 +539,8 @@ impl Cache {
 ///
 /// Cache entries must always contain a full page, so exactly `page_size` bytes are read. A
 /// partial last page is never fetched here: readers serve it from the in-memory tail (the
-/// writer's tip buffer or a sealed handle's partial page), so a stale cached copy can never
-/// mask appended bytes. A read past the blob's end therefore surfaces as an error rather than
-/// caching a short page.
+/// writer's tip buffer), so a stale cached copy can never mask appended bytes. A read past
+/// the blob's end therefore surfaces as an error rather than caching a short page.
 async fn fetch_cacheable_page(
     blob: &impl Blob,
     page_num: u64,

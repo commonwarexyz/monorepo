@@ -67,7 +67,7 @@
 //! recovers an EMPTY journal at position 0 — never fabricated items — and the sync flows that
 //! clear backwards re-clear on reopen.
 
-use super::{fixed, metrics::Metrics, Blob, Contiguous, Many, Mutable, Replay as BlobReplay};
+use super::{fixed, metrics::Metrics, Contiguous, Many, Mutable, Replay as BlobReplay};
 #[commonware_macros::stability(ALPHA)]
 use crate::{journal::authenticated, merkle};
 use crate::{
@@ -366,10 +366,10 @@ pub struct Journal<E: Context, V: Codec> {
     metrics: Arc<Metrics<E>>,
 }
 
-/// A reader over a variable journal.
-pub struct Reader<'a, E: Context, V: Codec> {
+/// A reader borrowing a variable journal's live state.
+pub(super) struct Reader<'a, E: Context, V: Codec> {
     /// The journal's data blob.
-    data: Blob<'a, E::Blob>,
+    data: &'a Writer<E::Blob>,
 
     /// The readable position range `[start, end)`.
     bounds: Range<u64>,
@@ -423,7 +423,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
     /// Read the varint-framed item at byte `offset`.
     async fn read_at_offset(&self, offset: u64) -> Result<V, Error> {
-        read_frame_at(&self.data, offset, &self.codec_config, self.compressed)
+        read_frame_at(self.data, offset, &self.codec_config, self.compressed)
             .await
             .map(|(_, _, item)| item)
     }
@@ -458,7 +458,12 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let start = offsets[0];
         let end = offsets[offsets.len() - 1];
         let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
-        let bytes = self.data.read_at(start, range_len).await?.coalesce();
+        let bytes = self
+            .data
+            .read_at(start, range_len)
+            .await
+            .map_err(Error::Runtime)?
+            .coalesce();
         let bytes = bytes.as_ref();
 
         let mut items = Vec::with_capacity(offsets.len());
@@ -580,7 +585,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         // points and cannot borrow `self`.
         let offset = self.frame_start(start_pos).await?;
         Ok(Some(ReplayState::<E::Blob, V> {
-            replay: self.data.clone().replay_from(offset, buffer)?,
+            replay: BlobReplay::new(self.data, offset, buffer)?,
             budget: buffer.get() as u64,
             pos: start_pos,
             end_pos: bounds.end,
@@ -1203,11 +1208,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns [Error::InvalidRewind] if `size` is larger than current size.
     /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
-    ///
-    /// # Warning
-    ///
-    /// - Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
-    ///   rewind truncates into their range.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         match size.cmp(&self.bounds.end) {
             std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
@@ -1375,32 +1375,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(end - 1)
     }
 
-    /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
-    /// creation, and the snapshot stays readable across concurrent appends.
-    ///
-    /// If the journal later rewinds or clears into the returned reader's range, subsequent
-    /// reads from that range may observe unspecified contents. If the journal later PRUNES
-    /// into the reader's range, reads of the pruned positions have THREE outcomes: a stale
-    /// success (the bytes survive in cache), a loud failure (the bytes dropped at the blob
-    /// level), or a MISDECODE — a cache page straddling the floor re-fetches with its pruned
-    /// prefix zeroed, and a zeroed varint length of 0 fabricates an empty item wherever the
-    /// codec accepts one. Consumers must never read below their own tracked pruning boundary.
-    pub async fn snapshot(&mut self) -> Result<Reader<'static, E, V>, Error> {
-        Ok(Reader {
-            data: Blob::Sealed(self.data.snapshot().await.map_err(Error::Runtime)?),
-            bounds: self.bounds.clone(),
-            start_offset: self.data.floor(),
-            offsets: self.offsets.snapshot().await?,
-            codec_config: self.codec_config.clone(),
-            compressed: self.compression.is_some(),
-            metrics: self.metrics.clone(),
-        })
-    }
-
     /// A reader borrowing the journal's live state.
     fn reader(&self) -> Reader<'_, E, V> {
         Reader {
-            data: Blob::Writer(&self.data),
+            data: &self.data,
             bounds: self.bounds.clone(),
             start_offset: self.data.floor(),
             offsets: self.offsets.reader(),
@@ -1418,15 +1396,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Prune items at positions below `min_position` (capped to the journal's size), exactly:
     /// the new pruning boundary IS the requested position. Returns true if the boundary
-    /// advanced.
-    ///
-    /// Readers holding earlier snapshots and reading newly pruned positions see one of THREE
-    /// outcomes: a stale success (the bytes survive in cache), a loud failure (the bytes
-    /// dropped at the blob level), or a MISDECODE — a cache page straddling the floor
-    /// re-fetches with its pruned prefix zeroed, and a zeroed varint length of 0 fabricates
-    /// an empty item wherever the codec accepts one. Consumers must never read below their
-    /// own tracked pruning boundary. Positions at or above the new boundary stay readable
-    /// everywhere.
+    /// advanced. Positions at or above the new boundary stay readable.
     ///
     /// Both blobs' dirty bytes and their new floors land in ONE commit. The floors are
     /// mutations whose durability follows that commit: a crash beforehand regresses them
@@ -1710,8 +1680,7 @@ mod tests {
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        deterministic, Batchable as _, BufferPooler, Metrics as _, Runner, Spawner as _, Storage,
-        Supervisor as _,
+        deterministic, Batchable as _, BufferPooler, Metrics as _, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
     use futures::{FutureExt as _, StreamExt as _};
@@ -1881,11 +1850,10 @@ mod tests {
             journal.sync().await.unwrap();
 
             let positions: Vec<u64> = (0..items.len() as u64).collect();
-            let reader = journal.snapshot().await.unwrap();
             // Warm both the offsets and data page caches, then expect every position to be
             // served synchronously.
-            let expected = reader.read_many(&positions).await.unwrap();
-            let served = reader.try_read_many_sync(&positions);
+            let expected = journal.read_many(&positions).await.unwrap();
+            let served = journal.try_read_many_sync(&positions);
             assert_eq!(served.len(), positions.len());
             for (item, expected) in served.iter().zip(&expected) {
                 assert_eq!(item.as_ref().expect("cached position is served"), expected);
@@ -1893,11 +1861,9 @@ mod tests {
 
             // An out-of-range position is a miss, not an error, and does not poison the rest
             // of the batch.
-            let served = reader.try_read_many_sync(&[9, 13]);
+            let served = journal.try_read_many_sync(&[9, 13]);
             assert!(served[0].is_some());
             assert!(served[1].is_none());
-            drop(served);
-            drop(reader);
 
             journal.destroy().await.unwrap();
         });
@@ -1917,8 +1883,7 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            let reader = journal.snapshot().await.unwrap();
-            let _ = reader.read_many(&[2, 1]).await;
+            let _ = journal.read_many(&[2, 1]).await;
         });
     }
 
@@ -1937,8 +1902,7 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            let reader = journal.snapshot().await.unwrap();
-            let _ = reader.read_many(&[1, 1]).await;
+            let _ = journal.read_many(&[1, 1]).await;
         });
     }
 
@@ -1959,23 +1923,21 @@ mod tests {
 
             let positions: Vec<u64> = (0..12).collect();
             let expected: Vec<u64> = (0..12).map(|i| i * 100).collect();
-            let reader = journal.snapshot().await.unwrap();
             for _ in 0..2 {
-                let mut served = reader.try_read_many_sync(&positions);
+                let mut served = journal.try_read_many_sync(&positions);
                 let misses: Vec<u64> = positions
                     .iter()
                     .zip(&served)
                     .filter_map(|(&pos, item)| item.is_none().then_some(pos))
                     .collect();
-                let mut fetched = reader.read_many(&misses).await.unwrap().into_iter();
+                let mut fetched = journal.read_many(&misses).await.unwrap().into_iter();
                 for item in served.iter_mut().filter(|item| item.is_none()) {
                     *item = fetched.next();
                 }
                 let completed: Vec<_> = served.into_iter().map(Option::unwrap).collect();
                 assert_eq!(completed, expected);
             }
-            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
-            drop(reader);
+            assert_eq!(journal.read_many(&positions).await.unwrap(), expected);
 
             journal.destroy().await.unwrap();
         });
@@ -1996,7 +1958,7 @@ mod tests {
                 .unwrap();
             journal.append_many(Many::Flat(&appended)).await.unwrap();
             journal.sync().await.unwrap();
-            let reader = journal.snapshot().await.unwrap();
+            let reader = journal.reader();
 
             // Present a miss carrying its frame start: the completion must serve it from the
             // data blob alone (offsets counters unchanged).
@@ -2045,14 +2007,12 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
                 ..cfg
             };
-            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg)
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            let reader = journal.snapshot().await.unwrap();
             let positions: Vec<u64> = (3..10).collect();
-            let items = reader.read_many(&positions).await.unwrap();
+            let items = journal.read_many(&positions).await.unwrap();
             assert_eq!(items, vec![300, 400, 500, 600, 700, 800, 900]);
-            drop(reader);
 
             journal.destroy().await.unwrap();
         });
@@ -2088,17 +2048,16 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
                 ..cfg
             };
-            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("second"), cfg)
+            let journal = Journal::<_, FixedBytes<300>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            let reader = journal.snapshot().await.unwrap();
-            reader.read(6).await.unwrap();
-            reader.read(16).await.unwrap();
+            journal.read(6).await.unwrap();
+            journal.read(16).await.unwrap();
 
             // Derive the hit/miss split the batch will see (read_many's sync pass is exactly
             // this probe), then check the batch's values and accounting against it.
             let positions = [0, 3, 5, 6, 10, 12, 15, 17, 20, 21, 23];
-            let served = reader.try_read_many_sync(&positions);
+            let served = journal.try_read_many_sync(&positions);
             let hits = served.iter().filter(|item| item.is_some()).count() as u64;
             let misses = positions.len() as u64 - hits;
             assert!(misses > 0, "some positions must be cold");
@@ -2109,7 +2068,7 @@ mod tests {
                 .map(|&p| items[p as usize].clone())
                 .collect();
             let before = context.encode();
-            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            assert_eq!(journal.read_many(&positions).await.unwrap(), expected);
             let after = context.encode();
             assert_eq!(
                 counter(&after, "second_cache_hits") - counter(&before, "second_cache_hits"),
@@ -2122,7 +2081,7 @@ mod tests {
 
             // A second pass serves the now-cached positions through the hit path and must agree.
             let before = context.encode();
-            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            assert_eq!(journal.read_many(&positions).await.unwrap(), expected);
             let after = context.encode();
             assert_eq!(
                 counter(&after, "second_cache_hits") - counter(&before, "second_cache_hits"),
@@ -2132,7 +2091,6 @@ mod tests {
                 counter(&after, "second_cache_misses"),
                 counter(&before, "second_cache_misses")
             );
-            drop(reader);
 
             journal.destroy().await.unwrap();
         });
@@ -2155,8 +2113,7 @@ mod tests {
 
             // Replay should return all items.
             {
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
                 let mut count = 0u64;
                 futures::pin_mut!(stream);
                 while let Some(result) = stream.next().await {
@@ -2170,8 +2127,7 @@ mod tests {
             // A partial replay starts mid-journal (mid-page and mid-frame).
             {
                 const START_POS: u64 = 53;
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(START_POS, NZUsize!(64)).await.unwrap();
+                let stream = journal.replay(START_POS, NZUsize!(64)).await.unwrap();
                 let mut count = 0;
                 futures::pin_mut!(stream);
                 while let Some(result) = stream.next().await {
@@ -2208,22 +2164,23 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
                 ..cfg
             };
-            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg)
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            let reader = journal.snapshot().await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 read_rate: Some(1.0),
                 ..Default::default()
             };
-            let stream = reader.replay(0, NZUsize!(1024)).await.unwrap();
-            futures::pin_mut!(stream);
+            {
+                let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+                futures::pin_mut!(stream);
 
-            assert!(matches!(
-                stream.next().await.unwrap(),
-                Err(Error::Runtime(_))
-            ));
-            assert!(stream.next().await.is_none());
+                assert!(matches!(
+                    stream.next().await.unwrap(),
+                    Err(Error::Runtime(_))
+                ));
+                assert!(stream.next().await.is_none());
+            }
 
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             journal.destroy().await.unwrap();
@@ -2838,8 +2795,7 @@ mod tests {
 
             // Replay from the boundary.
             {
-                let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(110, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(110, NZUsize!(1024)).await.unwrap();
                 futures::pin_mut!(stream);
                 let mut count = 0;
                 while let Some(result) = stream.next().await {
@@ -3122,11 +3078,9 @@ mod tests {
             let items = [0, 1, 2, 3, 4];
             journal.append_many(Many::Flat(&items)).await.unwrap();
             journal.append(&5).await.unwrap();
-            let reader = journal.snapshot().await.unwrap();
-            reader.read(0).await.unwrap();
-            reader.read_many(&[1, 2]).await.unwrap();
-            reader.try_read_sync(3).unwrap();
-            drop(reader);
+            journal.read(0).await.unwrap();
+            journal.read_many(&[1, 2]).await.unwrap();
+            journal.try_read_sync(3).unwrap();
             journal.sync().await.unwrap();
             journal.prune(2).await.unwrap();
             journal.rewind(4).await.unwrap();
@@ -3175,138 +3129,13 @@ mod tests {
             journal.sync().await.unwrap();
 
             // The page cache cannot hold every page, so some position must be cold.
-            let reader = journal.snapshot().await.unwrap();
             let pos = (0..200)
-                .find(|&pos| reader.try_read_sync(pos).is_none())
+                .find(|&pos| journal.try_read_sync(pos).is_none())
                 .expect("some position should be cold");
-            assert_eq!(reader.read(pos).await.unwrap(), pos);
-            drop(reader);
+            assert_eq!(journal.read(pos).await.unwrap(), pos);
 
             let buffer = context.encode();
             assert!(buffer.contains("miss_read_duration_count 1"), "{buffer}");
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Snapshots freeze their bounds: appends and rewinds after the snapshot do not move it,
-    /// and unpruned positions stay readable.
-    #[test_traced]
-    fn test_variable_snapshot_frozen_across_appends() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, "snapshot-frozen", LARGE_PAGE_SIZE, 10);
-            let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
-                .await
-                .unwrap();
-            for i in 0..20u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-
-            let snapshot = journal.snapshot().await.unwrap();
-            assert_eq!(snapshot.bounds(), 0..20);
-
-            // Concurrent appends are invisible to the snapshot.
-            for i in 20u64..40 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            assert_eq!(snapshot.bounds(), 0..20);
-            assert!(matches!(
-                snapshot.read(20).await,
-                Err(Error::ItemOutOfRange(20))
-            ));
-            for i in 0u64..20 {
-                assert_eq!(snapshot.read(i).await.unwrap(), i * 100);
-            }
-
-            // A prune below the snapshot's range freezes the snapshot's BOUNDS, but the
-            // pruned bytes are gone at the blob level: only unpruned positions are guaranteed
-            // readable through the snapshot.
-            journal.prune(10).await.unwrap();
-            assert_eq!(snapshot.bounds(), 0..20);
-            for i in 10u64..20 {
-                assert_eq!(snapshot.read(i).await.unwrap(), i * 100);
-            }
-
-            let fresh = journal.snapshot().await.unwrap();
-            assert_eq!(fresh.bounds(), 10..40);
-            assert!(matches!(fresh.read(3).await, Err(Error::ItemPruned(3))));
-
-            drop(snapshot);
-            drop(fresh);
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_snapshots_readable_during_concurrent_appends() {
-        let executor = deterministic::Runner::seeded(7);
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, "snapshot-concurrent", LARGE_PAGE_SIZE, 10);
-            let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
-                .await
-                .unwrap();
-
-            let (mut tx, mut rx) =
-                futures::channel::mpsc::channel::<Reader<'static, deterministic::Context, u64>>(8);
-            let validator = context.child("validator").spawn(|_| async move {
-                let mut validated = 0usize;
-                while let Some(snapshot) = rx.next().await {
-                    let bounds = snapshot.bounds();
-                    for i in bounds.clone() {
-                        assert_eq!(snapshot.read(i).await.unwrap(), i * 100);
-                    }
-                    validated += (bounds.end - bounds.start) as usize;
-                }
-                validated
-            });
-
-            for i in 0..40u64 {
-                journal.append(&(i * 100)).await.unwrap();
-                if i % 7 == 0 {
-                    let snapshot = journal.snapshot().await.unwrap();
-                    if tx.try_send(snapshot).is_err() {
-                        break;
-                    }
-                }
-            }
-            drop(tx);
-            assert!(validator.await.unwrap() > 0);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Replay through a stale snapshot observes the snapshot's frozen bounds.
-    #[test_traced]
-    fn test_variable_replay_from_stale_snapshot() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, "snapshot-replay", LARGE_PAGE_SIZE, 10);
-            let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
-                .await
-                .unwrap();
-            for i in 0..7u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-
-            let snapshot = journal.snapshot().await.unwrap();
-            for i in 7u64..20 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-
-            {
-                let stream = snapshot.replay(0, NZUsize!(1024)).await.unwrap();
-                futures::pin_mut!(stream);
-                let mut count = 0u64;
-                while let Some(result) = stream.next().await {
-                    let (pos, item) = result.unwrap();
-                    assert_eq!(item, pos * 100);
-                    count += 1;
-                }
-                assert_eq!(count, 7);
-            }
-            drop(snapshot);
 
             journal.destroy().await.unwrap();
         });

@@ -3,10 +3,6 @@
 //! A [Writer] exclusively owns its blob and cannot be cloned. Appended bytes can be read back
 //! immediately but are not durable until [Writer::sync].
 //!
-//! # Snapshot
-//!
-//! [Writer::snapshot] captures a logical read view without consuming the writer.
-//!
 //! # Paging
 //!
 //! Callers append and read logical bytes. The blob stores those bytes raw, so a byte's blob
@@ -498,19 +494,6 @@ impl<B: Blob> Writer<B> {
         Ok(Replay::new(reader))
     }
 
-    /// Flush buffered data and capture an immutable [`super::Sealed`] view without consuming the
-    /// writer.
-    ///
-    /// This writes buffered bytes to the blob but does not make them durable. Call
-    /// [`Self::sync`] if the returned handle's bytes must survive a crash.
-    ///
-    /// If this writer later rewinds or truncates into the returned handle's range, reads from that
-    /// handle may observe unspecified contents.
-    pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
-        self.flush_internal(true, false).await?;
-        Ok(self.sealed_handle())
-    }
-
     /// Flushes buffered data and makes all pending mutations durable.
     ///
     /// A single physical write can be persisted with [`Blob::write_at_sync`]. If there
@@ -686,35 +669,6 @@ impl<B: Blob> Writer<B> {
 
         Ok(())
     }
-
-    /// Page-cache id used for reads. Exposed for tests.
-    #[cfg(test)]
-    pub(super) const fn cache_id(&self) -> u64 {
-        self.id
-    }
-
-    /// Construct an immutable read handle for the current blob state, under a fresh
-    /// page-cache id: the writer keeps mutating its own cache namespace, so the handle
-    /// must not share it.
-    fn sealed_handle(&self) -> super::Sealed<B> {
-        assert_eq!(
-            self.buffer.offset % self.cache_ref.page_size(),
-            0,
-            "flushed tip must start on a page boundary"
-        );
-        let partial_page = if self.buffer.is_empty() {
-            None
-        } else {
-            Some(self.buffer.slice(..))
-        };
-        super::Sealed::new(
-            self.blob.clone(),
-            self.buffer.size(),
-            partial_page,
-            self.cache_ref.clone(),
-            self.cache_ref.next_id(),
-        )
-    }
 }
 
 #[cfg(test)]
@@ -729,12 +683,9 @@ mod tests {
         Supervisor as _,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16, NZU32};
+    use commonware_utils::{sync::Mutex, NZUsize, NZU16, NZU32};
     use futures::FutureExt as _;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
+    use std::sync::Arc;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
@@ -1476,6 +1427,46 @@ mod tests {
         });
     }
 
+    /// Syncing a recovered, already-synced partial page must not rewrite it.
+    #[test_traced("DEBUG")]
+    fn test_sync_recovered_synced_partial_page_no_write() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let data: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(PAGE_SIZE.get() as usize - 17)
+                .collect();
+
+            {
+                let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
+                writer.append(&data).await.unwrap();
+                writer.sync().await.unwrap();
+            }
+
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            let mut recovered = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(recovered.size(), data.len() as u64);
+
+            recovered.sync().await.unwrap();
+            let (_, writes_after_sync, full_after_sync, range_after_sync) = blob.snapshot();
+            assert_eq!(
+                writes_after_sync, writes,
+                "syncing an unchanged recovered partial page must not rewrite it"
+            );
+            assert_eq!(full_after_sync, full_syncs + 1);
+            assert_eq!(range_after_sync, range_syncs);
+
+            let read = recovered.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_append_owned_bypass_with_buffered_tip() {
         // A large owned append merges with unsynced buffered bytes: the fill completes the
@@ -1906,53 +1897,6 @@ mod tests {
             let (_, writes, full_syncs, _) = inner.snapshot();
             assert!(writes > 0);
             assert!(full_syncs > 0);
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    // Verifies snapshot cannot flush buffered bytes before pending start_sync finishes.
-    fn test_snapshot_waits_for_outstanding_start_sync_before_flushing() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let inner = SyncTrackingBlob::new();
-            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
-
-            // Start a sync, then buffer newer bytes not covered by it.
-            let prior = writer.start_sync().await;
-            let deferred = next_pending_sync(&pending);
-            writer.append(b"hello world").await.unwrap();
-
-            let snapshot = context.child("snapshot").spawn(move |_| async move {
-                let snapshot = writer.snapshot().await.unwrap();
-                let read = snapshot
-                    .read_at(0, b"hello world".len())
-                    .await
-                    .unwrap()
-                    .coalesce();
-                assert_eq!(read.as_ref(), b"hello world");
-                writer
-            });
-
-            // Snapshot must wait before flushing buffered bytes.
-            deferred
-                .blocked
-                .await
-                .expect("snapshot never waited on start_sync");
-            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
-            assert_eq!(writes, 0);
-            assert_eq!(full_syncs, 0);
-            assert_eq!(range_syncs, 0);
-
-            // Releasing the sync lets snapshot flush and read the buffered bytes.
-            deferred.release.send(Ok(())).unwrap();
-            let _writer = snapshot.await.unwrap();
-            prior.await.unwrap();
-            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
-            assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 1);
-            assert_eq!(range_syncs, 0);
         });
     }
 
@@ -2469,127 +2413,31 @@ mod tests {
         });
     }
 
-    /// Blob wrapper that delays one selected read after capturing its current bytes.
-    #[derive(Clone)]
-    struct DelayedReadBlob<B: Blob> {
-        inner: B,
-        offset: u64,
-        len: usize,
-        reads: Arc<AtomicUsize>,
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-    }
+    /// `read_up_to` at the logical end: a non-zero request errors, a zero-length request
+    /// succeeds with zero bytes.
+    #[test_traced("DEBUG")]
+    fn test_read_up_to_at_eof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let (blob, size) = context
+                .open("test_partition", b"read_up_to_eof")
+                .await
+                .unwrap();
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            writer.append(b"abc").await.unwrap();
 
-    impl<B: Blob> DelayedReadBlob<B> {
-        fn new(
-            inner: B,
-            offset: u64,
-            len: usize,
-            started: oneshot::Sender<()>,
-            release: oneshot::Receiver<()>,
-        ) -> Self {
-            Self {
-                inner,
-                offset,
-                len,
-                reads: Arc::new(AtomicUsize::new(0)),
-                started: Arc::new(Mutex::new(Some(started))),
-                release: Arc::new(Mutex::new(Some(release))),
-            }
-        }
-    }
-
-    impl<B: Blob> crate::Blob for DelayedReadBlob<B> {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            if offset == self.offset
-                && len == self.len
-                && self.reads.fetch_add(1, Ordering::SeqCst) == 0
-            {
-                let bytes = self.inner.read_at(offset, len).await?;
-
-                let sender = self
-                    .started
-                    .lock()
-                    .take()
-                    .expect("delayed read start signal consumed more than once");
-                let _ = sender.send(());
-
-                let release = self
-                    .release
-                    .lock()
-                    .take()
-                    .expect("delayed read release receiver consumed more than once");
-                release.await.expect("release signal dropped");
-
-                return Ok(bytes);
-            }
-
-            self.inner.read_at(offset, len).await
-        }
-
-        async fn read_at_buf(
-            &self,
-            offset: u64,
-            len: usize,
-            bufs: impl Into<IoBufsMut> + Send,
-        ) -> Result<IoBufsMut, Error> {
-            if offset == self.offset
-                && len == self.len
-                && self.reads.fetch_add(1, Ordering::SeqCst) == 0
-            {
-                let bytes = self.inner.read_at_buf(offset, len, bufs).await?;
-
-                let sender = self
-                    .started
-                    .lock()
-                    .take()
-                    .expect("delayed read start signal consumed more than once");
-                let _ = sender.send(());
-
-                let release = self
-                    .release
-                    .lock()
-                    .take()
-                    .expect("delayed read release receiver consumed more than once");
-                release.await.expect("release signal dropped");
-
-                return Ok(bytes);
-            }
-
-            self.inner.read_at_buf(offset, len, bufs).await
-        }
-
-        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.inner.write_at(offset, bufs).await
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.inner.write_at_sync(offset, bufs).await
-        }
-
-        async fn prune(&self, offset: u64) -> Result<(), Error> {
-            self.inner.prune(offset).await
-        }
-
-        fn floor(&self) -> u64 {
-            self.inner.floor()
-        }
-
-        async fn resize(&self, len: u64) -> Result<(), Error> {
-            self.inner.resize(len).await
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            self.inner.sync().await
-        }
-
-        async fn start_sync(&self) -> Handle<()> {
-            self.inner.start_sync().await
-        }
+            let size = writer.size();
+            let result = writer.read_up_to(size, 1, IoBufMut::with_capacity(1)).await;
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+            let (_, read) = writer
+                .read_up_to(size, 0, IoBufMut::with_capacity(0))
+                .await
+                .unwrap();
+            assert_eq!(read, 0);
+        });
     }
 
     #[test]
@@ -2634,174 +2482,6 @@ mod tests {
                 !hit || probe == new_bytes,
                 "try_read_sync_into served stale pre-resize bytes: {probe:?}"
             );
-        });
-    }
-
-    #[test]
-    fn test_snapshot_fetch_cannot_repopulate_live_cache_after_resize() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let page_size = PAGE_SIZE.get() as usize;
-            let (inner, blob_size) = context
-                .open("test_partition", b"snapshot_resize_cache")
-                .await
-                .unwrap();
-            let (started_tx, started_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            let blob =
-                DelayedReadBlob::new(inner, page_size as u64, page_size, started_tx, release_rx);
-            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
-                .await
-                .unwrap();
-
-            let old_page0 = vec![0x11u8; page_size];
-            let old_page1 = vec![0x22u8; page_size];
-            writer.append(&old_page0).await.unwrap();
-            writer.append(&old_page1).await.unwrap();
-            writer.sync().await.unwrap();
-
-            writer.cache_ref.invalidate_from(writer.id, 1);
-
-            let snapshot = writer.snapshot().await.unwrap();
-            let snapshot_task = context
-                .child("snapshot")
-                .spawn(move |_| async move { snapshot.read_at(page_size as u64, page_size).await });
-            started_rx.await.expect("snapshot read never started");
-
-            writer.resize(page_size as u64).await.unwrap();
-            let new_page1 = vec![0x33u8; page_size];
-            writer.append(&new_page1).await.unwrap();
-            writer.sync().await.unwrap();
-
-            let _ = release_tx.send(());
-            let stale = snapshot_task
-                .await
-                .expect("snapshot task failed")
-                .expect("snapshot read failed")
-                .coalesce();
-            assert_eq!(stale.as_ref(), old_page1.as_slice());
-
-            let mut probe = vec![0u8; page_size];
-            assert!(writer.try_read_sync_into(&mut probe, page_size as u64));
-            assert_eq!(probe, new_page1);
-        });
-    }
-
-    #[test]
-    fn test_resize_shrink_allowed_while_snapshot_alive() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let (blob, blob_size) = context
-                .open("test_partition", b"snapshot_blocks_shrink")
-                .await
-                .unwrap();
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
-                .await
-                .unwrap();
-
-            let page_size = PAGE_SIZE.get() as usize;
-            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 2 + 7).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
-
-            let snapshot = append.snapshot().await.unwrap();
-            let snapshot_clone = snapshot.clone();
-            let snapshot_size = snapshot.size();
-
-            let read = snapshot.read_at(0, data.len()).await.unwrap().coalesce();
-            assert_eq!(read.as_ref(), data.as_slice());
-
-            // Growing appends after the snapshot's frozen range, so it cannot invalidate it.
-            append.resize(snapshot_size + 3).await.unwrap();
-            assert_eq!(append.size(), snapshot_size + 3);
-
-            // Shrinking while old handles exist is allowed. Those handles remain memory-safe, but
-            // future reads from ranges reused by the writer are unspecified.
-            append.resize(snapshot_size - 1).await.unwrap();
-            assert_eq!(append.size(), snapshot_size - 1);
-            assert_eq!(snapshot_clone.size(), snapshot_size);
-        });
-    }
-
-    #[test]
-    fn test_snapshot_read_many_into_matches_read_at() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let (blob, blob_size) = context
-                .open("test_partition", b"snapshot_read_many")
-                .await
-                .unwrap();
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
-                .await
-                .unwrap();
-
-            let item_size = 4;
-            let page_size = PAGE_SIZE.get() as usize;
-            let total = page_size * 3 + 13;
-            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
-
-            let snapshot = append.snapshot().await.unwrap();
-            let offsets = [
-                0,
-                (page_size - item_size) as u64,
-                (page_size + 5) as u64,
-                (page_size * 3 + 2) as u64,
-            ];
-            // Cover page-aligned, boundary-crossing, and snapshot-tail reads in one batch.
-            let mut batch = vec![0u8; offsets.len() * item_size];
-            snapshot
-                .read_many_into(&mut batch, &offsets, NZUsize!(item_size))
-                .await
-                .unwrap();
-
-            for (item, offset) in batch.chunks_exact(item_size).zip(offsets) {
-                let single = snapshot
-                    .read_at(offset, item_size)
-                    .await
-                    .unwrap()
-                    .coalesce();
-                assert_eq!(item, single.as_ref());
-                assert_eq!(item, &data[offset as usize..offset as usize + item_size]);
-            }
-        });
-    }
-
-    #[test]
-    fn test_snapshot_try_read_sync_prefers_snapshot_tail() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let (blob, blob_size) = context
-                .open("test_partition", b"snapshot_try_read_tail")
-                .await
-                .unwrap();
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
-                .await
-                .unwrap();
-
-            let page_size = PAGE_SIZE.get() as usize;
-            append.append(&vec![0xAA; page_size]).await.unwrap();
-            append.sync().await.unwrap();
-
-            let tail = b"oldtail";
-            append.append(tail).await.unwrap();
-            let snapshot = append.snapshot().await.unwrap();
-
-            let poison = vec![0xBB; page_size];
-            // If the snapshot consulted the page cache for its tail, this would leak in.
-            assert_eq!(
-                append.cache_ref.cache(append.id, &poison, page_size as u64),
-                0
-            );
-
-            let mut read = vec![0; tail.len()];
-            assert!(snapshot.try_read_sync_into(&mut read, page_size as u64));
-            assert_eq!(read.as_slice(), tail);
         });
     }
 

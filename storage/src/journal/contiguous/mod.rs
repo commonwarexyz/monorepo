@@ -8,11 +8,7 @@
 //! leave its in-memory state inconsistent with the underlying storage.
 
 use super::Error;
-use crate::journal::frame::FrameReader;
-use commonware_runtime::{
-    buffer::paged::{Replay as PagedReplay, Sealed, Writer},
-    Blob as RBlob, Buf, Error as RError, IoBufMut, IoBufs,
-};
+use commonware_runtime::{buffer::paged::Writer, Blob as RBlob, Buf, Error as RError, IoBufMut};
 use futures::{stream, Stream, StreamExt as _};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
@@ -252,226 +248,14 @@ pub trait Mutable: Contiguous + Send + Sync {
     }
 }
 
-/// A read handle for a journal's blob.
-pub(super) enum Blob<'a, B: RBlob> {
-    /// Writable blob, read through the writer's cache-aware logical view.
-    Writer(&'a Writer<B>),
-    /// Immutable snapshot of the blob.
-    Sealed(Sealed<B>),
-}
-
-impl<B: RBlob> Clone for Blob<'_, B> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Writer(writer) => Self::Writer(writer),
-            Self::Sealed(sealed) => Self::Sealed(sealed.clone()),
-        }
-    }
-}
-
-impl<'a, B: RBlob> Blob<'a, B> {
-    /// Return the blob's logical size.
-    pub(super) fn size(&self) -> u64 {
-        match self {
-            Self::Writer(writer) => writer.size(),
-            Self::Sealed(sealed) => sealed.size(),
-        }
-    }
-
-    /// Read into `buf` if the data is already cached.
-    pub(super) fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
-        match self {
-            Self::Writer(writer) => writer.try_read_sync_into(buf, offset),
-            Self::Sealed(sealed) => sealed.try_read_sync_into(buf, offset),
-        }
-    }
-
-    /// Read exactly `len` bytes at `offset`.
-    pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        match self {
-            Self::Writer(writer) => writer.read_at(offset, len).await.map_err(Error::Runtime),
-            Self::Sealed(sealed) => sealed.read_at(offset, len).await.map_err(Error::Runtime),
-        }
-    }
-
-    /// Read up to `len` bytes at `offset`.
-    pub(super) async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        match self {
-            Self::Writer(writer) => writer
-                .read_up_to(offset, len, bufs)
-                .await
-                .map_err(Error::Runtime),
-            Self::Sealed(sealed) => sealed
-                .read_up_to(offset, len, bufs)
-                .await
-                .map_err(Error::Runtime),
-        }
-    }
-
-    /// Return a sequential replay handle starting at `offset`.
-    ///
-    /// Constructing the handle is cheap: paged replay stores prefetch settings, and writer-view
-    /// replay starts with an empty buffer. Read buffers are allocated later by `Replay::ensure`.
-    ///
-    /// Sealed blobs can use paged replay directly because their bytes are already fixed. A
-    /// writable blob is replayed through a live view so replay observes logical bytes without
-    /// mutating or flushing the writer.
-    pub(super) fn replay_from(
-        self,
-        offset: u64,
-        buffer_size: NonZeroUsize,
-    ) -> Result<Replay<'a, B>, Error> {
-        match self {
-            Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
-            Self::Sealed(sealed) => {
-                let mut replay = sealed.replay(buffer_size).map_err(Error::Runtime)?;
-                replay.seek_to(offset).map_err(Error::Runtime)?;
-                Ok(Replay::paged(replay))
-            }
-        }
-    }
-
-    /// Read fixed-size items at sorted byte offsets into `buf`.
-    pub(super) async fn read_many_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Result<usize, Error> {
-        match self {
-            Self::Writer(writer) => writer
-                .read_many_into(buf, offsets, item_size)
-                .await
-                .map_err(Error::Runtime),
-            Self::Sealed(sealed) => sealed
-                .read_many_into(buf, offsets, item_size)
-                .await
-                .map_err(Error::Runtime),
-        }
-    }
-
-    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
-    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
-    pub(super) fn try_read_many_sync_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Vec<usize> {
-        match self {
-            Self::Writer(writer) => writer.try_read_many_sync_into(buf, offsets, item_size),
-            Self::Sealed(sealed) => sealed.try_read_many_sync_into(buf, offsets, item_size),
-        }
-    }
-
-    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges.
-    pub(super) fn try_read_ranges_sync_into(
-        &self,
-        buf: &mut [u8],
-        ranges: &[(u64, usize)],
-    ) -> Vec<usize> {
-        match self {
-            Self::Writer(writer) => writer.try_read_ranges_sync_into(buf, ranges),
-            Self::Sealed(sealed) => sealed.try_read_ranges_sync_into(buf, ranges),
-        }
-    }
-}
-
-impl<B: RBlob> FrameReader for Blob<'_, B> {
-    async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        Self::read_up_to(self, offset, len, bufs).await
-    }
-
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Self::read_at(self, offset, len).await
-    }
-}
-
-/// Sequential replay over either a sealed paged blob or a live writer view.
+/// Sequential read buffer over a journal's live blob.
+///
+/// Reads go through the writer's cache-aware logical view, so replay observes logical bytes
+/// (including still-buffered appends) without mutating or flushing the writer. Construction is
+/// cheap: the buffer starts empty and read buffers are allocated later by [`Replay::ensure`].
 pub(super) struct Replay<'a, B: RBlob> {
-    inner: ReplayInner<'a, B>,
-}
-
-/// Backing strategy for sequential blob replay.
-enum ReplayInner<'a, B: RBlob> {
-    /// Paged replay over sealed data. The runtime buffer serves raw logical
-    /// bytes (integrity is verified by the storage backend).
-    Paged(PagedReplay<B>),
-    /// Logical replay over a live writer or any other blob view.
-    View(ViewReplay<'a, B>),
-}
-
-impl<'a, B: RBlob> Replay<'a, B> {
-    /// Wrap a paged replay handle.
-    const fn paged(replay: PagedReplay<B>) -> Self {
-        Self {
-            inner: ReplayInner::Paged(replay),
-        }
-    }
-
-    /// Build a replay handle over a logical blob view.
-    fn view(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
-        Ok(Self {
-            inner: ReplayInner::View(ViewReplay::new(blob, offset, buffer_size)?),
-        })
-    }
-
-    /// Return whether the underlying blob has reached EOF.
-    ///
-    /// The replay buffer may still hold bytes after this becomes true.
-    pub(super) const fn is_exhausted(&self) -> bool {
-        match &self.inner {
-            ReplayInner::Paged(replay) => replay.is_exhausted(),
-            ReplayInner::View(replay) => replay.is_exhausted(),
-        }
-    }
-
-    /// Ensure at least `n` logical bytes are buffered unless EOF is reached first.
-    pub(super) async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
-        match &mut self.inner {
-            ReplayInner::Paged(replay) => replay.ensure(n).await.map_err(Error::Runtime),
-            ReplayInner::View(replay) => replay.ensure(n).await,
-        }
-    }
-}
-
-impl<B: RBlob> Buf for Replay<'_, B> {
-    fn remaining(&self) -> usize {
-        match &self.inner {
-            ReplayInner::Paged(replay) => replay.remaining(),
-            ReplayInner::View(replay) => replay.remaining(),
-        }
-    }
-
-    fn chunk(&self) -> &[u8] {
-        match &self.inner {
-            ReplayInner::Paged(replay) => replay.chunk(),
-            ReplayInner::View(replay) => replay.chunk(),
-        }
-    }
-
-    fn advance(&mut self, cnt: usize) {
-        match &mut self.inner {
-            ReplayInner::Paged(replay) => replay.advance(cnt),
-            ReplayInner::View(replay) => replay.advance(cnt),
-        }
-    }
-}
-
-/// Sequential read buffer over a live journal blob view.
-struct ViewReplay<'a, B: RBlob> {
-    /// The source blob view.
-    blob: Blob<'a, B>,
+    /// The source blob.
+    blob: &'a Writer<B>,
     /// Next logical offset to read from `blob`.
     offset: u64,
     /// Minimum read size when more bytes are needed.
@@ -484,9 +268,13 @@ struct ViewReplay<'a, B: RBlob> {
     exhausted: bool,
 }
 
-impl<'a, B: RBlob> ViewReplay<'a, B> {
-    /// Create a view replay positioned at `offset`.
-    fn new(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+impl<'a, B: RBlob> Replay<'a, B> {
+    /// Create a replay positioned at `offset`.
+    pub(super) const fn new(
+        blob: &'a Writer<B>,
+        offset: u64,
+        buffer_size: NonZeroUsize,
+    ) -> Result<Self, Error> {
         if offset > blob.size() {
             return Err(Error::Runtime(RError::BlobInsufficientLength));
         }
@@ -501,13 +289,15 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
         })
     }
 
-    /// Return whether the source view has no more bytes to read.
-    const fn is_exhausted(&self) -> bool {
+    /// Return whether the underlying blob has reached EOF.
+    ///
+    /// The replay buffer may still hold bytes after this becomes true.
+    pub(super) const fn is_exhausted(&self) -> bool {
         self.exhausted
     }
 
-    /// Ensure at least `n` bytes are available through the [`Buf`] implementation.
-    async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
+    /// Ensure at least `n` logical bytes are buffered unless EOF is reached first.
+    pub(super) async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.remaining() < n && !self.exhausted {
             self.compact();
 
@@ -529,7 +319,8 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
             let (buf, read) = self
                 .blob
                 .read_up_to(self.offset, read_len, IoBufMut::with_capacity(read_len))
-                .await?;
+                .await
+                .map_err(Error::Runtime)?;
             self.offset = self
                 .offset
                 .checked_add(read as u64)
@@ -559,7 +350,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
     }
 }
 
-impl<B: RBlob> Buf for ViewReplay<'_, B> {
+impl<B: RBlob> Buf for Replay<'_, B> {
     fn remaining(&self) -> usize {
         self.buf.len() - self.cursor
     }
@@ -574,62 +365,5 @@ impl<B: RBlob> Buf for ViewReplay<'_, B> {
             .checked_add(cnt)
             .expect("advance overflowed replay cursor");
         assert!(self.cursor <= self.buf.len(), "advanced past replay buffer");
-    }
-}
-
-#[cfg(test)]
-mod blob_tests {
-    use super::*;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Storage as _};
-    use commonware_utils::{NZUsize, NZU16};
-
-    fn assert_insufficient_length(result: Result<(IoBufMut, usize), Error>) {
-        assert!(matches!(
-            result,
-            Err(Error::Runtime(RError::BlobInsufficientLength))
-        ));
-    }
-
-    #[test]
-    fn test_read_up_to_eof_parity() {
-        const PAGE_SIZE: std::num::NonZeroU16 = NZU16!(64);
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3));
-            let (blob, size) = context
-                .open("read_up_to_eof_parity", b"blob")
-                .await
-                .unwrap();
-            let mut writer = Writer::new(blob, size, 128, cache_ref).await.unwrap();
-            writer.append(b"abc").await.unwrap();
-
-            let size = writer.size();
-            let tail = Blob::Writer(&writer);
-            assert_insufficient_length(tail.read_up_to(size, 1, IoBufMut::with_capacity(1)).await);
-            assert_eq!(
-                tail.read_up_to(size, 0, IoBufMut::with_capacity(0))
-                    .await
-                    .unwrap()
-                    .1,
-                0
-            );
-
-            let snapshot = writer.snapshot().await.unwrap();
-            let snapshot_blob = Blob::Sealed(snapshot);
-            assert_insufficient_length(
-                snapshot_blob
-                    .read_up_to(size, 1, IoBufMut::with_capacity(1))
-                    .await,
-            );
-            assert_eq!(
-                snapshot_blob
-                    .read_up_to(size, 0, IoBufMut::with_capacity(0))
-                    .await
-                    .unwrap()
-                    .1,
-                0
-            );
-        });
     }
 }

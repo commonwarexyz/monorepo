@@ -18,10 +18,9 @@ const PARTITION: &str = "test-partition";
 const ITEM_SIZE: usize = 32;
 
 /// Sequentially read `items_to_read` items in the given `journal` starting from item 0.
-async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
-    let reader = journal.snapshot().await.unwrap();
+async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
     for pos in 0..items_to_read {
-        black_box(reader.read(pos).await.expect("failed to read data"));
+        black_box(journal.read(pos).await.expect("failed to read data"));
     }
 }
 
@@ -45,7 +44,7 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
                     let mut duration = Duration::ZERO;
                     for _ in 0..iters {
                         let start = Instant::now();
-                        bench_run(&mut j, items).await;
+                        bench_run(&j, items).await;
                         duration += start.elapsed();
                     }
 
