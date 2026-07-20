@@ -394,6 +394,7 @@ mod tests {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
 
+        // Handling a notarization requests the missing nullifications below it
         let notarization_v5 = build_notarization(&schemes, &verifier, EPOCH, View::new(5));
         let effects = state.handle(Certificate::Notarization(notarization_v5));
         assert_eq!(
@@ -407,8 +408,11 @@ mod tests {
         );
         assert!(!state.is_failed(View::new(5)));
 
+        // Certification fails for view 5
         let effects = state.handle_certified(View::new(5), false);
 
+        // View 5 is marked failed and only the failed view is re-requested: the
+        // requests its notarization answered are retried by the resolver engine
         assert!(state.is_failed(View::new(5)));
         assert_eq!(effects, vec![fetch(5, 5, FetchReason::CertificationFailed)]);
     }
@@ -418,6 +422,7 @@ mod tests {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
 
+        // Handling a notarization requests the missing nullifications below it
         let notarization_v5 = build_notarization(&schemes, &verifier, EPOCH, View::new(5));
         let effects = state.handle(Certificate::Notarization(notarization_v5.clone()));
         assert_eq!(
@@ -430,8 +435,10 @@ mod tests {
             ]
         );
 
+        // Certification succeeds for view 5
         let effects = state.handle_certified(View::new(5), true);
 
+        // The certified notarization becomes the floor and view 5 is not marked failed
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
         );
