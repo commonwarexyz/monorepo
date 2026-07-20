@@ -99,17 +99,13 @@ commonware_macros::stability_scope!(ALPHA {
             let mut activations: Vec<_> = activations.into_iter().collect();
             activations.sort_unstable_by_key(|(upgrade, _)| *upgrade);
 
-            for pair in activations.windows(2) {
-                let [(earlier, earlier_epoch), (later, later_epoch)] = pair else {
-                    unreachable!("windows of two always contain two items");
-                };
-
-                if earlier == later {
-                    return Err(Error::Duplicate);
-                }
-                if earlier_epoch > later_epoch {
-                    return Err(Error::NonMonotonic);
-                }
+            if !activations.is_sorted_by(|(earlier, _), (later, _)| earlier < later) {
+                return Err(Error::Duplicate);
+            }
+            if !activations
+                .is_sorted_by(|(_, earlier_epoch), (_, later_epoch)| earlier_epoch <= later_epoch)
+            {
+                return Err(Error::NonMonotonic);
             }
 
             Ok(Self { activations })
