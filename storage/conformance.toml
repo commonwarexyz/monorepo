@@ -1,6 +1,6 @@
 ["commonware_storage::archive::conformance::StorageConformance<ArchiveImmutableWorkload>"]
 n_cases = 128
-hash = "5232521cdfae18cc115d502e806f81594bae762fd0d7d77d6632bf1b075dab61"
+hash = "815b5dffbb36d771096432e4054357b319fc89e7e6f57b79dc11cd56fc2ccc54"
 
 ["commonware_storage::archive::conformance::StorageConformance<ArchivePrunableWorkload>"]
 n_cases = 128
@@ -96,7 +96,7 @@ hash = "d0e096f35334ff21dee895f9deea7033e76729ddd03df054389861cf48bec07c"
 
 ["commonware_storage::ordinal::conformance::StorageConformance<OrdinalWorkload>"]
 n_cases = 256
-hash = "12eaf15d3fec848fdcba091b290a17ae8e5f66f27cd7f9d1629ff7c935858a7d"
+hash = "638a285da5f0113152bd5323bbbf38ab969dd68ebddd0b729edd14bc08aa9c65"
 
 ["commonware_storage::ordinal::storage::conformance::CodecConformance<Record<u32>>"]
 n_cases = 65536
