@@ -62,54 +62,86 @@ pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
 }
 
 /// Leadership term structure reported by an [`Elector`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Terms {
-    /// Every view is its own term: a new leader is elected each view, and
-    /// leader rotation itself bounds how long finality can stall.
-    ///
-    /// This variant is the only way to configure single-view terms:
-    /// [`Terms::Stable`] with a length of 1 is rejected at engine
-    /// construction.
-    #[default]
-    Rotating,
-    /// Views are grouped into terms of `length` consecutive views served by
-    /// one leader.
-    Stable {
-        /// Number of consecutive views per term (greater than 1).
-        ///
-        /// Consensus-critical: every participant must configure the same
-        /// value (see [`TermLength`]).
-        length: TermLength,
-        /// Maximum time an entered view may remain unfinalized before this
-        /// participant abandons the term: on expiry it treats its current
-        /// view as timed out and votes nullify, which (with a quorum) forms
-        /// a nullification covering the rest of the term and evicts the
-        /// leader.
-        ///
-        /// A Byzantine stable leader can keep every per-view timer satisfied
-        /// while preventing finality: each view notarizes and certifies, but
-        /// no finalization certificate forms. With single-view terms, leader
-        /// rotation bounds such a stall to one view. With longer terms, this
-        /// timeout bounds it instead.
-        stall_timeout: Duration,
-    },
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Terms {
+    /// Number of consecutive views per term (one if and only if rotating).
+    length: TermLength,
+    /// Term-abandonment timeout (set if and only if `length` exceeds one).
+    stall_timeout: Option<Duration>,
 }
 
 impl Terms {
-    /// Returns the number of consecutive views per term.
-    pub const fn length(&self) -> TermLength {
-        match self {
-            Self::Rotating => TermLength::ONE,
-            Self::Stable { length, .. } => *length,
+    /// Every view is its own term: a new leader is elected each view, and
+    /// leader rotation itself bounds how long finality can stall.
+    pub const fn rotating() -> Self {
+        Self {
+            length: TermLength::ONE,
+            stall_timeout: None,
         }
     }
 
-    /// Returns the term-abandonment timeout, if stable leaders are configured.
-    pub const fn stall_timeout(&self) -> Option<Duration> {
-        match self {
-            Self::Rotating => None,
-            Self::Stable { stall_timeout, .. } => Some(*stall_timeout),
+    /// Views are grouped into terms of `length` consecutive views served by
+    /// one leader.
+    ///
+    /// The length is consensus-critical: every participant must configure
+    /// the same value (see [`TermLength`]).
+    ///
+    /// `stall_timeout` is local policy: the maximum time an entered view may
+    /// remain unfinalized before this participant abandons the term. On
+    /// expiry it treats its current view as timed out and votes nullify,
+    /// which (with a quorum) forms a nullification covering the rest of the
+    /// term and evicts the leader.
+    ///
+    /// A Byzantine stable leader can keep every per-view timer satisfied
+    /// while preventing finality: each view notarizes and certifies, but
+    /// no finalization certificate forms. With single-view terms, leader
+    /// rotation bounds such a stall to one view. With longer terms, this
+    /// timeout bounds it instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `length` is 1 or if `stall_timeout` is zero. Single-view
+    /// terms are [`Terms::rotating`] (the default), where per-view timeouts
+    /// already bound a stall.
+    pub const fn stable(length: TermLength, stall_timeout: Duration) -> Self {
+        assert!(
+            length.get() > 1,
+            "stable leaders require a term length greater than 1"
+        );
+        assert!(
+            !stall_timeout.is_zero(),
+            "stable leaders require a stall timeout greater than zero"
+        );
+        Self {
+            length,
+            stall_timeout: Some(stall_timeout),
         }
+    }
+
+    /// Returns the number of consecutive views per term.
+    ///
+    /// Returns [`TermLength::ONE`] if and only if this is [`Terms::rotating`].
+    /// A length of one is the definition of rotation, not an approximation of
+    /// it: all term arithmetic ([`View::covers`], [`View::admits`],
+    /// [`View::term_index`], [`View::next_term_start`]) reduces exactly to
+    /// per-view behavior at length one. The only regime fact the length does
+    /// not carry is the stall deadline, which callers read from
+    /// [`Terms::stall_timeout`].
+    pub const fn length(&self) -> TermLength {
+        self.length
+    }
+
+    /// Returns the term-abandonment timeout, if stable leaders are configured.
+    ///
+    /// Returns `Some` if and only if [`Self::length`] is greater than one.
+    pub const fn stall_timeout(&self) -> Option<Duration> {
+        self.stall_timeout
+    }
+}
+
+impl Default for Terms {
+    fn default() -> Self {
+        Self::rotating()
     }
 }
 
@@ -179,25 +211,24 @@ impl<H: Hasher> RoundRobin<H> {
     pub fn shuffled(seed: &[u8]) -> Self {
         Self {
             seed: Some(seed.to_vec()),
-            terms: Terms::Rotating,
+            terms: Terms::rotating(),
             _phantom: PhantomData,
         }
     }
 
     /// Enables stable leaders: `term_length` consecutive views share a leader,
     /// and a term abandoned after `stall_timeout` evicts them (see
-    /// [`Terms::Stable`]).
+    /// [`Terms::stable`]).
     ///
     /// The term length is consensus-critical: every participant must configure
     /// the same value (see [`TermLength`]). The timeout is local policy.
     ///
-    /// A `term_length` of 1 is rejected at engine construction (single-view
-    /// terms need no timeout and are the default).
+    /// # Panics
+    ///
+    /// Panics if `term_length` is 1 or `stall_timeout` is zero (see
+    /// [`Terms::stable`]).
     pub const fn with_term(mut self, term_length: TermLength, stall_timeout: Duration) -> Self {
-        self.terms = Terms::Stable {
-            length: term_length,
-            stall_timeout,
-        };
+        self.terms = Terms::stable(term_length, stall_timeout);
         self
     }
 }
@@ -264,7 +295,7 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 /// certificate is available.
 ///
 /// This elector does not support stable leaders: it has no term-length
-/// configuration and [`Elector::terms`] always returns [`Terms::Rotating`].
+/// configuration and [`Elector::terms`] always returns [`Terms::rotating`].
 ///
 /// Only works with [`super::scheme::bls12381_threshold::vrf`]
 /// (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
@@ -324,7 +355,7 @@ where
     V: Variant,
 {
     fn terms(&self) -> Terms {
-        Terms::Rotating
+        Terms::rotating()
     }
 
     fn elect(
