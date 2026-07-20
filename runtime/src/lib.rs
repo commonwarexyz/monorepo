@@ -857,6 +857,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_error_future<R: Runner>(#[case] runner: R) {
         #[allow(clippy::unused_async)]
         async fn error_future() -> Result<&'static str, &'static str> {
@@ -869,6 +870,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_handle_can_use_futures_pool<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             let mut pool = FuturesPool::<Result<(), Error>>::default();
@@ -880,6 +882,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_clock_sleep<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -899,6 +902,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_clock_sleep_until<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock + Metrics,
@@ -917,6 +921,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_clock_sleep_until_far_future<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -931,6 +936,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_clock_timeout<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -962,6 +968,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_root_finishes<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -978,6 +985,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_after_abort<R>(#[case] runner: R)
     where
         R: Runner,
@@ -1004,6 +1012,8 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    // TODO: add an io_uring case once its blocking pool lands.
+    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_abort<R: Runner>(
         #[case] runner: R,
         #[values(
@@ -1037,7 +1047,16 @@ mod tests {
         deterministic::Config::default().with_catch_panics(true)
     ))]
     #[case::tokio(tokio::Runner::default())]
-    #[case::tokio_caught(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[case::tokio_caught(tokio::Runner::new(
+        tokio::Config::default().with_catch_panics(true)
+    ))]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
+    #[cfg_attr(
+        feature = "iouring",
+        case::iouring_caught(iouring::Runner::new(
+            iouring::Config::default().with_catch_panics(true))
+        )
+    )]
     #[should_panic(expected = "blah")]
     fn test_panic_aborts_root<R: Runner>(#[case] runner: R) {
         let result: Result<(), Error> = runner.start(|_| async move {
@@ -1049,6 +1068,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     #[should_panic(expected = "blah")]
     fn test_panic_aborts_spawn<R: Runner>(#[case] runner: R)
     where
@@ -1070,7 +1090,15 @@ mod tests {
     #[case::deterministic(deterministic::Runner::new(
         deterministic::Config::default().with_catch_panics(true)
     ))]
-    #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[case::tokio(tokio::Runner::new(
+        tokio::Config::default().with_catch_panics(true))
+    )]
+    #[cfg_attr(
+        feature = "iouring",
+        case::iouring(iouring::Runner::new(
+            iouring::Config::default().with_catch_panics(true))
+        )
+    )]
     fn test_panic_aborts_spawn_caught<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1087,6 +1115,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     #[should_panic(expected = "boom")]
     fn test_multiple_panics<R: Runner>(#[case] runner: R)
     where
@@ -1114,7 +1143,15 @@ mod tests {
     #[case::deterministic(deterministic::Runner::new(
         deterministic::Config::default().with_catch_panics(true)
     ))]
-    #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[case::tokio(tokio::Runner::new(
+        tokio::Config::default().with_catch_panics(true))
+    )]
+    #[cfg_attr(
+        feature = "iouring",
+        case::iouring(iouring::Runner::new(
+            iouring::Config::default().with_catch_panics(true))
+        )
+    )]
     fn test_multiple_panics_caught<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1140,6 +1177,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_select<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             // Test first branch
@@ -1171,6 +1209,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_select_loop<R: Runner>(#[case] runner: R)
     where
         R::Context: Clock,
@@ -1220,6 +1259,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_storage_operations<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1303,6 +1343,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_blob_read_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1358,6 +1399,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_blob_resize<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1419,6 +1461,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_many_partition_read_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1471,6 +1514,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_blob_read_past_length<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1504,6 +1548,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_blob_clone_and_concurrent_read<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Storage + Metrics,
@@ -1575,6 +1620,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_shutdown<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -1610,6 +1656,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_shutdown_multiple_signals<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -1664,6 +1711,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_shutdown_timeout<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -1693,6 +1741,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_shutdown_multiple_stop_calls<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -1758,6 +1807,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_unfulfilled_shutdown<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics,
@@ -1781,6 +1831,8 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    // TODO: add an io_uring case once it supports dedicated tasks
+    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_dedicated<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -1794,6 +1846,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1835,6 +1888,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_abort_on_parent_abort<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1873,6 +1927,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_abort_on_parent_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1908,6 +1963,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_cascading_abort<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1986,6 +2042,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_child_survives_sibling_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -2047,6 +2104,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_clone_chain<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -2103,6 +2161,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_sparse_clone_chain<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -2143,6 +2202,8 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    // TODO: add an io_uring case once its blocking pool lands.
+    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_blocking<R: Runner>(
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
@@ -2164,6 +2225,8 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    // TODO: add an io_uring case once its blocking pool lands.
+    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     #[should_panic(expected = "blocking task panicked")]
     fn test_spawn_blocking_panic<R: Runner>(
         #[case] runner: R,
@@ -2191,7 +2254,11 @@ mod tests {
     #[case::deterministic(deterministic::Runner::new(
         deterministic::Config::default().with_catch_panics(true)
     ))]
-    #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[case::tokio(tokio::Runner::new(
+        tokio::Config::default().with_catch_panics(true))
+    )]
+    // TODO: add an io_uring case once its blocking pool lands.
+    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_blocking_panic_caught<R: Runner>(
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
@@ -2214,6 +2281,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_circular_reference_prevents_cleanup<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             // Setup tracked resource
@@ -2271,6 +2339,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_late_waker<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics + Spawner,
@@ -2337,6 +2406,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_metrics<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2374,6 +2444,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_metrics_with_attribute<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2450,6 +2521,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_metrics_attribute_with_nested_label<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2499,6 +2571,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_metrics_attributes_isolated_between_contexts<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2557,6 +2630,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_metrics_spawn_attribute_cardinality<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -2639,6 +2713,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_metrics_attributes_sorted_deterministically<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2689,6 +2764,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_metrics_nested_labels_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2795,6 +2871,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_metrics_family_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2894,6 +2971,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_register_and_encode<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2916,6 +2994,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_register_drop_removes_metrics<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2955,6 +3034,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_register_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3010,6 +3090,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_reregister_after_drop<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3034,6 +3115,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_register_clone_keeps_metric_alive<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3071,6 +3153,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_encode_single_eof<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3109,6 +3192,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_family_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3166,6 +3250,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_strategy<R: Runner>(#[case] runner: R)
     where
         R::Context: Strategizer + Metrics,
@@ -3184,6 +3269,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_nested_strategy_runs_inline<R: Runner>(#[case] runner: R)
     where
         R::Context: Strategizer + Metrics,
@@ -3228,6 +3314,23 @@ mod tests {
         64,
         8
     )]
+    #[cfg_attr(
+        feature = "iouring",
+        case::iouring(iouring::Runner::default(), 4096, 64)
+    )]
+    #[cfg_attr(
+        feature = "iouring",
+        case::iouring_custom(
+            iouring::Runner::new(iouring::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64))
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)))),
+            64,
+            8
+        )
+    )]
     fn test_buffer_pooler<R: Runner>(
         #[case] runner: R,
         #[case] expected_network_max_per_class: u32,
@@ -3260,601 +3363,5 @@ mod tests {
                     .all(|class| class.max_buffers.get() == expected_storage_max_per_class)
             );
         });
-    }
-
-    #[test]
-    fn test_deterministic_buffer_pooler() {
-        test_buffer_pooler(deterministic::Runner::default(), 4096, 64);
-
-        let runner = deterministic::Runner::new(
-            deterministic::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        );
-        test_buffer_pooler(runner, 64, 8);
-    }
-
-    #[test]
-    fn test_tokio_buffer_pooler() {
-        test_buffer_pooler(tokio::Runner::default(), 4096, 64);
-
-        let runner = tokio::Runner::new(
-            tokio::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        );
-        test_buffer_pooler(runner, 64, 8);
-    }
-
-    #[cfg(feature = "iouring")]
-    mod iouring_tests {
-        use super::*;
-
-        #[test]
-        fn test_iouring_network_echo() {
-            // Exercise bind, accept, dial, send, and recv end-to-end on the
-            // runtime's own ring (all connection setup goes through io_uring).
-            let executor = iouring::Runner::default();
-            executor.start(|context| async move {
-                let mut listener = context
-                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                    .await
-                    .unwrap();
-                let addr = listener.local_addr().unwrap();
-
-                let server = context.child("server").spawn(move |_| async move {
-                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-                    let msg = stream.recv(5).await.unwrap();
-                    assert_eq!(msg.coalesce(), b"hello");
-                    sink.send(IoBuf::from(b"world")).await.unwrap();
-                });
-
-                let (mut sink, mut stream) = context.dial(addr).await.unwrap();
-                sink.send(IoBuf::from(b"hello")).await.unwrap();
-                let response = stream.recv(5).await.unwrap();
-                assert_eq!(response.coalesce(), b"world");
-                server.await.unwrap();
-            });
-        }
-
-        #[test]
-        fn test_iouring_network_recv_timeout() {
-            // Exercise a network deadline expiring while the executor drives
-            // the ring (turn/park path): the recv must report a timeout close
-            // to the configured budget instead of stalling.
-            let op_timeout = Duration::from_millis(100);
-            let cfg = iouring::Config::default().with_read_write_timeout(op_timeout);
-            iouring::Runner::new(cfg).start(|context| async move {
-                let mut listener = context
-                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                    .await
-                    .unwrap();
-                let addr = listener.local_addr().unwrap();
-
-                let server = context.child("server").spawn(move |_| async move {
-                    let (_, sink, mut stream) = listener.accept().await.unwrap();
-                    let result = stream.recv(1).await;
-                    assert!(matches!(result, Err(Error::Timeout)));
-                    // Keep the connection alive until the recv resolves.
-                    drop(sink);
-                });
-
-                // Dial but never send, so the server's recv can only expire.
-                let start = std::time::Instant::now();
-                let (_sink, _stream) = context.dial(addr).await.unwrap();
-                server.await.unwrap();
-                let elapsed = start.elapsed();
-                assert!(elapsed >= op_timeout);
-                assert!(elapsed < op_timeout * 30, "recv timeout took {elapsed:?}");
-            });
-        }
-
-        #[test]
-        fn test_iouring_fast_teardown_with_inflight_recv() {
-            // A recv still in flight when the root task returns must not delay
-            // teardown until its (60s) deadline: teardown cancels operations
-            // whose tasks were dropped.
-            let start = std::time::Instant::now();
-            let cfg = iouring::Config::default().with_read_write_timeout(Duration::from_secs(60));
-            iouring::Runner::new(cfg).start(|context| async move {
-                let mut listener = context
-                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                    .await
-                    .unwrap();
-                let addr = listener.local_addr().unwrap();
-
-                context.child("server").spawn(move |_| async move {
-                    let (_, _sink, mut stream) = listener.accept().await.unwrap();
-                    // Never receives data; aborted when the root returns.
-                    let _ = stream.recv(1).await;
-                });
-
-                let (_sink, _stream) = context.dial(addr).await.unwrap();
-                // Give the server's recv a chance to reach the kernel.
-                context.sleep(Duration::from_millis(50)).await;
-            });
-            assert!(
-                start.elapsed() < Duration::from_secs(10),
-                "teardown took {:?}",
-                start.elapsed()
-            );
-        }
-
-        #[test]
-        fn test_iouring_accept_survives_reissue() {
-            // An accept that waits longer than the read/write timeout is
-            // transparently reissued: a connection arriving after several
-            // reissue cycles must still be accepted.
-            let op_timeout = Duration::from_millis(50);
-            let cfg = iouring::Config::default().with_read_write_timeout(op_timeout);
-            iouring::Runner::new(cfg).start(|context| async move {
-                let mut listener = context
-                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                    .await
-                    .unwrap();
-                let addr = listener.local_addr().unwrap();
-
-                let server = context.child("server").spawn(move |_| async move {
-                    let (_, _sink, mut stream) = listener.accept().await.unwrap();
-                    let msg = stream.recv(4).await.unwrap();
-                    assert_eq!(msg.coalesce(), b"ping");
-                });
-
-                // Wait through multiple accept deadlines before connecting.
-                context.sleep(op_timeout * 4).await;
-                let (mut sink, _stream) = context.dial(addr).await.unwrap();
-                sink.send(IoBuf::from(b"ping")).await.unwrap();
-                server.await.unwrap();
-            });
-        }
-
-        #[test]
-        fn test_iouring_cross_thread_wake() {
-            // Verify a foreign thread can wake the runtime thread out of its
-            // park: the sleep gives the runtime time to park (so the alarm is
-            // registered from another thread against a parked runtime), and
-            // the oneshot send must then unblock the root task.
-            let executor = iouring::Runner::default();
-            executor.start(|context| async move {
-                let start = std::time::Instant::now();
-                let (tx, rx) = oneshot::channel();
-                let thread = std::thread::spawn(move || {
-                    futures::executor::block_on(context.sleep(Duration::from_millis(50)));
-                    tx.send(42).unwrap();
-                });
-                assert_eq!(rx.await.unwrap(), 42);
-
-                // Join so the thread's context clone drops before teardown
-                // asserts that no context escaped the runtime.
-                thread.join().unwrap();
-
-                // The wake must arrive promptly after the 50ms sleep, not at
-                // the runtime's next unrelated park deadline.
-                assert!(
-                    start.elapsed() < Duration::from_secs(5),
-                    "cross-thread wake took {:?}",
-                    start.elapsed()
-                );
-            });
-        }
-
-        #[test]
-        fn test_iouring_metrics_with_attribute() {
-            let runner = iouring::Runner::default();
-            test_metrics_with_attribute(runner);
-        }
-
-        #[test]
-        fn test_iouring_metrics_attribute_with_nested_label() {
-            let runner = iouring::Runner::default();
-            test_metrics_attribute_with_nested_label(runner);
-        }
-
-        #[test]
-        fn test_iouring_metrics_attributes_isolated_between_contexts() {
-            let runner = iouring::Runner::default();
-            test_metrics_attributes_isolated_between_contexts(runner);
-        }
-
-        #[test]
-        fn test_iouring_metrics_spawn_attribute_cardinality() {
-            let runner = iouring::Runner::default();
-            test_metrics_spawn_attribute_cardinality(runner);
-        }
-
-        #[test]
-        fn test_iouring_metrics_attributes_sorted_deterministically() {
-            let runner = iouring::Runner::default();
-            test_metrics_attributes_sorted_deterministically(runner);
-        }
-
-        #[test]
-        fn test_iouring_metrics_nested_labels_with_attributes() {
-            let runner = iouring::Runner::default();
-            test_metrics_nested_labels_with_attributes(runner);
-        }
-
-        #[test]
-        fn test_iouring_metrics_family_with_attributes() {
-            let runner = iouring::Runner::default();
-            test_metrics_family_with_attributes(runner);
-        }
-
-        #[test]
-        fn test_iouring_register_and_encode() {
-            let runner = iouring::Runner::default();
-            test_register_and_encode(runner);
-        }
-
-        #[test]
-        fn test_iouring_register_drop_removes_metrics() {
-            let runner = iouring::Runner::default();
-            test_register_drop_removes_metrics(runner);
-        }
-
-        #[test]
-        fn test_iouring_register_with_attributes() {
-            let runner = iouring::Runner::default();
-            test_register_with_attributes(runner);
-        }
-
-        #[test]
-        fn test_iouring_reregister_after_drop() {
-            let runner = iouring::Runner::default();
-            test_reregister_after_drop(runner);
-        }
-
-        #[test]
-        fn test_iouring_register_clone_keeps_metric_alive() {
-            let runner = iouring::Runner::default();
-            test_register_clone_keeps_metric_alive(runner);
-        }
-
-        #[test]
-        fn test_iouring_encode_single_eof() {
-            let runner = iouring::Runner::default();
-            test_encode_single_eof(runner);
-        }
-
-        #[test]
-        fn test_iouring_family_with_attributes() {
-            let runner = iouring::Runner::default();
-            test_family_with_attributes(runner);
-        }
-
-        #[test]
-        fn test_iouring_error_future() {
-            let runner = iouring::Runner::default();
-            test_error_future(runner);
-        }
-
-        #[test]
-        fn test_iouring_clock_sleep() {
-            let executor = iouring::Runner::default();
-            test_clock_sleep(executor);
-        }
-
-        #[test]
-        fn test_iouring_clock_sleep_until() {
-            let executor = iouring::Runner::default();
-            test_clock_sleep_until(executor);
-        }
-
-        #[test]
-        fn test_iouring_clock_sleep_until_far_future() {
-            let executor = iouring::Runner::default();
-            test_clock_sleep_until_far_future(executor);
-        }
-
-        #[test]
-        fn test_iouring_clock_timeout() {
-            let executor = iouring::Runner::default();
-            test_clock_timeout(executor);
-        }
-
-        #[test]
-        fn test_iouring_root_finishes() {
-            let executor = iouring::Runner::default();
-            test_root_finishes(executor);
-        }
-
-        #[test]
-        fn test_iouring_spawn_after_abort() {
-            let executor = iouring::Runner::default();
-            test_spawn_after_abort(executor);
-        }
-
-        #[test]
-        fn test_iouring_spawn_abort() {
-            let executor = iouring::Runner::default();
-            test_spawn_abort(executor, false, false);
-        }
-
-        #[test]
-        #[should_panic(expected = "blah")]
-        fn test_iouring_panic_aborts_root() {
-            let executor = iouring::Runner::default();
-            test_panic_aborts_root(executor);
-        }
-
-        #[test]
-        #[should_panic(expected = "blah")]
-        fn test_iouring_panic_aborts_root_caught() {
-            let cfg = iouring::Config::default().with_catch_panics(true);
-            let executor = iouring::Runner::new(cfg);
-            test_panic_aborts_root(executor);
-        }
-
-        #[test]
-        #[should_panic(expected = "blah")]
-        fn test_iouring_panic_aborts_spawn() {
-            let executor = iouring::Runner::default();
-            test_panic_aborts_spawn(executor);
-        }
-
-        #[test]
-        fn test_iouring_panic_aborts_spawn_caught() {
-            let cfg = iouring::Config::default().with_catch_panics(true);
-            let executor = iouring::Runner::new(cfg);
-            test_panic_aborts_spawn_caught(executor);
-        }
-
-        #[test]
-        #[should_panic(expected = "boom")]
-        fn test_iouring_multiple_panics() {
-            let executor = iouring::Runner::default();
-            test_multiple_panics(executor);
-        }
-
-        #[test]
-        fn test_iouring_multiple_panics_caught() {
-            let cfg = iouring::Config::default().with_catch_panics(true);
-            let executor = iouring::Runner::new(cfg);
-            test_multiple_panics_caught(executor);
-        }
-
-        #[test]
-        fn test_iouring_select() {
-            let executor = iouring::Runner::default();
-            test_select(executor);
-        }
-
-        #[test]
-        fn test_iouring_select_loop() {
-            let executor = iouring::Runner::default();
-            test_select_loop(executor);
-        }
-
-        #[test]
-        fn test_iouring_storage_operations() {
-            let executor = iouring::Runner::default();
-            test_storage_operations(executor);
-        }
-
-        #[test]
-        fn test_iouring_blob_read_write() {
-            let executor = iouring::Runner::default();
-            test_blob_read_write(executor);
-        }
-
-        #[test]
-        fn test_iouring_blob_resize() {
-            let executor = iouring::Runner::default();
-            test_blob_resize(executor);
-        }
-
-        #[test]
-        fn test_iouring_many_partition_read_write() {
-            let executor = iouring::Runner::default();
-            test_many_partition_read_write(executor);
-        }
-
-        #[test]
-        fn test_iouring_blob_read_past_length() {
-            let executor = iouring::Runner::default();
-            test_blob_read_past_length(executor);
-        }
-
-        #[test]
-        fn test_iouring_blob_clone_and_concurrent_read() {
-            // Run test
-            let executor = iouring::Runner::default();
-            test_blob_clone_and_concurrent_read(executor);
-        }
-
-        #[test]
-        fn test_iouring_shutdown() {
-            let executor = iouring::Runner::default();
-            test_shutdown(executor);
-        }
-
-        #[test]
-        fn test_iouring_shutdown_multiple_signals() {
-            let executor = iouring::Runner::default();
-            test_shutdown_multiple_signals(executor);
-        }
-
-        #[test]
-        fn test_iouring_shutdown_timeout() {
-            let executor = iouring::Runner::default();
-            test_shutdown_timeout(executor);
-        }
-
-        #[test]
-        fn test_iouring_shutdown_multiple_stop_calls() {
-            let executor = iouring::Runner::default();
-            test_shutdown_multiple_stop_calls(executor);
-        }
-
-        #[test]
-        fn test_iouring_unfulfilled_shutdown() {
-            let executor = iouring::Runner::default();
-            test_unfulfilled_shutdown(executor);
-        }
-
-        #[test]
-        fn test_iouring_spawn() {
-            let runner = iouring::Runner::default();
-            test_spawn(runner);
-        }
-
-        #[test]
-        fn test_iouring_spawn_abort_on_parent_abort() {
-            let runner = iouring::Runner::default();
-            test_spawn_abort_on_parent_abort(runner);
-        }
-
-        #[test]
-        fn test_iouring_spawn_abort_on_parent_completion() {
-            let runner = iouring::Runner::default();
-            test_spawn_abort_on_parent_completion(runner);
-        }
-
-        #[test]
-        fn test_iouring_spawn_cascading_abort() {
-            let runner = iouring::Runner::default();
-            test_spawn_cascading_abort(runner);
-        }
-
-        #[test]
-        fn test_iouring_child_survives_sibling_completion() {
-            let runner = iouring::Runner::default();
-            test_child_survives_sibling_completion(runner);
-        }
-
-        #[test]
-        fn test_iouring_spawn_clone_chain() {
-            let runner = iouring::Runner::default();
-            test_spawn_clone_chain(runner);
-        }
-
-        #[test]
-        fn test_iouring_spawn_sparse_clone_chain() {
-            let runner = iouring::Runner::default();
-            test_spawn_sparse_clone_chain(runner);
-        }
-
-        // Blocking and dedicated spawns are temporarily unsupported on the
-        // io_uring runtime: the panic behavior is covered by
-        // `iouring::runtime::tests::{test_spawn_blocking_panics, test_spawn_dedicated_panics}`.
-
-        #[test]
-        fn test_iouring_circular_reference_prevents_cleanup() {
-            let executor = iouring::Runner::default();
-            test_circular_reference_prevents_cleanup(executor);
-        }
-
-        #[test]
-        fn test_iouring_late_waker() {
-            let executor = iouring::Runner::default();
-            test_late_waker(executor);
-        }
-
-        #[test]
-        fn test_iouring_metrics() {
-            let executor = iouring::Runner::default();
-            test_metrics(executor);
-        }
-
-        #[test]
-        fn test_iouring_process_rss_metric() {
-            let executor = iouring::Runner::default();
-            executor.start(|context| async move {
-                loop {
-                    // Wait for RSS metric to be available
-                    let metrics = context.encode();
-                    if !metrics.contains("runtime_process_rss") {
-                        context.sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-
-                    // Verify the RSS value is eventually populated (greater than 0)
-                    for line in metrics.lines() {
-                        if line.starts_with("runtime_process_rss")
-                            && !line.starts_with("runtime_process_rss{")
-                        {
-                            let parts: Vec<&str> = line.split_whitespace().collect();
-                            if parts.len() >= 2 {
-                                let rss_value: i64 =
-                                    parts[1].parse().expect("Failed to parse RSS value");
-                                if rss_value > 0 {
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        #[test]
-        fn test_iouring_resolver() {
-            let executor = iouring::Runner::default();
-            executor.start(|context| async move {
-                let addrs = context.resolve("localhost").await.unwrap();
-                assert!(!addrs.is_empty());
-                for addr in addrs {
-                    assert!(
-                        addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
-                            || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
-                    );
-                }
-            });
-        }
-
-        #[test]
-        fn test_strategy_iouring() {
-            let executor = iouring::Runner::default();
-            executor.start(|context| async move {
-                // Create a strategy backed by a pool with 4 threads.
-                let strategy = context.child("pool").strategy(NZUsize!(4));
-                assert_eq!(strategy.manual().parallelism(), 4);
-
-                // Use the strategy to sum a vector of numbers.
-                let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
-                assert_eq!(sum, 10000 * 9999 / 2);
-            });
-        }
-
-        /// Pool work runs on dedicated worker threads, so awaiting a spawned
-        /// strategy task exercises the loop's cross-thread wake path.
-        #[test]
-        fn test_iouring_parallel_strategy_spawn_completes() {
-            let executor = iouring::Runner::default();
-            executor.start(|context| async move {
-                let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
-                assert_eq!(strategy.parallelism(), 2);
-
-                let output = strategy
-                    .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
-                    .await;
-
-                assert_eq!(output, vec![1, 2]);
-            });
-        }
-
-        #[test]
-        fn test_iouring_buffer_pooler() {
-            test_buffer_pooler(iouring::Runner::default(), 4096, 64);
-
-            let runner = iouring::Runner::new(
-                iouring::Config::default()
-                    .with_network_buffer_pool_config(
-                        BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                    )
-                    .with_storage_buffer_pool_config(
-                        BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                    ),
-            );
-            test_buffer_pooler(runner, 64, 8);
-        }
     }
 }

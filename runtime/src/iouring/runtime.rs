@@ -1256,7 +1256,13 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Runner as _, Spawner as _, Supervisor as _};
+    use crate::{
+        IoBuf, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _, Sink as _,
+        Spawner as _, Strategizer as _, Stream as _, Supervisor as _,
+    };
+    use commonware_parallel::Strategy as _;
+    use commonware_utils::{NZUsize, channel::oneshot};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     #[test]
     #[should_panic(expected = "temporarily unsupported on the io_uring runtime")]
@@ -1271,6 +1277,217 @@ mod tests {
     fn test_spawn_dedicated_panics() {
         Runner::default().start(|context| async move {
             context.child("dedicated").dedicated().spawn(|_| async {});
+        });
+    }
+
+    #[test]
+    fn test_network_echo() {
+        // Exercise bind, accept, dial, send, and recv end-to-end on the
+        // runtime's own ring (all connection setup goes through io_uring).
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let server = context.child("server").spawn(move |_| async move {
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                let msg = stream.recv(5).await.unwrap();
+                assert_eq!(msg.coalesce(), b"hello");
+                sink.send(IoBuf::from(b"world")).await.unwrap();
+            });
+
+            let (mut sink, mut stream) = context.dial(addr).await.unwrap();
+            sink.send(IoBuf::from(b"hello")).await.unwrap();
+            let response = stream.recv(5).await.unwrap();
+            assert_eq!(response.coalesce(), b"world");
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_network_recv_timeout() {
+        // Exercise a network deadline expiring while the executor drives
+        // the ring (turn/park path): the recv must report a timeout close
+        // to the configured budget instead of stalling.
+        let op_timeout = Duration::from_millis(100);
+        let cfg = Config::default().with_read_write_timeout(op_timeout);
+        Runner::new(cfg).start(|context| async move {
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let server = context.child("server").spawn(move |_| async move {
+                let (_, sink, mut stream) = listener.accept().await.unwrap();
+                let result = stream.recv(1).await;
+                assert!(matches!(result, Err(Error::Timeout)));
+                // Keep the connection alive until the recv resolves.
+                drop(sink);
+            });
+
+            // Dial but never send, so the server's recv can only expire.
+            let start = std::time::Instant::now();
+            let (_sink, _stream) = context.dial(addr).await.unwrap();
+            server.await.unwrap();
+            let elapsed = start.elapsed();
+            assert!(elapsed >= op_timeout);
+            assert!(elapsed < op_timeout * 30, "recv timeout took {elapsed:?}");
+        });
+    }
+
+    #[test]
+    fn test_fast_teardown_with_inflight_recv() {
+        // A recv still in flight when the root task returns must not delay
+        // teardown until its (60s) deadline: teardown cancels operations
+        // whose tasks were dropped.
+        let start = std::time::Instant::now();
+        let cfg = Config::default().with_read_write_timeout(Duration::from_secs(60));
+        Runner::new(cfg).start(|context| async move {
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            context.child("server").spawn(move |_| async move {
+                let (_, _sink, mut stream) = listener.accept().await.unwrap();
+                // Never receives data; aborted when the root returns.
+                let _ = stream.recv(1).await;
+            });
+
+            let (_sink, _stream) = context.dial(addr).await.unwrap();
+            // Give the server's recv a chance to reach the kernel.
+            context.sleep(Duration::from_millis(50)).await;
+        });
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "teardown took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn test_accept_survives_reissue() {
+        // An accept that waits longer than the read/write timeout is
+        // transparently reissued: a connection arriving after several
+        // reissue cycles must still be accepted.
+        let op_timeout = Duration::from_millis(50);
+        let cfg = Config::default().with_read_write_timeout(op_timeout);
+        Runner::new(cfg).start(|context| async move {
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let server = context.child("server").spawn(move |_| async move {
+                let (_, _sink, mut stream) = listener.accept().await.unwrap();
+                let msg = stream.recv(4).await.unwrap();
+                assert_eq!(msg.coalesce(), b"ping");
+            });
+
+            // Wait through multiple accept deadlines before connecting.
+            context.sleep(op_timeout * 4).await;
+            let (mut sink, _stream) = context.dial(addr).await.unwrap();
+            sink.send(IoBuf::from(b"ping")).await.unwrap();
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_cross_thread_wake() {
+        // Verify a foreign thread can wake the runtime thread out of its
+        // park: the sleep gives the runtime time to park (so the alarm is
+        // registered from another thread against a parked runtime), and
+        // the oneshot send must then unblock the root task.
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let start = std::time::Instant::now();
+            let (tx, rx) = oneshot::channel();
+            let thread = std::thread::spawn(move || {
+                futures::executor::block_on(context.sleep(Duration::from_millis(50)));
+                tx.send(42).unwrap();
+            });
+            assert_eq!(rx.await.unwrap(), 42);
+
+            // Join so the thread's context clone drops before teardown
+            // asserts that no context escaped the runtime.
+            thread.join().unwrap();
+
+            // The wake must arrive promptly after the 50ms sleep, not at
+            // the runtime's next unrelated park deadline.
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "cross-thread wake took {:?}",
+                start.elapsed()
+            );
+        });
+    }
+
+    #[test]
+    fn test_process_rss_metric() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            loop {
+                // Wait for RSS metric to be available
+                let metrics = context.encode();
+                if !metrics.contains("runtime_process_rss") {
+                    context.sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+
+                // Verify the RSS value is eventually populated (greater than 0)
+                for line in metrics.lines() {
+                    if line.starts_with("runtime_process_rss")
+                        && !line.starts_with("runtime_process_rss{")
+                    {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            let rss_value: i64 =
+                                parts[1].parse().expect("Failed to parse RSS value");
+                            if rss_value > 0 {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_resolver() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let addrs = context.resolve("localhost").await.unwrap();
+            assert!(!addrs.is_empty());
+            for addr in addrs {
+                assert!(
+                    addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                        || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                );
+            }
+        });
+    }
+
+    /// Pool work runs on dedicated worker threads, so awaiting a spawned
+    /// strategy task exercises the loop's cross-thread wake path.
+    #[test]
+    fn test_parallel_strategy_spawn_completes() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+            assert_eq!(strategy.parallelism(), 2);
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
         });
     }
 }
