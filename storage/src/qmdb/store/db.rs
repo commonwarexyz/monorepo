@@ -32,6 +32,7 @@
 //!         },
 //!         translator: TwoCap,
 //!         init_cache_size: Some(NZUsize!(1 << 16)),
+//!         init_buffer: NZUsize!(1 << 21),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.child("store"), config)
