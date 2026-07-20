@@ -24,7 +24,7 @@ use super::{
     alloc::{block_align, Allocator, Extent},
     chunk::{chunk_of, merge_frozen_runs, ChunkCrc, ChunkMap, ChunkState, CrcCache, RunMeta},
     layout::{ChecksumRef, Entry},
-    Config, Driver, BLOCK,
+    Config, Driver, OrderedMap, OrderedSet, BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error};
 use bytes::Bytes;
@@ -68,7 +68,8 @@ pub(super) struct BlobInner {
     /// stays backed with its low bytes logically dead.
     floor: u64,
     /// Written runs keyed by logical start; gaps are holes (zeros).
-    runs: BTreeMap<u64, RunMeta>,
+    /// Aliased so Kani proofs run over the solver-friendly container.
+    runs: OrderedMap<u64, RunMeta>,
     /// Checksum state per backed chunk, over the chunk's written span.
     crcs: ChunkMap,
     /// Bytes of the frontier chunk's written span (from its chunk base),
@@ -83,11 +84,13 @@ pub(super) struct BlobInner {
     /// (every write is written through); a [`ChunkCrc::Pending`] chunk is
     /// always resident, and its entry is the authoritative source for CRC
     /// finalization, reads, prefix/suffix sourcing, and COW.
-    overlay: BTreeMap<u64, OverlayEntry>,
+    /// Aliased so Kani proofs run over the solver-friendly container.
+    overlay: OrderedMap<u64, OverlayEntry>,
     /// Monotonic clock for overlay LRU stamps.
     overlay_clock: u64,
     /// Chunks whose content changed since the last snapshot.
-    dirty_chunks: BTreeSet<u64>,
+    /// Aliased so Kani proofs run over the solver-friendly container.
+    dirty_chunks: OrderedSet<u64>,
     /// Committed CRC pages loaded for verification (bounded LRU).
     crc_cache: CrcCache,
     /// Committed checksum refs whose extent guard was verified this
@@ -794,8 +797,9 @@ impl BlobInner {
         self.committed_entry.as_ref()
     }
 
-    /// Written runs keyed by logical start (gaps are holes).
-    pub const fn runs(&self) -> &BTreeMap<u64, RunMeta> {
+    /// Written runs keyed by logical start (gaps are holes). The map is
+    /// aliased so Kani proofs run over the solver-friendly container.
+    pub const fn runs(&self) -> &OrderedMap<u64, RunMeta> {
         &self.runs
     }
 
@@ -818,8 +822,9 @@ impl BlobInner {
 
     /// The read planner's split view: runs and chunk states borrowed for
     /// the plan walk while the committed-CRC cache is consulted mutably
-    /// (even lookups stamp its LRU clock).
-    pub const fn plan_parts(&mut self) -> (&BTreeMap<u64, RunMeta>, &ChunkMap, &mut CrcCache) {
+    /// (even lookups stamp its LRU clock). The map is aliased so Kani
+    /// proofs run over the solver-friendly container.
+    pub const fn plan_parts(&mut self) -> (&OrderedMap<u64, RunMeta>, &ChunkMap, &mut CrcCache) {
         (&self.runs, &self.crcs, &mut self.crc_cache)
     }
 
@@ -880,8 +885,9 @@ impl BlobInner {
         self.runs.remove(&logical)
     }
 
-    /// Detach every run at or beyond `from`, in order.
-    pub fn split_runs_from(&mut self, from: u64) -> BTreeMap<u64, RunMeta> {
+    /// Detach every run at or beyond `from`, in order. The map is aliased
+    /// so Kani proofs run over the solver-friendly container.
+    pub fn split_runs_from(&mut self, from: u64) -> OrderedMap<u64, RunMeta> {
         self.runs.split_off(&from)
     }
 

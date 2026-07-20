@@ -206,6 +206,8 @@ mod resize;
 mod state;
 #[cfg(test)]
 mod tests;
+#[cfg(any(test, kani))]
+mod vecmap;
 mod write;
 
 use crate::{BufferPool, Error, Handle, IoBufs, IoBufsMut};
@@ -218,6 +220,18 @@ use std::{
     pin::Pin,
     sync::{Arc, OnceLock},
 };
+
+// The volume's ordered containers: the std BTree containers in production
+// and test builds, swapped for the solver-friendly `vecmap` substitutes
+// under Kani (symbolic BTree execution exhausts the solver — the vecmap
+// module docs carry the trust argument).
+cfg_if::cfg_if! {
+    if #[cfg(kani)] {
+        use vecmap::{VecMap as OrderedMap, VecSet as OrderedSet};
+    } else {
+        use std::collections::{BTreeMap as OrderedMap, BTreeSet as OrderedSet};
+    }
+}
 
 /// Alignment unit for all extents, checksum granularity, and the assumed
 /// physical tearing granularity of the inner blob: writes tear at (at

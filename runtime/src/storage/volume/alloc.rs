@@ -7,8 +7,7 @@
 //! completes (see the commit protocol in the module docs), which is what makes
 //! rollback to the previous commit safe.
 
-use super::BLOCK;
-use std::collections::BTreeMap;
+use super::{OrderedMap, BLOCK};
 
 /// A contiguous physical byte range in the volume file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,7 +24,8 @@ pub(super) struct Extent {
 pub(super) struct Allocator {
     /// Free ranges keyed by offset. Invariant: non-empty, block-aligned,
     /// non-adjacent (always coalesced), and entirely below `end`.
-    free: BTreeMap<u64, u64>,
+    /// Aliased so Kani proofs run over the solver-friendly container.
+    free: OrderedMap<u64, u64>,
     /// High-water mark: everything at and beyond this offset is free.
     end: u64,
     /// Running total of the bytes in `free` (kept exact by every mutation).
@@ -47,7 +47,7 @@ impl Allocator {
         let mut extents: Vec<Extent> = used.into_iter().collect();
         extents.sort_by_key(|e| e.offset);
 
-        let mut free = BTreeMap::new();
+        let mut free = OrderedMap::new();
         let mut free_bytes = 0;
         let mut cursor = reserved;
         for extent in extents {

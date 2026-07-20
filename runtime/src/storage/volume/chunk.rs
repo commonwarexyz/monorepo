@@ -10,10 +10,10 @@
 
 use super::{
     alloc::{block_align, Extent},
-    BLOCK,
+    OrderedMap, OrderedSet, BLOCK,
 };
 use commonware_utils::bitmap::BitMap;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// The chunk index containing logical byte `offset`. Chunks and blocks
 /// coincide in this format (checksum granularity == tearing granularity).
@@ -270,9 +270,11 @@ pub(super) struct ChunkMap {
     /// Dense state per contiguous backed chunk range, keyed by first
     /// chunk. Segments never overlap. Ranges created out of order may
     /// touch without merging (adjacent segments read exactly like one).
-    segments: BTreeMap<u64, Segment>,
+    /// Aliased so Kani proofs run over the solver-friendly container.
+    segments: OrderedMap<u64, Segment>,
     /// Chunks with a pending (deferred) CRC.
-    pending: BTreeSet<u64>,
+    /// Aliased so Kani proofs run over the solver-friendly container.
+    pending: OrderedSet<u64>,
     /// Chunks with `verified == false`.
     unverified: u64,
 }
@@ -537,7 +539,9 @@ impl ChunkMap {
 
     /// Seed dense state for every chunk covered by `runs` (hydration): all
     /// unverified, with CRCs left on disk ([`ChunkCrc::Unloaded`]).
-    pub fn seed(&mut self, runs: &BTreeMap<u64, RunMeta>) {
+    /// The map is aliased so Kani proofs run over the solver-friendly
+    /// container.
+    pub fn seed(&mut self, runs: &OrderedMap<u64, RunMeta>) {
         debug_assert!(self.segments.is_empty(), "seed into an empty map");
         let mut open: Option<(u64, u64)> = None;
         for (&logical, run) in runs {
@@ -959,7 +963,9 @@ impl CrcCache {
 /// still guarantee every run is frozen (born <= the current snapshot seq),
 /// since a young component would silently lose its exemption otherwise.
 /// Holes are never crossed: they break logical contiguity by definition.
-pub(super) fn merge_frozen_runs(runs: &mut BTreeMap<u64, RunMeta>) {
+/// The map is aliased so Kani proofs run over the solver-friendly
+/// container.
+pub(super) fn merge_frozen_runs(runs: &mut OrderedMap<u64, RunMeta>) {
     /// Whether `run` at `logical` extends `head` (at `head_logical`) with
     /// logical and physical contiguity and no padding gap in `head`.
     const fn extends(head_logical: u64, head: &RunMeta, logical: u64, run: &RunMeta) -> bool {
