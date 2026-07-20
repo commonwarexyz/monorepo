@@ -32,6 +32,7 @@
 //!         },
 //!         translator: TwoCap,
 //!         init_cache_size: Some(NZUsize!(1 << 16)),
+//!         init_buffer: NZUsize!(1 << 21),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.child("store"), config)
@@ -118,6 +119,9 @@ pub struct Config<T: Translator, C> {
     /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
+
+    /// Size (in bytes) of the read buffer used to replay the log during init.
+    pub init_buffer: NonZeroUsize,
 }
 
 /// A finalized batch of writes and deletes ready to be applied to the store.
@@ -395,6 +399,7 @@ where
 
         // Build the snapshot.
         let cache_size = cfg.init_cache_size;
+        let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {
             let op = log.read(*last_commit_loc).await?;
@@ -408,6 +413,7 @@ where
                 inactivity_floor_loc,
                 &log,
                 &mut snapshot,
+                init_buffer,
                 cache_size,
                 |_, _| {},
             )
@@ -564,6 +570,7 @@ mod test {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
         };
         TestStore::init(context, cfg).await.unwrap()
     }

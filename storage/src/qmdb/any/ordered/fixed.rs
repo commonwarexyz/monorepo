@@ -113,7 +113,10 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
-        pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
+        pub async fn init(
+            context: E,
+            cfg: Config<T, S, core::num::NonZeroUsize>,
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
         }
     }
@@ -149,7 +152,7 @@ pub(crate) mod test {
                         test_ordered_any_update_collision_edge_case,
                     },
                 },
-                test::fixed_db_config,
+                test::{fixed_db_config, fixed_db_config_partitioned},
             },
             verify_proof,
         },
@@ -548,7 +551,7 @@ pub(crate) mod test {
             }
         }
 
-        let cfg = fixed_db_config::<OneCap>(partition, &context);
+        let cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
         let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
             .await
             .unwrap();
@@ -592,12 +595,15 @@ pub(crate) mod test {
         let db = db.commit().await.unwrap();
         let db = db.sync().await.unwrap();
         let root = db.root();
+        let active_keys = db.active_keys;
         drop(db);
 
         // Reopen with a range of concurrency values. All rebuild from the same log and must
-        // match the original root and serve the expected value for every key.
+        // match the original root, the original active-key count (counted per actual key, so
+        // translated-key collision chains contribute each of their members), and serve the
+        // expected value for every key.
         for &concurrency in concurrency_sweep {
-            let mut cfg = fixed_db_config::<OneCap>(partition, &context);
+            let mut cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
             cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
             let ctx = context
                 .child("reopen")
@@ -607,6 +613,10 @@ pub(crate) mod test {
                 db.root(),
                 root,
                 "root mismatch at P={P} concurrency={concurrency}"
+            );
+            assert_eq!(
+                db.active_keys, active_keys,
+                "active-key count mismatch at P={P} concurrency={concurrency}"
             );
             assert_expected_values(&db).await;
             drop(db);
@@ -621,14 +631,14 @@ pub(crate) mod test {
             type FreshDb<S> =
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
-            let cfg = fixed_db_config::<OneCap>("parallel_fresh", &context);
+            let cfg = fixed_db_config_partitioned::<OneCap>("parallel_fresh", &context);
             let db = FreshDb::<Sequential>::init(context.child("create"), cfg)
                 .await
                 .unwrap();
             let root = db.root();
             drop(db);
 
-            let mut cfg = fixed_db_config::<OneCap>("parallel_fresh", &context);
+            let mut cfg = fixed_db_config_partitioned::<OneCap>("parallel_fresh", &context);
             cfg.init_concurrency = NZUsize!(4);
             let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
                 .await
@@ -650,7 +660,7 @@ pub(crate) mod test {
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
             // Populate a db so the log has committed operations to replay.
-            let cfg = fixed_db_config::<OneCap>("parallel_replay_fail", &context);
+            let cfg = fixed_db_config_partitioned::<OneCap>("parallel_replay_fail", &context);
             let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
                 .await
                 .unwrap();
@@ -668,7 +678,7 @@ pub(crate) mod test {
 
             // Reopen the op log directly (init's reads run before faults are enabled) and build
             // against a fresh index, mirroring init's parallel snapshot build.
-            let cfg = fixed_db_config::<OneCap>("parallel_replay_fail", &context);
+            let cfg = fixed_db_config_partitioned::<OneCap>("parallel_replay_fail", &context);
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
                 cfg.journal_config,
@@ -689,7 +699,14 @@ pub(crate) mod test {
             // workers never read the log themselves.
             context.storage_fault_config().write().read_rate = Some(1.0);
             let result = index
-                .build_snapshot(context.child("build"), floor, &log, NZUsize!(4), None)
+                .build_snapshot(
+                    context.child("build"),
+                    floor,
+                    &log,
+                    NZUsize!(4),
+                    NZUsize!(1 << 21),
+                    None,
+                )
                 .await;
             assert!(result.is_err(), "replay must fail under read faults");
 
@@ -697,6 +714,53 @@ pub(crate) mod test {
             assert_eq!(Arc::strong_count(&log), 1);
 
             context.storage_fault_config().write().read_rate = None;
+        });
+    }
+
+    /// A multi-worker build of an empty log must return the serial build's result (zero active
+    /// keys, an empty bitmap) rather than panicking on the last-commit bit.
+    #[test_traced("WARN")]
+    fn test_ordered_partitioned_parallel_init_empty_log() {
+        deterministic::Runner::default().start(|context| async move {
+            use crate::qmdb::SnapshotBuild as _;
+            use std::sync::Arc;
+
+            let mut results = Vec::new();
+            for concurrency in [1usize, 4] {
+                let cfg = fixed_db_config_partitioned::<OneCap>("ordered_parallel_empty", &context);
+                let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                    context
+                        .child("log")
+                        .with_attribute("concurrency", concurrency),
+                    cfg.journal_config,
+                )
+                .await
+                .unwrap();
+                let log = Arc::new(log);
+                let mut index =
+                    crate::index::partitioned::ordered::Index::<OneCap, Location, 1>::new(
+                        context
+                            .child("index")
+                            .with_attribute("concurrency", concurrency),
+                        OneCap,
+                    );
+                let result = index
+                    .build_snapshot(
+                        context
+                            .child("build")
+                            .with_attribute("concurrency", concurrency),
+                        Location::new(0),
+                        &log,
+                        core::num::NonZeroUsize::new(concurrency).unwrap(),
+                        NZUsize!(1 << 21),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.0, 0);
+                results.push(result);
+            }
+            assert_eq!(results[0], results[1]);
         });
     }
 

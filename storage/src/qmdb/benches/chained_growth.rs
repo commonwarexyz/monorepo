@@ -86,7 +86,8 @@ fn cur_fix_cfg(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
-        init_concurrency: NZUsize!(1),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 

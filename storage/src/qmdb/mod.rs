@@ -50,7 +50,10 @@
 //!   Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
-    index::{Cursor, Unordered as Index, partitioned::partition_index_and_sub_key},
+    index::{
+        Cursor, Unordered as Index,
+        partitioned::{PartitionRange, Partitioned},
+    },
     journal::{
         Error as JournalError,
         contiguous::{Contiguous, Mutable},
@@ -65,7 +68,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::Spawner;
-use commonware_utils::{NZUsize, bitmap::BitMap, cache::Clock, channel::mpsc};
+use commonware_utils::{bitmap::BitMap, cache::Clock, channel::mpsc};
 use core::num::NonZeroUsize;
 use futures::{StreamExt as _, future::join_all, pin_mut};
 use std::sync::Arc;
@@ -253,24 +256,20 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
     }
 }
 
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot. Each buffer fill pays a thread hand-off to the storage layer, so the buffer is sized
-/// to amortize that hand-off across tens of thousands of operations (at the cost of this much
-/// memory per replay).
-const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 21);
-
 /// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
-/// `cache_size` bounds a `(location -> key)` cache that lets collision resolution resolve
-/// candidates from memory instead of re-reading the log; `None` disables it.
+/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
+/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
+/// instead of re-reading the log; `None` disables it.
 pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
@@ -281,9 +280,7 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    let stream = reader
-        .replay(*inactivity_floor_loc, SNAPSHOT_READ_BUFFER_SIZE)
-        .await?;
+    let stream = reader.replay(*inactivity_floor_loc, init_buffer).await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
 
@@ -466,16 +463,16 @@ type RoutedBatch<K> = Vec<(K, u64, bool)>;
 /// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
 /// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
 /// `reader` and `(location -> key)` cache. Returns the populated worker index.
-async fn build_snapshot_worker<F, C, T, const P: usize>(
+async fn build_snapshot_worker<F, C, R>(
     log: Arc<C>,
     mut rx: mpsc::Receiver<RoutedBatch<<C::Item as Operation<F>>::Key>>,
-    mut index: crate::index::partitioned::ordered::RangeIndex<T, Location<F>, P>,
+    mut index: R,
     cache_size: Option<NonZeroUsize>,
-) -> Result<crate::index::partitioned::ordered::RangeIndex<T, Location<F>, P>, Error<F>>
+) -> Result<R, Error<F>>
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
-    T: Translator,
+    R: PartitionRange<Value = Location<F>>,
 {
     let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
     while let Some(batch) = rx.recv().await {
@@ -509,6 +506,7 @@ async fn build_snapshot_serial<F, C, I>(
     inactivity_floor_loc: Location<F>,
     reader: &C,
     snapshot: &mut I,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
@@ -524,6 +522,7 @@ where
         inactivity_floor_loc,
         reader,
         snapshot,
+        init_buffer,
         cache_size,
         |is_active, old_loc| {
             activity.push(is_active);
@@ -534,6 +533,149 @@ where
     )
     .await?;
     Ok((active_keys, activity))
+}
+
+/// Build a snapshot by splitting the log replay across parallel workers, each owning a contiguous
+/// range of the index's partitions (see [Partitioned]). Returns the number of active keys and
+/// the activity bitmap (see [SnapshotBuild::build_snapshot]).
+async fn build_snapshot_parallel<F, E, C, I>(
+    snapshot: &mut I,
+    context: E,
+    inactivity_floor_loc: Location<F>,
+    log: &Arc<C>,
+    init_concurrency: NonZeroUsize,
+    init_buffer: NonZeroUsize,
+    cache_size: Option<NonZeroUsize>,
+) -> Result<(usize, BitMap), Error<F>>
+where
+    F: Family,
+    E: Spawner,
+    C: Contiguous<Item: Operation<F>> + 'static,
+    I: Partitioned + Index<Value = Location<F>>,
+{
+    let count = snapshot.partition_count();
+    let workers = (init_concurrency.get() - 1).min(count);
+
+    // No workers: build on this task.
+    if workers == 0 {
+        return build_snapshot_serial(
+            inactivity_floor_loc,
+            &**log,
+            snapshot,
+            init_buffer,
+            cache_size,
+        )
+        .await;
+    }
+
+    let floor = *inactivity_floor_loc;
+    let range_size = count.div_ceil(workers);
+
+    // `range_size` rounds up, so `range_size * workers` can exceed `count`, leaving trailing
+    // ranges empty (and a naive `count - lo` would underflow). Reduce to the number of
+    // non-empty ranges so routing (`p / range_size`) stays in `[0, workers)`.
+    let workers = count.div_ceil(range_size);
+    let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
+
+    // Spawn one worker per contiguous partition range, each owning its own reader and cache.
+    let mut senders = Vec::with_capacity(workers);
+    let mut handles = Vec::with_capacity(workers);
+    for w in 0..workers {
+        let (tx, rx) = mpsc::channel(SNAPSHOT_CHANNEL_DEPTH);
+        senders.push(tx);
+        let log = log.clone();
+
+        // This worker owns the contiguous partition range [lo, lo + range_len). It allocates
+        // only that many slots, so per-worker memory is the range, not the full partition set.
+        let lo = w * range_size;
+        let range_len = range_size.min(count - lo);
+        let worker_index = snapshot.new_range(lo, range_len);
+        let handle = context
+            .child("snapshot_worker")
+            .with_attribute("worker", w)
+            .dedicated()
+            .spawn(move |_| {
+                build_snapshot_worker::<F, C, I::Range>(log, rx, worker_index, per_worker_cache)
+            });
+        handles.push(handle);
+    }
+
+    // Replay the log once and route each keyed op to the worker owning its partition.
+    // Routing runs in an inner future so any replay failure is captured rather than
+    // returned immediately: returning while the worker handles are merely dropped would
+    // leave the workers running detached, retaining the log and their range allocations
+    // after init has already failed. The stream is also released before the join.
+    let end = log.bounds().end;
+    let routing_result: Result<(), Error<F>> = async {
+        let stream = log.replay(floor, init_buffer).await?;
+        pin_mut!(stream);
+        let mut batches: Vec<RoutedBatch<_>> = (0..workers)
+            .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
+            .collect();
+
+        // A closed channel means a worker terminated early (e.g. returned an `Error<F>`
+        // while resolving a collision). Stop routing on the first such send failure and
+        // let the join below surface that worker's error, rather than panicking on the
+        // send.
+        while let Some(result) = stream.next().await {
+            let (loc, op) = result?;
+            let is_delete = op.is_delete();
+            let Some(key) = op.into_key() else { continue };
+            let w = I::partition_of(key.as_ref()) / range_size;
+            batches[w].push((key, loc, is_delete));
+            if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
+                let batch =
+                    std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
+                if senders[w].send(batch).await.is_err() {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Flush remaining batches before the channels close.
+        for (w, batch) in batches.into_iter().enumerate() {
+            if !batch.is_empty() && senders[w].send(batch).await.is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    // Close the channels so each worker's stream terminates and it returns its index.
+    drop(senders);
+
+    // Join workers before surfacing any replay failure, so none outlive a failed init.
+    let joined = join_all(handles).await;
+    routing_result?;
+
+    // Install each worker's partition range into the snapshot. Each worker carries its own
+    // partition offset, so installation needs no range arguments.
+    for handle in joined {
+        let worker_index = handle??;
+        snapshot.install_range(worker_index);
+    }
+
+    // Reconstruct the activity bitmap in location order: a location is active iff it is the
+    // current location of an active key, or it is the last commit. This matches the serial
+    // build's per-op push-then-clear, which leaves exactly those bits set. Each active key
+    // holds exactly one location in the snapshot, so the same walk counts the active keys.
+    let mut total_items = 0;
+    let mut active: BitMap = BitMap::zeroes(end - floor);
+    snapshot.for_each_value(|loc| {
+        active.set(**loc - floor, true);
+        total_items += 1;
+    });
+
+    // The last operation is the final commit (a log always ends with one), which stays active.
+    // An empty log has none.
+    if let Some(last_commit) = end.checked_sub(1)
+        && last_commit >= floor
+    {
+        active.set(last_commit - floor, true);
+    }
+
+    Ok((total_items, active))
 }
 
 /// Builds a database's snapshot index from the operations log.
@@ -547,14 +689,17 @@ where
 pub trait SnapshotBuild<F: Family>:
     sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
 {
+    /// The build's concurrency knob: `()` for index types that build serially, and a task count
+    /// for index types that build in parallel (including the calling task, so `1` builds
+    /// entirely on the calling task).
+    type Concurrency: Copy + Send + 'static;
+
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
     ///
-    /// `init_concurrency` bounds how many tasks an index type that builds in parallel uses,
-    /// including the calling task (`1` builds entirely on the calling task). Index types that
-    /// build serially ignore it. `cache_size` bounds each build's `(location -> key)` cache
-    /// (`None` disables it).
+    /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
+    /// build's `(location -> key)` cache (`None` disables it).
     // In-crate callers await this future at concrete index types, so the flexibility an explicit
     // `Send` bound on the returned future would add is unused.
     #[allow(async_fn_in_trait)]
@@ -563,22 +708,15 @@ pub trait SnapshotBuild<F: Family>:
         _context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
+        _init_concurrency: Self::Concurrency,
+        init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        // This index type builds serially, so `init_concurrency` has no effect. Warn on an
-        // explicit concurrency rather than silently ignore it.
-        if init_concurrency.get() > 1 {
-            tracing::warn!(
-                init_concurrency,
-                "init_concurrency configured but this index builds serially; ignoring"
-            );
-        }
-        build_snapshot_serial(inactivity_floor_loc, &**log, self, cache_size).await
+        build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
     }
 }
 
@@ -598,141 +736,72 @@ mod sealed {
     }
 }
 
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {}
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {}
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
-    for crate::index::partitioned::unordered::Index<T, Location<F>, P>
-{
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
+    type Concurrency = ();
+}
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
+    type Concurrency = ();
 }
 
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
-    for crate::index::partitioned::ordered::Index<T, Location<F>, P>
+    for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
+    type Concurrency = NonZeroUsize;
+
     async fn build_snapshot<E, C>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
         init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        let count = self.partition_count();
-        let workers = (init_concurrency.get() - 1).min(count);
+        build_snapshot_parallel(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_concurrency,
+            init_buffer,
+            cache_size,
+        )
+        .await
+    }
+}
 
-        // No workers: build on this task.
-        if workers == 0 {
-            return build_snapshot_serial(inactivity_floor_loc, &**log, self, cache_size).await;
-        }
+impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+    for crate::index::partitioned::ordered::Index<T, Location<F>, P>
+{
+    type Concurrency = NonZeroUsize;
 
-        let floor = *inactivity_floor_loc;
-        let range_size = count.div_ceil(workers);
-
-        // `range_size` rounds up, so `range_size * workers` can exceed `count`, leaving trailing
-        // ranges empty (and a naive `count - lo` would underflow). Reduce to the number of
-        // non-empty ranges so routing (`p / range_size`) stays in `[0, workers)`.
-        let workers = count.div_ceil(range_size);
-        let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
-
-        // Spawn one worker per contiguous partition range, each owning its own reader and cache.
-        let mut senders = Vec::with_capacity(workers);
-        let mut handles = Vec::with_capacity(workers);
-        for w in 0..workers {
-            let (tx, rx) = mpsc::channel(SNAPSHOT_CHANNEL_DEPTH);
-            senders.push(tx);
-            let log = log.clone();
-
-            // This worker owns the contiguous partition range [lo, lo + range_len). It allocates
-            // only that many slots, so per-worker memory is the range, not the full partition set.
-            let lo = w * range_size;
-            let range_len = range_size.min(count - lo);
-            let worker_index = self.new_range(lo, range_len);
-            let handle = context
-                .child("snapshot_worker")
-                .with_attribute("worker", w)
-                .shared(true)
-                .spawn(move |_| {
-                    build_snapshot_worker::<F, C, T, P>(log, rx, worker_index, per_worker_cache)
-                });
-            handles.push(handle);
-        }
-
-        // Replay the log once and route each keyed op to the worker owning its partition.
-        // Routing runs in an inner future so any replay failure is captured rather than
-        // returned immediately: returning while the worker handles are merely dropped would
-        // leave the workers running detached, retaining the log and their range allocations
-        // after init has already failed. The stream is also released before the join.
-        let end = log.bounds().end;
-        let last_commit = end.saturating_sub(1);
-        let routing_result: Result<(), Error<F>> = async {
-            let stream = log.replay(floor, SNAPSHOT_READ_BUFFER_SIZE).await?;
-            pin_mut!(stream);
-            let mut batches: Vec<RoutedBatch<_>> = (0..workers)
-                .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
-                .collect();
-
-            // A closed channel means a worker terminated early (e.g. returned an `Error<F>`
-            // while resolving a collision). Stop routing on the first such send failure and
-            // let the join below surface that worker's error, rather than panicking on the
-            // send.
-            while let Some(result) = stream.next().await {
-                let (loc, op) = result?;
-                let is_delete = op.is_delete();
-                let Some(key) = op.into_key() else { continue };
-                let (p, _) = partition_index_and_sub_key::<P>(key.as_ref());
-                let w = p / range_size;
-                batches[w].push((key, loc, is_delete));
-                if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
-                    let batch = std::mem::replace(
-                        &mut batches[w],
-                        Vec::with_capacity(SNAPSHOT_ROUTE_BATCH),
-                    );
-                    if senders[w].send(batch).await.is_err() {
-                        return Ok(());
-                    }
-                }
-            }
-
-            // Flush remaining batches before the channels close.
-            for (w, batch) in batches.into_iter().enumerate() {
-                if !batch.is_empty() && senders[w].send(batch).await.is_err() {
-                    break;
-                }
-            }
-            Ok(())
-        }
-        .await;
-
-        // Close the channels so each worker's stream terminates and it returns its index.
-        drop(senders);
-
-        // Join workers before surfacing any replay failure, so none outlive a failed init.
-        let joined = join_all(handles).await;
-        routing_result?;
-
-        // Install each worker's partition range into self. Each worker carries its own
-        // partition offset, so installation needs no range arguments.
-        let mut total_items = 0;
-        for handle in joined {
-            let worker_index = handle??;
-            total_items += self.install_range(worker_index);
-        }
-
-        // Reconstruct the activity bitmap in location order: a location is active iff it is the
-        // current location of an active key, or it is the last commit. This matches the serial
-        // build's per-op push-then-clear, which leaves exactly those bits set.
-        let mut active: BitMap = BitMap::zeroes(end - floor);
-        self.for_each_value(|loc| {
-            active.set(**loc - floor, true);
-        });
-        if last_commit >= floor {
-            active.set(last_commit - floor, true);
-        }
-
-        Ok((total_items, active))
+    async fn build_snapshot<E, C>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F>> + 'static,
+    {
+        build_snapshot_parallel(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_concurrency,
+            init_buffer,
+            cache_size,
+        )
+        .await
     }
 }
 

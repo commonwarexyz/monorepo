@@ -109,7 +109,8 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 },
                 translator: EightCap,
                 init_cache_size: Some(NZUsize!(3)),
-                init_concurrency: NZUsize!(1),
+                init_buffer: NZUsize!(1 << 21),
+                init_concurrency: (),
             };
 
             let mut db: GenericDb<F> =
