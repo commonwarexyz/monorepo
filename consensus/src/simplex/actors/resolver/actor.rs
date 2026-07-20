@@ -400,7 +400,7 @@ impl<
                             .or_default()
                             .push(response);
                     }
-                    _ => {
+                    Certificate::Finalization(_) | Certificate::Nullification(_) => {
                         response.send_lossy(true);
                     }
                 }
