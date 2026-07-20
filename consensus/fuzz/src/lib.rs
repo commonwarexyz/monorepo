@@ -210,8 +210,10 @@ async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
 ///
 /// `SingleCancel` and `SinglePending` apply their non-default certifier only to
 /// `target_idx`. `RejectView` applies the same deterministic rejection rule to
-/// every validator, preserving the certification-consistency assumption while
-/// exercising the protocol's rejection path.
+/// every correct validator and is valid only when that view's proposer is
+/// Byzantine. Dedicated audit targets enforce that precondition before using
+/// it, preserving both certification consistency and the correct proposer's
+/// certifiable-by-construction obligation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertifyChoice {
     Always,
@@ -469,24 +471,19 @@ impl Arbitrary<'_> for FuzzInput {
             _ => ForwardingPolicy::SilentLeader,
         };
 
-        // A consistent one-view rejection is safe in either configuration: all
-        // correct validators nullify that view and certify later views. The
-        // single-target cancel/pending variants require N4F0C4, where disabling
-        // one certifier still leaves a finalize quorum.
-        let reject_view = View::new(u.int_in_range(1..=required_containers)?);
+        // Single-target cancel/pending variants require N4F0C4, where disabling
+        // one certifier still leaves a finalize quorum. Rejected certification
+        // is enabled separately by dedicated audit targets only when their
+        // statically known leader schedule selects the Byzantine participant.
         let certify = if configuration == N4F0C4 {
             let target_idx = u.int_in_range(0..=configuration.n as u8 - 1)?;
-            match u.int_in_range(0..=5)? {
+            match u.int_in_range(0..=4)? {
                 0 => CertifyChoice::SingleCancel { target_idx },
                 1 => CertifyChoice::SinglePending { target_idx },
-                2 => CertifyChoice::RejectView { view: reject_view },
                 _ => CertifyChoice::Always,
             }
         } else {
-            match u.int_in_range(0..=3)? {
-                0 => CertifyChoice::RejectView { view: reject_view },
-                _ => CertifyChoice::Always,
-            }
+            CertifyChoice::Always
         };
 
         let reporting = ReporterWiring::arbitrary(u)?;
@@ -1968,7 +1965,36 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+            if matches!(input.certify, CertifyChoice::RejectView { .. }) {
+                // A Byzantine participant may behave correctly. For the audit
+                // rejection campaign, run its normal engine so the designated
+                // Byzantine-led view reliably has a well-formed proposal. Its
+                // application always certifies its own proposal, while all
+                // correct applications consistently reject it. Its raw reporter
+                // is intentionally excluded from the correct audit set below.
+                let (pending, recovered, resolver) = channels;
+                let _ = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                    ctx,
+                    &oracle,
+                    &participants,
+                    schemes[i].clone(),
+                    validator,
+                    P::Elector::default(),
+                    relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    input.mailbox_size,
+                    input.fetch_concurrent,
+                    input.forwarding,
+                    pending,
+                    recovered,
+                    resolver,
+                    CertifyChoice::Always,
+                    ReporterWiring::Solo,
+                );
+            } else {
+                spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+            }
         }
 
         for i in (config.faults as usize)..(config.n as usize) {
@@ -3184,7 +3210,18 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
 /// Unlike [`fuzz`], this is an explicit opt-in used only by dedicated audit
 /// targets. It runs the same basic and vote invariants as Standard mode, then
 /// dispatches the additional audit invariants through [`invariants::check`].
-pub fn fuzz_audit<P: simplex::Simplex>(input: FuzzInput) {
+pub fn fuzz_audit<P: simplex::Simplex>(mut input: FuzzInput) {
+    // Rejected certification is sampled only for instantiations that expose a
+    // statically known Byzantine-led view. General fuzz targets never receive
+    // this override, so they cannot accidentally reject a correct proposer's
+    // certifiable-by-construction payload.
+    if input.certify == CertifyChoice::Always
+        && input.raw_bytes.first().is_some_and(|byte| byte % 4 == 0)
+        && let Some(view) = P::audit_rejection_view(input.configuration)
+        && input.required_containers >= view.get()
+    {
+        input.certify = CertifyChoice::RejectView { view };
+    }
     print_fuzz_input(Mode::Standard, &input);
 
     let raw_bytes = input.raw_bytes.clone();
@@ -3255,7 +3292,12 @@ mod tests {
     #[test]
     fn audited_standard_observes_rejected_certification() {
         let mut input = audit_input();
-        input.certify = CertifyChoice::RejectView { view: View::new(1) };
+        input.configuration = N4F1C3;
+        input.required_containers = 4;
+        // With epoch 333 and four round-robin participants, view 3 is led by
+        // the compromised participant at index 0. Rejecting that proposal does
+        // not violate any correct proposer's certifiable-by-construction duty.
+        input.certify = CertifyChoice::RejectView { view: View::new(3) };
         let (valid, rejected) = run_audited_standard_once::<simplex::SimplexId>(input);
         assert!(valid, "audit run was not checked");
         assert!(rejected, "audit run did not reach false certification");
@@ -3264,12 +3306,11 @@ mod tests {
     #[test]
     fn certify_variants_preserve_liveness_with_full_honesty() {
         // With four honest validators, disabling one certifier leaves exactly
-        // the finalize quorum. A consistently rejected view is nullified before
-        // later views resume certification. Both paths must retain liveness.
+        // the finalize quorum. Both incomplete-result paths must retain
+        // liveness.
         for certify in [
             CertifyChoice::SingleCancel { target_idx: 0 },
             CertifyChoice::SinglePending { target_idx: 0 },
-            CertifyChoice::RejectView { view: View::new(1) },
         ] {
             let mut input = audit_input();
             input.certify = certify;
@@ -3279,12 +3320,14 @@ mod tests {
     }
 
     #[test]
-    fn rejected_view_preserves_liveness_with_one_byzantine_validator() {
+    fn rejected_byzantine_leader_view_preserves_liveness() {
         let mut input = audit_input();
         input.configuration = N4F1C3;
-        input.certify = CertifyChoice::RejectView { view: View::new(1) };
-        let audit = run_standard_once::<simplex::SimplexId>(input, false, true, false, None);
-        assert!(audit.is_some(), "rejecting one view prevented recovery");
+        input.required_containers = 4;
+        input.certify = CertifyChoice::RejectView { view: View::new(3) };
+        let (valid, rejected) = run_audited_standard_once::<simplex::SimplexId>(input);
+        assert!(valid, "rejecting one Byzantine-led view prevented recovery");
+        assert!(rejected, "the Byzantine-led view was not rejected");
     }
 
     #[test]

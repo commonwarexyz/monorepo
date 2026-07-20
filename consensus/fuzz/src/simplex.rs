@@ -1,13 +1,16 @@
-use crate::id_mock;
 #[cfg(feature = "mocks")]
 use crate::simplex_certificate_mock as cert_mock;
+use crate::{Configuration, N4F1C3, id_mock};
 use commonware_codec::Read;
-use commonware_consensus::simplex::{
-    elector::{Config as ElectorConfig, Random, RoundRobin},
-    scheme::{
-        Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-        secp256r1,
+use commonware_consensus::{
+    simplex::{
+        elector::{Config as ElectorConfig, Random, RoundRobin},
+        scheme::{
+            Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+            secp256r1,
+        },
     },
+    types::View,
 };
 use commonware_cryptography::{
     PublicKey, Sha256,
@@ -69,6 +72,14 @@ where
         Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     );
+
+    /// A view whose leader is the configured Byzantine participant in the
+    /// dedicated audit harness, if this instantiation has a statically known
+    /// leader schedule. Returning `None` disables rejected-certification
+    /// sampling for that instantiation.
+    fn audit_rejection_view(_configuration: Configuration) -> Option<View> {
+        None
+    }
 }
 
 pub struct SimplexEd25519;
@@ -107,6 +118,10 @@ impl Simplex for SimplexId {
     ) {
         id_mock::fixture(context, namespace, n)
     }
+
+    fn audit_rejection_view(configuration: Configuration) -> Option<View> {
+        (configuration == N4F1C3).then(|| View::new(3))
+    }
 }
 
 #[cfg(feature = "mocks")]
@@ -128,6 +143,10 @@ impl Simplex for SimplexCertificateMock {
     ) {
         let fixture = cert_mock::fixture_with::<false, true, true, _>(context, namespace, n);
         (fixture.participants, fixture.schemes)
+    }
+
+    fn audit_rejection_view(configuration: Configuration) -> Option<View> {
+        (configuration == N4F1C3).then(|| View::new(3))
     }
 }
 

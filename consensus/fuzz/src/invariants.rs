@@ -855,12 +855,41 @@ where
 
         let mut accepted_proposals: BTreeSet<ApplicationProposal> = BTreeSet::new();
         let mut rejected_proposals: BTreeSet<ApplicationProposal> = BTreeSet::new();
+        let mut proposed_payloads: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
+        let mut observed_notarizations: BTreeSet<Proposal<Sha256Digest>> = BTreeSet::new();
+        let mut observed_nullifications: BTreeSet<Round> = BTreeSet::new();
         let mut successful_certifications: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
         let mut failed_certifications: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
         let mut reported_certifications: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
             BTreeMap::new();
         let mut local_finalizes: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
             BTreeMap::new();
+
+        // Invariant: local_notarize_parent_gaps_are_nullified
+        // Before a correct engine emits a notarize vote for a proposal at view
+        // v with parent p, it must already have observed a
+        // nullification certificate for every discarded view in (p, v).
+        // The dedicated audit targets start from Floor::Genesis, so every
+        // discarded view above genesis must appear in their retained history.
+        // A future non-genesis audit target must record its floor and begin the
+        // required range above that floor.
+        //
+        // Source: Context's parent documentation states that skipping any view
+        // without possessing its nullification could result in a fork. This is
+        // the per-node vote-history strengthening of the certificate-graph
+        // chain_consistency invariant.
+        let assert_parent_gap_nullified =
+            |proposal: &Proposal<Sha256Digest>, observed: &BTreeSet<Round>| {
+                let parent = proposal.parent.get();
+                let view = proposal.round.view().get();
+                for skipped in parent.saturating_add(1)..view {
+                    let skipped_round = Round::new(proposal.round.epoch(), View::new(skipped));
+                    assert!(
+                        observed.contains(&skipped_round),
+                        "Invariant violation: local notarize skips non-nullified round {skipped_round:?}: observer {observer_bytes:?}, proposal {proposal:?}"
+                    );
+                }
+            };
 
         for recorded in &events {
             match &recorded.event {
@@ -869,6 +898,19 @@ where
                     valid: true,
                     activity,
                 } => {
+                    // These sets are deliberately updated while walking the
+                    // append-only log so later checks establish prior local
+                    // observation rather than eventual or cross-node evidence.
+                    match activity {
+                        Activity::Notarization(certificate) => {
+                            observed_notarizations.insert(certificate.proposal.clone());
+                        }
+                        Activity::Nullification(certificate) => {
+                            observed_nullifications.insert(certificate.round());
+                        }
+                        _ => {}
+                    }
+
                     // Invariant: exact_proposal_non_equivocation
                     // A correct signer cannot notarize two different full proposals
                     // in one round, cannot finalize two different full proposals in
@@ -994,6 +1036,7 @@ where
                                     vote.proposal
                                 );
                             }
+                            assert_parent_gap_nullified(&vote.proposal, &observed_nullifications);
                         }
                         Activity::Certification(certificate) => {
                             let key = (certificate.proposal.round, certificate.proposal.payload);
@@ -1033,6 +1076,25 @@ where
                             assert!(
                                 successful_certifications.contains(&key),
                                 "Invariant violation: local finalize without successful certification: observer {observer_bytes:?}, proposal {:?}",
+                                vote.proposal
+                            );
+
+                            // Invariant: local_finalize_requires_matching_notarization
+                            // Before a correct engine emits its finalize vote, its
+                            // own history must contain a notarization certificate
+                            // for the identical full proposal, including the parent.
+                            // This intentionally applies to locally signed Finalize
+                            // activities, not received Finalization certificates,
+                            // which may be learned without the underlying
+                            // notarization being reported locally.
+                            //
+                            // Source: the instantiated voter round's
+                            // construct_finalize path requires a stored
+                            // notarization and finalizes that notarization's exact
+                            // proposal.
+                            assert!(
+                                observed_notarizations.contains(&vote.proposal),
+                                "Invariant violation: local finalize without prior matching notarization: observer {observer_bytes:?}, proposal {:?}",
                                 vote.proposal
                             );
                             local_finalizes
@@ -1102,6 +1164,7 @@ where
                             outcome: Completion::Returned(payload),
                         } => {
                             accepted_proposals.insert((context.round, context.parent, *payload));
+                            proposed_payloads.insert((context.round, *payload));
                         }
                         AutomatonEvent::VerifyCompleted {
                             context,
@@ -1124,8 +1187,40 @@ where
                             if *result {
                                 successful_certifications.insert(key);
                             } else {
+                                // Invariant: proposed_payloads_are_certifiable
+                                // Once a correct application returns a payload from
+                                // propose, a later certification result for that
+                                // same (round, payload) must be true. A missing or
+                                // canceled proposal completion imposes no observable
+                                // requirement.
+                                //
+                                // Source: the Automaton contract makes proposed
+                                // payloads certifiable-by-construction and commits
+                                // the proposer to certifying them if notarized.
+                                assert!(
+                                    !proposed_payloads.contains(&key),
+                                    "Invariant violation: locally proposed payload failed certification: observer {observer_bytes:?}, round {round:?}, payload {payload:?}"
+                                );
                                 failed_certifications.insert(key);
                             }
+                        }
+                        AutomatonEvent::CertifyRequested { round, payload } => {
+                            // Invariant: certification_request_requires_notarization
+                            // A correct engine requests certification only after it
+                            // has reported a notarization for the same
+                            // (round, payload). CertifyRequested does not retain the
+                            // parent, so exact parent coherence is checked by the
+                            // activity-based invariants when later evidence exists.
+                            //
+                            // Source: the instantiated voter round's try_certify
+                            // path yields a proposal only after storing a matching
+                            // notarization certificate.
+                            assert!(
+                                observed_notarizations.iter().any(|proposal| {
+                                    proposal.round == *round && proposal.payload == *payload
+                                }),
+                                "Invariant violation: certification requested without prior notarization: observer {observer_bytes:?}, round {round:?}, payload {payload:?}"
+                            );
                         }
                         _ => {}
                     }
@@ -2125,6 +2220,16 @@ mod tests {
         );
     }
 
+    fn record_certify_request(reporter: &AuditReporter, proposal: &Proposal<Sha256Digest>) {
+        record_automaton(
+            reporter,
+            AutomatonEvent::CertifyRequested {
+                round: proposal.round,
+                payload: proposal.payload,
+            },
+        );
+    }
+
     #[test]
     fn check_selects_invariants_from_the_reporter_type() {
         let (participants, schemes) = vote_fixture();
@@ -2139,7 +2244,7 @@ mod tests {
     fn exact_proposal_non_equivocation_accepts_one_complete_observation() {
         let (participants, schemes) = vote_fixture();
         let mut reporter = audit_reporter(0, &participants, &schemes);
-        let proposal = proposal(5, 1, 0xA);
+        let proposal = proposal(5, 4, 0xA);
         record_propose_success(&reporter, &proposal);
         reporter.report(Activity::Notarize(
             Notarize::sign(&schemes[0], proposal).unwrap(),
@@ -2152,7 +2257,8 @@ mod tests {
     fn exact_proposal_non_equivocation_rejects_same_payload_with_different_parents() {
         let (participants, schemes) = vote_fixture();
         let mut reporter = audit_reporter(0, &participants, &schemes);
-        for parent in [1, 2] {
+        reporter.report(Activity::Nullification(nullification_activity(&schemes, 4)));
+        for parent in [3, 4] {
             let proposal = proposal(5, parent, 0xA);
             record_propose_success(&reporter, &proposal);
             reporter.report(Activity::Notarize(
@@ -2284,6 +2390,9 @@ mod tests {
         let (participants, schemes) = vote_fixture();
         let mut reporter = audit_reporter(0, &participants, &schemes);
         let proposal = proposal(5, 4, 0xA);
+        reporter.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
         record_certify_result(&reporter, &proposal, true);
         reporter.report(Activity::Finalize(
             Finalize::sign(&schemes[0], proposal).unwrap(),
@@ -2407,6 +2516,9 @@ mod tests {
         let (participants, schemes) = vote_fixture();
         let mut reporter = audit_reporter(0, &participants, &schemes);
         let proposal = proposal(5, 4, 0xA);
+        reporter.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
         record_certify_result(&reporter, &proposal, true);
         reporter.report(Activity::Certification(notarization_activity(
             &schemes, 5, 4, 0xA,
@@ -2424,6 +2536,9 @@ mod tests {
         let mut reporter = audit_reporter(0, &participants, &schemes);
         let certified = proposal(5, 3, 0xA);
         let finalized = proposal(5, 4, 0xA);
+        reporter.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
         record_certify_result(&reporter, &certified, true);
         reporter.report(Activity::Certification(notarization_activity(
             &schemes, 5, 3, 0xA,
@@ -2431,6 +2546,128 @@ mod tests {
         reporter.report(Activity::Finalize(
             Finalize::sign(&schemes[0], finalized).unwrap(),
         ));
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn local_notarize_accepts_complete_prior_parent_gap() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(5, 2, 0xA);
+        reporter.report(Activity::Nullification(nullification_activity(&schemes, 3)));
+        reporter.report(Activity::Nullification(nullification_activity(&schemes, 4)));
+        record_propose_success(&reporter, &proposal);
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[0], proposal).unwrap(),
+        ));
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "local notarize skips non-nullified round")]
+    fn local_notarize_rejects_missing_parent_gap_nullification() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(5, 2, 0xA);
+        reporter.report(Activity::Nullification(nullification_activity(&schemes, 3)));
+        record_propose_success(&reporter, &proposal);
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[0], proposal).unwrap(),
+        ));
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "local finalize without prior matching notarization")]
+    fn local_finalize_rejects_notarization_with_different_parent() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let finalized = proposal(5, 4, 0xA);
+        reporter.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 3, 0xA,
+        )));
+        record_certify_result(&reporter, &finalized, true);
+        reporter.report(Activity::Finalize(
+            Finalize::sign(&schemes[0], finalized).unwrap(),
+        ));
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn local_finalize_of_recovered_notarization_does_not_require_gap_history() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(5, 2, 0xA);
+        // A finalizer may recover the notarization directly; the quorum that
+        // formed it proves safe voting without requiring this node to retain
+        // each earlier nullification locally.
+        reporter.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 2, 0xA,
+        )));
+        record_certify_result(&reporter, &proposal, true);
+        reporter.report(Activity::Finalize(
+            Finalize::sign(&schemes[0], proposal).unwrap(),
+        ));
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn received_finalization_does_not_require_local_notarization_observation() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(3, &participants, &schemes);
+        reporter.report(Activity::Finalization(finalization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn locally_proposed_payload_accepts_true_certification() {
+        let (participants, schemes) = vote_fixture();
+        let reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(5, 4, 0xA);
+        record_propose_success(&reporter, &proposal);
+        record_certify_result(&reporter, &proposal, true);
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "locally proposed payload failed certification")]
+    fn locally_proposed_payload_rejects_false_certification() {
+        let (participants, schemes) = vote_fixture();
+        let reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(5, 4, 0xA);
+        record_propose_success(&reporter, &proposal);
+        record_certify_result(&reporter, &proposal, false);
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn false_certification_without_proposal_observation_is_allowed() {
+        let (participants, schemes) = vote_fixture();
+        let reporter = audit_reporter(0, &participants, &schemes);
+        record_certify_result(&reporter, &proposal(5, 4, 0xA), false);
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn certification_request_accepts_prior_matching_notarization() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(5, 4, 0xA);
+        reporter.report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        record_certify_request(&reporter, &proposal);
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "certification requested without prior notarization")]
+    fn certification_request_without_prior_notarization_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let reporter = audit_reporter(0, &participants, &schemes);
+        record_certify_request(&reporter, &proposal(5, 4, 0xA));
         check_fuzz_invariants(std::slice::from_ref(&reporter));
     }
 
