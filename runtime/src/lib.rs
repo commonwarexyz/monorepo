@@ -844,6 +844,7 @@ mod tests {
         future::{pending, ready},
         join, pin_mut,
     };
+    use rstest::rstest;
     use std::{
         collections::HashMap,
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -858,7 +859,10 @@ mod tests {
     use tracing::{Level, error};
     use utils::reschedule;
 
-    fn test_error_future<R: Runner>(runner: R) {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_error_future<R: Runner>(#[case] runner: R) {
         #[allow(clippy::unused_async)]
         async fn error_future() -> Result<&'static str, &'static str> {
             Err("An error occurred")
@@ -867,16 +871,21 @@ mod tests {
         assert_eq!(result, Err("An error occurred"));
     }
 
-    #[test]
-    fn test_handle_can_use_futures_pool() {
-        deterministic::Runner::default().start(|_| async move {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_handle_can_use_futures_pool<R: Runner>(#[case] runner: R) {
+        runner.start(|_| async move {
             let mut pool = FuturesPool::<Result<(), Error>>::default();
             pool.push(Handle::ready(Ok(())));
             assert!(pool.next_completed().await.is_ok());
         });
     }
 
-    fn test_clock_sleep<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_clock_sleep<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -892,7 +901,10 @@ mod tests {
         });
     }
 
-    fn test_clock_sleep_until<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_clock_sleep_until<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock + Metrics,
     {
@@ -907,7 +919,10 @@ mod tests {
         });
     }
 
-    fn test_clock_sleep_until_far_future<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_clock_sleep_until_far_future<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -918,7 +933,10 @@ mod tests {
         });
     }
 
-    fn test_clock_timeout<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_clock_timeout<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -946,7 +964,10 @@ mod tests {
         });
     }
 
-    fn test_root_finishes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_root_finishes<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
     {
@@ -959,7 +980,10 @@ mod tests {
         });
     }
 
-    fn test_spawn_after_abort<R>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_spawn_after_abort<R>(#[case] runner: R)
     where
         R: Runner,
         R::Context: Spawner,
@@ -982,8 +1006,18 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort<R: Runner>(runner: R, dedicated: bool, blocking: bool)
-    where
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default(), false, false)]
+    #[case::deterministic_blocking(deterministic::Runner::default(), false, true)]
+    #[case::deterministic_dedicated(deterministic::Runner::default(), true, false)]
+    #[case::tokio(tokio::Runner::default(), false, false)]
+    #[case::tokio_blocking(tokio::Runner::default(), false, true)]
+    #[case::tokio_dedicated(tokio::Runner::default(), true, false)]
+    fn test_spawn_abort<R: Runner>(
+        #[case] runner: R,
+        #[case] dedicated: bool,
+        #[case] blocking: bool,
+    ) where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
@@ -1004,14 +1038,26 @@ mod tests {
         });
     }
 
-    fn test_panic_aborts_root<R: Runner>(runner: R) {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::deterministic_caught(deterministic::Runner::new(
+        deterministic::Config::default().with_catch_panics(true)
+    ))]
+    #[case::tokio(tokio::Runner::default())]
+    #[case::tokio_caught(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[should_panic(expected = "blah")]
+    fn test_panic_aborts_root<R: Runner>(#[case] runner: R) {
         let result: Result<(), Error> = runner.start(|_| async move {
             panic!("blah");
         });
         result.unwrap_err();
     }
 
-    fn test_panic_aborts_spawn<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[should_panic(expected = "blah")]
+    fn test_panic_aborts_spawn<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1027,7 +1073,12 @@ mod tests {
         });
     }
 
-    fn test_panic_aborts_spawn_caught<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::new(
+        deterministic::Config::default().with_catch_panics(true)
+    ))]
+    #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    fn test_panic_aborts_spawn_caught<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1040,7 +1091,11 @@ mod tests {
         assert!(matches!(result, Err(Error::Exited)));
     }
 
-    fn test_multiple_panics<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[should_panic(expected = "boom")]
+    fn test_multiple_panics<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1062,7 +1117,12 @@ mod tests {
         });
     }
 
-    fn test_multiple_panics_caught<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::new(
+        deterministic::Config::default().with_catch_panics(true)
+    ))]
+    #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    fn test_multiple_panics_caught<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1084,7 +1144,10 @@ mod tests {
         assert!(matches!(res3, Err(Error::Exited)));
     }
 
-    fn test_select<R: Runner>(runner: R) {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_select<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             // Test first branch
             let output = Mutex::new(0);
@@ -1112,7 +1175,10 @@ mod tests {
     }
 
     /// Ensure future fusing works as expected.
-    fn test_select_loop<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_select_loop<R: Runner>(#[case] runner: R)
     where
         R::Context: Clock,
     {
@@ -1158,7 +1224,10 @@ mod tests {
         });
     }
 
-    fn test_storage_operations<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_storage_operations<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1238,7 +1307,10 @@ mod tests {
         });
     }
 
-    fn test_blob_read_write<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_blob_read_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1290,7 +1362,10 @@ mod tests {
         });
     }
 
-    fn test_blob_resize<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_blob_resize<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1348,7 +1423,10 @@ mod tests {
         });
     }
 
-    fn test_many_partition_read_write<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_many_partition_read_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1397,7 +1475,10 @@ mod tests {
         });
     }
 
-    fn test_blob_read_past_length<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_blob_read_past_length<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1427,7 +1508,10 @@ mod tests {
         })
     }
 
-    fn test_blob_clone_and_concurrent_read<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_blob_clone_and_concurrent_read<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Storage + Metrics,
     {
@@ -1495,7 +1579,10 @@ mod tests {
         });
     }
 
-    fn test_shutdown<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_shutdown<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1527,7 +1614,10 @@ mod tests {
         });
     }
 
-    fn test_shutdown_multiple_signals<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_shutdown_multiple_signals<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1578,7 +1668,10 @@ mod tests {
         });
     }
 
-    fn test_shutdown_timeout<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_shutdown_timeout<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1604,7 +1697,10 @@ mod tests {
         });
     }
 
-    fn test_shutdown_multiple_stop_calls<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_shutdown_multiple_stop_calls<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1666,7 +1762,10 @@ mod tests {
         });
     }
 
-    fn test_unfulfilled_shutdown<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_unfulfilled_shutdown<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics,
     {
@@ -1686,7 +1785,10 @@ mod tests {
         });
     }
 
-    fn test_spawn_dedicated<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_spawn_dedicated<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
     {
@@ -1696,7 +1798,10 @@ mod tests {
         });
     }
 
-    fn test_spawn<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_spawn<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1734,7 +1839,10 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort_on_parent_abort<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_spawn_abort_on_parent_abort<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1769,7 +1877,10 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort_on_parent_completion<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_spawn_abort_on_parent_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1801,7 +1912,10 @@ mod tests {
         });
     }
 
-    fn test_spawn_cascading_abort<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_spawn_cascading_abort<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1876,7 +1990,10 @@ mod tests {
         });
     }
 
-    fn test_child_survives_sibling_completion<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_child_survives_sibling_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1934,7 +2051,10 @@ mod tests {
         });
     }
 
-    fn test_spawn_clone_chain<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_spawn_clone_chain<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1987,7 +2107,10 @@ mod tests {
         });
     }
 
-    fn test_spawn_sparse_clone_chain<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_spawn_sparse_clone_chain<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -2024,7 +2147,10 @@ mod tests {
         });
     }
 
-    fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_spawn_blocking<R: Runner>(#[case] runner: R, #[values(false, true)] dedicated: bool)
     where
         R::Context: Spawner,
     {
@@ -2041,8 +2167,14 @@ mod tests {
         });
     }
 
-    fn test_spawn_blocking_panic<R: Runner>(runner: R, dedicated: bool)
-    where
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[should_panic(expected = "blocking task panicked")]
+    fn test_spawn_blocking_panic<R: Runner>(
+        #[case] runner: R,
+        #[values(false, true)] dedicated: bool,
+    ) where
         R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
@@ -2066,8 +2198,15 @@ mod tests {
         });
     }
 
-    fn test_spawn_blocking_panic_caught<R: Runner>(runner: R, dedicated: bool)
-    where
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::new(
+        deterministic::Config::default().with_catch_panics(true)
+    ))]
+    #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    fn test_spawn_blocking_panic_caught<R: Runner>(
+        #[case] runner: R,
+        #[values(false, true)] dedicated: bool,
+    ) where
         R::Context: Spawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
@@ -2088,7 +2227,10 @@ mod tests {
         assert!(matches!(result, Err(Error::Exited)));
     }
 
-    fn test_circular_reference_prevents_cleanup<R: Runner>(runner: R) {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_circular_reference_prevents_cleanup<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             // Setup tracked resource
             let dropper = Arc::new(());
@@ -2142,7 +2284,10 @@ mod tests {
         });
     }
 
-    fn test_late_waker<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_late_waker<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics + Spawner,
     {
@@ -2205,7 +2350,10 @@ mod tests {
         drop(holder);
     }
 
-    fn test_metrics<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_metrics<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2239,7 +2387,10 @@ mod tests {
         });
     }
 
-    fn test_metrics_with_attribute<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_metrics_with_attribute<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2312,19 +2463,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_with_attribute() {
-        let executor = deterministic::Runner::default();
-        test_metrics_with_attribute(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_with_attribute() {
-        let runner = tokio::Runner::default();
-        test_metrics_with_attribute(runner);
-    }
-
-    fn test_metrics_attribute_with_nested_label<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_metrics_attribute_with_nested_label<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2370,19 +2512,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_attribute_with_nested_label() {
-        let executor = deterministic::Runner::default();
-        test_metrics_attribute_with_nested_label(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_attribute_with_nested_label() {
-        let runner = tokio::Runner::default();
-        test_metrics_attribute_with_nested_label(runner);
-    }
-
-    fn test_metrics_attributes_isolated_between_contexts<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_metrics_attributes_isolated_between_contexts<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2431,25 +2564,16 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_attributes_isolated_between_contexts() {
-        let executor = deterministic::Runner::default();
-        test_metrics_attributes_isolated_between_contexts(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_attributes_isolated_between_contexts() {
-        let runner = tokio::Runner::default();
-        test_metrics_attributes_isolated_between_contexts(runner);
-    }
-
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/3485.
     ///
     /// Verifies the documented guarantee that runtime task metrics ignore context
     /// attributes: spawning with a varying `with_attribute` (as the marshaled
     /// consensus code does for each round) must not create per-value entries in
     /// `runtime_tasks_spawned` / `runtime_tasks_running`.
-    fn test_metrics_spawn_attribute_cardinality<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_metrics_spawn_attribute_cardinality<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -2528,19 +2652,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_spawn_attribute_cardinality() {
-        let executor = deterministic::Runner::default();
-        test_metrics_spawn_attribute_cardinality(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_spawn_attribute_cardinality() {
-        let runner = tokio::Runner::default();
-        test_metrics_spawn_attribute_cardinality(runner);
-    }
-
-    fn test_metrics_attributes_sorted_deterministically<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_metrics_attributes_sorted_deterministically<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2587,19 +2702,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_attributes_sorted_deterministically() {
-        let executor = deterministic::Runner::default();
-        test_metrics_attributes_sorted_deterministically(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_attributes_sorted_deterministically() {
-        let runner = tokio::Runner::default();
-        test_metrics_attributes_sorted_deterministically(runner);
-    }
-
-    fn test_metrics_nested_labels_with_attributes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_metrics_nested_labels_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2702,19 +2808,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_nested_labels_with_attributes() {
-        let executor = deterministic::Runner::default();
-        test_metrics_nested_labels_with_attributes(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_nested_labels_with_attributes() {
-        let runner = tokio::Runner::default();
-        test_metrics_nested_labels_with_attributes(runner);
-    }
-
-    fn test_metrics_family_with_attributes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_metrics_family_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2810,19 +2907,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_family_with_attributes() {
-        let executor = deterministic::Runner::default();
-        test_metrics_family_with_attributes(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_family_with_attributes() {
-        let runner = tokio::Runner::default();
-        test_metrics_family_with_attributes(runner);
-    }
-
-    fn test_register_and_encode<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_register_and_encode<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2841,19 +2929,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_register_and_encode() {
-        let executor = deterministic::Runner::default();
-        test_register_and_encode(executor);
-    }
-
-    #[test]
-    fn test_tokio_register_and_encode() {
-        let runner = tokio::Runner::default();
-        test_register_and_encode(runner);
-    }
-
-    fn test_register_drop_removes_metrics<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_register_drop_removes_metrics<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2889,19 +2968,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_register_drop_removes_metrics() {
-        let executor = deterministic::Runner::default();
-        test_register_drop_removes_metrics(executor);
-    }
-
-    #[test]
-    fn test_tokio_register_drop_removes_metrics() {
-        let runner = tokio::Runner::default();
-        test_register_drop_removes_metrics(runner);
-    }
-
-    fn test_register_with_attributes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_register_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2953,19 +3023,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_register_with_attributes() {
-        let executor = deterministic::Runner::default();
-        test_register_with_attributes(executor);
-    }
-
-    #[test]
-    fn test_tokio_register_with_attributes() {
-        let runner = tokio::Runner::default();
-        test_register_with_attributes(runner);
-    }
-
-    fn test_reregister_after_drop<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_reregister_after_drop<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2986,19 +3047,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_reregister_after_drop() {
-        let executor = deterministic::Runner::default();
-        test_reregister_after_drop(executor);
-    }
-
-    #[test]
-    fn test_tokio_reregister_after_drop() {
-        let runner = tokio::Runner::default();
-        test_reregister_after_drop(runner);
-    }
-
-    fn test_register_clone_keeps_metric_alive<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_register_clone_keeps_metric_alive<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -3032,19 +3084,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_register_clone_keeps_metric_alive() {
-        let executor = deterministic::Runner::default();
-        test_register_clone_keeps_metric_alive(executor);
-    }
-
-    #[test]
-    fn test_tokio_register_clone_keeps_metric_alive() {
-        let runner = tokio::Runner::default();
-        test_register_clone_keeps_metric_alive(runner);
-    }
-
-    fn test_encode_single_eof<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_encode_single_eof<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -3079,19 +3122,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_encode_single_eof() {
-        let executor = deterministic::Runner::default();
-        test_encode_single_eof(executor);
-    }
-
-    #[test]
-    fn test_tokio_encode_single_eof() {
-        let runner = tokio::Runner::default();
-        test_encode_single_eof(runner);
-    }
-
-    fn test_family_with_attributes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_family_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -3146,288 +3180,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_family_with_attributes() {
-        let executor = deterministic::Runner::default();
-        test_family_with_attributes(executor);
-    }
-
-    #[test]
-    fn test_tokio_family_with_attributes() {
-        let runner = tokio::Runner::default();
-        test_family_with_attributes(runner);
-    }
-
-    #[test]
-    fn test_deterministic_future() {
-        let runner = deterministic::Runner::default();
-        test_error_future(runner);
-    }
-
-    #[test]
-    fn test_deterministic_clock_sleep() {
-        let executor = deterministic::Runner::default();
-        test_clock_sleep(executor);
-    }
-
-    #[test]
-    fn test_deterministic_clock_sleep_until() {
-        let executor = deterministic::Runner::default();
-        test_clock_sleep_until(executor);
-    }
-
-    #[test]
-    fn test_deterministic_clock_sleep_until_far_future() {
-        let executor = deterministic::Runner::default();
-        test_clock_sleep_until_far_future(executor);
-    }
-
-    #[test]
-    fn test_deterministic_clock_timeout() {
-        let executor = deterministic::Runner::default();
-        test_clock_timeout(executor);
-    }
-
-    #[test]
-    fn test_deterministic_root_finishes() {
-        let executor = deterministic::Runner::default();
-        test_root_finishes(executor);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_after_abort() {
-        let executor = deterministic::Runner::default();
-        test_spawn_after_abort(executor);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_abort() {
-        let executor = deterministic::Runner::default();
-        test_spawn_abort(executor, false, false);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_deterministic_panic_aborts_root() {
-        let runner = deterministic::Runner::default();
-        test_panic_aborts_root(runner);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_deterministic_panic_aborts_root_caught() {
-        let cfg = deterministic::Config::default().with_catch_panics(true);
-        let runner = deterministic::Runner::new(cfg);
-        test_panic_aborts_root(runner);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_deterministic_panic_aborts_spawn() {
-        let executor = deterministic::Runner::default();
-        test_panic_aborts_spawn(executor);
-    }
-
-    #[test]
-    fn test_deterministic_panic_aborts_spawn_caught() {
-        let cfg = deterministic::Config::default().with_catch_panics(true);
-        let executor = deterministic::Runner::new(cfg);
-        test_panic_aborts_spawn_caught(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "boom")]
-    fn test_deterministic_multiple_panics() {
-        let executor = deterministic::Runner::default();
-        test_multiple_panics(executor);
-    }
-
-    #[test]
-    fn test_deterministic_multiple_panics_caught() {
-        let cfg = deterministic::Config::default().with_catch_panics(true);
-        let executor = deterministic::Runner::new(cfg);
-        test_multiple_panics_caught(executor);
-    }
-
-    #[test]
-    fn test_deterministic_select() {
-        let executor = deterministic::Runner::default();
-        test_select(executor);
-    }
-
-    #[test]
-    fn test_deterministic_select_loop() {
-        let executor = deterministic::Runner::default();
-        test_select_loop(executor);
-    }
-
-    #[test]
-    fn test_deterministic_storage_operations() {
-        let executor = deterministic::Runner::default();
-        test_storage_operations(executor);
-    }
-
-    #[test]
-    fn test_deterministic_blob_read_write() {
-        let executor = deterministic::Runner::default();
-        test_blob_read_write(executor);
-    }
-
-    #[test]
-    fn test_deterministic_blob_resize() {
-        let executor = deterministic::Runner::default();
-        test_blob_resize(executor);
-    }
-
-    #[test]
-    fn test_deterministic_many_partition_read_write() {
-        let executor = deterministic::Runner::default();
-        test_many_partition_read_write(executor);
-    }
-
-    #[test]
-    fn test_deterministic_blob_read_past_length() {
-        let executor = deterministic::Runner::default();
-        test_blob_read_past_length(executor);
-    }
-
-    #[test]
-    fn test_deterministic_blob_clone_and_concurrent_read() {
-        // Run test
-        let executor = deterministic::Runner::default();
-        test_blob_clone_and_concurrent_read(executor);
-    }
-
-    #[test]
-    fn test_deterministic_shutdown() {
-        let executor = deterministic::Runner::default();
-        test_shutdown(executor);
-    }
-
-    #[test]
-    fn test_deterministic_shutdown_multiple_signals() {
-        let executor = deterministic::Runner::default();
-        test_shutdown_multiple_signals(executor);
-    }
-
-    #[test]
-    fn test_deterministic_shutdown_timeout() {
-        let executor = deterministic::Runner::default();
-        test_shutdown_timeout(executor);
-    }
-
-    #[test]
-    fn test_deterministic_shutdown_multiple_stop_calls() {
-        let executor = deterministic::Runner::default();
-        test_shutdown_multiple_stop_calls(executor);
-    }
-
-    #[test]
-    fn test_deterministic_unfulfilled_shutdown() {
-        let executor = deterministic::Runner::default();
-        test_unfulfilled_shutdown(executor);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_dedicated() {
-        let executor = deterministic::Runner::default();
-        test_spawn_dedicated(executor);
-    }
-
-    #[test]
-    fn test_deterministic_spawn() {
-        let runner = deterministic::Runner::default();
-        test_spawn(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_abort_on_parent_abort() {
-        let runner = deterministic::Runner::default();
-        test_spawn_abort_on_parent_abort(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_abort_on_parent_completion() {
-        let runner = deterministic::Runner::default();
-        test_spawn_abort_on_parent_completion(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_cascading_abort() {
-        let runner = deterministic::Runner::default();
-        test_spawn_cascading_abort(runner);
-    }
-
-    #[test]
-    fn test_deterministic_child_survives_sibling_completion() {
-        let runner = deterministic::Runner::default();
-        test_child_survives_sibling_completion(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_clone_chain() {
-        let runner = deterministic::Runner::default();
-        test_spawn_clone_chain(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_sparse_clone_chain() {
-        let runner = deterministic::Runner::default();
-        test_spawn_sparse_clone_chain(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_blocking() {
-        for dedicated in [false, true] {
-            let executor = deterministic::Runner::default();
-            test_spawn_blocking(executor, dedicated);
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "blocking task panicked")]
-    fn test_deterministic_spawn_blocking_panic() {
-        for dedicated in [false, true] {
-            let executor = deterministic::Runner::default();
-            test_spawn_blocking_panic(executor, dedicated);
-        }
-    }
-
-    #[test]
-    fn test_deterministic_spawn_blocking_panic_caught() {
-        for dedicated in [false, true] {
-            let cfg = deterministic::Config::default().with_catch_panics(true);
-            let executor = deterministic::Runner::new(cfg);
-            test_spawn_blocking_panic_caught(executor, dedicated);
-        }
-    }
-
-    #[test]
-    fn test_deterministic_spawn_blocking_abort() {
-        for (dedicated, blocking) in [(false, true), (true, false)] {
-            let executor = deterministic::Runner::default();
-            test_spawn_abort(executor, dedicated, blocking);
-        }
-    }
-
-    #[test]
-    fn test_deterministic_circular_reference_prevents_cleanup() {
-        let executor = deterministic::Runner::default();
-        test_circular_reference_prevents_cleanup(executor);
-    }
-
-    #[test]
-    fn test_deterministic_late_waker() {
-        let executor = deterministic::Runner::default();
-        test_late_waker(executor);
-    }
-
-    #[test]
-    fn test_deterministic_metrics() {
-        let executor = deterministic::Runner::default();
-        test_metrics(executor);
-    }
-
-    #[test]
     fn test_deterministic_resolver() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -3449,276 +3201,6 @@ mod tests {
             let result = context.resolve("example.com").await;
             assert!(matches!(result, Err(Error::ResolveFailed(_))));
         });
-    }
-
-    #[test]
-    fn test_tokio_error_future() {
-        let runner = tokio::Runner::default();
-        test_error_future(runner);
-    }
-
-    #[test]
-    fn test_tokio_clock_sleep() {
-        let executor = tokio::Runner::default();
-        test_clock_sleep(executor);
-    }
-
-    #[test]
-    fn test_tokio_clock_sleep_until() {
-        let executor = tokio::Runner::default();
-        test_clock_sleep_until(executor);
-    }
-
-    #[test]
-    fn test_tokio_clock_sleep_until_far_future() {
-        let executor = tokio::Runner::default();
-        test_clock_sleep_until_far_future(executor);
-    }
-
-    #[test]
-    fn test_tokio_clock_timeout() {
-        let executor = tokio::Runner::default();
-        test_clock_timeout(executor);
-    }
-
-    #[test]
-    fn test_tokio_root_finishes() {
-        let executor = tokio::Runner::default();
-        test_root_finishes(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn_after_abort() {
-        let executor = tokio::Runner::default();
-        test_spawn_after_abort(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn_abort() {
-        let executor = tokio::Runner::default();
-        test_spawn_abort(executor, false, false);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_tokio_panic_aborts_root() {
-        let executor = tokio::Runner::default();
-        test_panic_aborts_root(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_tokio_panic_aborts_root_caught() {
-        let cfg = tokio::Config::default().with_catch_panics(true);
-        let executor = tokio::Runner::new(cfg);
-        test_panic_aborts_root(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_tokio_panic_aborts_spawn() {
-        let executor = tokio::Runner::default();
-        test_panic_aborts_spawn(executor);
-    }
-
-    #[test]
-    fn test_tokio_panic_aborts_spawn_caught() {
-        let cfg = tokio::Config::default().with_catch_panics(true);
-        let executor = tokio::Runner::new(cfg);
-        test_panic_aborts_spawn_caught(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "boom")]
-    fn test_tokio_multiple_panics() {
-        let executor = tokio::Runner::default();
-        test_multiple_panics(executor);
-    }
-
-    #[test]
-    fn test_tokio_multiple_panics_caught() {
-        let cfg = tokio::Config::default().with_catch_panics(true);
-        let executor = tokio::Runner::new(cfg);
-        test_multiple_panics_caught(executor);
-    }
-
-    #[test]
-    fn test_tokio_select() {
-        let executor = tokio::Runner::default();
-        test_select(executor);
-    }
-
-    #[test]
-    fn test_tokio_select_loop() {
-        let executor = tokio::Runner::default();
-        test_select_loop(executor);
-    }
-
-    #[test]
-    fn test_tokio_storage_operations() {
-        let executor = tokio::Runner::default();
-        test_storage_operations(executor);
-    }
-
-    #[test]
-    fn test_tokio_blob_read_write() {
-        let executor = tokio::Runner::default();
-        test_blob_read_write(executor);
-    }
-
-    #[test]
-    fn test_tokio_blob_resize() {
-        let executor = tokio::Runner::default();
-        test_blob_resize(executor);
-    }
-
-    #[test]
-    fn test_tokio_many_partition_read_write() {
-        let executor = tokio::Runner::default();
-        test_many_partition_read_write(executor);
-    }
-
-    #[test]
-    fn test_tokio_blob_read_past_length() {
-        let executor = tokio::Runner::default();
-        test_blob_read_past_length(executor);
-    }
-
-    #[test]
-    fn test_tokio_blob_clone_and_concurrent_read() {
-        // Run test
-        let executor = tokio::Runner::default();
-        test_blob_clone_and_concurrent_read(executor);
-    }
-
-    #[test]
-    fn test_tokio_shutdown() {
-        let executor = tokio::Runner::default();
-        test_shutdown(executor);
-    }
-
-    #[test]
-    fn test_tokio_shutdown_multiple_signals() {
-        let executor = tokio::Runner::default();
-        test_shutdown_multiple_signals(executor);
-    }
-
-    #[test]
-    fn test_tokio_shutdown_timeout() {
-        let executor = tokio::Runner::default();
-        test_shutdown_timeout(executor);
-    }
-
-    #[test]
-    fn test_tokio_shutdown_multiple_stop_calls() {
-        let executor = tokio::Runner::default();
-        test_shutdown_multiple_stop_calls(executor);
-    }
-
-    #[test]
-    fn test_tokio_unfulfilled_shutdown() {
-        let executor = tokio::Runner::default();
-        test_unfulfilled_shutdown(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn_dedicated() {
-        let executor = tokio::Runner::default();
-        test_spawn_dedicated(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn() {
-        let runner = tokio::Runner::default();
-        test_spawn(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_abort_on_parent_abort() {
-        let runner = tokio::Runner::default();
-        test_spawn_abort_on_parent_abort(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_abort_on_parent_completion() {
-        let runner = tokio::Runner::default();
-        test_spawn_abort_on_parent_completion(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_cascading_abort() {
-        let runner = tokio::Runner::default();
-        test_spawn_cascading_abort(runner);
-    }
-
-    #[test]
-    fn test_tokio_child_survives_sibling_completion() {
-        let runner = tokio::Runner::default();
-        test_child_survives_sibling_completion(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_clone_chain() {
-        let runner = tokio::Runner::default();
-        test_spawn_clone_chain(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_sparse_clone_chain() {
-        let runner = tokio::Runner::default();
-        test_spawn_sparse_clone_chain(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking() {
-        for dedicated in [false, true] {
-            let executor = tokio::Runner::default();
-            test_spawn_blocking(executor, dedicated);
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "blocking task panicked")]
-    fn test_tokio_spawn_blocking_panic() {
-        for dedicated in [false, true] {
-            let executor = tokio::Runner::default();
-            test_spawn_blocking_panic(executor, dedicated);
-        }
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking_panic_caught() {
-        for dedicated in [false, true] {
-            let cfg = tokio::Config::default().with_catch_panics(true);
-            let executor = tokio::Runner::new(cfg);
-            test_spawn_blocking_panic_caught(executor, dedicated);
-        }
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking_abort() {
-        for (dedicated, blocking) in [(false, true), (true, false)] {
-            let executor = tokio::Runner::default();
-            test_spawn_abort(executor, dedicated, blocking);
-        }
-    }
-
-    #[test]
-    fn test_tokio_circular_reference_prevents_cleanup() {
-        let executor = tokio::Runner::default();
-        test_circular_reference_prevents_cleanup(executor);
-    }
-
-    #[test]
-    fn test_tokio_late_waker() {
-        let executor = tokio::Runner::default();
-        test_late_waker(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics() {
-        let executor = tokio::Runner::default();
-        test_metrics(executor);
     }
 
     #[test]
@@ -3874,11 +3356,15 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_strategy_tokio() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            // Create a strategy backed by a pool with 4 threads.
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_strategy<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Strategizer + Metrics,
+    {
+        runner.start(|context| async move {
+            // Create a strategy with a parallelism of 4.
             let strategy = context.child("pool").strategy(NZUsize!(4));
             assert_eq!(strategy.manual().parallelism(), 4);
 
@@ -3888,24 +3374,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_strategy_deterministic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create a strategy that plans for a parallelism of 4.
-            let strategy = context.child("pool").strategy(NZUsize!(4));
-            assert_eq!(strategy.manual().parallelism(), 4);
-
-            // Use the strategy to sum a vector of numbers.
-            let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
-            assert_eq!(sum, 10000 * 9999 / 2);
-        });
-    }
-
-    #[test]
-    fn test_deterministic_nested_strategy_runs_inline() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_nested_strategy_runs_inline<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Strategizer + Metrics,
+    {
+        runner.start(|context| async move {
             let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
 
             let output = strategy
@@ -3993,24 +3469,39 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_tokio_nested_strategy_runs_inline() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
-
-            let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
-                .await;
-
-            assert_eq!(output, vec![1, 2]);
-        });
-    }
-
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default(), 4096, 64)]
+    #[case::deterministic_custom(
+        deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        ),
+        64,
+        8
+    )]
+    #[case::tokio(tokio::Runner::default(), 4096, 64)]
+    #[case::tokio_custom(
+        tokio::Runner::new(
+            tokio::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        ),
+        64,
+        8
+    )]
     fn test_buffer_pooler<R: Runner>(
-        runner: R,
-        expected_network_max_per_class: u32,
-        expected_storage_max_per_class: u32,
+        #[case] runner: R,
+        #[case] expected_network_max_per_class: u32,
+        #[case] expected_storage_max_per_class: u32,
     ) where
         R::Context: BufferPooler,
     {
@@ -4039,37 +3530,5 @@ mod tests {
                     .all(|class| class.max_buffers.get() == expected_storage_max_per_class)
             );
         });
-    }
-
-    #[test]
-    fn test_deterministic_buffer_pooler() {
-        test_buffer_pooler(deterministic::Runner::default(), 4096, 64);
-
-        let runner = deterministic::Runner::new(
-            deterministic::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        );
-        test_buffer_pooler(runner, 64, 8);
-    }
-
-    #[test]
-    fn test_tokio_buffer_pooler() {
-        test_buffer_pooler(tokio::Runner::default(), 4096, 64);
-
-        let runner = tokio::Runner::new(
-            tokio::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        );
-        test_buffer_pooler(runner, 64, 8);
     }
 }
