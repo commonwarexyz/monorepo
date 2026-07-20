@@ -2,19 +2,16 @@ use super::{Config, Error};
 use crate::{rmap::RMap, Context};
 use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Error as RError,
+    Blob as _, Buf, BufMut, BufferPooler, Error as RError,
 };
-use commonware_utils::bitmap::BitMap;
-use futures::future::try_join_all;
-use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet},
-    marker::PhantomData,
-};
+use std::marker::PhantomData;
 use tracing::debug;
+
+/// Name of the single blob holding all records.
+pub(super) const BLOB_NAME: &[u8] = b"ordinal";
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -71,16 +68,16 @@ where
 pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
-    config: Config,
+    partition: String,
 
-    // Index blobs for storing key records
-    blobs: BTreeMap<u64, Write<E::Blob>>,
+    // The single blob holding every record
+    blob: Write<E::Blob>,
 
     // RMap for interval tracking
     intervals: RMap,
 
-    // Pending sections to be synced.
-    pending: BTreeSet<u64>,
+    // Whether the blob has mutations not yet staged for durability
+    dirty: bool,
 
     // Metrics
     puts: Counter,
@@ -93,175 +90,115 @@ pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
 }
 
 impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
-    /// Initialize a new [Ordinal] instance with a collection of [BitMap]s (indicating which
-    /// records should be considered available).
+    /// Size of each record in bytes (as u64).
+    const RECORD_SIZE: u64 = Record::<V>::SIZE as u64;
+
+    /// Resolve an index to its record's byte offset, or `None` when the record's byte range is
+    /// not representable in a `u64`.
+    fn record_offset(index: u64) -> Option<u64> {
+        let offset = index.checked_mul(Self::RECORD_SIZE)?;
+        offset.checked_add(Self::RECORD_SIZE)?;
+        Some(offset)
+    }
+
+    /// Initialize a new [Ordinal] instance from the indices durably `committed` by the caller.
     ///
-    /// If a section is not provided in the [BTreeMap], all records in that section are considered
-    /// unavailable. If a [BitMap] is provided for a section, all records in that section are
-    /// considered available if and only if the [BitMap] is set for the record. If a section is provided
-    /// but no [BitMap] is populated, all records in that section are considered available.
+    /// Each committed record's CRC32 is checked to confirm it was written (a never-written hole
+    /// fails the check) and the set is adopted as the in-memory [RMap]. A committed record that
+    /// is missing or invalid fails initialization with [Error::MissingRecord]. Stored records
+    /// outside `committed` are ignored: they are unreachable through [Ordinal] and are
+    /// overwritten by future puts.
     ///
-    /// Passing `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
-    /// The removal is durable before `init` returns.
-    pub async fn init(
-        context: E,
-        config: Config,
-        bits: Option<BTreeMap<u64, &Option<BitMap>>>,
-    ) -> Result<Self, Error> {
-        // Reset the store unless committed bits are provided to recover from the stored blobs
-        let record_size = Record::<V>::SIZE as u64;
-        let items_per_blob = config.items_per_blob.get();
-        let mut blobs = BTreeMap::new();
-        let stored_blobs = if bits.is_none() {
+    /// Passing `None` removes all stored data and starts empty. The removal is durable before
+    /// `init` returns.
+    pub async fn init(context: E, config: Config, committed: Option<RMap>) -> Result<Self, Error> {
+        // Reset the store unless committed indices are provided to recover from the stored blob
+        if committed.is_none() {
             // The durable wipe is this path's only commit and no adjacent
             // durable operation exists to batch it with. Deferring it to ride
-            // a later commit would let a crash resurrect the removed sections,
-            // and a future init with bits naming them would replay their stale
-            // records as committed.
+            // a later commit would let a crash resurrect the removed blob,
+            // and a future init naming its records would replay their stale
+            // contents as committed.
             match context.remove(&config.partition, None).await {
-                Ok(()) | Err(RError::PartitionMissing(_)) => Vec::new(),
+                Ok(()) | Err(RError::PartitionMissing(_)) => {}
                 Err(err) => return Err(Error::Runtime(err)),
             }
-        } else {
-            match context.scan(&config.partition).await {
-                Ok(blobs) => blobs,
-                Err(RError::PartitionMissing(_)) => Vec::new(),
-                Err(err) => return Err(Error::Runtime(err)),
-            }
-        };
-
-        // Open all blobs and check for partial records
-        for name in stored_blobs {
-            let (blob, len) = context.open(&config.partition, &name).await?;
-            let index = match name.try_into() {
-                Ok(index) => u64::from_be_bytes(index),
-                Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
-            };
-
-            // The storage backend guarantees per-blob atomic sync, so torn
-            // writes cannot survive a crash: a size that is not a record
-            // multiple is corruption or tampering
-            if len % record_size != 0 {
-                return Err(Error::Corruption(format!(
-                    "section {index} size {len} is not a multiple of record size {record_size}"
-                )));
-            }
-
-            debug!(blob = index, len, "found index blob");
-            blobs.insert(index, (blob, len));
         }
 
-        // Initialize intervals by scanning committed records
-        debug!(
-            blobs = blobs.len(),
-            "rebuilding intervals from existing index"
-        );
-        let start = context.current();
-        let mut items = 0;
+        // Open the blob and check for partial records. The storage backend guarantees per-blob
+        // atomic sync, so torn writes cannot survive a crash: a size that is not a record
+        // multiple is corruption or tampering. The same holds for the pruned floor (the store
+        // only ever prunes at record multiples).
+        let (blob, size) = context.open(&config.partition, BLOB_NAME).await?;
+        if !size.is_multiple_of(Self::RECORD_SIZE) {
+            return Err(Error::Corruption(format!(
+                "blob size {size} is not a multiple of record size {}",
+                Self::RECORD_SIZE
+            )));
+        }
+        let floor = blob.floor();
+        if !floor.is_multiple_of(Self::RECORD_SIZE) {
+            return Err(Error::Corruption(format!(
+                "pruned floor splits a record: {floor} bytes (foreign write or record size change)"
+            )));
+        }
+
+        // Verify the committed records
         let mut intervals = RMap::new();
-        if let Some(bits) = &bits {
-            // Drop sections the committed bits do not cover: every removal lands in
-            // ONE atomic commit
-            let sections_to_remove: Vec<u64> = blobs
-                .keys()
-                .filter(|section| match bits.get(section) {
-                    Some(Some(bits)) => bits.count_ones() == 0,
-                    Some(None) => false,
-                    None => true,
-                })
-                .copied()
-                .collect();
-            if !sections_to_remove.is_empty() {
-                let mut batch = context.batch().await.map_err(Error::Runtime)?;
-                for &section in &sections_to_remove {
-                    let blob = blobs.remove(&section).expect("collected from keys");
-                    drop(blob);
-                    commonware_runtime::WriteBatch::remove(
-                        &mut batch,
-                        &config.partition,
-                        Some(&section.to_be_bytes()),
-                    );
-                }
-                commonware_runtime::WriteBatch::apply_sync(batch)
-                    .await
-                    .map_err(Error::Runtime)?;
-            }
-
-            // Rebuild intervals from the committed records
-            for (section, bits) in bits {
-                if let Some(bits) = bits {
-                    if bits.count_ones() == 0 {
-                        continue;
-                    }
-                }
-
-                let Some((blob, size)) = blobs.get(section) else {
-                    return Err(Error::MissingRecord(section * items_per_blob));
-                };
-
-                // A section replays every record unless a bitmap restricts replay
-                // to the records it marks
-                let mut set_indices = bits.as_ref().map(|bits| bits.ones_iter());
-                let mut all_indices = 0..items_per_blob;
-                let mut replay_blob =
-                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
-                while let Some(bit_index) = set_indices
-                    .as_mut()
-                    .map_or_else(|| all_indices.next(), |indices| indices.next())
-                {
-                    let index = section * items_per_blob + bit_index;
-                    if bit_index >= items_per_blob {
-                        return Err(Error::MissingRecord(index));
-                    }
-                    let offset = bit_index * record_size;
-                    if offset + record_size > *size {
-                        return Err(Error::MissingRecord(index));
-                    }
+        if let Some(committed) = committed {
+            debug!(size, floor, "rebuilding intervals from existing index");
+            let start = context.current();
+            let mut items = 0;
+            let mut replay =
+                ReadBuffer::from_pooler(&context, blob.clone(), size, config.replay_buffer);
+            for (&range_start, &range_end) in committed.iter() {
+                for index in range_start..=range_end {
+                    // A committed record must lie fully within the blob's readable range: below
+                    // the floor or beyond the size, it can never have been written (or was
+                    // pruned by a boundary the caller has already committed past).
+                    let offset = match Self::record_offset(index) {
+                        Some(offset) if offset >= floor && offset + Self::RECORD_SIZE <= size => {
+                            offset
+                        }
+                        _ => return Err(Error::MissingRecord(index)),
+                    };
 
                     // A committed record that is missing or invalid cannot be recovered
-                    replay_blob.seek_to(offset)?;
-                    let mut record_buf = replay_blob.read(Record::<V>::SIZE).await?;
+                    replay.seek_to(offset)?;
+                    let mut record_buf = replay.read(Record::<V>::SIZE).await?;
                     if let Ok(record) = Record::<V>::read(&mut record_buf) {
                         if record.is_valid() {
                             items += 1;
-                            intervals.insert(index);
                             continue;
                         }
                     }
                     return Err(Error::MissingRecord(index));
                 }
             }
+            debug!(
+                items,
+                elapsed = ?context.current().duration_since(start).unwrap_or_default(),
+                "rebuilt intervals"
+            );
+            intervals = committed;
         }
-        debug!(
-            items,
-            elapsed = ?context.current().duration_since(start).unwrap_or_default(),
-            "rebuilt intervals"
-        );
 
-        // Wrap blobs in write buffers
-        let blobs = blobs
-            .into_iter()
-            .map(|(index, (blob, len))| {
-                (
-                    index,
-                    Write::from_pooler(&context, blob, len, config.write_buffer),
-                )
-            })
-            .collect();
+        // Wrap the blob in a write buffer
+        let blob = Write::from_pooler(&context, blob, size, config.write_buffer);
 
         // Initialize metrics
         let puts = context.counter("puts", "Number of put calls");
         let gets = context.counter("gets", "Number of get calls");
         let has = context.counter("has", "Number of has calls");
         let syncs = context.counter("syncs", "Number of sync calls");
-        let pruned = context.counter("pruned", "Number of pruned blobs");
+        let pruned = context.counter("pruned", "Number of prunes that advanced the boundary");
 
         Ok(Self {
             context,
-            config,
-            blobs,
+            partition: config.partition,
+            blob,
             intervals,
-            pending: BTreeSet::new(),
+            dirty: false,
             puts,
             gets,
             has,
@@ -272,42 +209,21 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 
     /// Add a value at the specified index (pending until sync).
+    ///
+    /// Returns [Error::IndexOverflow] if the record's byte range is not representable and
+    /// [Error::IndexPruned] if the index precedes the pruning boundary.
     pub async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
 
-        // Check if blob exists
-        let items_per_blob = self.config.items_per_blob.get();
-        let section = index / items_per_blob;
-        if let Entry::Vacant(entry) = self.blobs.entry(section) {
-            // Stage the blob's creation in a creation-only batch, published WITHOUT
-            // a commit: its entry becomes durable at the next commit (records are
-            // pending until sync anyway), or a crash before one erases the section
-            // together with its unsynced records
-            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
-            let blob = commonware_runtime::WriteBatch::create(
-                &mut batch,
-                &self.config.partition,
-                &section.to_be_bytes(),
-            )
-            .await?;
-            commonware_runtime::WriteBatch::apply(batch)
-                .await
-                .map_err(Error::Runtime)?;
-            entry.insert(Write::from_pooler(
-                &self.context,
-                blob,
-                0,
-                self.config.write_buffer,
-            ));
-            debug!(section, "created blob");
+        let offset = Self::record_offset(index).ok_or(Error::IndexOverflow(index))?;
+        if offset < self.blob.floor() {
+            return Err(Error::IndexPruned(index));
         }
 
         // Write the value to the blob
-        let blob = self.blobs.get_mut(&section).unwrap();
-        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
-        blob.write_at(offset, record.encode_mut()).await?;
-        self.pending.insert(section);
+        self.blob.write_at(offset, record.encode_mut()).await?;
+        self.dirty = true;
 
         // Add to intervals
         self.intervals.insert(index);
@@ -325,11 +241,8 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         }
 
         // Read from disk
-        let items_per_blob = self.config.items_per_blob.get();
-        let section = index / items_per_blob;
-        let blob = self.blobs.get(&section).unwrap();
-        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let mut read_buf = blob.read_at(offset, Record::<V>::SIZE).await?;
+        let offset = Self::record_offset(index).expect("interval index has a valid offset");
+        let mut read_buf = self.blob.read_at(offset, Record::<V>::SIZE).await?;
         let record = Record::<V>::read(&mut read_buf)?;
 
         // If record is valid, return it
@@ -380,77 +293,49 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         self.intervals.missing_items(start, max)
     }
 
-    /// Prune indices older than `min` by removing entire blobs: every removal lands in ONE
-    /// atomic commit.
+    /// Prune indices below `min` (capped to one past the highest written index), exactly: the
+    /// new pruning boundary IS the (capped) requested index. Bytes below the boundary drop via
+    /// the runtime's native [commonware_runtime::Blob::prune], and subsequent puts below it
+    /// fail with [Error::IndexPruned].
     ///
-    /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
-    /// all possible indices in that blob are less than `min`.
+    /// The new floor is a mutation, not a durability point: it persists at the next sync, and
+    /// a crash may regress it to the last synced floor — never the reverse — so consumers
+    /// re-prune after recovery.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Collect sections to remove
-        let items_per_blob = self.config.items_per_blob.get();
-        let min_section = min / items_per_blob;
-        let sections_to_remove: Vec<u64> = self
-            .blobs
-            .keys()
-            .filter(|&&section| section < min_section)
-            .copied()
-            .collect();
-
-        // Stage the collected sections' removals in one batch
-        if !sections_to_remove.is_empty() {
-            let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
-            for &section in &sections_to_remove {
-                let blob = self.blobs.remove(&section).expect("collected from keys");
-                drop(blob);
-                commonware_runtime::WriteBatch::remove(
-                    &mut batch,
-                    &self.config.partition,
-                    Some(&section.to_be_bytes()),
-                );
-
-                // Remove the corresponding index range from intervals
-                let start_index = section * items_per_blob;
-                let end_index = (section + 1) * items_per_blob - 1;
-                self.intervals.remove(start_index, end_index);
-                debug!(section, start_index, end_index, "pruned blob");
-
-                // Update metrics
-                self.pruned.inc();
-            }
-            commonware_runtime::WriteBatch::apply_sync(batch)
-                .await
-                .map_err(Error::Runtime)?;
-        }
-
-        // Clean pending entries that fall into pruned sections.
-        self.pending.retain(|&section| section >= min_section);
-
-        Ok(())
-    }
-
-    /// Write all pending entries and sync all modified [commonware_runtime::Blob]s.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.syncs.inc();
-
-        if self.pending.is_empty() {
+        // Cap to one past the highest written index (the blob's size is always a record
+        // multiple, so the cap is exact).
+        let min = min.min(self.blob.size() / Self::RECORD_SIZE);
+        let target = min * Self::RECORD_SIZE;
+        if target <= self.blob.floor() {
             return Ok(());
         }
 
-        let futures: Vec<_> = self
-            .blobs
-            .iter_mut()
-            .filter(|(section, _)| self.pending.contains(section))
-            .map(|(_, blob)| blob.sync())
-            .collect();
-        try_join_all(futures).await?;
+        // The native prune is exact, so the boundary lands at the requested offset. `min` is
+        // nonzero (the target exceeds the floor), so the removed range is well-formed.
+        self.blob.prune(target).await?;
+        self.intervals.remove(0, min - 1);
+        self.dirty = true;
 
-        // Clear pending sections.
-        self.pending.clear();
+        // Update metrics
+        self.pruned.inc();
 
         Ok(())
     }
 
-    /// Write all pending entries and stage the modified [commonware_runtime::Blob]s' durability
+    /// Write all pending entries and sync the [commonware_runtime::Blob].
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.syncs.inc();
+
+        if !self.dirty {
+            return Ok(());
+        }
+        self.blob.sync().await?;
+        self.dirty = false;
+
+        Ok(())
+    }
+
+    /// Write all pending entries and stage the [commonware_runtime::Blob]'s durability
     /// with `batch`.
     pub async fn sync_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
         &mut self,
@@ -458,46 +343,34 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     ) -> Result<(), Error> {
         self.syncs.inc();
 
-        if self.pending.is_empty() {
+        if !self.dirty {
             return Ok(());
         }
-        let pending = &self.pending;
-        for (_, blob) in self
-            .blobs
-            .iter_mut()
-            .filter(|(section, _)| pending.contains(section))
-        {
-            blob.sync_into(batch).await?;
-        }
-        self.pending.clear();
+        self.blob.sync_into(batch).await?;
+        self.dirty = false;
+
         Ok(())
     }
 
     /// Destroy [Ordinal] and remove all data, in ONE atomic commit.
     pub async fn destroy(self) -> Result<(), Error> {
         let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
-        self.destroy_into(&mut batch).await?;
+        self.destroy_into(&mut batch);
         commonware_runtime::WriteBatch::apply_sync(batch)
             .await
             .map_err(Error::Runtime)
     }
 
-    /// [Self::destroy], staged with `batch`: every blob's removal and the partition's land
-    /// when the caller applies the batch with `apply_sync`, atomically with everything else
-    /// it stages.
-    pub(crate) async fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+    /// [Self::destroy], staged with `batch`: the partition's removal lands when the caller
+    /// applies the batch with `apply_sync`, atomically with everything else it stages. The
+    /// partition always exists (its blob is opened at initialization), so staging the removal
+    /// cannot fail the batch.
+    pub(crate) fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
         self,
         batch: &mut T,
-    ) -> Result<(), Error> {
-        drop(self.blobs);
-        // The partition may never have been created (an ordinal that never held a record);
-        // staging its removal would then fail the whole batch.
-        match self.context.scan(&self.config.partition).await {
-            Ok(_) => batch.remove(&self.config.partition, None),
-            Err(RError::PartitionMissing(_)) => {}
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-        Ok(())
+    ) {
+        drop(self.blob);
+        batch.remove(&self.partition, None);
     }
 }
 

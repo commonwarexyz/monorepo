@@ -116,7 +116,10 @@ pub struct Config<C> {
     /// The partition to use for the archive's ordinal.
     pub ordinal_partition: String,
 
-    /// The number of items per section.
+    /// The number of items each of the commit record's section bitmaps shards. This is
+    /// commit-record shard granularity only: it does not affect how the ordinal stores
+    /// records on disk, but it must remain constant across restarts for the stored record
+    /// to translate to the same indices.
     pub items_per_section: NonZeroU64,
 
     /// The amount of bytes that can be buffered for the freezer key journal before being

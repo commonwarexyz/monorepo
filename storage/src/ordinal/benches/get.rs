@@ -1,11 +1,11 @@
-use super::utils::{append_random, init, Ordinal, ITEMS_PER_BLOB};
+use super::utils::{append_random, init, Ordinal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
     Runner,
 };
-use commonware_storage::utils::bits_for_indices;
-use commonware_utils::{TestRng, NZU64};
+use commonware_storage::rmap::RMap;
+use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
 use futures::{stream::FuturesUnordered, StreamExt};
 use rand::RngExt as _;
@@ -48,11 +48,11 @@ fn bench_get(c: &mut Criterion) {
 
     // Create a shared on-disk store once so later setup is fast.
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
-    let bits = builder.start(|ctx| async move {
+    let committed = builder.start(|ctx| async move {
         let mut store = init(ctx, None).await;
         let indices = append_random(&mut store, ITEMS).await;
         store.sync().await.unwrap();
-        bits_for_indices(NZU64!(ITEMS_PER_BLOB), indices)
+        indices.collect::<RMap>()
     });
 
     // Run the benchmarks.
@@ -62,16 +62,12 @@ fn bench_get(c: &mut Criterion) {
             let label = format!("{}/mode={} reads={}", module_path!(), mode, reads);
             c.bench_function(&label, |b| {
                 b.to_async(&runner).iter_custom({
-                    let bits = bits.clone();
+                    let committed = committed.clone();
                     move |iters| {
-                        let bits = bits.clone();
+                        let committed = committed.clone();
                         async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let bits = bits
-                                .iter()
-                                .map(|(section, bitmap)| (*section, bitmap))
-                                .collect();
-                            let store = init(ctx, Some(bits)).await;
+                            let store = init(ctx, Some(committed)).await;
                             let selected_indices = select_indices(reads, ITEMS);
                             let start = Instant::now();
                             for _ in 0..iters {

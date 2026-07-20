@@ -1,11 +1,10 @@
-use super::utils::{append_random, init, ITEMS_PER_BLOB};
+use super::utils::{append_random, init};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
     Runner, Supervisor as _,
 };
-use commonware_storage::utils::bits_for_indices;
-use commonware_utils::NZU64;
+use commonware_storage::rmap::RMap;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -14,11 +13,11 @@ fn bench_restart(c: &mut Criterion) {
     let cfg = Config::default();
     for items in [10_000, 50_000, 100_000, 500_000] {
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
-        let bits = builder.start(|ctx| async move {
+        let committed = builder.start(|ctx| async move {
             let mut store = init(ctx, None).await;
             let indices = append_random(&mut store, items).await;
             store.sync().await.unwrap();
-            bits_for_indices(NZU64!(ITEMS_PER_BLOB), indices)
+            indices.collect::<RMap>()
         });
 
         // Run the benchmarks
@@ -26,17 +25,14 @@ fn bench_restart(c: &mut Criterion) {
         let label = format!("{}/items={}", module_path!(), items);
         c.bench_function(&label, |b| {
             b.to_async(&runner).iter_custom(|iters| {
-                let bits = bits.clone();
+                let committed = committed.clone();
                 async move {
                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        let bits = bits
-                            .iter()
-                            .map(|(section, bitmap)| (*section, bitmap))
-                            .collect();
+                        let committed = committed.clone();
                         let start = Instant::now();
-                        let _store = init(ctx.child("storage"), Some(bits)).await;
+                        let _store = init(ctx.child("storage"), Some(committed)).await;
                         total += start.elapsed();
                     }
                     total

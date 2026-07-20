@@ -6,7 +6,7 @@ use commonware_runtime::{
     conformance::{StorageConformance, StorageWorkload},
     Supervisor as _,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use rand::RngExt as _;
 
 struct OrdinalWorkload;
@@ -20,7 +20,6 @@ impl StorageWorkload for OrdinalWorkload {
     ) -> Result<(), Self::Error> {
         let cfg = Config {
             partition: format!("ordinal-conformance-{seed}"),
-            items_per_blob: NZU64!(16),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         };

@@ -2,6 +2,7 @@ use crate::{
     archive::{immutable::Config, Error, Identifier},
     freezer::{self, Cursor, Freezer},
     ordinal::{self, Ordinal},
+    rmap::RMap,
     Context,
 };
 use commonware_codec::{CodecShared, EncodeSize, RangeCfg, Read, Write as CodecWrite};
@@ -17,9 +18,12 @@ use tracing::debug;
 /// Name of the commit record blob.
 const COMMIT_BLOB_NAME: &[u8] = b"commit";
 
-/// Ordinal section bitmaps naming the records committed by each sync.
+/// Commit-record encoding of the ordinal indices committed by each sync, sharded into
+/// per-section bitmaps of `items_per_section` bits (the shard granularity, nothing more:
+/// the ordinal itself is a single flat blob keyed by absolute index).
 ///
-/// `None` marks a fully-populated section (every record available).
+/// `None` marks a fully-populated section (every record available). The bitmaps are
+/// translated to absolute indices at the [Ordinal::init] boundary.
 type SectionBits = BTreeMap<u64, Option<BitMap>>;
 
 /// Codec configuration for reading [SectionBits].
@@ -101,18 +105,48 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         )
         .await?;
 
-        // Initialize ordinal. Ordinal::init removes stored sections that are not present
-        // in this map, so an empty map represents a committed empty ordinal.
-        let section_bits = sections.iter().map(|(&section, bits)| (section, bits));
+        // Translate the committed section bitmaps to absolute indices. The commit record is
+        // externally stored, so a section or bitmap naming unaddressable indices is corruption
+        // (such indices can never have been written).
+        let items_per_section = cfg.items_per_section.get();
+        let mut committed = RMap::new();
+        for (&section, bits) in &sections {
+            let start = section.checked_mul(items_per_section);
+            if start
+                .and_then(|start| start.checked_add(items_per_section))
+                .is_none()
+            {
+                return Err(Error::RecordCorrupted);
+            }
+            let start = start.expect("checked above");
+            match bits {
+                Some(bits) => {
+                    // A stored bitmap shards exactly one section.
+                    if bits.len() != items_per_section {
+                        return Err(Error::RecordCorrupted);
+                    }
+                    for bit in bits.ones_iter() {
+                        committed.insert(start + bit);
+                    }
+                }
+                None => {
+                    for index in start..start + items_per_section {
+                        committed.insert(index);
+                    }
+                }
+            }
+        }
+
+        // Initialize ordinal. Records outside the committed set are unreachable, so an empty
+        // map represents a committed empty ordinal.
         let ordinal = Ordinal::init(
             context.child("ordinal"),
             ordinal::Config {
                 partition: cfg.ordinal_partition,
-                items_per_blob: cfg.items_per_section,
                 write_buffer: cfg.ordinal_write_buffer,
                 replay_buffer: cfg.replay_buffer,
             },
-            Some(section_bits.collect()),
+            Some(committed),
         )
         .await?;
 
@@ -123,7 +157,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
 
         Ok(Self {
             context,
-            items_per_section: cfg.items_per_section.get(),
+            items_per_section,
             partition: cfg.metadata_partition,
             commit,
             sections,
@@ -268,7 +302,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         let mut batch = self.context.batch().await?;
 
         // Stage the ordinal's destruction
-        self.ordinal.destroy_into(&mut batch).await?;
+        self.ordinal.destroy_into(&mut batch);
 
         // Stage the freezer's destruction
         self.freezer.destroy_into(&mut batch).await?;

@@ -11,9 +11,19 @@
 use std::collections::BTreeMap;
 
 /// A collection that manages disjoint, inclusive ranges `[start, end]`.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RMap {
     ranges: BTreeMap<u64, u64>,
+}
+
+impl FromIterator<u64> for RMap {
+    fn from_iter<T: IntoIterator<Item = u64>>(iter: T) -> Self {
+        let mut map = Self::new();
+        for value in iter {
+            map.insert(value);
+        }
+        map
+    }
 }
 
 impl RMap {
