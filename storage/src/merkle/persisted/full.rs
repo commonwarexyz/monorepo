@@ -672,8 +672,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.mem.root(hasher, inactive_peaks)
     }
 
-    /// Prune as many nodes as possible, leaving behind at most one pruning-granularity chunk
-    /// of nodes.
+    /// Prune all nodes below the current leaf count, keeping only the retained pinned nodes.
     pub async fn prune_all(&mut self) -> Result<(), Error<F>> {
         let leaves = self.mem.leaves();
         if leaves != 0 {

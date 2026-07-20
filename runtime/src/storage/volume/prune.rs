@@ -1,4 +1,5 @@
-//! Prefix pruning: drop a blob's bytes below a chunk-aligned floor.
+//! Prefix pruning: drop a blob's bytes below a byte-exact floor (only the
+//! physical surgery stays chunk-granular).
 //!
 //! Pruning is a MUTATION, not a durability point: like a write or a
 //! resize, it publishes at the blob's next commit — the captured entry

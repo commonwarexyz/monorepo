@@ -211,12 +211,4 @@ impl<B: Blob> Read<B> {
 
         Ok(())
     }
-
-    /// Resizes the blob to the specified len and syncs the blob.
-    ///
-    /// This may be useful if reading some blob after unclean shutdown.
-    pub async fn resize(self, len: u64) -> Result<(), Error> {
-        self.blob.resize(len).await?;
-        self.blob.sync().await
-    }
 }

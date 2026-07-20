@@ -2231,9 +2231,9 @@ pub mod tests {
         });
     }
 
-    /// Verify that `Db::prune` never advances the ops journal past the settled bitmap
-    /// pruning boundary on a delayed-merge (MMB) family. The journal's lower bound must be
-    /// less than or equal to `sync_boundary()`, and the test setup must force the lag to
+    /// Verify that `Db::prune` prunes the ops journal exactly to the settled bitmap
+    /// pruning boundary on a delayed-merge (MMB) family. The journal's lower bound must
+    /// equal the requested `sync_boundary()`, and the test setup must force the lag to
     /// be strictly active so the assertion is not vacuous.
     #[test_traced]
     fn test_current_mmb_prune_respects_sync_boundary() {
@@ -2254,19 +2254,18 @@ pub mod tests {
                 mmb_commit(&mut db, [(k, Some(val(70_000 + round)))]).await;
             }
 
-            db.prune(db.sync_boundary()).await.unwrap();
-
             let boundary = db.sync_boundary();
+            db.prune(boundary).await.unwrap();
+
             let floor = db.inactivity_floor_loc();
             assert!(
                 boundary < floor,
                 "delayed-merge lag must be strictly active: boundary={boundary}, floor={floor}"
             );
-            assert!(
-                db.bounds().start <= boundary,
-                "ops journal was pruned past the settled bitmap boundary: \
-                 bounds.start={}, boundary={boundary}",
-                db.bounds().start
+            assert_eq!(
+                db.bounds().start,
+                boundary,
+                "ops journal must be pruned exactly to the requested settled bitmap boundary"
             );
 
             db.destroy().await.unwrap();
@@ -2301,27 +2300,27 @@ pub mod tests {
                 .await;
             }
 
-            db.prune(db.sync_boundary()).await.unwrap();
-
             let boundary = db.sync_boundary();
+            db.prune(boundary).await.unwrap();
+
             let floor = db.inactivity_floor_loc();
             let chunk_bits = commonware_utils::bitmap::BitMap::<N>::CHUNK_SIZE_BITS;
             assert!(
                 boundary <= floor && *floor - *boundary < chunk_bits,
                 "MMR lag should be only chunk alignment: boundary={boundary}, floor={floor}, chunk_bits={chunk_bits}"
             );
-            assert!(
-                db.bounds().start <= boundary,
-                "ops journal bounds must be <= sync_boundary: bounds.start={}, boundary={boundary}",
-                db.bounds().start
+            assert_eq!(
+                db.bounds().start,
+                boundary,
+                "ops journal must be pruned exactly to the requested sync_boundary"
             );
 
             db.destroy().await.unwrap();
         });
     }
 
-    /// Verify that `prune(loc)` with `loc < sync_boundary()` prunes the ops journal only as far
-    /// as the caller requested.
+    /// Verify that `prune(loc)` with `loc < sync_boundary()` prunes the ops journal exactly as
+    /// far as the caller requested.
     #[test_traced]
     fn test_current_prune_below_settled_boundary_is_honored() {
         let executor = deterministic::Runner::default();
@@ -2345,10 +2344,10 @@ pub mod tests {
             let small = Location::new(1);
             db.prune(small).await.unwrap();
 
-            assert!(
-                db.bounds().start <= small,
-                "journal pruning exceeded the caller-supplied target: bounds.start={}, requested={small}",
-                db.bounds().start
+            assert_eq!(
+                db.bounds().start,
+                small,
+                "journal must be pruned exactly to the caller-supplied target"
             );
 
             db.destroy().await.unwrap();

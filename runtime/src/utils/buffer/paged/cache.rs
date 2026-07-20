@@ -190,12 +190,6 @@ impl CacheRef {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Convert a logical offset into the number of the page it belongs to and the offset within
-    /// that page.
-    pub const fn offset_to_page(&self, offset: u64) -> (u64, u64) {
-        Cache::offset_to_page(self.page_size, offset)
-    }
-
     /// Try to read the specified bytes from the page cache only. Returns the number of bytes
     /// successfully read from cache and copied to `buf` before a page fault, if any.
     pub(super) fn read_cached(
@@ -412,7 +406,7 @@ impl CacheRef {
     /// - Panics if `offset` is not page aligned.
     /// - If the buffer is not the size of a page.
     pub fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
-        let (mut page_num, offset_in_page) = self.offset_to_page(offset);
+        let (mut page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
         assert_eq!(offset_in_page, 0);
         {
             // Write lock the page cache.

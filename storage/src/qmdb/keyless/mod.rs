@@ -1473,6 +1473,7 @@ pub(crate) mod tests {
         const PRUNE_LOC: u64 = 30;
         db.prune(Location::new(PRUNE_LOC)).await.unwrap();
         let oldest_retained = db.bounds().start;
+        assert_eq!(oldest_retained, Location::new(PRUNE_LOC));
         assert_eq!(db.root(), root);
 
         db.sync().await.unwrap();
@@ -1486,9 +1487,6 @@ pub(crate) mod tests {
             (Location::new(150), 10),
             (Location::new(190), 15),
         ] {
-            if start_loc < oldest_retained {
-                continue;
-            }
             let (proof, ops) = db.proof(start_loc, NZU64!(max_ops)).await.unwrap();
             assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &ops, &root,));
         }
@@ -1497,6 +1495,7 @@ pub(crate) mod tests {
         db.prune(aggressive_prune).await.unwrap();
 
         let new_oldest = db.bounds().start;
+        assert_eq!(new_oldest, aggressive_prune);
         let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
         assert!(verify_proof::<Sha256, _, _>(
             &proof, new_oldest, &ops, &root,
@@ -1505,15 +1504,14 @@ pub(crate) mod tests {
         let almost_all = db.bounds().end - 5;
         db.prune(almost_all).await.unwrap();
         let final_oldest = db.bounds().start;
-        if final_oldest < db.bounds().end {
-            let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
-            assert!(verify_proof::<Sha256, _, _>(
-                &final_proof,
-                final_oldest,
-                &final_ops,
-                &root,
-            ));
-        }
+        assert_eq!(final_oldest, almost_all);
+        let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
+        assert!(verify_proof::<Sha256, _, _>(
+            &final_proof,
+            final_oldest,
+            &final_ops,
+            &root,
+        ));
 
         db.destroy().await.unwrap();
     }

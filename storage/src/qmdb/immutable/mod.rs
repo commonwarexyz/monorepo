@@ -1038,8 +1038,8 @@ pub(super) mod test {
         db.sync().await.unwrap();
         let durable_state = (db.root(), db.inactivity_floor_loc(), db.bounds().end);
 
-        // Apply, but do not commit, a batch that advances the floor far enough for prune to
-        // remove the oldest blob.
+        // Apply, but do not commit, a batch that advances the floor so a prune removes the
+        // oldest operations.
         let buffered_floor = db.bounds().end;
         let key = Sha256::fill(100);
         let value = Sha256::fill(101);
@@ -1055,7 +1055,7 @@ pub(super) mod test {
         assert_ne!(buffered_state, durable_state);
 
         db.prune(buffered_floor).await.unwrap();
-        assert!(db.bounds().start > Location::new(0));
+        assert_eq!(db.bounds().start, buffered_floor);
         drop(db);
 
         // Reopen must produce one coherent state. In particular, it must not recover the old
@@ -3336,16 +3336,11 @@ pub(super) mod test {
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
 
-        // Prune at the floor — the maximum prune allowed.
-        // Pruning is blob-aligned, so `bounds.start` may not physically advance all the way
-        // to `commit_loc`; what matters semantically is that the floor authorizes pruning
-        // of everything below the commit and that any further prune is rejected.
+        // Prune at the floor — the maximum prune allowed. Pruning is exact, so the boundary
+        // lands at `commit_loc` and any further prune is rejected.
         db.prune(commit_loc).await.unwrap();
         let bounds = db.bounds();
-        assert!(
-            bounds.start <= commit_loc,
-            "prune must not advance bounds.start past the floor"
-        );
+        assert_eq!(bounds.start, commit_loc);
         assert_eq!(bounds.end, Location::new(*commit_loc + 1));
 
         // Pruning one past the floor must be rejected — the floor is the hard ceiling.

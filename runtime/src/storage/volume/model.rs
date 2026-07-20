@@ -215,7 +215,11 @@
 //! and scripted large-floor crashes (committed, regressed, and parked
 //! mid-commit) drive the floor's interaction with checksum-ref dropping,
 //! compaction, and paging at size (see `commit::finalize` and the
-//! recovery ref-window checks), sampled under the same caveat.
+//! recovery ref-window checks), sampled under the same caveat. Prune
+//! ENUMERATION is block-granular: the model's prune action advances by
+//! whole chunks and the conformance `extract` asserts block-aligned
+//! floors, so mid-chunk floors are covered only by the directed
+//! `tests::test_volume_prune_end_to_end` and the scale soak.
 //!
 //! # Deliberately out of scope
 //!

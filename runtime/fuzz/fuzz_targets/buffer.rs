@@ -44,9 +44,6 @@ enum FuzzOperation {
     ReadSeekTo {
         position: u16,
     },
-    ReadResize {
-        new_size: u16,
-    },
     WriteAt {
         data: Vec<u8>,
         offset: u16,
@@ -210,12 +207,6 @@ fn fuzz(input: FuzzInput) {
                 FuzzOperation::ReadSeekTo { position } => {
                     if let Some(ref mut reader) = read_buffer {
                         let _ = reader.seek_to(position as u64);
-                    }
-                }
-
-                FuzzOperation::ReadResize { new_size } => {
-                    if let Some(reader) = read_buffer.take() {
-                        let _ = reader.resize(new_size as u64).await;
                     }
                 }
 

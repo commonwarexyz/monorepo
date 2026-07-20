@@ -25,7 +25,11 @@
 //! # Crash reconciliation
 //!
 //! Each blob's pruned floor is a mutation whose durability follows a commit capturing that
-//! blob, and a crash regresses each floor to its own last-committed value (never forward).
+//! blob, and a crash regresses each floor to its own last-committed value (never forward),
+//! so consumers re-prune after recovery. Whether frame bytes in a regressed range hold
+//! their original content is backend-defined ([commonware_runtime::Blob::prune]): the
+//! volume resurfaces them, raw file backends may have reclaimed the space, and this
+//! journal never reads below its own boundary either way.
 //! `prune` stages both blobs in ONE batch whose commit captures both floors, so a crash
 //! ordinarily recovers a consistent pair. The [commonware_runtime::Blob] contract still ties
 //! each floor to its own blob's commits with no cross-blob pairing promised (and the

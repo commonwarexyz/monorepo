@@ -687,7 +687,8 @@ mod test {
             let fetched_value = db.get(&key).await.unwrap();
             assert_eq!(fetched_value.unwrap(), value);
 
-            // Insert two new k/v pairs to force pruning of the first section.
+            // Insert two new k/v pairs, advancing the inactivity floor (2 -> 5) past the
+            // first key's original operations.
             let (k1, v1) = (Digest::random(&mut ctx), vec![2, 3, 4, 5, 6]);
             let (k2, v2) = (Digest::random(&mut ctx), vec![6, 7, 8]);
             apply_entries(&mut db, [(k1, Some(v1.clone()))]).await;
@@ -707,7 +708,8 @@ mod test {
             assert_eq!(*db.bounds().end, 10);
             assert_eq!(*db.inactivity_floor_loc, 5);
 
-            // Ensure all keys can be accessed, despite the first section being pruned.
+            // Ensure all keys can be accessed: the floor advance moved still-active
+            // operations above the floor, and nothing is pruned until an explicit `prune`.
             assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
