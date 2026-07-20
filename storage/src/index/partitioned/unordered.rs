@@ -227,8 +227,8 @@ mod tests {
         Index::new(ctx, OneCap)
     }
 
-    /// A worker's value walk must visit every value it holds exactly once -- inline values and
-    /// overflow chains alike -- since the snapshot build derives the activity bitmap and
+    /// A worker's value walk must visit every value it holds exactly once (inline values and
+    /// overflow chains alike), since the snapshot build derives the activity bitmap and
     /// active-key counts from it.
     #[test_traced]
     fn test_range_for_each_value_visits_all_values_once() {
