@@ -432,21 +432,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.size(section)
     }
 
-    /// Rewind the journal to a specific section and byte offset.
-    ///
-    /// This truncates the section to the given size. All sections
-    /// after `section` are removed.
-    pub async fn rewind(&mut self, section: u64, offset: u64) -> Result<(), Error> {
-        self.manager.rewind(section, offset).await
-    }
-
-    /// Rewind only the given section to a specific byte offset.
-    ///
-    /// Unlike `rewind`, this does not affect other sections.
-    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind_section(section, size).await
-    }
-
     /// Remove all underlying blobs and the partition, in ONE atomic commit.
     pub async fn destroy(self) -> Result<(), Error>
     where
@@ -774,191 +759,6 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_segmented_fixed_rewind() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Create sections 1, 2, 3
-            for section in 1u64..=3 {
-                journal
-                    .append(section, &test_digest(section))
-                    .await
-                    .expect("failed to append");
-            }
-            journal.sync_all().await.expect("failed to sync");
-
-            // Verify all sections exist
-            for section in 1u64..=3 {
-                let size = journal.size(section).expect("failed to get size");
-                assert!(size > 0, "section {section} should have data");
-            }
-
-            // Rewind to section 1 (should remove sections 2, 3)
-            let size = journal.size(1).expect("failed to get size");
-            journal.rewind(1, size).await.expect("failed to rewind");
-
-            // Verify section 1 still has data
-            let size = journal.size(1).expect("failed to get size");
-            assert!(size > 0, "section 1 should still have data");
-
-            // Verify sections 2, 3 are removed
-            for section in 2u64..=3 {
-                let size = journal.size(section).expect("failed to get size");
-                assert_eq!(size, 0, "section {section} should be removed");
-            }
-
-            // Verify data in section 1 is still readable
-            let item = journal.get(1, 0).await.expect("failed to get");
-            assert_eq!(item, test_digest(1));
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_rewind_max_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Append to the maximal section. `section + 1` has no representable successor.
-            journal
-                .append(u64::MAX, &test_digest(0))
-                .await
-                .expect("failed to append");
-            journal.sync_all().await.expect("failed to sync");
-
-            // Rewinding the maximal section removes no sections above it and must not panic.
-            let size = journal.size(u64::MAX).expect("failed to get size");
-            journal
-                .rewind(u64::MAX, size)
-                .await
-                .expect("failed to rewind");
-
-            // The section is intact and readable.
-            assert_eq!(journal.size(u64::MAX).expect("failed to get size"), size);
-            assert_eq!(journal.get(u64::MAX, 0).await.unwrap(), test_digest(0));
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_rewind_many_sections() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Create sections 1-10
-            for section in 1u64..=10 {
-                journal
-                    .append(section, &test_digest(section))
-                    .await
-                    .expect("failed to append");
-            }
-            journal.sync_all().await.expect("failed to sync");
-
-            // Rewind to section 5 (should remove sections 6-10)
-            let size = journal.size(5).expect("failed to get size");
-            journal.rewind(5, size).await.expect("failed to rewind");
-
-            // Verify sections 1-5 still have data
-            for section in 1u64..=5 {
-                let size = journal.size(section).expect("failed to get size");
-                assert!(size > 0, "section {section} should still have data");
-            }
-
-            // Verify sections 6-10 are removed
-            for section in 6u64..=10 {
-                let size = journal.size(section).expect("failed to get size");
-                assert_eq!(size, 0, "section {section} should be removed");
-            }
-
-            // Verify data integrity via replay
-            {
-                let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("failed to replay");
-                pin_mut!(stream);
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    let (section, _, item) = result.expect("failed to read");
-                    items.push((section, item));
-                }
-                assert_eq!(items.len(), 5);
-                for (i, (section, item)) in items.iter().enumerate() {
-                    assert_eq!(*section, (i + 1) as u64);
-                    assert_eq!(*item, test_digest((i + 1) as u64));
-                }
-            }
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_rewind_persistence() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-
-            // Create sections 1-5
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to init");
-            for section in 1u64..=5 {
-                journal
-                    .append(section, &test_digest(section))
-                    .await
-                    .expect("failed to append");
-            }
-            journal.sync_all().await.expect("failed to sync");
-
-            // Rewind to section 2
-            let size = journal.size(2).expect("failed to get size");
-            journal.rewind(2, size).await.expect("failed to rewind");
-            journal.sync_all().await.expect("failed to sync");
-            drop(journal);
-
-            // Re-init and verify only sections 1-2 exist
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            // Verify sections 1-2 have data
-            for section in 1u64..=2 {
-                let size = journal.size(section).expect("failed to get size");
-                assert!(size > 0, "section {section} should have data after restart");
-            }
-
-            // Verify sections 3-5 are gone
-            for section in 3u64..=5 {
-                let size = journal.size(section).expect("failed to get size");
-                assert_eq!(size, 0, "section {section} should be gone after restart");
-            }
-
-            // Verify data integrity
-            let item1 = journal.get(1, 0).await.expect("failed to get");
-            assert_eq!(item1, test_digest(1));
-            let item2 = journal.get(2, 0).await.expect("failed to get");
-            assert_eq!(item2, test_digest(2));
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
     /// A partial trailing item cannot arise from a crash (per-blob atomic sync): init rejects
     /// it as corruption.
     #[test_traced]
@@ -1193,28 +993,25 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
+
+            // Create an empty blob for section 2 directly in the partition so init
+            // tracks an existing, empty section.
+            let (empty, _) = context
+                .open(&cfg.partition, &2u64.to_be_bytes())
+                .await
+                .expect("failed to create empty section blob");
+            empty.sync().await.expect("failed to sync empty blob");
+            drop(empty);
+
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
-            // Append to section 1
+            // Append to sections 1 and 3, leaving section 2 empty in the middle.
             journal
                 .append(1, &test_digest(100))
                 .await
                 .expect("failed to append");
-
-            // Create section 2 but make it empty via rewind
-            journal
-                .append(2, &test_digest(200))
-                .await
-                .expect("failed to append");
-            journal.sync(2).await.expect("failed to sync");
-            journal
-                .rewind_section(2, 0)
-                .await
-                .expect("failed to rewind");
-
-            // Append to section 3
             journal
                 .append(3, &test_digest(300))
                 .await
@@ -1222,7 +1019,8 @@ mod tests {
 
             journal.sync_all().await.expect("failed to sync");
 
-            // Verify section lengths
+            // Verify section 2 exists but is empty
+            assert!(journal.sections().any(|section| section == 2));
             assert_eq!(journal.section_len(1).unwrap(), 1);
             assert_eq!(journal.section_len(2).unwrap(), 0);
             assert_eq!(journal.section_len(3).unwrap(), 1);
@@ -1364,22 +1162,33 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_last_after_rewind_to_zero() {
+    fn test_last_empty_section_returns_none() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
+
+            // Create an empty blob for section 0 directly in the partition so init
+            // tracks an existing, empty section.
+            let (empty, _) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("failed to create empty section blob");
+            empty.sync().await.expect("failed to sync empty blob");
+            drop(empty);
+
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
-            journal.append(0, &test_digest(0)).await.unwrap();
-            journal.append(0, &test_digest(1)).await.unwrap();
-            journal.sync(0).await.unwrap();
-
-            assert!(journal.last(0).await.unwrap().is_some());
-
-            journal.rewind(0, 0).await.unwrap();
+            // An existing but empty section has no last item.
+            assert!(journal.sections().any(|section| section == 0));
             assert_eq!(journal.last(0).await.unwrap(), None);
+
+            // A section with data returns its last item.
+            journal.append(1, &test_digest(0)).await.unwrap();
+            journal.append(1, &test_digest(1)).await.unwrap();
+            journal.sync(1).await.unwrap();
+            assert_eq!(journal.last(1).await.unwrap(), Some(test_digest(1)));
 
             journal.destroy().await.unwrap();
         });
@@ -1692,66 +1501,6 @@ mod tests {
                 .await
                 .expect("failed to append after clear");
             assert_eq!(position, 0);
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_rewind_waits_for_in_flight_start_sync() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pending = PendingSyncs::default();
-            let context = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.child("storage"), cfg)
-                .await
-                .expect("failed to init");
-
-            journal
-                .append(1, &test_digest(0))
-                .await
-                .expect("failed to append");
-            journal
-                .append(2, &test_digest(1))
-                .await
-                .expect("failed to append");
-            let handle = journal.start_sync(2).await.expect("failed to start sync");
-            assert!(!pending.lock().is_empty());
-
-            let size = journal.size(1).expect("failed to get size");
-            let started = Arc::new(AtomicUsize::new(0));
-            let completed = Arc::new(AtomicUsize::new(0));
-            let started_clone = started.clone();
-            let completed_clone = completed.clone();
-            let waiter = context.inner.child("rewind").spawn(move |_| async move {
-                started_clone.fetch_add(1, Ordering::Relaxed);
-                journal.rewind(1, size).await.expect("failed to rewind");
-                completed_clone.fetch_add(1, Ordering::Relaxed);
-                journal
-            });
-
-            while started.load(Ordering::Relaxed) == 0 {
-                commonware_runtime::reschedule().await;
-            }
-            commonware_runtime::reschedule().await;
-            assert_eq!(
-                completed.load(Ordering::Relaxed),
-                0,
-                "rewind must wait for in-flight syncs on removed sections"
-            );
-
-            release_pending_syncs(&pending);
-            handle
-                .await
-                .expect("sync handle should complete despite rewind");
-            while completed.load(Ordering::Relaxed) == 0 {
-                commonware_runtime::reschedule().await;
-            }
-            let journal = waiter.await.expect("rewind task failed");
-            assert_eq!(journal.size(2).expect("failed to get size"), 0);
             journal.destroy().await.expect("failed to destroy");
         });
     }

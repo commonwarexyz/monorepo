@@ -171,20 +171,6 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         self.manager.size(section)
     }
 
-    /// Rewind to a specific section and size.
-    ///
-    /// Truncates the section to the given size and removes all sections after it.
-    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind(section, size).await
-    }
-
-    /// Rewind only the given section to a specific size.
-    ///
-    /// Unlike `rewind`, this does not affect other sections.
-    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind_section(section, size).await
-    }
-
     /// Prune sections before min, in ONE atomic commit.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error>
     where
@@ -361,46 +347,6 @@ mod tests {
             assert!(glob.manager.blobs.contains_key(&3));
             assert!(glob.manager.blobs.contains_key(&4));
             assert!(glob.manager.blobs.contains_key(&5));
-
-            glob.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_glob_rewind() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
-                .await
-                .expect("Failed to init glob");
-
-            // Append multiple values and track sizes
-            let values: Vec<i32> = vec![1, 2, 3, 4, 5];
-            let mut locations = Vec::new();
-
-            for value in &values {
-                let (offset, size) = glob.append(1, value).await.expect("Failed to append");
-                locations.push((offset, size));
-            }
-            glob.sync(1).await.expect("Failed to sync");
-
-            // Rewind to after the third value
-            let (third_offset, third_size) = locations[2];
-            let rewind_size = third_offset + u64::from(third_size);
-            glob.rewind_section(1, rewind_size)
-                .await
-                .expect("Failed to rewind");
-
-            // First three values should still be readable
-            for (i, (offset, size)) in locations.iter().take(3).enumerate() {
-                let retrieved = glob.get(1, *offset, *size).await.expect("Failed to get");
-                assert_eq!(retrieved, values[i]);
-            }
-
-            // Fourth and fifth values should fail (reading past end of blob)
-            let (fourth_offset, fourth_size) = locations[3];
-            let result = glob.get(1, fourth_offset, fourth_size).await;
-            assert!(result.is_err());
 
             glob.destroy().await.expect("Failed to destroy");
         });

@@ -20,7 +20,7 @@
 //!
 //! # Open Blobs
 //!
-//! `Journal` uses 1 `commonware-storage::Blob` per `section` to store data. All `Blobs` in a given
+//! `Journal` uses 1 `commonware-runtime::Blob` per `section` to store data. All `Blobs` in a given
 //! `partition` are kept open during the lifetime of `Journal`. If the caller wishes to bound the
 //! number of open `Blobs`, they can group data into fewer `sections` and/or prune unused
 //! `sections`.
@@ -28,8 +28,10 @@
 //! # Sync
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
-//! to determine when to force pending data to be written to `Storage` using the `sync` method. When
-//! calling `close`, all pending data is automatically synced and any open blobs are dropped.
+//! to force pending data to be written using [Journal::sync] (selected sections),
+//! [Journal::sync_all] (every open section), or [Journal::start_sync] (durability in the
+//! background, reported through the returned handle). Dropping the `Journal` does not sync:
+//! pending data that was never synced is lost.
 //!
 //! # Pruning
 //!
@@ -494,30 +496,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         self.manager.size(section)
     }
 
-    /// Rewinds the journal to the given `section` and `size`.
-    ///
-    /// This removes any data beyond the specified `section` and `size`.
-    ///
-    /// # Warnings
-    ///
-    /// * This operation is not guaranteed to survive restarts until sync is called.
-    /// * This operation is not atomic, but it will always leave the journal in a consistent state
-    ///   in the event of failure since blobs are always removed in reverse order of section.
-    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind(section, size).await
-    }
-
-    /// Rewinds the `section` to the given `size`.
-    ///
-    /// Unlike [Self::rewind], this method does not modify anything other than the given `section`.
-    ///
-    /// # Warning
-    ///
-    /// This operation is not guaranteed to survive restarts until sync is called.
-    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind_section(section, size).await
-    }
-
     /// Ensures the given `sections` are synced to the underlying store.
     ///
     /// If a selected section does not exist, no error will be returned.
@@ -898,18 +876,6 @@ mod tests {
 
             // Test size on pruned section
             match journal.size(1) {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
-            // Test rewind on pruned section
-            match journal.rewind(2, 0).await {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
-            // Test rewind_section on pruned section
-            match journal.rewind_section(1, 0).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
@@ -1401,143 +1367,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_rewind() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create journal
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
-
-            // Check size of non-existent section
-            let size = journal.size(1).unwrap();
-            assert_eq!(size, 0);
-
-            // Append data to section 1
-            journal.append(1, &42i32).await.unwrap();
-
-            // Check size of section 1 - should be greater than 0
-            let size = journal.size(1).unwrap();
-            assert!(size > 0);
-
-            // Append more data and verify size increases
-            journal.append(1, &43i32).await.unwrap();
-            let new_size = journal.size(1).unwrap();
-            assert!(new_size > size);
-
-            // Check size of different section - should still be 0
-            let size = journal.size(2).unwrap();
-            assert_eq!(size, 0);
-
-            // Append data to section 2
-            journal.append(2, &44i32).await.unwrap();
-
-            // Check size of section 2 - should be greater than 0
-            let size = journal.size(2).unwrap();
-            assert!(size > 0);
-
-            // Rollback everything in section 1 and 2
-            journal.rewind(1, 0).await.unwrap();
-
-            // Check size of section 1 - should be 0
-            let size = journal.size(1).unwrap();
-            assert_eq!(size, 0);
-
-            // Check size of section 2 - should be 0
-            let size = journal.size(2).unwrap();
-            assert_eq!(size, 0);
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_rewind_max_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
-
-            // Append to the maximal section. `section + 1` has no representable successor.
-            let (offset, _) = journal.append(u64::MAX, &42i32).await.unwrap();
-            let size = journal.size(u64::MAX).unwrap();
-            assert!(size > 0);
-
-            // Rewinding the maximal section removes no sections above it and must not panic.
-            journal.rewind(u64::MAX, size).await.unwrap();
-
-            // The section is intact and readable.
-            assert_eq!(journal.size(u64::MAX).unwrap(), size);
-            assert_eq!(journal.get(u64::MAX, offset).await.unwrap(), 42i32);
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_rewind_section() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create journal
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
-
-            // Check size of non-existent section
-            let size = journal.size(1).unwrap();
-            assert_eq!(size, 0);
-
-            // Append data to section 1
-            journal.append(1, &42i32).await.unwrap();
-
-            // Check size of section 1 - should be greater than 0
-            let size = journal.size(1).unwrap();
-            assert!(size > 0);
-
-            // Append more data and verify size increases
-            journal.append(1, &43i32).await.unwrap();
-            let new_size = journal.size(1).unwrap();
-            assert!(new_size > size);
-
-            // Check size of different section - should still be 0
-            let size = journal.size(2).unwrap();
-            assert_eq!(size, 0);
-
-            // Append data to section 2
-            journal.append(2, &44i32).await.unwrap();
-
-            // Check size of section 2 - should be greater than 0
-            let size = journal.size(2).unwrap();
-            assert!(size > 0);
-
-            // Rollback everything in section 1
-            journal.rewind_section(1, 0).await.unwrap();
-
-            // Check size of section 1 - should be 0
-            let size = journal.size(1).unwrap();
-            assert_eq!(size, 0);
-
-            // Check size of section 2 - should be greater than 0
-            let size = journal.size(2).unwrap();
-            assert!(size > 0);
-        });
-    }
-
-    #[test_traced]
     fn test_journal_small_items() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1595,268 +1424,6 @@ mod tests {
                 count += 1;
             }
             assert_eq!(count, num_items, "Should replay all items");
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_rewind_many_sections() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Create sections 1-10 with data
-            for section in 1u64..=10 {
-                journal.append(section, &(section as i32)).await.unwrap();
-            }
-            journal.sync_all().await.unwrap();
-
-            // Verify all sections exist
-            for section in 1u64..=10 {
-                let size = journal.size(section).unwrap();
-                assert!(size > 0, "section {section} should have data");
-            }
-
-            // Rewind to section 5 (should remove sections 6-10)
-            journal.rewind(5, journal.size(5).unwrap()).await.unwrap();
-
-            // Verify sections 1-5 still exist with correct data
-            for section in 1u64..=5 {
-                let size = journal.size(section).unwrap();
-                assert!(size > 0, "section {section} should still have data");
-            }
-
-            // Verify sections 6-10 are removed (size should be 0)
-            for section in 6u64..=10 {
-                let size = journal.size(section).unwrap();
-                assert_eq!(size, 0, "section {section} should be removed");
-            }
-
-            // Verify data integrity via replay
-            {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
-                pin_mut!(stream);
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    let (section, _, _, item) = result.unwrap();
-                    items.push((section, item));
-                }
-                assert_eq!(items.len(), 5);
-                for (i, (section, item)) in items.iter().enumerate() {
-                    assert_eq!(*section, (i + 1) as u64);
-                    assert_eq!(*item, (i + 1) as i32);
-                }
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_rewind_partial_truncation() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append 5 items and record sizes after each
-            let mut sizes = Vec::new();
-            for i in 0..5 {
-                journal.append(1, &i).await.unwrap();
-                journal.sync(1).await.unwrap();
-                sizes.push(journal.size(1).unwrap());
-            }
-
-            // Rewind to keep only first 3 items
-            let target_size = sizes[2];
-            journal.rewind(1, target_size).await.unwrap();
-
-            // Verify size is correct
-            let new_size = journal.size(1).unwrap();
-            assert_eq!(new_size, target_size);
-
-            // Verify first 3 items via replay
-            {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
-                pin_mut!(stream);
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    let (_, _, _, item) = result.unwrap();
-                    items.push(item);
-                }
-                assert_eq!(items.len(), 3);
-                for (i, item) in items.iter().enumerate() {
-                    assert_eq!(*item, i as i32);
-                }
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_rewind_nonexistent_target() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Create sections 5, 6, 7 (skip 1-4)
-            for section in 5u64..=7 {
-                journal.append(section, &(section as i32)).await.unwrap();
-            }
-            journal.sync_all().await.unwrap();
-
-            // Rewind to section 3 (doesn't exist)
-            journal.rewind(3, 0).await.unwrap();
-
-            // Verify sections 5, 6, 7 are removed
-            for section in 5u64..=7 {
-                let size = journal.size(section).unwrap();
-                assert_eq!(size, 0, "section {section} should be removed");
-            }
-
-            // Verify replay returns nothing
-            {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
-                pin_mut!(stream);
-                let items: Vec<_> = stream.collect().await;
-                assert!(items.is_empty());
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_rewind_persistence() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Create sections 1-5 with data
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for section in 1u64..=5 {
-                journal.append(section, &(section as i32)).await.unwrap();
-            }
-            journal.sync_all().await.unwrap();
-
-            // Rewind to section 2
-            let size = journal.size(2).unwrap();
-            journal.rewind(2, size).await.unwrap();
-            journal.sync_all().await.unwrap();
-            drop(journal);
-
-            // Re-init and verify only sections 1-2 exist
-            let mut journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Verify sections 1-2 have data
-            for section in 1u64..=2 {
-                let size = journal.size(section).unwrap();
-                assert!(size > 0, "section {section} should have data after restart");
-            }
-
-            // Verify sections 3-5 are gone
-            for section in 3u64..=5 {
-                let size = journal.size(section).unwrap();
-                assert_eq!(size, 0, "section {section} should be gone after restart");
-            }
-
-            // Verify data integrity via replay
-            {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
-                pin_mut!(stream);
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    let (section, _, _, item) = result.unwrap();
-                    items.push((section, item));
-                }
-                assert_eq!(items.len(), 2);
-                assert_eq!(items[0], (1, 1));
-                assert_eq!(items[1], (2, 2));
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_rewind_to_zero_removes_all_newer() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Create sections 1, 2, 3
-            for section in 1u64..=3 {
-                journal.append(section, &(section as i32)).await.unwrap();
-            }
-            journal.sync_all().await.unwrap();
-
-            // Rewind section 1 to size 0
-            journal.rewind(1, 0).await.unwrap();
-
-            // Verify section 1 exists but is empty
-            let size = journal.size(1).unwrap();
-            assert_eq!(size, 0, "section 1 should be empty");
-
-            // Verify sections 2, 3 are completely removed
-            for section in 2u64..=3 {
-                let size = journal.size(section).unwrap();
-                assert_eq!(size, 0, "section {section} should be removed");
-            }
-
-            // Verify replay returns nothing
-            {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
-                pin_mut!(stream);
-                let items: Vec<_> = stream.collect().await;
-                assert!(items.is_empty());
-            }
-
-            journal.destroy().await.unwrap();
         });
     }
 
@@ -2241,28 +1808,27 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
+            // Create an empty blob for section 2 directly in the partition so init
+            // tracks an existing, empty section.
+            let (empty, _) = context
+                .open(&cfg.partition, &2u64.to_be_bytes())
+                .await
+                .expect("Failed to create empty section blob");
+            empty.sync().await.expect("Failed to sync empty blob");
+            drop(empty);
+
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
-            // Append to section 1
+            // Append to sections 1 and 3, leaving section 2 empty in the middle.
             journal.append(1, &100i32).await.expect("Failed to append");
-
-            // Create section 2 but don't append anything - just sync to create the blob
-            // Actually, we need to append something and then rewind to make it empty
-            journal.append(2, &200i32).await.expect("Failed to append");
-            journal.sync(2).await.expect("Failed to sync");
-            journal
-                .rewind_section(2, 0)
-                .await
-                .expect("Failed to rewind");
-
-            // Append to section 3
             journal.append(3, &300i32).await.expect("Failed to append");
 
             journal.sync_all().await.expect("Failed to sync");
 
-            // Verify section sizes
+            // Verify section 2 exists but is empty
+            assert!(journal.manager.blobs.contains_key(&2));
             assert!(journal.size(1).unwrap() > 0);
             assert_eq!(journal.size(2).unwrap(), 0);
             assert!(journal.size(3).unwrap() > 0);

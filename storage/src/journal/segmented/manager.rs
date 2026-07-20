@@ -50,9 +50,6 @@ pub trait SectionBuffer: Send + Sync {
 
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
-
-    /// Resize the logical size of the buffer.
-    fn resize(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
 impl<B: Blob> SectionBuffer for Writer<B> {
@@ -77,10 +74,6 @@ impl<B: Blob> SectionBuffer for Writer<B> {
     async fn wait_for_sync(&mut self) -> Result<(), RError> {
         Self::wait_for_sync(self).await
     }
-
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
-    }
 }
 
 impl<B: Blob> SectionBuffer for Write<B> {
@@ -104,10 +97,6 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn wait_for_sync(&mut self) -> Result<(), RError> {
         Self::wait_for_sync(self).await
-    }
-
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
     }
 }
 
@@ -183,7 +172,7 @@ pub struct Config<F> {
 /// # In-flight syncs
 ///
 /// Syncs started by [Manager::start_sync] complete in the background, so every path that
-/// removes a blob from `blobs` (`prune`, `rewind`, `clear`, `destroy`) must
+/// removes a blob from `blobs` (`prune`, `clear`, `destroy`) must
 /// call [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared
 /// completion first, guaranteeing that caller-held sync handles always report the sync's true
 /// result and that no buffer is dropped with I/O in flight.
@@ -575,65 +564,6 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    /// Rewind by removing all sections after `section` and resizing the target section.
-    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-
-        // Remove sections in descending order (newest first) to maintain a contiguous record
-        // if a crash occurs during rewind. Section `u64::MAX` has no successor, so there are
-        // no sections above it to remove.
-        let sections_to_remove: Vec<u64> = match section.checked_add(1) {
-            Some(next) => self.blobs.range(next..).rev().map(|(&s, _)| s).collect(),
-            None => Vec::new(),
-        };
-
-        for s in sections_to_remove {
-            // Remove the underlying blob from storage
-            let mut blob = self.blobs.remove(&s).unwrap();
-            blob.wait_for_sync().await?;
-            drop(blob);
-            self.context
-                .remove(&self.partition, Some(&s.to_be_bytes()))
-                .await?;
-            self.tracked.dec();
-            debug!(section = s, "removed blob during rewind");
-        }
-
-        // If the section exists, truncate it to the given size. No explicit sync barrier is
-        // needed here: the buffer waits for any in-flight sync before mutating the blob.
-        if let Some(blob) = self.blobs.get_mut(&section) {
-            let current_size = blob.size();
-            if size < current_size {
-                blob.resize(size).await?;
-                debug!(
-                    section,
-                    old_size = current_size,
-                    new_size = size,
-                    "rewound blob"
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Resize only the given section without affecting other sections.
-    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-
-        // Get the blob at the given section
-        if let Some(blob) = self.blobs.get_mut(&section) {
-            // Truncate the blob to the given size
-            let current = blob.size();
-            if size < current {
-                blob.resize(size).await?;
-                debug!(section, from = current, to = size, "rewound section");
-            }
-        }
-
-        Ok(())
-    }
-
     /// Returns the byte size of the given section.
     pub fn size(&self, section: u64) -> Result<u64, Error> {
         self.prune_guard(section)?;
@@ -713,10 +643,6 @@ mod tests {
                 self.wait_for_syncs.fetch_add(1, Ordering::Relaxed);
                 syncing.await?;
             }
-            Ok(())
-        }
-
-        async fn resize(&mut self, _len: u64) -> Result<(), RError> {
             Ok(())
         }
     }
