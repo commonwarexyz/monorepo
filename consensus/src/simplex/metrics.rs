@@ -15,11 +15,11 @@ pub enum TimeoutReason {
     LeaderNullify,
     LeaderTimeout,
     CertificationTimeout,
+    StallTimeout,
     MissingProposal,
     IgnoredProposal,
     InvalidProposal,
     FailedCertification,
-    StallTimeout,
 }
 
 impl TimeoutReason {
@@ -34,11 +34,11 @@ impl TimeoutReason {
             Self::LeaderNullify => "LeaderNullify",
             Self::LeaderTimeout => "LeaderTimeout",
             Self::CertificationTimeout => "CertificationTimeout",
+            Self::StallTimeout => "StallTimeout",
             Self::MissingProposal => "MissingProposal",
             Self::IgnoredProposal => "IgnoredProposal",
             Self::InvalidProposal => "InvalidProposal",
             Self::FailedCertification => "FailedCertification",
-            Self::StallTimeout => "StallTimeout",
         }
     }
 }
