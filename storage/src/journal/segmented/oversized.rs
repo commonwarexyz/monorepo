@@ -40,25 +40,6 @@
 //! itself performs) make both journals' truncations durable before returning, so neither
 //! a dropped index entry nor the stale bytes it referenced can survive a crash once
 //! later appends may reuse the freed offsets.
-//!
-//! _Recovery verifies value checksums only while scanning backwards for the last valid
-//! entry. Earlier entries' checksums are verified lazily when values are read via
-//! `get_value()`. If the underlying storage is corrupted, `get_value()` will return a
-//! checksum error even though the index entry exists._
-//!
-//! # Limitations
-//!
-//! The backwards scan stops at the first valid entry and trusts everything below it. On
-//! storage that persists writes out of order, an entry whose value bytes were lost can
-//! survive behind a newer entry whose value is intact. Reads of such an entry fail their
-//! checksum: detected, never silent, and only possible for writes that were never
-//! acknowledged as durable. Conversely, a checksum failure at the scanned tail is
-//! treated as a crash artifact, so acknowledged bytes corrupted in place after the fact
-//! are rewound at the next init rather than preserved for external repair (consumers
-//! holding a durable size bound, like the freezer's checkpoint, detect this at init).
-//! Eliminating both would require recovery to consult a durably recorded publication
-//! bound instead of blob contents, which this journal does not maintain. Removals of
-//! sections past a rewind point carry the storage layer's removal durability.
 
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
