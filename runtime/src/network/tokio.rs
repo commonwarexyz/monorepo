@@ -423,11 +423,16 @@ mod tests {
     #[test_group("slow")]
     #[tokio::test]
     async fn test_stress_trait() {
+        // The stress suite multiplexes every stream inside one task, so a
+        // single recv can legitimately wait a long while between polls on a
+        // slow (e.g. coverage-instrumented) runner. Give it a budget sized
+        // for that: the suite verifies throughput and interleaving, not
+        // timeout enforcement.
         tests::stress_test_network_trait(|| {
             TokioNetwork::Network::new(
                 TokioNetwork::Config::default()
-                    .with_read_timeout(Duration::from_secs(15))
-                    .with_write_timeout(Duration::from_secs(15)),
+                    .with_read_timeout(Duration::from_secs(120))
+                    .with_write_timeout(Duration::from_secs(120)),
                 test_pool(),
             )
         })

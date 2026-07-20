@@ -751,9 +751,15 @@ mod tests {
     #[test_group("slow")]
     #[test]
     fn test_stress_trait() {
-        // Exercise the io_uring backend under the shared stress suite.
+        // Exercise the io_uring backend under the shared stress suite. The
+        // suite multiplexes every stream inside one task, so a single recv
+        // can legitimately wait a long while between polls on a slow (e.g.
+        // coverage-instrumented) runner: give it a budget sized for that.
         let (mut harness, network) = test_network_with_ring(
-            Config::default(),
+            Config {
+                read_write_timeout: Duration::from_secs(120),
+                ..Default::default()
+            },
             iouring::RingConfig {
                 size: 256,
                 ..Default::default()
