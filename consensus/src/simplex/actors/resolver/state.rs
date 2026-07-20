@@ -119,10 +119,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Handle a certification result from the voter.
-    ///
-    /// A failure does not re-request the views the failed notarization was
-    /// fetched for: the actor answers their responses with the certification
-    /// verdict, so the resolver engine retries those requests itself.
     pub fn handle_certified(&mut self, view: View, success: bool) -> Vec<Effect> {
         let mut effects = Vec::new();
         if success {
@@ -142,7 +138,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
             self.notarizations.remove(&view);
             self.failed_views.insert(view);
 
-            // Request nullification for this view (if above floor)
+            // Request nullification for this view (if above floor). The views the
+            // failed notarization was fetched for are not re-requested: the actor
+            // answers their responses with the certification verdict, so the
+            // resolver engine retries those requests itself.
             let floor = self.floor_view();
             if view > floor {
                 effects.push(Effect::Fetch {
