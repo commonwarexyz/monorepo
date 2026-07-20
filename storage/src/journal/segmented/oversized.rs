@@ -411,9 +411,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// after the given section. The value size is derived from the last entry.
     ///
     /// Both of `section`'s truncations are durable before this returns: a crash recovers
-    /// `section` to either its pre-rewind or its post-rewind state. Later sections are
-    /// removed (newest first) before the truncations, and those removals carry the
-    /// storage layer's removal durability.
+    /// `section` to either its pre-rewind or its post-rewind state. Each journal removes
+    /// its later sections (newest first) before truncating `section`, and those removals
+    /// carry the storage layer's removal durability.
     pub async fn rewind(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
         // Rewind index first (this also removes sections after `section`)
         self.index.rewind(section, index_size).await?;
@@ -960,6 +960,63 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_oversized_recovery_glob_truncation_durable_before_offset_reuse() {
+        // Crash 1: the index truncation is durable but the glob still holds entry 2's
+        // frame (the state a crash inside `rewind` leaves behind).
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), test_cfg(&context))
+                    .await
+                    .expect("Failed to init");
+            oversized
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("Failed to append");
+            oversized
+                .append(1, TestEntry::new(2, 0, 0), &[2; 16])
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            oversized
+                .index
+                .rewind(1, chunk)
+                .await
+                .expect("Failed to rewind index");
+            oversized.index.sync(1).await.expect("Failed to sync index");
+        });
+
+        // Boot 2: recovery truncates the glob to entry 1's end and must make that
+        // truncation durable. Entry 3 (same size) then reuses entry 2's freed range.
+        // Crash 2 lands after the index sync and before the values sync.
+        let (_, checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                let mut oversized: Oversized<_, TestEntry, TestValue> =
+                    Oversized::init(context.child("second"), test_cfg(&context))
+                        .await
+                        .expect("Failed to reinit");
+                oversized
+                    .append(1, TestEntry::new(3, 0, 0), &[3; 16])
+                    .await
+                    .expect("Failed to append");
+                oversized.index.sync(1).await.expect("Failed to sync index");
+            });
+
+        // Boot 3: without a durable glob truncation in recovery, entry 3 would be
+        // adopted referencing entry 2's still-durable frame.
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("third"), test_cfg(&context))
+                    .await
+                    .expect("Failed to reinit");
+            assert_adopted_entries_consistent(&oversized).await;
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_oversized_rewind_crash_between_truncations_recovers_post_rewind() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
@@ -1192,6 +1249,82 @@ mod tests {
                 chunk,
                 "entry with torn value bytes must be rewound"
             );
+            assert_adopted_entries_consistent(&oversized).await;
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_scans_past_torn_interior_index_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Use page size = entry size so each entry is on its own page.
+            let cfg = Config {
+                index_partition: "test-index".into(),
+                value_partition: "test-values".into(),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(TestEntry::SIZE as u16),
+                    NZUsize!(8),
+                ),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
+
+            // Create five durable entry/value pairs.
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+            for i in 1..=5u8 {
+                oversized
+                    .append(1, TestEntry::new(i as u64, 0, 0), &[i; 16])
+                    .await
+                    .expect("Failed to append");
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Corrupt the CRC record of the THIRD entry's index page: the backward open
+            // scan stops at the (valid) last page, so the torn page survives in bounds.
+            let physical_page = TestEntry::SIZE as u64 + 12;
+            let (index_blob, size) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open index blob");
+            assert_eq!(size, 5 * physical_page);
+            index_blob
+                .write_at_sync(2 * physical_page + TestEntry::SIZE as u64, vec![0xFF; 12])
+                .await
+                .expect("Failed to corrupt index page");
+            drop(index_blob);
+
+            // Corrupt the fourth and fifth values so the backward scan must walk past
+            // their entries and read the torn page.
+            let (values_blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open values blob");
+            values_blob
+                .write_at_sync(60, vec![0xFF; 20])
+                .await
+                .expect("Failed to corrupt value");
+            values_blob
+                .write_at_sync(80, vec![0xFF; 20])
+                .await
+                .expect("Failed to corrupt value");
+            drop(values_blob);
+
+            // Recovery scans past the invalid tail values and the torn page (surfaced
+            // as a checksum failure, not a generic read error) to the last valid pair.
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("second"), cfg)
+                    .await
+                    .expect("Failed to reinit");
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            assert_eq!(oversized.size(1).expect("size"), 2 * chunk);
             assert_adopted_entries_consistent(&oversized).await;
             oversized.destroy().await.expect("Failed to destroy");
         });
