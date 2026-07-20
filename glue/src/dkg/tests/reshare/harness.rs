@@ -255,7 +255,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         let parent = ancestry.peek()?.clone();
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
-        let payload = input.parent.payload;
+        let payload = input.upstream.payload;
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
         let block = Block {

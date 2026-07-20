@@ -118,15 +118,15 @@ pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
 /// Aggregated per-proposal input a [`Stateful`] application hands its inner
 /// application.
 ///
-/// `parent` is the input [`Stateful`] received as a
+/// `upstream` is the input [`Stateful`] received as a
 /// [`commonware_consensus::Application`] (from whatever wraps it);
 /// `provider` is the stateful-owned handle from [`Config::provider`]. Being
-/// generic over the parent input, it lets an outer application (for example a
+/// generic over the upstream input, it lets an outer application (for example a
 /// reshare wrapper) stack its own input on top of the stateful-owned provider
 /// without either layer knowing the other.
-pub struct Input<Parent, Provider> {
+pub struct Input<Upstream, Provider> {
     /// Input forwarded from the application wrapping [`Stateful`].
-    pub parent: Parent,
+    pub upstream: Upstream,
 
     /// Provider owned by the stateful actor, from its [`Config::provider`].
     pub provider: Provider,

@@ -107,7 +107,7 @@ where
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.propose");
                     let input = Input {
-                        parent,
+                        upstream: parent,
                         provider: self.provider.clone(),
                     };
                     self.processor
