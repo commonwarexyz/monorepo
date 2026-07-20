@@ -139,6 +139,23 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         index
     }
 
+    /// Visit every value held across all partitions (inline and spilled), in unspecified
+    /// order. Shared by the full index and a build worker's range view.
+    fn for_each_value_impl(&self, mut f: impl FnMut(&V)) {
+        for (p, partition) in self.partitions.iter().enumerate() {
+            for v in partition.values_iter() {
+                f(v);
+            }
+            if let Some(inner) = self.spilled_partition(p) {
+                for vals in inner.values() {
+                    for v in vals {
+                        f(v);
+                    }
+                }
+            }
+        }
+    }
+
     /// Spill partition `i` to the side-table if its sorted array has reached the threshold.
     fn maybe_spill(&mut self, i: usize) {
         if self.partitions[i].len() < self.threshold {
@@ -383,22 +400,6 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
             self.spilled.insert(lo + local, inner);
         }
     }
-
-    /// Visits inline and spilled values.
-    fn for_each_value(&self, mut f: impl FnMut(&V)) {
-        for (p, partition) in self.partitions.iter().enumerate() {
-            for v in partition.values_iter() {
-                f(v);
-            }
-            if let Some(inner) = self.spilled_partition(p) {
-                for vals in inner.values() {
-                    for v in vals {
-                        f(v);
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
@@ -432,6 +433,10 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         self.index
             .get_mut_or_insert_slot(i - self.offset, sub, value)
+    }
+
+    fn for_each_value(&self, f: impl FnMut(&V)) {
+        self.index.for_each_value_impl(f);
     }
 }
 

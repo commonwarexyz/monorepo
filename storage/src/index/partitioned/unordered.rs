@@ -78,13 +78,6 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
             self.partitions[lo + local].absorb(slot);
         }
     }
-
-    /// Visits inline and overflow values.
-    fn for_each_value(&self, mut f: impl FnMut(&V)) {
-        for partition in &self.partitions {
-            partition.for_each_value(&mut f);
-        }
-    }
 }
 
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
@@ -117,6 +110,12 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
     fn get_mut_or_insert(&mut self, key: &[u8], value: V) -> Option<Self::Cursor<'_>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         self.partitions[i - self.offset].get_mut_or_insert(sub, value)
+    }
+
+    fn for_each_value(&self, mut f: impl FnMut(&V)) {
+        for partition in &self.partitions {
+            partition.for_each_value(&mut f);
+        }
     }
 }
 

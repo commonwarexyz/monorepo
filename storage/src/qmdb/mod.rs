@@ -69,7 +69,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::Spawner;
 use commonware_utils::{bitmap::BitMap, cache::Clock, channel::mpsc};
-use core::num::NonZeroUsize;
+use core::{num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, future::join_all, pin_mut};
 use std::sync::Arc;
 use thiserror::Error;
@@ -462,13 +462,16 @@ type RoutedBatch<K> = Vec<(K, u64, bool)>;
 
 /// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
 /// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
-/// `reader` and `(location -> key)` cache. Returns the populated worker index.
+/// `reader` and `(location -> key)` cache. Returns the populated worker index along with the
+/// range's share of the activity bitmap (over `activity`, the replayed region) and its active-key
+/// count.
 async fn build_snapshot_worker<F, C, R>(
     log: Arc<C>,
     mut rx: mpsc::Receiver<RoutedBatch<<C::Item as Operation<F>>::Key>>,
     mut index: R,
+    activity: Range<u64>,
     cache_size: Option<NonZeroUsize>,
-) -> Result<R, Error<F>>
+) -> Result<(R, BitMap, usize), Error<F>>
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
@@ -496,7 +499,17 @@ where
             }
         }
     }
-    Ok(index)
+
+    // Reconstruct this range's share of the activity bitmap (in parallel with the other workers):
+    // a location is active iff it holds the current operation of an active key. Each active key
+    // holds exactly one location, so the same walk counts the range's active keys.
+    let mut active = BitMap::zeroes(activity.end - activity.start);
+    let mut active_keys = 0;
+    index.for_each_value(|loc| {
+        active.set(**loc - activity.start, true);
+        active_keys += 1;
+    });
+    Ok((index, active, active_keys))
 }
 
 /// Build a snapshot serially on the calling task via [build_snapshot_from_log], collecting each
@@ -576,6 +589,7 @@ where
     // non-empty ranges so routing (`p / range_size`) stays in `[0, workers)`.
     let workers = count.div_ceil(range_size);
     let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
+    let end = log.bounds().end;
 
     // Spawn one worker per contiguous partition range, each owning its own reader and cache.
     let mut senders = Vec::with_capacity(workers);
@@ -595,7 +609,13 @@ where
             .with_attribute("worker", w)
             .dedicated()
             .spawn(move |_| {
-                build_snapshot_worker::<F, C, I::Range>(log, rx, worker_index, per_worker_cache)
+                build_snapshot_worker::<F, C, I::Range>(
+                    log,
+                    rx,
+                    worker_index,
+                    floor..end,
+                    per_worker_cache,
+                )
             });
         handles.push(handle);
     }
@@ -605,7 +625,6 @@ where
     // returned immediately: returning while the worker handles are merely dropped would
     // leave the workers running detached, retaining the log and their range allocations
     // after init has already failed. The stream is also released before the join.
-    let end = log.bounds().end;
     let routing_result: Result<(), Error<F>> = async {
         let stream = log.replay(floor, init_buffer).await?;
         pin_mut!(stream);
@@ -649,23 +668,19 @@ where
     let joined = join_all(handles).await;
     routing_result?;
 
-    // Install each worker's partition range into the snapshot. Each worker carries its own
-    // partition offset, so installation needs no range arguments.
-    for handle in joined {
-        let worker_index = handle??;
-        snapshot.install_range(worker_index);
-    }
-
-    // Reconstruct the activity bitmap in location order: a location is active iff it is the
-    // current location of an active key, or it is the last commit. This matches the serial
-    // build's per-op push-then-clear, which leaves exactly those bits set. Each active key
-    // holds exactly one location in the snapshot, so the same walk counts the active keys.
+    // Install each worker's partition range into the snapshot (each worker carries its own
+    // partition offset, so installation needs no range arguments) and fold the worker's share
+    // of the activity bitmap and active-key count in. The union of the workers' shares matches
+    // the serial build's per-op push-then-clear, which leaves exactly the bits of each active
+    // key's current location set.
     let mut total_items = 0;
     let mut active: BitMap = BitMap::zeroes(end - floor);
-    snapshot.for_each_value(|loc| {
-        active.set(**loc - floor, true);
-        total_items += 1;
-    });
+    for handle in joined {
+        let (worker_index, worker_active, worker_keys) = handle??;
+        snapshot.install_range(worker_index);
+        active.or(&worker_active);
+        total_items += worker_keys;
+    }
 
     // The last operation is the final commit (a log always ends with one), which stays active.
     // An empty log has none.
