@@ -1200,7 +1200,7 @@ mod tests {
             oversized.index.sync(1).await.expect("Failed to sync index");
             oversized
                 .values
-                .write_raw(1, offset, vec![0xFF; size as usize])
+                .inject(1, offset, vec![0xFF; size as usize])
                 .await
                 .expect("Failed to overwrite value bytes");
             oversized

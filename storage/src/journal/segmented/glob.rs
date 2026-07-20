@@ -190,9 +190,9 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(Crc32::checksum(&buf.as_ref()[..data_len]) == stored_checksum)
     }
 
-    /// Overwrite raw bytes at `offset` in `section`, bypassing entry framing.
+    /// Inject arbitrary bytes at `offset` in `section`, bypassing entry framing.
     #[cfg(test)]
-    pub(super) async fn write_raw(
+    pub(super) async fn inject(
         &mut self,
         section: u64,
         offset: u64,
