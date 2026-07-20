@@ -103,6 +103,21 @@
 //! touch and the first staged write is never misread as a staged
 //! shrink).
 //!
+//! A batch can also stage a RESIZE ([`Action::BatchResizeDown`] and
+//! [`Action::BatchResizeUp`], Batch::resize). A staged shrink drops
+//! coverage from the overlay's merged view: batch-private blocks are
+//! discarded outright (nothing will ever reference them), published
+//! blocks leave the view and are replaced at apply through the same
+//! capture-gated free discipline as staged COW. A staged grow zeroes
+//! backed boundary cells through the staged write path and turns the
+//! rest into holes, exactly as the direct resize does. The overlay
+//! tracks its DEEPEST staged size: apply truncates the blob's dirty
+//! marks at that boundary (a shrink drops coverage a later staged
+//! regrow does not restore), and a shrink bottoming out at the pruned
+//! floor clears them entirely — a boundary below the floor would mark
+//! dead state dirty. A resize-only overlay is a full batch part: apply
+//! records its never-split obligation like any staged write's.
+//!
 //! A batch can also stage a blob CREATION ([`Action::BatchCreate`]): the
 //! blob does not exist until apply publishes it. A batch that stages
 //! creations ALONGSIDE anything else publishes and begins its commit in
@@ -196,17 +211,23 @@
 //! it touched, never disturbing others, which is SQLite's "powersafe
 //! overwrite" assumption at block granularity and is implicit in the crash
 //! fan only resolving WRITTEN blocks — are assumptions about the OS and
-//! device, not checked facts), wall-clock effects,
-//! reader/writer async interleavings (see below), and staged batch resize
-//! (`Batch::resize` has no model action — its shrink-into-hole regressions
-//! are pinned by unit tests in `tests`). Batch operations over blobs with a
-//! NONZERO pruned floor are likewise unenumerated: `BatchOverwrite` is
-//! gated off at `floor > 0` and staged resize has no action, so only
-//! `BatchAppend` ever runs against a pruned blob. The `publish_overlay`
-//! shrink-to-floor defect lived exactly in that gap and is pinned by
-//! `tests::test_volume_batch_shrink_to_pruned_floor`. Enumerating batch
-//! ops over pruned blobs is a future model extension that needs a
-//! state-space budget. The checksum-extent lifecycle is
+//! device, not checked facts), wall-clock effects, and
+//! reader/writer async interleavings (see below). Staged batch resize and
+//! batch content ops over PRUNED blobs are enumerated
+//! ([`Action::BatchResizeDown`], [`Action::BatchResizeUp`], and the
+//! floor-relative [`Action::BatchOverwrite`], driven by the BATCH_RESIZE
+//! and BATCH_PRUNE workloads) — but only at the model's granularity:
+//! one-cell shrinks and two-cell grows per action, block-aligned floors,
+//! and staged writes starting at or above the floor (below-floor writes
+//! and resize targets are contract violations check_floor rejects, never
+//! enumerated). The implementation's arbitrary-length resizes, sub-chunk
+//! boundary trims, and frontier read-back machinery sit below cell
+//! granularity and stay with the directed unit tests in `tests` (e.g.
+//! `tests::test_volume_batch_shrink_to_pruned_floor` for the byte-exact
+//! shrink-to-floor shape) and the lockstep conformance. Resize of a
+//! batch-created slot is unreachable here (staged creations are not live
+//! until apply), matching the content-op carve-out in `Action::BatchApply`'s
+//! commit-free reasoning. The checksum-extent lifecycle is
 //! also uncovered: the model inlines expected chunk content into the
 //! superblock-bound table, so the implementation's separately stored
 //! commit-written checksum extents — the whole-extent guard CRCs,
@@ -443,12 +464,23 @@ struct StagedRun {
 pub(super) struct StagedSlot {
     /// Staged logical size (starts at the published size).
     pub(super) size: u8,
+    /// The smallest staged size the overlay passed through: apply's
+    /// dirty-mark truncation binds to this boundary (a staged shrink
+    /// drops coverage a later staged regrow does not restore).
+    min_size: u8,
     /// Staged run overlay: replaces the published run at the same block.
     runs: BTreeMap<u8, StagedRun>,
+    /// Published blocks a staged COW or shrink dropped from the merged
+    /// view: their runs leave the blob at apply.
+    removed: BTreeSet<u8>,
     /// Blocks allocated by the batch (freed if it is dropped unapplied).
     fresh: Vec<usize>,
-    /// Published blocks replaced by staged COW (pending-freed at apply).
+    /// Published blocks replaced by staged COW or shrink (pending-freed
+    /// at apply).
     replaced: Vec<usize>,
+    /// Batch-allocated blocks a staged shrink dropped: nothing references
+    /// them, freed at apply or drop.
+    discarded: Vec<usize>,
     /// The slot is a staged CREATION: the blob does not exist until apply
     /// publishes it (and, per the spec, immediately begins its commit).
     pub(super) created: bool,
@@ -457,6 +489,33 @@ pub(super) struct StagedSlot {
     /// staged — the slot stays writable outside the batch, and a later
     /// staged write REBASES to the then-current published size.
     pub(super) member: bool,
+}
+
+impl StagedSlot {
+    /// A fresh content overlay over a slot whose published size is `size`.
+    fn over(size: u8) -> Self {
+        Self {
+            size,
+            min_size: size,
+            runs: BTreeMap::new(),
+            removed: BTreeSet::new(),
+            fresh: Vec::new(),
+            replaced: Vec::new(),
+            discarded: Vec::new(),
+            created: false,
+            member: false,
+        }
+    }
+
+    /// Turn a membership-only overlay into a content overlay based at the
+    /// slot's CURRENT published size: direct writes may have legally grown
+    /// the slot since the touch, and reading the stale touch size would
+    /// misread that growth as a staged shrink.
+    fn rebase(&mut self, published: u8) {
+        self.member = false;
+        self.size = published;
+        self.min_size = published;
+    }
 }
 
 /// A staged (unapplied) batch: per-slot overlays plus staged removals.
@@ -661,8 +720,20 @@ pub(super) enum Action {
     Crash,
     /// Stage one append into the current batch (starting one if needed).
     BatchAppend(u8),
-    /// Stage an overwrite of cell 0 into the current batch.
+    /// Stage an overwrite of the first cell at or above the pruned floor
+    /// into the current batch (cell 0 on an unpruned blob). A staged
+    /// write starting below the floor is rejected by the write path
+    /// (check_floor), so it is never enumerated.
     BatchOverwrite(u8),
+    /// Stage a one-cell shrink into the current batch (Batch::resize
+    /// below the staged size). A target below the pruned floor is
+    /// rejected by the resize path (check_floor), so the action disables
+    /// at the floor.
+    BatchResizeDown(u8),
+    /// Stage a two-cell grow into the current batch (Batch::resize above
+    /// the staged size): cells landing in merged-backed blocks are
+    /// zeroed through the staged write path, the rest become holes.
+    BatchResizeUp(u8),
     /// Stage the creation of a (removed, or removal-staged) blob into the
     /// current batch.
     BatchCreate(u8),
@@ -891,12 +962,15 @@ impl Volume {
                         );
                     } else {
                         // Staged COW of a base-shared overlay block: the
-                        // fresh block carries the overlay content and the
-                        // published block is replaced at apply.
+                        // fresh block carries the overlay content, the
+                        // published block is replaced at apply, and the
+                        // base run leaves the merged view (so a staged
+                        // shrink re-accounts nothing).
                         let phys = self.allocate();
                         let cells = merge(sr.run.cells);
                         disk.write(phys, Block::Data(cells.0, cells.1));
                         staged.replaced.push(sr.run.phys);
+                        staged.removed.insert(lblock);
                         staged.fresh.push(phys);
                         staged.runs.insert(
                             lblock,
@@ -911,7 +985,7 @@ impl Volume {
                         );
                     }
                 }
-                None => match base {
+                None => match base.filter(|_| !staged.removed.contains(&lblock)) {
                     Some(run) if cell >= published && idx >= run.frozen => {
                         // In-place into the published run's block, beyond
                         // everything a snapshot can capture.
@@ -926,11 +1000,13 @@ impl Volume {
                         );
                     }
                     Some(run) => {
-                        // Staged COW of a published block.
+                        // Staged COW of a published block: the base run
+                        // leaves the merged view.
                         let phys = self.allocate();
                         let cells = merge(run.cells);
                         disk.write(phys, Block::Data(cells.0, cells.1));
                         staged.replaced.push(run.phys);
+                        staged.removed.insert(lblock);
                         staged.fresh.push(phys);
                         staged.runs.insert(
                             lblock,
@@ -2086,20 +2162,12 @@ pub(super) fn step(
             }
             let published = s.volume.blobs[slot as usize].size;
             let batch = s.volume.batch.get_or_insert_with(Batch::default);
-            let staged = batch.slots.entry(slot).or_insert_with(|| StagedSlot {
-                size: published,
-                runs: BTreeMap::new(),
-                fresh: Vec::new(),
-                replaced: Vec::new(),
-                created: false,
-                member: false,
-            });
+            let staged = batch
+                .slots
+                .entry(slot)
+                .or_insert_with(|| StagedSlot::over(published));
             if staged.member {
-                // Membership only until now: staging begins against the
-                // slot's CURRENT published size (direct writes may have
-                // legally grown it since the touch — the overlay rebases).
-                staged.member = false;
-                staged.size = published;
+                staged.rebase(published);
             }
             if staged.size >= MAX_CELLS {
                 return Ok(None);
@@ -2111,37 +2179,122 @@ pub(super) fn step(
             Ok(Some(vec![s]))
         }
         Action::BatchOverwrite(slot) => {
-            // Cell 0 below a nonzero pruned floor: staging it would
-            // publish a run below the floor (the caller contract the
-            // direct write path rejects), so it is never enumerated.
-            if mutations_blocked
-                || !s.volume.blobs[slot as usize].live
-                || s.volume.blobs[slot as usize].floor > 0
-            {
+            // The first writable cell is the floor (cell 0 on an unpruned
+            // blob): a staged write starting below the floor is a caller
+            // contract violation (check_floor), never enumerated.
+            let b = &s.volume.blobs[slot as usize];
+            if mutations_blocked || !b.live {
                 return Ok(None);
             }
-            let published = s.volume.blobs[slot as usize].size;
+            let published = b.size;
+            let cell = b.floor;
             let batch = s.volume.batch.get_or_insert_with(Batch::default);
-            let staged = batch.slots.entry(slot).or_insert_with(|| StagedSlot {
-                size: published,
-                runs: BTreeMap::new(),
-                fresh: Vec::new(),
-                replaced: Vec::new(),
-                created: false,
-                member: false,
-            });
+            let staged = batch
+                .slots
+                .entry(slot)
+                .or_insert_with(|| StagedSlot::over(published));
             if staged.member {
-                // Membership only until now: staging begins against the
-                // slot's CURRENT published size (direct writes may have
-                // legally grown it since the touch — the overlay rebases).
-                staged.member = false;
-                staged.size = published;
+                staged.rebase(published);
             }
-            if staged.size == 0 {
+            if staged.size <= cell {
                 return Ok(None);
             }
-            let val = s.volume.next_val(slot, 0);
-            s.volume.stage_cell(&mut s.disk, slot, 0, val);
+            let val = s.volume.next_val(slot, cell);
+            s.volume.stage_cell(&mut s.disk, slot, cell, val);
+            Ok(Some(vec![s]))
+        }
+        Action::BatchResizeDown(slot) => {
+            // Stage a one-cell shrink (Batch::resize below the staged
+            // size). Targets below the pruned floor are rejected by
+            // check_floor, so the action disables at the floor.
+            let b = &s.volume.blobs[slot as usize];
+            if mutations_blocked || !b.live {
+                return Ok(None);
+            }
+            let published = b.size;
+            let floor = b.floor;
+            let base: Vec<(u8, usize)> = b.runs.iter().map(|(&l, run)| (l, run.phys)).collect();
+            let batch = s.volume.batch.get_or_insert_with(Batch::default);
+            let staged = batch
+                .slots
+                .entry(slot)
+                .or_insert_with(|| StagedSlot::over(published));
+            if staged.member {
+                staged.rebase(published);
+            }
+            if staged.size <= floor {
+                return Ok(None);
+            }
+            let new_size = staged.size - 1;
+            let backed = new_size.div_ceil(CELLS_PER_BLOCK);
+            // Staged runs beyond the new backed coverage drop from the
+            // overlay: batch-private blocks are discarded (nothing will
+            // ever reference them), base-backed blocks leave the merged
+            // view and their published blocks are replaced at apply.
+            let dropped: Vec<u8> = staged
+                .runs
+                .keys()
+                .copied()
+                .filter(|&l| l >= backed)
+                .collect();
+            for l in dropped {
+                let sr = staged.runs.remove(&l).unwrap();
+                if sr.private {
+                    staged.fresh.retain(|&phys| phys != sr.run.phys);
+                    staged.discarded.push(sr.run.phys);
+                } else {
+                    staged.removed.insert(l);
+                    staged.replaced.push(sr.run.phys);
+                }
+            }
+            // Base runs beyond the new backed coverage (not already
+            // superseded) drop with the overlay.
+            for (l, phys) in base {
+                if l >= backed && !staged.removed.contains(&l) {
+                    staged.removed.insert(l);
+                    staged.replaced.push(phys);
+                }
+            }
+            staged.size = new_size;
+            staged.min_size = staged.min_size.min(new_size);
+            Ok(Some(vec![s]))
+        }
+        Action::BatchResizeUp(slot) => {
+            // Stage a two-cell grow (Batch::resize above the staged
+            // size): cells landing in merged-backed blocks are zeroed
+            // through the staged write path (their disk residue is
+            // arbitrary, exactly as for the direct resize), the rest
+            // become holes.
+            let b = &s.volume.blobs[slot as usize];
+            if mutations_blocked || !b.live {
+                return Ok(None);
+            }
+            let published = b.size;
+            let base_blocks: Vec<u8> = b.runs.keys().copied().collect();
+            let batch = s.volume.batch.get_or_insert_with(Batch::default);
+            let staged = batch
+                .slots
+                .entry(slot)
+                .or_insert_with(|| StagedSlot::over(published));
+            if staged.member {
+                staged.rebase(published);
+            }
+            if staged.size + 2 > MAX_CELLS {
+                return Ok(None);
+            }
+            let old = staged.size;
+            let new_size = old + 2;
+            let zeroed: Vec<u8> = (old..new_size)
+                .filter(|&cell| {
+                    let l = cell / CELLS_PER_BLOCK;
+                    staged.runs.contains_key(&l)
+                        || (base_blocks.contains(&l) && !staged.removed.contains(&l))
+                })
+                .collect();
+            staged.size = new_size;
+            for cell in zeroed {
+                s.volume.stage_cell(&mut s.disk, slot, cell, Cell::Zero);
+            }
             Ok(Some(vec![s]))
         }
         Action::BatchCreate(slot) => {
@@ -2167,12 +2320,8 @@ pub(super) fn step(
             batch.slots.insert(
                 slot,
                 StagedSlot {
-                    size: 0,
-                    runs: BTreeMap::new(),
-                    fresh: Vec::new(),
-                    replaced: Vec::new(),
                     created: true,
-                    member: false,
+                    ..StagedSlot::over(0)
                 },
             );
             Ok(Some(vec![s]))
@@ -2197,12 +2346,8 @@ pub(super) fn step(
             batch.slots.insert(
                 slot,
                 StagedSlot {
-                    size: published,
-                    runs: BTreeMap::new(),
-                    fresh: Vec::new(),
-                    replaced: Vec::new(),
-                    created: false,
                     member: true,
+                    ..StagedSlot::over(published)
                 },
             );
             Ok(Some(vec![s]))
@@ -2336,6 +2481,13 @@ pub(super) fn step(
                     members.push(slot);
                     continue;
                 }
+                // Batch-allocated blocks a staged shrink discarded are
+                // referenced by nothing: returned through the ordinary
+                // deferred-free path whatever the slot's fate (the
+                // implementation defers them before its removed check).
+                for block in staged.discarded {
+                    s.volume.release(block, rules);
+                }
                 let b = &mut s.volume.blobs[slot as usize];
                 if !b.live {
                     // Removed mid-batch (this batch's own staged removal,
@@ -2364,6 +2516,32 @@ pub(super) fn step(
                     }
                     members.push(slot);
                     continue;
+                }
+                // Staged shrink: mirror publish_overlay's truncation of
+                // the dirty marks at the DEEPEST staged size (a shrink
+                // drops coverage a later staged regrow does not restore;
+                // the regrown blocks re-mark from the overlay below). A
+                // shrink bottoming out at the (block-aligned) floor
+                // clears them entirely: a boundary below the floor would
+                // mark dead state dirty.
+                if staged.min_size < b.size {
+                    if staged.min_size == 0
+                        || (staged.min_size - 1) / CELLS_PER_BLOCK < b.floor / CELLS_PER_BLOCK
+                    {
+                        b.dirty_blocks.clear();
+                    } else {
+                        let boundary = (staged.min_size - 1) / CELLS_PER_BLOCK;
+                        b.dirty_blocks.retain(|&l| l <= boundary);
+                        if !b.dirty_blocks.contains(&boundary) {
+                            b.dirty_blocks.push(boundary);
+                        }
+                    }
+                }
+                // Base runs a staged COW or shrink dropped from the
+                // merged view leave the blob (COW'd blocks reinstall
+                // from the overlay below).
+                for l in &staged.removed {
+                    b.runs.remove(l);
                 }
                 let touched: Vec<u8> = staged.runs.keys().copied().collect();
                 for (l, sr) in staged.runs {
@@ -2406,9 +2584,9 @@ pub(super) fn step(
             };
             // Staged blocks were never referenced: return them through the
             // ordinary deferred-free path (staged removals simply never
-            // happened).
+            // happened). Shrink-discarded blocks were batch-allocated too.
             for staged in batch.slots.into_values() {
-                for block in staged.fresh {
+                for block in staged.fresh.into_iter().chain(staged.discarded) {
                     s.volume.release(block, rules);
                 }
             }
@@ -2684,6 +2862,42 @@ mod tests {
         Action::Crash,
     ];
 
+    /// Batch-over-pruned-blob workload: staged appends, overwrites of the
+    /// first above-floor cell, and staged shrinks bottoming out at the
+    /// floor run against a pruned blob, then publish, commit, and crash.
+    /// Selective-capture interplay is PRUNE's and BATCH's territory (a
+    /// group-commit mask keeps this menu's fan affordable).
+    const BATCH_PRUNE: &[Action] = &[
+        Action::Append(0),
+        Action::Prune(0),
+        Action::BatchAppend(0),
+        Action::BatchOverwrite(0),
+        Action::BatchResizeDown(0),
+        Action::BatchApply,
+        Action::Snapshot(ALL),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
+    /// Staged-resize workload: a batch shrinks a blob below its published
+    /// size (dropping committed coverage into replaced extents), regrows
+    /// through the same overlay (staged appends and hole growth over the
+    /// deepest staged size), publishes or drops, and a selective commit
+    /// of the sibling must capture the resize-only touch with its group.
+    const BATCH_RESIZE: &[Action] = &[
+        Action::Append(0),
+        Action::BatchAppend(1),
+        Action::BatchResizeDown(0),
+        Action::BatchResizeUp(0),
+        Action::BatchApply,
+        Action::BatchDrop,
+        Action::Snapshot(0b10),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
     /// Membership workload (Batch::sync): a directly written slot joins
     /// the group without staged content, stays writable (its growth
     /// rebases a later staged write), and its dirt commits with the group
@@ -2796,6 +3010,94 @@ mod tests {
     #[test]
     fn spec_holds_batch_member() {
         assert_holds(BATCH_MEMBER, 8, 2, 1_000);
+    }
+
+    #[test]
+    fn spec_holds_batch_prune() {
+        assert_holds(BATCH_PRUNE, 8, 2, 10_000);
+    }
+
+    #[test]
+    fn spec_holds_batch_resize() {
+        assert_holds(BATCH_RESIZE, 8, 2, 10_000);
+    }
+
+    /// The exact shrink-bottoms-out-at-the-floor shape (the
+    /// `publish_overlay` clear-arm) must be a legal model history end to
+    /// end — committed content above a pruned floor, a staged shrink to
+    /// exactly the floor, publish, then the group's commit crashed both
+    /// mid-flight and after confirmation — deeper than the BATCH_PRUNE
+    /// budget reaches. The conformance directed family drives the
+    /// implementation through this same shape.
+    #[test]
+    fn staged_shrink_to_floor_trace_allowed() {
+        let prefix: &[Action] = &[
+            Action::Append(0),
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Prune(0),
+            Action::BatchResizeDown(0),
+            Action::BatchApply,
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+        ];
+        for tail in [&[Action::Crash][..], &[Action::FsyncOk, Action::Crash][..]] {
+            let trace: Vec<Action> = prefix.iter().chain(tail).copied().collect();
+            assert!(
+                run_trace(&trace, &SPEC).is_ok(),
+                "spec must allow a staged shrink bottoming out at the floor"
+            );
+        }
+    }
+
+    /// A staged shrink's replaced extents ride the same capture-gated
+    /// free discipline as COW drops: releasing them at the NEXT commit
+    /// (instead of a commit that CAPTURES the blob) recycles a block the
+    /// confirmed table still references through the blob's
+    /// served-verbatim entry. Mirrors
+    /// `mutation_capture_gated_frees_detected` with the drop coming from
+    /// a staged shrink instead of a direct COW overwrite.
+    #[test]
+    fn mutation_resize_capture_gated_frees_detected() {
+        let trace: &[Action] = &[
+            // Commit a full block for blob 0 (a partial shadowed tail
+            // would be healed by the shadow splice).
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            // Stage a shrink past the committed block and publish: the
+            // block joins blob 0's capture-gated frees.
+            Action::BatchResizeDown(0),
+            Action::BatchResizeDown(0),
+            Action::BatchApply,
+            // Confirm a commit that does NOT capture blob 0 (the group
+            // holds only blob 0, so a blob-1 commit leaves it pending):
+            // its old entry, still referencing the block, is served
+            // verbatim while the mutation releases the free.
+            Action::Append(1),
+            Action::Snapshot(0b10),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            // The next commit allocates the (wrongly freed) block for its
+            // table and a crash exposes the clobbered fallback.
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            capture_gated_frees: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed the prematurely released staged-shrink free"
+        );
     }
 
     /// A staged removal must publish and begin its commit in one step.

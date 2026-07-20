@@ -556,7 +556,13 @@ enum Op {
     /// resolves them all).
     Sync(u8),
     BatchAppend(u8),
+    /// Stage an overwrite of the first cell at or above the pruned floor
+    /// (Batch::write_at at the floor offset).
     BatchOverwrite(u8),
+    /// Stage a one-cell shrink (Batch::resize below the staged size).
+    BatchResizeDown(u8),
+    /// Stage a two-cell grow (Batch::resize above the staged size).
+    BatchResizeUp(u8),
     BatchCreate(u8),
     /// Join the batch's group without staging content (Batch::sync).
     BatchSync(u8),
@@ -735,6 +741,8 @@ impl Rig {
             Op::Sync(mask) => vec![Action::Snapshot(mask), Action::WriteMeta, Action::FsyncOk],
             Op::BatchAppend(s) => vec![Action::BatchAppend(s)],
             Op::BatchOverwrite(s) => vec![Action::BatchOverwrite(s)],
+            Op::BatchResizeDown(s) => vec![Action::BatchResizeDown(s)],
+            Op::BatchResizeUp(s) => vec![Action::BatchResizeUp(s)],
             Op::BatchCreate(s) => vec![Action::BatchCreate(s)],
             Op::BatchSync(s) => vec![Action::BatchSync(s)],
             Op::BatchRemove(s) => vec![Action::BatchRemove(s)],
@@ -804,7 +812,7 @@ impl Rig {
             Op::Append(s) => Some((s, self.size_cells(s))),
             Op::Overwrite(s) => Some((s, 0)),
             Op::BatchAppend(s) => Some((s, self.staged_cells(s))),
-            Op::BatchOverwrite(s) => Some((s, 0)),
+            Op::BatchOverwrite(s) => Some((s, self.floor_cells(s))),
             _ => None,
         }
     }
@@ -973,7 +981,8 @@ impl Rig {
             Op::BatchAppend(s) | Op::BatchOverwrite(s) => {
                 let offset = match op {
                     Op::BatchAppend(_) => self.staged_cells(s) as u64 * CELL,
-                    _ => 0,
+                    // The first writable cell: the pruned floor.
+                    _ => self.floor_cells(s) as u64 * CELL,
                 };
                 let data = pattern(ctr.expect("batch write carries a value"));
                 let blob = self.blobs[&s].clone();
@@ -982,6 +991,18 @@ impl Rig {
                     .write_at(&blob, offset, IoBuf::copy_from_slice(&data))
                     .await
                     .unwrap_or_else(|e| panic!("batch write: {e}"));
+            }
+            Op::BatchResizeDown(s) | Op::BatchResizeUp(s) => {
+                let len = match op {
+                    Op::BatchResizeDown(_) => (self.staged_cells(s) as u64 - 1) * CELL,
+                    _ => (self.staged_cells(s) as u64 + 2) * CELL,
+                };
+                let blob = self.blobs[&s].clone();
+                let rig = self.batch_mut().await;
+                rig.batch
+                    .resize(&blob, len)
+                    .await
+                    .unwrap_or_else(|e| panic!("batch resize: {e}"));
             }
             Op::BatchCreate(s) => {
                 let rig = self.batch_mut().await;
@@ -1247,8 +1268,6 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
 ///   below-floor read rejection (below-floor writes and resizes are
 ///   never enumerated, and their rejection is pinned by
 ///   `tests::test_volume_prune_end_to_end`).
-/// - `Batch::resize`: no model action by design (the model docs'
-///   uncovered list), pinned by directed unit tests in `tests`.
 /// - `Batch::apply_start_sync`: `apply`'s publish plus `start_sync`'s
 ///   registered commit, with the cancellation injector driving the
 ///   composite.
@@ -1268,6 +1287,7 @@ fn conformance_surface_parity() {
             Op::Remove(_) => "Storage::remove",
             Op::Recreate(_) => "Storage::open (creation commit)",
             Op::BatchAppend(_) | Op::BatchOverwrite(_) => "Batch::write_at",
+            Op::BatchResizeDown(_) | Op::BatchResizeUp(_) => "Batch::resize",
             Op::BatchSync(_) => "Batch::sync",
             Op::BatchRemove(_) => "Batch::remove",
             Op::BatchCreate(_) => "Batch::create",
@@ -1642,6 +1662,126 @@ async fn conformance_batch_create() {
     assert!(stats.cases > 1_000, "suspiciously few cases: {stats:?}");
 }
 
+/// Batch-over-pruned-blob workload: staged appends, floor-relative
+/// overwrites, and staged shrinks bottoming out at the pruned floor,
+/// interleaved with prunes, publishes, commits, and staging inside a
+/// parked commit's window. The counterpart of the model's BATCH_PRUNE
+/// workload (batch content ops over a nonzero floor were the gap the
+/// publish_overlay shrink-to-floor defect lived in).
+#[tokio::test]
+async fn conformance_batch_prune() {
+    let stats = explore(&Workload {
+        menu: &[
+            Op::Append(0),
+            Op::Prune(0),
+            Op::BatchAppend(0),
+            Op::BatchOverwrite(0),
+            Op::BatchResizeDown(0),
+            Op::BatchApply,
+            Op::Sync(0b001),
+        ],
+        // Depth 6 reaches a staged cow-plus-shrink double free in the
+        // current accounting (its fix and directed pin land separately):
+        // raise the depth alongside them.
+        depth: 5,
+        window_masks: &[0b001],
+        window_menu: &[Op::BatchOverwrite(0), Op::BatchResizeDown(0)],
+        window_depth: 1,
+        window_max_prefix: 3,
+        fail_max_prefix: 0,
+        cap: 512,
+    })
+    .await;
+    assert!(stats.cases > 1_000, "suspiciously few cases: {stats:?}");
+}
+
+/// The staged-resize directed family. A staged shrink bottoming out at
+/// the (chunk-aligned) pruned floor — the publish_overlay clear-arm,
+/// whose boundary-below-the-floor regression marked dead state dirty —
+/// is published and committed, with the same commit also parked at the
+/// fsync (crash mid-commit and confirm arms). A shrink below the
+/// floor's block regrows through the same overlay (publish truncates at
+/// the DEEPEST staged size). A resize-only touch grouped with a
+/// sibling's staged write must be captured with it by the sibling's
+/// selective commit (never-split for resize-only parts). And a
+/// shrink-to-zero regrows as holes.
+#[tokio::test]
+async fn conformance_directed_batch_resize() {
+    let mut stats = Stats::default();
+    let traces: &[&[Op]] = &[
+        // Shrink bottoming out at the pruned floor, published and
+        // committed.
+        &[
+            Op::Append(0),
+            Op::Append(0),
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::Prune(0),
+            Op::BatchResizeDown(0),
+            Op::BatchApply,
+            Op::Sync(0b001),
+        ],
+        // The same bottom, regrown through the same overlay before
+        // apply.
+        &[
+            Op::Append(0),
+            Op::Append(0),
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::Prune(0),
+            Op::BatchResizeDown(0),
+            Op::BatchAppend(0),
+            Op::BatchApply,
+            Op::Sync(0b001),
+        ],
+        // Resize-only touch grouped with a sibling's staged write: the
+        // sibling's selective commit must capture the shrunk slot with
+        // it.
+        &[
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::BatchResizeDown(0),
+            Op::BatchAppend(1),
+            Op::BatchApply,
+            Op::Sync(0b010),
+        ],
+        // Shrink to zero, regrown as holes, published and committed.
+        &[
+            Op::Append(0),
+            Op::BatchResizeDown(0),
+            Op::BatchResizeUp(0),
+            Op::BatchApply,
+            Op::Sync(0b001),
+        ],
+    ];
+    for (i, trace) in traces.iter().enumerate() {
+        let mut rig = Rig::new().await;
+        for &op in *trace {
+            assert!(rig.enabled(op), "directed trace {i}: {op:?} disabled");
+            rig.execute(op).await;
+            rig.crash_probe(&[], 2048, i as u64, &mut stats).await;
+        }
+    }
+    // The floor-bottom shape with its commit parked at the inner fsync:
+    // crash mid-commit, and the confirm arm.
+    let parked = &[
+        Op::Append(0),
+        Op::Append(0),
+        Op::Append(0),
+        Op::Sync(0b001),
+        Op::Prune(0),
+        Op::BatchResizeDown(0),
+        Op::BatchApply,
+    ];
+    window_probe(parked, 0b001, &[], false, 2048, 41, &mut stats).await;
+    window_probe(parked, 0b001, &[], true, 2048, 41, &mut stats).await;
+    println!("directed batch-resize stats: {stats:?}");
+    assert!(
+        stats.exhaustive_points == stats.crash_points && stats.cases > 60,
+        "suspiciously thin coverage: {stats:?}"
+    );
+}
+
 /// The stale-tail directed family (blocker B1's shape): shrink a sparse
 /// blob into (or below) a hole, then make a LOWER chunk the new partial
 /// frontier and commit it. A stale tail buffer would durably record the
@@ -1884,6 +2024,8 @@ const DEEP_MENU: &[Op] = &[
     Op::BatchAppend(0),
     Op::BatchAppend(1),
     Op::BatchOverwrite(0),
+    Op::BatchResizeDown(0),
+    Op::BatchResizeUp(0),
     Op::BatchCreate(1),
     Op::BatchSync(0),
     Op::BatchRemove(1),
