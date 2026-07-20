@@ -1007,25 +1007,23 @@ mod tests {
     }
 
     #[rstest]
-    #[case::deterministic(deterministic::Runner::default(), false, false)]
-    #[case::deterministic_blocking(deterministic::Runner::default(), false, true)]
-    #[case::deterministic_dedicated(deterministic::Runner::default(), true, false)]
-    #[case::tokio(tokio::Runner::default(), false, false)]
-    #[case::tokio_blocking(tokio::Runner::default(), false, true)]
-    #[case::tokio_dedicated(tokio::Runner::default(), true, false)]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
     fn test_spawn_abort<R: Runner>(
         #[case] runner: R,
-        #[case] dedicated: bool,
-        #[case] blocking: bool,
+        #[values(
+            Execution::Shared(false),
+            Execution::Shared(true),
+            Execution::Dedicated
+        )]
+        execution: Execution,
     ) where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let context = if dedicated {
-                assert!(!blocking);
-                context.dedicated()
-            } else {
-                context.shared(blocking)
+            let context = match execution {
+                Execution::Dedicated => context.dedicated(),
+                Execution::Shared(blocking) => context.shared(blocking),
             };
 
             let handle = context.spawn(|_| async move {
@@ -2150,15 +2148,16 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
-    fn test_spawn_blocking<R: Runner>(#[case] runner: R, #[values(false, true)] dedicated: bool)
-    where
+    fn test_spawn_blocking<R: Runner>(
+        #[case] runner: R,
+        #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
+    ) where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let context = if dedicated {
-                context.dedicated()
-            } else {
-                context.shared(true)
+            let context = match execution {
+                Execution::Dedicated => context.dedicated(),
+                Execution::Shared(blocking) => context.shared(blocking),
             };
 
             let handle = context.spawn(|_| async move { 42 });
@@ -2173,23 +2172,18 @@ mod tests {
     #[should_panic(expected = "blocking task panicked")]
     fn test_spawn_blocking_panic<R: Runner>(
         #[case] runner: R,
-        #[values(false, true)] dedicated: bool,
+        #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
     ) where
         R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            if dedicated {
-                context.child("blocking").dedicated().spawn(|_| async move {
-                    panic!("blocking task panicked");
-                });
-            } else {
-                context
-                    .child("blocking")
-                    .shared(true)
-                    .spawn(|_| async move {
-                        panic!("blocking task panicked");
-                    });
-            }
+            let spawner = match execution {
+                Execution::Dedicated => context.child("blocking").dedicated(),
+                Execution::Shared(blocking) => context.child("blocking").shared(blocking),
+            };
+            spawner.spawn(|_| async move {
+                panic!("blocking task panicked");
+            });
 
             // Loop until panic
             loop {
@@ -2205,23 +2199,18 @@ mod tests {
     #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
     fn test_spawn_blocking_panic_caught<R: Runner>(
         #[case] runner: R,
-        #[values(false, true)] dedicated: bool,
+        #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
     ) where
         R::Context: Spawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
-            let handle = if dedicated {
-                context.child("blocking").dedicated().spawn(|_| async move {
-                    panic!("blocking task panicked");
-                })
-            } else {
-                context
-                    .child("blocking")
-                    .shared(true)
-                    .spawn(|_| async move {
-                        panic!("blocking task panicked");
-                    })
+            let spawner = match execution {
+                Execution::Dedicated => context.child("blocking").dedicated(),
+                Execution::Shared(blocking) => context.child("blocking").shared(blocking),
             };
+            let handle = spawner.spawn(|_| async move {
+                panic!("blocking task panicked");
+            });
             handle.await
         });
         assert!(matches!(result, Err(Error::Exited)));
