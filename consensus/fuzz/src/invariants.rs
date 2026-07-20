@@ -23,9 +23,9 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     let attributable = <P::Scheme as certificate::Scheme>::is_attributable();
 
     // Invariant: certificate_signature_counts_are_valid
-    // Appropriate certificates have valid count of signatures:
-    //  - attributable certificates expose a signer count in [quorum, n];
-    //  - non-attributable certificates expose no signer count.
+    // Every observed certificate exposes the appropriate signer-count metadata:
+    // - attributable certificates expose a count in [quorum, n];
+    // - non-attributable certificates expose no signer count.
     let participants = n as usize;
     let check_count = |kind: &str, view: u64, signature_count: Option<usize>| {
         if attributable {
@@ -46,23 +46,26 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
     };
 
-    // Normalization pass: fold every replica's certificates into global
-    // view-indexed maps, checking signer-count metadata and per-view proposal
-    // uniqueness at insertion. Count validation runs before deduplication, so
-    // an invalid duplicate cannot be hidden.
+    // Invariants:
+    // - no_conflicting_quorum_notarizations
+    // - no_conflicting_quorum_finalizations
     //
-    // Invariant: agreement / no_conflicting_quorum_notarizations /
-    // no_conflicting_quorum_finalizations
-    // All replicas must agree on one proposal per notarized or finalized view.
+    // Across all reported certificates, at most one (parent, payload) may be
+    // notarized in a view, and at most one (parent, payload) may be finalized in
+    // a view. Replicas without a certificate observation for that view impose no
+    // requirement.
+    //
+    // The independently defined signature-count check runs before each observation
+    // is merged, so an invalid duplicate cannot be hidden by an earlier valid one.
     type Identity = (u64, Sha256Digest);
-    let mut notarized: BTreeMap<u64, (usize, Identity)> = BTreeMap::new();
-    let mut nullified: BTreeMap<u64, usize> = BTreeMap::new();
-    let mut finalized: BTreeMap<u64, (usize, Identity)> = BTreeMap::new();
+    let mut notarized_by_view: BTreeMap<u64, (usize, Identity)> = BTreeMap::new();
+    let mut nullified_by_view: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut finalized_by_view: BTreeMap<u64, (usize, Identity)> = BTreeMap::new();
     for (idx, (notarizations, nullifications, finalizations)) in replicas.iter().enumerate() {
         for (&view, d) in notarizations.iter() {
             check_count("notarization", view, d.signature_count);
             let proposal = (d.parent, d.payload);
-            match notarized.entry(view) {
+            match notarized_by_view.entry(view) {
                 Entry::Vacant(entry) => {
                     entry.insert((idx, proposal));
                 }
@@ -77,12 +80,12 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
         for (&view, d) in nullifications.iter() {
             check_count("nullification", view, d.signature_count);
-            nullified.entry(view).or_insert(idx);
+            nullified_by_view.entry(view).or_insert(idx);
         }
         for (&view, d) in finalizations.iter() {
             check_count("finalization", view, d.signature_count);
             let proposal = (d.parent, d.payload);
-            match finalized.entry(view) {
+            match finalized_by_view.entry(view) {
                 Entry::Vacant(entry) => {
                     entry.insert((idx, proposal));
                 }
@@ -103,7 +106,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // correct signers to have voted nullify(0)). Notarizations and
     // finalizations at view 0 are already rejected by the parent < view and
     // finalization-requires-notarization checks.
-    if let Some(&idx) = nullified.get(&0) {
+    if let Some(&idx) = nullified_by_view.get(&0) {
         panic!(
             "Invariant violation: replica {idx} has nullification certificate at genesis view 0"
         );
@@ -112,8 +115,8 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // Invariant: no_finalized_view_nullified
     // A view cannot carry both a finalization and a nullification certificate,
     // regardless of which replicas recorded them.
-    for (&view, &(fin_idx, _)) in finalized.iter() {
-        if let Some(&null_idx) = nullified.get(&view) {
+    for (&view, &(fin_idx, _)) in finalized_by_view.iter() {
+        if let Some(&null_idx) = nullified_by_view.get(&view) {
             panic!(
                 "Invariant violation: view {view} finalized by replica {fin_idx} and nullified by replica {null_idx}"
             );
@@ -124,8 +127,8 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // Any finalization must be backed by a notarization with the same
     // (parent, payload); combined with per-view uniqueness above this also
     // forbids any notarization conflicting with a finalized proposal.
-    for (&view, &(idx, proposal)) in finalized.iter() {
-        let notarized_proposal = notarized.get(&view).map(|&(_, p)| p);
+    for (&view, &(idx, proposal)) in finalized_by_view.iter() {
+        let notarized_proposal = notarized_by_view.get(&view).map(|&(_, p)| p);
         assert!(
             notarized_proposal == Some(proposal),
             "Invariant violation: finalization without matching notarization in view {view}: replica {idx} finalized {proposal:?} but notarized is {notarized_proposal:?}"
@@ -142,24 +145,26 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // reconstruct unreported history or prove local possession or event ordering.
     // Only notarized links are walked: finalization_requires_notarization has
     // already forced every finalized view onto an identical notarized link.
-    for (&view, &(idx, (parent, _))) in notarized.iter() {
+    for (&view, &(idx, (parent, _))) in notarized_by_view.iter() {
         assert!(
             parent < view,
             "Invariant violation: replica {idx} has notarization in view {view} with parent {parent}"
         );
-        if let Some((skipped, _)) = finalized.range(parent + 1..view).next() {
+        if let Some((skipped, _)) = finalized_by_view.range(parent + 1..view).next() {
             panic!(
                 "Invariant violation: replica {idx} has notarization in view {view} with parent {parent} skipping finalized view {skipped}"
             );
         }
         assert!(
-            parent == 0 || notarized.contains_key(&parent) || finalized.contains_key(&parent),
+            parent == 0
+                || notarized_by_view.contains_key(&parent)
+                || finalized_by_view.contains_key(&parent),
             "Invariant violation: replica {idx} has notarization in view {view} with uncertified parent {parent}"
         );
         // Walk the recorded nullifications in (parent, view) expecting
         // consecutive keys; the first gap is the missing view.
         let mut expected = parent + 1;
-        for (&w, _) in nullified.range(parent + 1..view) {
+        for (&w, _) in nullified_by_view.range(parent + 1..view) {
             if w != expected {
                 break;
             }
