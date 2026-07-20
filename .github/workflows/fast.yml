@@ -75,16 +75,24 @@ jobs:
   Lint-Gate:
     name: "Lints"
     runs-on: ubuntu-latest
-    needs: Lint
+    needs: [Lint, lint-toml, zepter]
     if: always()
     steps:
       - name: Check lint results
         run: |
           if [ "${{ needs.Lint.result }}" != "success" ]; then
-            echo "Lints failed or were cancelled"
+            echo "Lint failed"
             exit 1
           fi
-          echo "All lints passed successfully!"
+          if [ "${{ needs.lint-toml.result }}" != "success" ]; then
+            echo "lint-toml failed"
+            exit 1
+          fi
+          if [ "${{ needs.zepter.result }}" != "success" ]; then
+            echo "zepter failed"
+            exit 1
+          fi
+          echo "All lints passed!"
 
   Tests:
     name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) }}) (partition: ${{ matrix.partition }}/2)"
