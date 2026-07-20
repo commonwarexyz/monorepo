@@ -549,7 +549,8 @@ enum Op {
     ResizeUp(u8),
     Remove(u8),
     Recreate(u8),
-    /// Advance the slot's pruned floor by one chunk (Blob::prune).
+    /// Advance the slot's pruned floor by one cell (Blob::prune, at a
+    /// mid-chunk byte offset whenever the new floor is odd).
     Prune(u8),
     /// Sync every live blob in the mask as ONE commit (multi-bit masks
     /// register every root, then await every handle: one union commit
@@ -929,9 +930,10 @@ impl Rig {
                     .unwrap_or_else(|e| panic!("{}: resize up: {e}", self.ctx()));
             }
             Op::Prune(s) => {
-                // One model block per prune: the byte offset of the next
-                // chunk boundary above the current floor.
-                let offset = (self.floor_cells(s) + CELLS_PER_BLOCK) as u64 * CELL;
+                // One model cell per prune: an odd floor lands the byte
+                // offset mid-chunk (the straddling chunk's dead low
+                // bytes stay on disk).
+                let offset = (self.floor_cells(s) + 1) as u64 * CELL;
                 self.blobs[&s]
                     .prune(offset)
                     .await
@@ -1097,9 +1099,11 @@ impl Rig {
                 );
             }
             if floor > 0 {
+                // Probe the LAST byte below the floor: the tightest
+                // below-floor offset, one byte off a legal read.
                 assert!(
                     matches!(
-                        self.blobs[&slot].read_at(0, 1).await,
+                        self.blobs[&slot].read_at(floor - 1, 1).await,
                         Err(Error::OffsetPruned(..))
                     ),
                     "{}: read below the floor of slot {slot} must be rejected",
@@ -1219,10 +1223,14 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
             return Err(format!("slot {slot}: size {size} is not cell-aligned"));
         }
         // The recovered floor is part of the observable: it must be the
-        // adopted commit's, chunk-aligned, and enforced on reads.
+        // adopted commit's and enforced on reads. The harness only ever
+        // drives cell-aligned prunes, so a recovered floor off the cell
+        // grid can only be corruption — and cell alignment makes the
+        // cell division below an exact translation of `Blob::floor`,
+        // compared byte-for-byte against the model's floor.
         let floor = blob.floor();
-        if !floor.is_multiple_of(BLOCK) {
-            return Err(format!("slot {slot}: floor {floor} is not chunk-aligned"));
+        if !floor.is_multiple_of(CELL) {
+            return Err(format!("slot {slot}: floor {floor} is not cell-aligned"));
         }
         if floor > size {
             return Err(format!("slot {slot}: floor {floor} beyond size {size}"));
@@ -1665,9 +1673,12 @@ async fn conformance_batch_create() {
 /// Batch-over-pruned-blob workload: staged appends, floor-relative
 /// overwrites, and staged shrinks bottoming out at the pruned floor,
 /// interleaved with prunes, publishes, commits, and staging inside a
-/// parked commit's window. The counterpart of the model's BATCH_PRUNE
-/// workload (batch content ops over a nonzero floor were the gap the
-/// publish_overlay shrink-to-floor defect lived in).
+/// parked commit's window. Prunes advance one cell, so mid-chunk floors
+/// — the batch overwrite targeting the straddling chunk's high cell,
+/// and shrinks bottoming out mid-chunk — are routine here. The
+/// counterpart of the model's BATCH_PRUNE workload (batch content ops
+/// over a nonzero floor were the gap the publish_overlay
+/// shrink-to-floor defect lived in).
 #[tokio::test]
 async fn conformance_batch_prune() {
     let stats = explore(&Workload {
@@ -1695,26 +1706,29 @@ async fn conformance_batch_prune() {
 }
 
 /// The staged-resize directed family. A staged shrink bottoming out at
-/// the (chunk-aligned) pruned floor — the publish_overlay clear-arm,
-/// whose boundary-below-the-floor regression marked dead state dirty —
-/// is published and committed, with the same commit also parked at the
-/// fsync (crash mid-commit and confirm arms). A shrink below the
-/// floor's block regrows through the same overlay (publish truncates at
-/// the DEEPEST staged size). A resize-only touch grouped with a
-/// sibling's staged write must be captured with it by the sibling's
-/// selective commit (never-split for resize-only parts). And a
-/// shrink-to-zero regrows as holes.
+/// a chunk-aligned pruned floor — the publish_overlay clear-arm, whose
+/// boundary-below-the-floor regression marked dead state dirty — is
+/// published and committed, with the same commit also parked at the
+/// fsync (crash mid-commit and confirm arms). A shrink bottoming out at
+/// a MID-CHUNK floor exercises the boundary arm instead: the straddling
+/// chunk survives as the frontier, its low bytes dead. A shrink below
+/// the floor's block regrows through the same overlay (publish
+/// truncates at the DEEPEST staged size). A resize-only touch grouped
+/// with a sibling's staged write must be captured with it by the
+/// sibling's selective commit (never-split for resize-only parts). And
+/// a shrink-to-zero regrows as holes.
 #[tokio::test]
 async fn conformance_directed_batch_resize() {
     let mut stats = Stats::default();
     let traces: &[&[Op]] = &[
-        // Shrink bottoming out at the pruned floor, published and
-        // committed.
+        // Shrink bottoming out at the chunk-aligned pruned floor (two
+        // one-cell prunes), published and committed: the clear arm.
         &[
             Op::Append(0),
             Op::Append(0),
             Op::Append(0),
             Op::Sync(0b001),
+            Op::Prune(0),
             Op::Prune(0),
             Op::BatchResizeDown(0),
             Op::BatchApply,
@@ -1728,8 +1742,23 @@ async fn conformance_directed_batch_resize() {
             Op::Append(0),
             Op::Sync(0b001),
             Op::Prune(0),
+            Op::Prune(0),
             Op::BatchResizeDown(0),
             Op::BatchAppend(0),
+            Op::BatchApply,
+            Op::Sync(0b001),
+        ],
+        // Shrink bottoming out at a MID-CHUNK floor, published and
+        // committed: the boundary arm keeps the straddling chunk as the
+        // frontier with its low bytes dead.
+        &[
+            Op::Append(0),
+            Op::Append(0),
+            Op::Append(0),
+            Op::Sync(0b001),
+            Op::Prune(0),
+            Op::BatchResizeDown(0),
+            Op::BatchResizeDown(0),
             Op::BatchApply,
             Op::Sync(0b001),
         ],
@@ -1761,13 +1790,14 @@ async fn conformance_directed_batch_resize() {
             rig.crash_probe(&[], 2048, i as u64, &mut stats).await;
         }
     }
-    // The floor-bottom shape with its commit parked at the inner fsync:
-    // crash mid-commit, and the confirm arm.
+    // The chunk-aligned floor-bottom shape with its commit parked at the
+    // inner fsync: crash mid-commit, and the confirm arm.
     let parked = &[
         Op::Append(0),
         Op::Append(0),
         Op::Append(0),
         Op::Sync(0b001),
+        Op::Prune(0),
         Op::Prune(0),
         Op::BatchResizeDown(0),
         Op::BatchApply,
@@ -2004,14 +2034,16 @@ async fn conformance_directed_capture_gated_frees() {
     );
 }
 
-/// The directed prune family: a committed prefix is pruned, and a crash
-/// BEFORE the pruning commit must regress the floor to the committed one
-/// (the pruned cells readable again), while a crash AFTER the pruning
-/// commit must keep the floor durable — no confirmed-pruned part is ever
-/// served again. The model-side floor sets are asserted explicitly so
-/// both arms stay directed, and the crash probes then hold the real
-/// recovered state to them (extraction compares `Blob::floor` and the
-/// below-floor read rejection against the model's allowed states).
+/// The directed prune family: a committed prefix is pruned to MID-CHUNK
+/// floors, and a crash BEFORE the pruning commit must regress the floor
+/// exactly to the committed one (the pruned cells readable again), while
+/// a crash AFTER the pruning commit must keep the floor durable at its
+/// exact mid-chunk byte — never rounded to a chunk boundary, and no
+/// confirmed-pruned part ever served again. The model-side floor sets
+/// are asserted explicitly so every arm stays directed, and the crash
+/// probes then hold the real recovered state to them (extraction
+/// compares `Blob::floor` cell-exactly and probes the below-floor read
+/// rejection at the floor's own boundary).
 #[tokio::test]
 async fn conformance_directed_prune() {
     let mut stats = Stats::default();
@@ -2027,27 +2059,55 @@ async fn conformance_directed_prune() {
         rig.execute(op).await;
         rig.crash_probe(&[], 2048, 31, &mut stats).await;
     }
-    // The pruning commit never landed: every recovery regresses the floor.
+    // The mid-chunk floor's pruning commit never landed: every recovery
+    // regresses the floor exactly to the committed zero.
     let regressed = states_after(&rig.tracked, &[Action::Crash], &rig.trace);
     assert!(
         regressed
             .iter()
             .all(|(_, state)| state.volume.blobs[0].floor == 0),
-        "model must regress the crashed-away floor"
+        "model must regress the crashed-away mid-chunk floor"
     );
-    // The pruning commit lands: the floor is durable across the crash.
+    // The pruning commit lands: the mid-chunk floor (one cell, half a
+    // chunk) is durable across the crash and restored exactly.
     rig.execute(Op::Sync(0b001)).await;
     rig.crash_probe(&[], 2048, 32, &mut stats).await;
     let persisted = states_after(&rig.tracked, &[Action::Crash], &rig.trace);
     assert!(
         persisted
             .iter()
-            .all(|(_, state)| state.volume.blobs[0].floor == CELLS_PER_BLOCK),
-        "model must keep the committed floor"
+            .all(|(_, state)| state.volume.blobs[0].floor == 1),
+        "model must keep the committed mid-chunk floor"
+    );
+    // Advance the floor across the chunk boundary to the next mid-chunk
+    // cell WITHOUT a commit: recovery regresses exactly to the committed
+    // mid-chunk floor, never to a chunk boundary on either side.
+    rig.execute(Op::Prune(0)).await;
+    rig.crash_probe(&[], 2048, 33, &mut stats).await;
+    rig.execute(Op::Prune(0)).await;
+    rig.crash_probe(&[], 2048, 34, &mut stats).await;
+    let regressed = states_after(&rig.tracked, &[Action::Crash], &rig.trace);
+    assert!(
+        regressed
+            .iter()
+            .all(|(_, state)| state.volume.blobs[0].floor == 1),
+        "model must regress exactly to the committed mid-chunk floor"
+    );
+    // The second pruning commit lands: floor 3 (mid-chunk again, with
+    // the whole first chunk freed behind it) is durable and restored
+    // exactly.
+    rig.execute(Op::Sync(0b001)).await;
+    rig.crash_probe(&[], 2048, 35, &mut stats).await;
+    let persisted = states_after(&rig.tracked, &[Action::Crash], &rig.trace);
+    assert!(
+        persisted
+            .iter()
+            .all(|(_, state)| state.volume.blobs[0].floor == 3),
+        "model must keep the committed floor past the chunk boundary"
     );
     println!("directed prune stats: {stats:?}");
     assert!(
-        stats.exhaustive_points == stats.crash_points && stats.cases > 10,
+        stats.exhaustive_points == stats.crash_points && stats.cases > 20,
         "suspiciously thin coverage: {stats:?}"
     );
 }

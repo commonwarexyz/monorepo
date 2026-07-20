@@ -29,11 +29,12 @@
 //! - Extent recycling through deferred frees, hole runs from resize-up, and
 //!   the sacred-slot rule for superblock writes.
 //! - Prefix pruning: a per-blob floor below which cells are
-//!   dropped and unreadable (see below). The model's floor is
-//!   cell-granular; the implementation's floor is BYTE-exact within its
-//!   chunk (the sub-chunk refinement only tightens the read/write guard
-//!   boundary — it is covered by the end-to-end unit test and the
-//!   lockstep floor comparison, not enumerated here).
+//!   dropped and unreadable (see below). The model enumerates the floor
+//!   at CELL granularity — mid-block floors included — while the
+//!   implementation's floor is BYTE-exact within a cell (that last
+//!   refinement only tightens the read/write guard boundary — it is
+//!   covered by the end-to-end unit test and the lockstep floor
+//!   comparison, not enumerated here).
 //!
 //! # The freeze rule
 //!
@@ -113,9 +114,11 @@
 //! rest into holes, exactly as the direct resize does. The overlay
 //! tracks its DEEPEST staged size: apply truncates the blob's dirty
 //! marks at that boundary (a shrink drops coverage a later staged
-//! regrow does not restore), and a shrink bottoming out at the pruned
-//! floor clears them entirely — a boundary below the floor would mark
-//! dead state dirty. A resize-only overlay is a full batch part: apply
+//! regrow does not restore). A shrink whose boundary block falls below
+//! the floor's block clears the marks entirely — they would dirty dead
+//! state — while a bottom at a mid-block floor keeps the straddling
+//! block marked as the surviving frontier. A resize-only overlay is a
+//! full batch part: apply
 //! records its never-split obligation like any staged write's.
 //!
 //! A batch can also stage a blob CREATION ([`Action::BatchCreate`]): the
@@ -134,10 +137,15 @@
 //!
 //! # Prefix pruning
 //!
-//! [`Action::Prune`] advances a blob's pruned FLOOR by one block: cells
+//! [`Action::Prune`] advances a blob's pruned FLOOR by one cell: cells
 //! below the floor drop, and reads, writes, and shrinks into them become
 //! illegal (below-floor mutations are simply never enumerated, like other
-//! contract violations). Pruning is a MUTATION, not a durability point:
+//! contract violations). Only blocks wholly below the floor's block
+//! free. The block CONTAINING a mid-block floor survives whole, its low
+//! cell logically dead — never freed and never served — mirroring the
+//! implementation's straddling chunk, whose dead low bytes stay on disk
+//! for CRC granularity ([`Rules::retain_straddler`]).
+//! Pruning is a MUTATION, not a durability point:
 //! it marks the blob dirty, the next commit CAPTURING the blob records
 //! the floor in its entry, and the dropped blocks join the same
 //! capture-gated free discipline as COW and rewind drops (the last
@@ -221,7 +229,7 @@
 //! ([`Action::BatchResizeDown`], [`Action::BatchResizeUp`], and the
 //! floor-relative [`Action::BatchOverwrite`], driven by the BATCH_RESIZE
 //! and BATCH_PRUNE workloads) — but only at the model's granularity:
-//! one-cell shrinks and two-cell grows per action, block-aligned floors,
+//! one-cell shrinks and two-cell grows per action, cell-granular floors,
 //! and staged writes starting at or above the floor (below-floor writes
 //! and resize targets are contract violations check_floor rejects, never
 //! enumerated). The implementation's arbitrary-length resizes, sub-chunk
@@ -245,10 +253,13 @@
 //! mid-commit) drive the floor's interaction with checksum-ref dropping,
 //! compaction, and paging at size (see `commit::finalize` and the
 //! recovery ref-window checks), sampled under the same caveat. Prune
-//! ENUMERATION is block-granular: the model's prune action advances by
-//! whole chunks and the conformance `extract` asserts block-aligned
-//! floors, so mid-chunk floors are covered only by the directed
-//! `tests::test_volume_prune_end_to_end` and the scale soak.
+//! ENUMERATION is cell-granular: the prune action advances the floor
+//! one cell at a time — mid-block floors included — and the conformance
+//! `extract` translates recovered floors cell-exactly (`Blob::floor`
+//! must equal the model floor times the 2048-byte cell). Byte-exactness
+//! WITHIN a cell stays out of enumerated reach — a floor like 5300 is
+//! unrepresentable here — so sub-cell floors are covered only by the
+//! directed `tests::test_volume_prune_end_to_end` and the scale soak.
 //!
 //! # Deliberately out of scope
 //!
@@ -326,8 +337,9 @@ struct Entry {
     gen: u8,
     /// Committed size in cells.
     size: u8,
-    /// Committed pruned floor in cells (block-aligned, at most `size`):
-    /// cells below were dropped and are never served.
+    /// Committed pruned floor in cells (at most `size`): cells below
+    /// were dropped and are never served. A mid-block floor's straddling
+    /// block stays referenced, its low cell dead.
     floor: u8,
     /// Logical block -> (physical block, expected cells). Absent = hole.
     /// Expected cells are the model's chunk CRC. Cells at or beyond `size`
@@ -430,9 +442,10 @@ pub(super) struct BlobState {
     pub(super) live: bool,
     pub(super) gen: u8,
     pub(super) size: u8,
-    /// Live pruned floor in cells (block-aligned, at most `size`): cells
-    /// below were dropped, and reads, writes, and shrinks into them are
-    /// illegal. Monotonic in RAM, while recovery restores the adopted
+    /// Live pruned floor in cells (at most `size`): cells below were
+    /// dropped, and reads, writes, and shrinks into them are illegal. A
+    /// mid-block floor leaves its straddling block backed with a dead
+    /// low cell. Monotonic in RAM, while recovery restores the adopted
     /// commit's floor (I7).
     pub(super) floor: u8,
     /// Logical block -> run. Absent = hole.
@@ -677,6 +690,15 @@ pub(super) struct Rules {
     /// floor survives recovery, making a prune durable without its
     /// commit (I7).
     floor_from_commit: bool,
+    /// Keep the block containing a mid-block floor allocated when
+    /// pruning: its low cell is dead but shares the extent with the
+    /// live high cell (the implementation's straddling chunk keeps its
+    /// low bytes for CRC granularity). Disabling frees the straddling
+    /// block as if it were wholly dead while its run keeps serving:
+    /// once a capturing commit confirms, the extent recycles under an
+    /// entry that still references it, and the next write into it
+    /// clobbers the live cell (I3 via extent reuse).
+    retain_straddler: bool,
 }
 
 pub(super) const SPEC: Rules = Rules {
@@ -695,6 +717,7 @@ pub(super) const SPEC: Rules = Rules {
     manifest_fresh_shadow: true,
     prune_capture_gated: true,
     floor_from_commit: true,
+    retain_straddler: true,
 };
 
 /// Capture mask covering every blob (group-commit behavior).
@@ -711,12 +734,14 @@ pub(super) enum Action {
     ResizeUp(u8),
     Remove(u8),
     Recreate(u8),
-    /// Advance the slot's pruned floor by one block (Blob::prune): cells
-    /// below drop into the capture-gated free discipline and the blob
-    /// dirties so the next capture records the floor. Never enumerated
-    /// past the size (the implementation errors), on a removed blob, or
-    /// while a batch holds staged state for the blob — membership
-    /// included (the implementation's single-writer assertion).
+    /// Advance the slot's pruned floor by one cell (Blob::prune): blocks
+    /// wholly below the new floor drop into the capture-gated free
+    /// discipline, a mid-block floor's straddling block survives whole
+    /// with its low cell dead, and the blob dirties so the next capture
+    /// records the floor. Never enumerated past the size (the
+    /// implementation errors), on a removed blob, or while a batch holds
+    /// staged state for the blob — membership included (the
+    /// implementation's single-writer assertion).
     Prune(u8),
     /// Begin a commit capturing the dirty blobs in the mask (expanded
     /// across applied-batch groups).
@@ -728,9 +753,10 @@ pub(super) enum Action {
     /// Stage one append into the current batch (starting one if needed).
     BatchAppend(u8),
     /// Stage an overwrite of the first cell at or above the pruned floor
-    /// into the current batch (cell 0 on an unpruned blob). A staged
-    /// write starting below the floor is rejected by the write path
-    /// (check_floor), so it is never enumerated.
+    /// into the current batch (cell 0 on an unpruned blob, or the
+    /// straddling block's high cell when the floor is mid-block). A
+    /// staged write starting below the floor is rejected by the write
+    /// path (check_floor), so it is never enumerated.
     BatchOverwrite(u8),
     /// Stage a one-cell shrink into the current batch (Batch::resize
     /// below the staged size). A target below the pruned floor is
@@ -1843,14 +1869,20 @@ pub(super) fn step(
             }
             // The (possibly newly partial) tail must re-commit: its shadow
             // and manifest entry change even though its bytes do not. A
-            // shrink landing exactly on a nonzero floor leaves no backed
-            // tail (all lower runs were pruned): no block to mark, like
+            // shrink landing exactly on the floor has two shapes: a
+            // mid-block floor keeps its backed straddling block as the
+            // (partial) frontier, which must re-commit like any other
+            // tail, while a block-aligned floor leaves no backed tail at
+            // all (all lower runs were pruned) — no block to mark, like
             // the implementation's empty post-shrink frontier.
             if new_size > s.volume.blobs[slot as usize].floor {
                 let tail = (new_size - 1) / CELLS_PER_BLOCK;
                 s.volume.mark_dirty(slot, Some(tail));
             } else {
-                s.volume.mark_dirty(slot, None);
+                let straddler = (!new_size.is_multiple_of(CELLS_PER_BLOCK))
+                    .then_some(new_size / CELLS_PER_BLOCK)
+                    .filter(|l| s.volume.blobs[slot as usize].runs.contains_key(l));
+                s.volume.mark_dirty(slot, straddler);
             }
             Ok(Some(vec![s]))
         }
@@ -1965,13 +1997,18 @@ pub(super) fn step(
             if mutations_blocked || staged_any || !b.live {
                 return Ok(None);
             }
-            // One block per action: the floor lands between blocks or at
-            // the size. Beyond the size the implementation errors, so the
-            // action disables there.
-            let floor = b.floor + CELLS_PER_BLOCK;
+            // One cell per action: an odd floor lands mid-block. Beyond
+            // the size the implementation errors, so the action disables
+            // there.
+            let floor = b.floor + 1;
             if floor > b.size {
                 return Ok(None);
             }
+            // Only blocks WHOLLY below the floor's block drop: the block
+            // containing a mid-block floor survives whole, its dead low
+            // cell sharing the extent (and the committed CRC) with the
+            // live high cell, exactly like the implementation's
+            // straddling chunk.
             let lfloor = floor / CELLS_PER_BLOCK;
             let dropped: Vec<u8> = s.volume.blobs[slot as usize]
                 .runs
@@ -1989,6 +2026,23 @@ pub(super) fn step(
                     s.volume.release_content(slot, run.phys, rules);
                 } else {
                     s.volume.release(run.phys, rules);
+                }
+            }
+            // Mutation: free the straddling block as if it were wholly
+            // dead while its run keeps serving reads — the recycled
+            // extent is then clobbered under an entry that still
+            // references it (see `mutation_retain_straddler_detected`).
+            if !rules.retain_straddler && !floor.is_multiple_of(CELLS_PER_BLOCK) {
+                let straddler = s.volume.blobs[slot as usize]
+                    .runs
+                    .get(&lfloor)
+                    .map(|run| run.phys);
+                if let Some(phys) = straddler {
+                    if rules.prune_capture_gated {
+                        s.volume.release_content(slot, phys, rules);
+                    } else {
+                        s.volume.release(phys, rules);
+                    }
                 }
             }
             let b = &mut s.volume.blobs[slot as usize];
@@ -2528,9 +2582,10 @@ pub(super) fn step(
                 // the dirty marks at the DEEPEST staged size (a shrink
                 // drops coverage a later staged regrow does not restore;
                 // the regrown blocks re-mark from the overlay below). A
-                // shrink bottoming out at the (block-aligned) floor
-                // clears them entirely: a boundary below the floor would
-                // mark dead state dirty.
+                // boundary block below the floor's clears them entirely
+                // (marks there would dirty dead state), while a bottom
+                // at a mid-block floor keeps the straddling block marked
+                // as the surviving frontier.
                 if staged.min_size < b.size {
                     if staged.min_size == 0
                         || (staged.min_size - 1) / CELLS_PER_BLOCK < b.floor / CELLS_PER_BLOCK
@@ -2851,8 +2906,9 @@ mod tests {
         Action::Crash,
     ];
 
-    /// Pruning workload: the floor advances between blocks and to the
-    /// size, interleaved with appends, selective commits, and crashes — a
+    /// Pruning workload: the floor advances one cell at a time — through
+    /// mid-block positions, across block boundaries, and to the size —
+    /// interleaved with appends, selective commits, and crashes: a
     /// pruned-but-uncaptured blob serves its old entry verbatim (floor
     /// and runs intact), a capturing commit records the floor and
     /// releases the pruned extents, and a crashed-away prune regresses to
@@ -2870,8 +2926,9 @@ mod tests {
     ];
 
     /// Batch-over-pruned-blob workload: staged appends, overwrites of the
-    /// first above-floor cell, and staged shrinks bottoming out at the
-    /// floor run against a pruned blob, then publish, commit, and crash.
+    /// first at-or-above-floor cell (the straddling block's high cell on
+    /// a mid-block floor), and staged shrinks bottoming out at the floor
+    /// run against a pruned blob, then publish, commit, and crash.
     /// Selective-capture interplay is PRUNE's and BATCH's territory (a
     /// group-commit mask keeps this menu's fan affordable).
     const BATCH_PRUNE: &[Action] = &[
@@ -3011,7 +3068,7 @@ mod tests {
 
     #[test]
     fn spec_holds_prune() {
-        assert_holds(PRUNE, 8, 2, 10_000);
+        assert_holds(PRUNE, 8, 2, 100_000);
     }
 
     #[test]
@@ -3021,7 +3078,7 @@ mod tests {
 
     #[test]
     fn spec_holds_batch_prune() {
-        assert_holds(BATCH_PRUNE, 8, 2, 10_000);
+        assert_holds(BATCH_PRUNE, 8, 2, 100_000);
     }
 
     #[test]
@@ -3029,16 +3086,36 @@ mod tests {
         assert_holds(BATCH_RESIZE, 8, 2, 10_000);
     }
 
-    /// The exact shrink-bottoms-out-at-the-floor shape (the
-    /// `publish_overlay` clear-arm) must be a legal model history end to
-    /// end — committed content above a pruned floor, a staged shrink to
-    /// exactly the floor, publish, then the group's commit crashed both
-    /// mid-flight and after confirmation — deeper than the BATCH_PRUNE
-    /// budget reaches. The conformance directed family drives the
-    /// implementation through this same shape.
+    /// The exact shrink-bottoms-out-at-the-floor shapes (both
+    /// `publish_overlay` truncation arms) must be legal model histories
+    /// end to end — committed content above a pruned floor, a staged
+    /// shrink to exactly the floor (block-aligned for the clear arm,
+    /// mid-block for the straddler-keeping boundary arm), publish, then
+    /// the group's commit crashed both mid-flight and after
+    /// confirmation — deeper than the BATCH_PRUNE budget reaches. The
+    /// conformance directed family drives the implementation through
+    /// these same shapes.
     #[test]
     fn staged_shrink_to_floor_trace_allowed() {
-        let prefix: &[Action] = &[
+        // Shrink to a block-aligned floor (two one-cell prunes): the
+        // clear arm — no backed block survives below the boundary.
+        let aligned: &[Action] = &[
+            Action::Append(0),
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Prune(0),
+            Action::Prune(0),
+            Action::BatchResizeDown(0),
+            Action::BatchApply,
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+        ];
+        // Shrink to a mid-block floor: the boundary arm — the straddling
+        // block survives as the frontier, its low cell dead.
+        let mid_block: &[Action] = &[
             Action::Append(0),
             Action::Append(0),
             Action::Append(0),
@@ -3047,6 +3124,41 @@ mod tests {
             Action::FsyncOk,
             Action::Prune(0),
             Action::BatchResizeDown(0),
+            Action::BatchResizeDown(0),
+            Action::BatchApply,
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+        ];
+        for prefix in [aligned, mid_block] {
+            for tail in [&[Action::Crash][..], &[Action::FsyncOk, Action::Crash][..]] {
+                let trace: Vec<Action> = prefix.iter().chain(tail).copied().collect();
+                assert!(
+                    run_trace(&trace, &SPEC).is_ok(),
+                    "spec must allow a staged shrink bottoming out at the floor"
+                );
+            }
+        }
+    }
+
+    /// A staged overwrite over a MID-BLOCK floor targets the straddling
+    /// block's high cell (the first cell at or above the floor) and must
+    /// be a legal history end to end: the staged COW carries the dead
+    /// low cell along, publish reinstalls the run, and the group's
+    /// commit survives both a mid-flight crash and a post-confirmation
+    /// crash. BATCH_PRUNE enumerates this exact sequence within its
+    /// budget (every action below is on its menu and stays enabled), and
+    /// the conformance batch-prune workload drives the implementation
+    /// through it.
+    #[test]
+    fn straddler_overwrite_trace_allowed() {
+        let prefix: &[Action] = &[
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Prune(0),
+            Action::BatchOverwrite(0),
             Action::BatchApply,
             Action::Snapshot(0b01),
             Action::WriteMeta,
@@ -3055,7 +3167,7 @@ mod tests {
             let trace: Vec<Action> = prefix.iter().chain(tail).copied().collect();
             assert!(
                 run_trace(&trace, &SPEC).is_ok(),
-                "spec must allow a staged shrink bottoming out at the floor"
+                "spec must allow a staged overwrite of the straddling block's high cell"
             );
         }
     }
@@ -3538,10 +3650,12 @@ mod tests {
             Action::Snapshot(0b01),
             Action::WriteMeta,
             Action::FsyncOk,
-            // Prune the committed block away, then confirm a commit that
-            // does NOT capture blob 0: its old entry (floor 0, runs
-            // intact) is served verbatim while the mutation releases the
-            // pruned block.
+            // Prune the committed block away (two one-cell prunes carry
+            // the floor across the block boundary), then confirm a
+            // commit that does NOT capture blob 0: its old entry (floor
+            // 0, runs intact) is served verbatim while the mutation
+            // releases the pruned block.
+            Action::Prune(0),
             Action::Prune(0),
             Action::Append(1),
             Action::Snapshot(0b10),
@@ -3561,6 +3675,51 @@ mod tests {
         assert!(
             run_trace(trace, &rules).is_err(),
             "checker missed the prematurely released prune free"
+        );
+    }
+
+    /// Pruning to a mid-block floor must keep the straddling block
+    /// allocated: its high cell is still live, and the entry a capturing
+    /// commit writes keeps referencing the block for it. Freeing the
+    /// block as if it were wholly dead lets the capturing commit's
+    /// confirmation recycle the extent while that same commit's entry
+    /// still references it — the next allocation writes into it and a
+    /// crash exposes the clobbered live cell (I3 via extent reuse).
+    #[test]
+    fn mutation_retain_straddler_detected() {
+        let trace: &[Action] = &[
+            // Commit a full block for blob 0.
+            Action::Append(0),
+            Action::Append(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            // Prune to the mid-block floor: cell 0 dies, cell 1 stays
+            // live in the straddling block, which the mutation wrongly
+            // frees (capture-gated, so the release lands at the next
+            // capturing commit's confirmation).
+            Action::Prune(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            // The next allocation (the append's fresh tail block)
+            // recycles the wrongly freed extent and overwrites the live
+            // cell the confirmed entry still references. The commit
+            // then crashes: whichever superblock is adopted, the
+            // straddling run's content no longer verifies.
+            Action::Append(0),
+            Action::Snapshot(0b01),
+            Action::WriteMeta,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            retain_straddler: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed the wrongly freed straddling block"
         );
     }
 
