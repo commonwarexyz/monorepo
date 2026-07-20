@@ -858,4 +858,87 @@ mod tests {
             unreachable!("the failed sync must abort the actor");
         });
     }
+
+    /// The processing loop's exit paths settle the in-flight finalize
+    /// rather than dropping its durability handle: a start_sync failure is
+    /// reported only through the handle, so an unobserved drop would
+    /// silence a fatal sync failure. Closing the mailbox exits the loop
+    /// while a sync is parked, and releasing that sync as a real failure
+    /// must still abort the actor.
+    #[test]
+    #[should_panic(expected = "database finalize sync failed")]
+    fn finalized_exit_settles_inflight_sync() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            let (mut mailbox, gate, _finalized, _handle, _resolver_handler) =
+                start_gated_stateful(&context, "ack-exit").await;
+
+            let _ = mailbox.subscribe_databases().await;
+            let (ack1, waiter1) = commonware_utils::acknowledgement::Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(TestBlock::new(1, 1)), ack1));
+            wait_for_pending(&gate, 1).await;
+
+            // Close the mailbox: the loop exits and its drain awaits the
+            // parked handle.
+            drop(mailbox);
+            for _ in 0..16 {
+                reschedule().await;
+            }
+            let release = gate.lock().remove(0);
+            release.send(Err(RuntimeError::WriteFailed)).unwrap();
+            // The drain's settle panics, unwinding through the runner
+            // before this waiter can resolve.
+            let _ = waiter1.await;
+            unreachable!("the failed sync must abort the actor on exit");
+        });
+    }
+
+    /// A duplicate finalize delivery settles the prior in-flight sync
+    /// first. When that settle observes a shutdown, the shared height's
+    /// durability never completed, so the duplicate must stay unacked (an
+    /// acknowledgement would let the marshal prune a block the database
+    /// still needs after restart).
+    #[test]
+    fn finalized_duplicate_stays_unacked_after_shutdown_settle() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            let (mut mailbox, gate, finalized, handle, _resolver_handler) =
+                start_gated_stateful(&context, "ack-dup").await;
+
+            let _ = mailbox.subscribe_databases().await;
+            let (ack1, waiter1) = commonware_utils::acknowledgement::Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(TestBlock::new(1, 1)), ack1));
+            wait_for_pending(&gate, 1).await;
+
+            // Re-deliver block 1: the handler reports it as a duplicate and
+            // awaits the parked previous sync before deciding its effects.
+            let (ack_dup, waiter_dup) = commonware_utils::acknowledgement::Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(TestBlock::new(1, 1)), ack_dup));
+            for _ in 0..16 {
+                reschedule().await;
+            }
+
+            // Release the parked sync as a shutdown: the settle releases
+            // nothing, so neither delivery may acknowledge or notify.
+            let release = gate.lock().remove(0);
+            release.send(Err(RuntimeError::Closed)).unwrap();
+            for _ in 0..64 {
+                reschedule().await;
+            }
+            // Dropping an unacked acknowledgement resolves its waiter with
+            // an error: that is the re-delivery signal, and the bug under
+            // pin is an Ok (an acknowledgement without durability).
+            assert!(
+                waiter1.await.is_err(),
+                "shutdown settle must not acknowledge the original"
+            );
+            assert!(
+                waiter_dup.await.is_err(),
+                "duplicate acknowledged without durability"
+            );
+            assert!(finalized.lock().is_empty());
+
+            // The actor keeps serving the mailbox after a shutdown settle.
+            let _ = mailbox.subscribe_databases().await;
+            handle.abort();
+        });
+    }
 }

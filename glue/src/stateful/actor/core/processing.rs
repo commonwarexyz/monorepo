@@ -111,10 +111,9 @@ where
                         // No message and nothing to prune: wait on the mailbox as normal.
                         None => Either::Right(self.mailbox.recv().map(|m| m.map(Step::Message))),
                     },
-                    Err(TryRecvError::Disconnected) => {
-                        debug!("mailbox closed, stopping processing");
-                        return;
-                    }
+                    // Flow through the refutable arm's else so the exit
+                    // shares the post-loop drain below.
+                    Err(TryRecvError::Disconnected) => Either::Left(ready(None)),
                 };
             },
             on_stopped => {
@@ -193,9 +192,10 @@ where
                         // tracking (or acknowledging) this one: effects stay
                         // in block order, and the pipeline is bounded at one
                         // in-flight sync.
+                        let mut previous_released = true;
                         if let Some(mut previous) = inflight.take() {
                             let result = (&mut previous.durability).await;
-                            self.settle(previous, result).await;
+                            previous_released = self.settle(previous, result).await;
                         }
                         match (status, durability) {
                             (FinalizeStatus::Persisted { height }, Some(durability)) => {
@@ -207,10 +207,18 @@ where
                                 });
                             }
                             (FinalizeStatus::Duplicate, _) => {
-                                // Already reflected in durable state (any
-                                // in-flight sync for it was settled above):
-                                // nothing gates the acknowledgement.
-                                acknowledgement.acknowledge();
+                                // Already reflected in state, but durable only
+                                // if the settle above released: a duplicate's
+                                // durability may ride the very sync that was
+                                // settled, and a shutdown settle released
+                                // nothing. Acknowledging then would tell the
+                                // marshal the height is durable when it is
+                                // not, so leave it unacked for re-delivery.
+                                if previous_released {
+                                    acknowledgement.acknowledge();
+                                } else {
+                                    debug!("shutdown before duplicate's durability completed");
+                                }
                             }
                             (FinalizeStatus::Persisted { .. }, None) => {
                                 unreachable!("persisted finalize must return its durability handle")
@@ -234,20 +242,30 @@ where
                 }
             },
         }
+        // Every exit path settles the in-flight finalize rather than
+        // dropping its handle: a start_sync failure is reported only
+        // through the handle, so an unobserved drop would silence a
+        // fatal sync failure. A shutdown result releases nothing and
+        // the block is re-delivered after restart.
+        if let Some(mut entry) = inflight.take() {
+            let result = (&mut entry.durability).await;
+            self.settle(entry, result).await;
+        }
     }
 
     /// Release a resolved in-flight finalize's deferred effects: once the
     /// applied state is durable, deliver the finalized notification and the
     /// marshal acknowledgement. A real sync failure is fatal (panic). A
-    /// shutdown result releases nothing, so a restart re-delivers the block.
+    /// shutdown result releases nothing (returning false), so a restart
+    /// re-delivers the block.
     async fn settle(
         &mut self,
         entry: InflightFinalize<A::Block>,
         result: Result<(), RuntimeError>,
-    ) {
+    ) -> bool {
         if !crate::stateful::db::finalize_durable(result) {
             debug!("runtime shutdown before finalized database sync completed");
-            return;
+            return false;
         }
         debug!(
             height = entry.block.height().get(),
@@ -257,6 +275,7 @@ where
             .notify_finalized(self.context.as_present(), entry.block.as_ref())
             .await;
         entry.acknowledgement.acknowledge();
+        true
     }
 }
 
