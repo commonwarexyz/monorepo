@@ -42,14 +42,39 @@ pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Clone + Send + Unpin + 'st
     ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send;
 }
 
+fn sort_and_validate_chain<B: Block>(blocks: impl IntoIterator<Item = Arc<B>>) -> Vec<Arc<B>> {
+    let mut chain = blocks.into_iter().collect::<Vec<_>>();
+    chain.sort_by_key(|block| block.height());
+
+    for window in chain.windows(2) {
+        let parent = &window[0];
+        let child = &window[1];
+        assert_eq!(
+            parent.height().next(),
+            child.height(),
+            "initial blocks must be contiguous in height"
+        );
+        assert_eq!(
+            parent.digest(),
+            child.parent(),
+            "initial blocks must be contiguous in ancestry"
+        );
+    }
+
+    chain
+}
+
 /// Creates an ancestry stream from a fixed sequence of blocks.
 ///
 /// Blocks are yielded in iterator order and no parent fetching is performed. This is useful when
 /// the caller wants to bound the ancestry available to the application.
+///
+/// # Panics
+///
+/// Panics if the blocks do not form a contiguous chain.
 pub fn from_iter<B: Block>(blocks: impl IntoIterator<Item = Arc<B>>) -> impl Ancestry<B> {
     let blocks: VecDeque<_> = blocks.into_iter().collect();
-    let mut chain: Vec<_> = blocks.iter().cloned().collect();
-    chain.sort_by_key(|block| block.height());
+    let chain = sort_and_validate_chain(blocks.iter().cloned());
     BoundedAncestry { blocks, chain }
 }
 
@@ -356,22 +381,7 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
         initial: impl IntoIterator<Item = Arc<M::Block>>,
         fetch_duration: Timed,
     ) -> Self {
-        let mut buffered = initial.into_iter().collect::<Vec<_>>();
-        buffered.sort_by_key(|block| block.height());
-
-        // Check that the initial blocks are contiguous in height.
-        buffered.windows(2).for_each(|window| {
-            assert_eq!(
-                window[0].height().next(),
-                window[1].height(),
-                "initial blocks must be contiguous in height"
-            );
-            assert_eq!(
-                window[0].digest(),
-                window[1].parent(),
-                "initial blocks must be contiguous in ancestry"
-            );
-        });
+        let buffered = sort_and_validate_chain(initial);
 
         let tip = buffered.last().map(|block| block.digest());
         Self {
@@ -976,6 +986,25 @@ mod test {
             let results = forward.collect::<Vec<_>>().await;
             assert_eq!(results, vec![Arc::new(parent), Arc::new(child)]);
         });
+    }
+
+    #[test]
+    #[should_panic = "initial blocks must be contiguous in height"]
+    fn test_from_iter_panics_on_non_contiguous_height() {
+        let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+        let child = Block::new::<Sha256>((), parent.digest(), Height::new(3), 3);
+
+        let _ = from_iter([Arc::new(child), Arc::new(parent)]);
+    }
+
+    #[test]
+    #[should_panic = "initial blocks must be contiguous in ancestry"]
+    fn test_from_iter_panics_on_non_contiguous_ancestry() {
+        let expected_parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+        let wrong_parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 2);
+        let child = Block::new::<Sha256>((), expected_parent.digest(), Height::new(2), 3);
+
+        let _ = from_iter([Arc::new(child), Arc::new(wrong_parent)]);
     }
 
     #[test]
