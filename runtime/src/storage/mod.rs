@@ -1649,3 +1649,295 @@ pub(crate) mod tests {
         assert_eq!(output.coalesce(), b"hello");
     }
 }
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests {
+    use super::FloorState;
+    use loom::{
+        sync::{Arc, Mutex},
+        thread,
+    };
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    // This module model-checks the floor persistence protocol: the real
+    // [FloorState] driven through the same lock/write/fsync/mark steps as
+    // the storage backends, under loom's exhaustive interleaving
+    // exploration. The production choreography lives in async I/O code
+    // loom cannot run, so a minimal harness mirrors `Blob::sync_inner`
+    // and `Blob::prune` in `storage/tokio/unix.rs` step for step (each
+    // step's comment quotes the statement it mirrors). The memory
+    // backend runs the same protocol with the header rewrite and publish
+    // both under its content write lock, a strictly stronger shape, so
+    // the unix.rs choreography is the one worth checking. Failed syncs
+    // return before the fsync or the mark, leaving the mark set for a
+    // retry, which the quiescent convergence check covers.
+    //
+    // Checked properties:
+    //
+    // - P1: header images are recorded in monotone non-decreasing floor
+    //   order, so a stale image never overwrites a fresher one.
+    // - P2: whenever `dirty` is false at quiescence, the durable header
+    //   carries the current floor, so no floor advance is ever lost.
+    // - P3: a sync clears `dirty` only when no prune intervened between
+    //   its epoch snapshot and its `mark_synced`, so a cleared mark
+    //   implies the floor still equals the value that sync wrote.
+    //
+    // The `broken_*` drivers reintroduce the two races the design
+    // prevents, and the sensitivity tests assert loom finds a violating
+    // interleaving for each, so the harness is known to be strong enough
+    // to catch them.
+
+    /// The durable side of the protocol: the header region of the file.
+    ///
+    /// `images` records every header image issued, in write order, so the
+    /// file's header content is always the last entry (seeded with the
+    /// floor the blob was opened with). `durable` indexes the image made
+    /// durable by the latest fsync: `sync_all` persists whatever header
+    /// content is present when it runs. A positioned write racing a
+    /// concurrent fsync lands either before or after it, which is exactly
+    /// the pair of orders loom explores for this mutex.
+    struct Store {
+        images: Vec<u64>,
+        durable: usize,
+    }
+
+    impl Store {
+        fn new(floor: u64) -> Self {
+            Self {
+                images: vec![floor],
+                durable: 0,
+            }
+        }
+
+        /// A header image carrying `floor` is written to the file.
+        fn record(&mut self, floor: u64) {
+            let last = *self.images.last().unwrap();
+            assert!(
+                floor >= last,
+                "P1 violated: header image {floor} written after fresher image {last}"
+            );
+            self.images.push(floor);
+        }
+
+        /// An fsync completes: the current header content is durable.
+        const fn fsync(&mut self) {
+            self.durable = self.images.len() - 1;
+        }
+
+        /// The floor carried by the last durable header image.
+        fn durable_floor(&self) -> u64 {
+            self.images[self.durable]
+        }
+    }
+
+    /// One sync pass over the shared floor state and modeled store.
+    type SyncDriver = fn(&Mutex<FloorState>, &Mutex<Store>);
+
+    /// Mirrors `Blob::sync_inner` in `storage/tokio/unix.rs`.
+    fn protocol_sync(floor: &Mutex<FloorState>, store: &Mutex<Store>) {
+        // Mirrors sync_inner's floor-lock scope: `let state = floor.lock()`,
+        // then under the guard `if state.dirty()` the header write
+        // `Self::write_single_at(file, 0, &header.encode())` with
+        // `Header::with_floor(blob_version, state.floor())`, and finally
+        // `state.epoch()` as the scope's value.
+        let (epoch, written) = {
+            let state = floor.lock().unwrap();
+            let mut written = None;
+            if state.dirty() {
+                written = Some(state.floor());
+                store.lock().unwrap().record(state.floor());
+            }
+            (state.epoch(), written)
+        };
+        // Mirrors `file.sync_all()` after the scope closes.
+        store.lock().unwrap().fsync();
+        // Mirrors `floor.lock().mark_synced(epoch)`.
+        let mut state = floor.lock().unwrap();
+        let was_dirty = state.dirty();
+        state.mark_synced(epoch);
+        // P3: the mark clears only when the epoch is unchanged, meaning no
+        // prune advanced the floor after this sync's snapshot, so the
+        // floor must still be the exact value written above.
+        if was_dirty && !state.dirty() {
+            let written = written.expect("P3 violated: mark cleared by a sync that wrote nothing");
+            assert_eq!(
+                state.floor(),
+                written,
+                "P3 violated: dirty cleared across an intervening advance"
+            );
+        }
+    }
+
+    /// The atomics-pair analog of the stale-overwrite race: the header
+    /// image is recorded after the floor lock is released, from a
+    /// snapshot taken under it, so two concurrent syncs can land images
+    /// out of snapshot order.
+    fn broken_sync_write_after_unlock(floor: &Mutex<FloorState>, store: &Mutex<Store>) {
+        let (epoch, written) = {
+            let state = floor.lock().unwrap();
+            (state.epoch(), state.dirty().then(|| state.floor()))
+        };
+        // BROKEN: the write that sync_inner issues under the guard
+        // happens here instead, outside the lock.
+        if let Some(floor) = written {
+            store.lock().unwrap().record(floor);
+        }
+        store.lock().unwrap().fsync();
+        floor.lock().unwrap().mark_synced(epoch);
+    }
+
+    /// The atomics-pair analog of the lost-floor race: the dirty mark is
+    /// cleared without re-checking the epoch, so a prune landing mid-sync
+    /// is forgotten.
+    fn broken_sync_epoch_blind(floor: &Mutex<FloorState>, store: &Mutex<Store>) {
+        {
+            let state = floor.lock().unwrap();
+            if state.dirty() {
+                store.lock().unwrap().record(state.floor());
+            }
+        }
+        store.lock().unwrap().fsync();
+        // BROKEN: passing the current epoch instead of the snapshot makes
+        // the re-check in mark_synced vacuous, modeling an unconditional
+        // flag clear.
+        let mut state = floor.lock().unwrap();
+        let epoch = state.epoch();
+        state.mark_synced(epoch);
+    }
+
+    /// Mirrors `Blob::prune` in `storage/tokio/unix.rs`: the single
+    /// lock scope of `let advanced = self.floor.lock().advance(offset)`.
+    /// The hole punch that follows never touches the header, so the
+    /// store has nothing to model.
+    fn prune(floor: &Mutex<FloorState>, offset: u64) {
+        floor.lock().unwrap().advance(offset);
+    }
+
+    /// End-of-execution checks, run after every thread joined.
+    fn check_quiescent(sync: SyncDriver, floor: &Mutex<FloorState>, store: &Mutex<Store>) {
+        {
+            let state = floor.lock().unwrap();
+            let store = store.lock().unwrap();
+            // P1 over the whole run, in case a driver bypassed record.
+            assert!(
+                store.images.windows(2).all(|pair| pair[0] <= pair[1]),
+                "P1 violated: header images out of floor order: {:?}",
+                store.images
+            );
+            // The durable header can never be ahead of the in-RAM floor.
+            assert!(
+                store.durable_floor() <= state.floor(),
+                "durable floor {} ahead of in-RAM floor {}",
+                store.durable_floor(),
+                state.floor()
+            );
+            // P2: a clean mark at quiescence means the floor is durable.
+            if !state.dirty() {
+                assert_eq!(
+                    store.durable_floor(),
+                    state.floor(),
+                    "P2 violated: mark clean but the current floor was never persisted"
+                );
+            }
+        }
+        // A dirty mark at quiescence must converge: one uncontended sync
+        // persists the floor (the retry contract in sync_inner's docs).
+        sync(floor, store);
+        let state = floor.lock().unwrap();
+        let store = store.lock().unwrap();
+        assert!(!state.dirty(), "quiescent sync left the mark dirty");
+        assert_eq!(
+            store.durable_floor(),
+            state.floor(),
+            "P2 violated: quiescent sync lost the floor"
+        );
+    }
+
+    /// Two syncs race one prune over a blob opened at floor 0 with a
+    /// pending advance to 4. The stale-overwrite window needs two
+    /// writers, so this is the smallest scenario exercising out-of-order
+    /// header images.
+    fn two_syncs_one_prune(sync: SyncDriver) {
+        loom::model(move || {
+            let floor = Arc::new(Mutex::new(FloorState::new(0)));
+            let store = Arc::new(Mutex::new(Store::new(0)));
+            // A prune before the race dirties the floor, like a caller
+            // pruning once before concurrent syncs begin.
+            prune(&floor, 4);
+            let syncers: Vec<_> = (0..2)
+                .map(|_| {
+                    let floor = floor.clone();
+                    let store = store.clone();
+                    thread::spawn(move || sync(&floor, &store))
+                })
+                .collect();
+            let pruner = {
+                let floor = floor.clone();
+                thread::spawn(move || prune(&floor, 8))
+            };
+            for handle in syncers {
+                handle.join().unwrap();
+            }
+            pruner.join().unwrap();
+            check_quiescent(sync, &floor, &store);
+        });
+    }
+
+    /// One sync races two prunes whose offsets can arrive out of order,
+    /// so one advance may be ineffective. This is the smallest scenario
+    /// exercising a lost mid-sync advance.
+    fn one_sync_two_prunes(sync: SyncDriver) {
+        loom::model(move || {
+            let floor = Arc::new(Mutex::new(FloorState::new(0)));
+            let store = Arc::new(Mutex::new(Store::new(0)));
+            // Dirty the floor so the sync starts with a header to write.
+            prune(&floor, 2);
+            let syncer = {
+                let floor = floor.clone();
+                let store = store.clone();
+                thread::spawn(move || sync(&floor, &store))
+            };
+            let pruners: Vec<_> = [4u64, 8]
+                .into_iter()
+                .map(|offset| {
+                    let floor = floor.clone();
+                    thread::spawn(move || prune(&floor, offset))
+                })
+                .collect();
+            syncer.join().unwrap();
+            for handle in pruners {
+                handle.join().unwrap();
+            }
+            check_quiescent(sync, &floor, &store);
+        });
+    }
+
+    #[test]
+    fn floor_state_two_syncs_one_prune() {
+        two_syncs_one_prune(protocol_sync);
+    }
+
+    #[test]
+    fn floor_state_one_sync_two_prunes() {
+        one_sync_two_prunes(protocol_sync);
+    }
+
+    // Sensitivity: each broken driver must make loom find a violating
+    // interleaving, or the harness would be too weak to trust.
+
+    #[test]
+    fn floor_state_catches_write_after_unlock() {
+        let found = catch_unwind(AssertUnwindSafe(|| {
+            two_syncs_one_prune(broken_sync_write_after_unlock)
+        }));
+        assert!(found.is_err(), "loom missed the stale header write race");
+    }
+
+    #[test]
+    fn floor_state_catches_epoch_blind_mark() {
+        let found = catch_unwind(AssertUnwindSafe(|| {
+            one_sync_two_prunes(broken_sync_epoch_blind)
+        }));
+        assert!(found.is_err(), "loom missed the lost floor race");
+    }
+}
