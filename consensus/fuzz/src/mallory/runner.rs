@@ -33,13 +33,12 @@ use super::{adversary, fault, lifecycle, log, multiplexer, network, policy, stat
 use crate::{
     BYZANTINE_IDX, CertCfgOf, CertifyChoice, ManagedValidator, N4F0C4, POST_GST_WINDOW,
     PublicKeyOf, SniffChannel, SniffingReceiver, ValidatorLifecycle, build_validator,
-    build_validator_with_reporter, happens_before, invariants, simplex::Simplex, sniff_sink,
+    build_validator_with_reporter, happens_before, invariants,
+    simplex::Simplex,
+    simplex_audit::{RecordingReporter, summaries},
+    sniff_sink,
 };
-use commonware_consensus::{
-    Monitor as _,
-    simplex::mocks::{relay, reporter::Reporter},
-    types::View,
-};
+use commonware_consensus::{Monitor as _, simplex::mocks::relay, types::View};
 use commonware_cryptography::{
     certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
 };
@@ -92,8 +91,12 @@ const AMNESIA_TAG: u64 = 0xa3f1_9c2d_7b64_e850;
 const CRASHED_TAG: u64 = 0x5c8b_2e71_d4a0_936f;
 
 /// The honest reporter type the runner clones for state extraction and liveness.
-type MalloryReporter<P> =
-    Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
+type MalloryReporter<P> = RecordingReporter<
+    deterministic::Context,
+    <P as Simplex>::Scheme,
+    <P as Simplex>::Elector,
+    Sha256Digest,
+>;
 
 /// Whether a step's sampled fault actually perturbed the run. Logging / observability
 /// ONLY (the decision log's `applied` field); it never gates learning, a `NoEffect`
@@ -552,6 +555,7 @@ async fn restart<P: Simplex>(
     let rebuilt = dispatcher::with_default(&dispatch, || {
         build_validator_with_reporter::<P, P::Elector, _, _, _, _, _, _>(
             existing,
+            mv.generation().wrapping_add(1),
             ctx,
             oracle_ref,
             participants,
@@ -1523,9 +1527,9 @@ fn run_inner<P: Simplex>(
         // must not feed the honest-reporter invariants.
         let mut observers = reporters.clone();
         observers.extend(managed.iter().map(|m| m.reporter()));
-        invariants::check_vote_invariants_with_byzantine(&byzantine, &observers);
-        let states = invariants::extract(reporters, n);
-        invariants::check::<P>(config.n, states);
+        let observer_summaries = summaries(&observers);
+        invariants::check_vote_invariants_with_byzantine(&byzantine, &observer_summaries);
+        invariants::check::<P>(config.n, reporters.as_slice());
     });
 }
 

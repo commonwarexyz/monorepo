@@ -19,16 +19,23 @@
 //! unlike [`crate::state_cov::alpha`], whose tokens embed absolute views and so
 //! almost never recur across runs.
 
-use crate::{simplex::Simplex, state_cov};
-use commonware_consensus::simplex::mocks::reporter::Reporter;
+use crate::{
+    simplex::Simplex,
+    simplex_audit::{RecordingReporter, summaries},
+    state_cov,
+};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_runtime::deterministic;
 use std::collections::BTreeSet;
 
 /// The honest-reporter type the descriptor reads: the shared mock reporter over
 /// the deterministic runtime, a backend's scheme, and its elector.
-type HonestReporter<P> =
-    Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
+type HonestReporter<P> = RecordingReporter<
+    deterministic::Context,
+    <P as Simplex>::Scheme,
+    <P as Simplex>::Elector,
+    Sha256Digest,
+>;
 
 /// View-relative protocol-state descriptor of the honest reporters: a compact
 /// fingerprint of their agreement state as offsets, spreads, and counts relative
@@ -37,7 +44,8 @@ pub(crate) fn state_descriptor<P: Simplex>(
     honest: &[HonestReporter<P>],
     max_participants: usize,
 ) -> u64 {
-    let states = state_cov::encode_reporter_states(honest, max_participants);
+    let summaries = summaries(honest);
+    let states = state_cov::encode_reporter_states(&summaries, max_participants);
     if states.is_empty() {
         return 0;
     }

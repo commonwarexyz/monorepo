@@ -19,6 +19,7 @@ pub mod ordered_broadcast;
 #[cfg(feature = "mocks")]
 pub mod ordered_broadcast_certificate_mock;
 pub mod simplex;
+pub(crate) mod simplex_audit;
 #[cfg(feature = "mocks")]
 pub mod simplex_certificate_mock;
 pub mod simplex_node;
@@ -29,6 +30,7 @@ pub mod utils;
 use crate::{
     disrupter::Disrupter,
     network::ByzantineFirstReceiver,
+    simplex_audit::{RecordingAutomaton, RecordingReporter, summaries},
     simplex_node::NodeFuzzInput,
     strategy::{AnyScope, FutureScope, SmallScope, Strategy, StrategyChoice},
     utils::{Action, Partition, SetPartition, apply_partition, link_peers, register},
@@ -540,14 +542,14 @@ pub(crate) fn sniff_sink<P: simplex::Simplex>(
     })
 }
 
-type ReporterOf<P> = reporter::Reporter<
+type RecordingReporterOf<P> = RecordingReporter<
     deterministic::Context,
     <P as simplex::Simplex>::Scheme,
     <P as simplex::Simplex>::Elector,
     Sha256Digest,
 >;
 
-type ReporterEntry<P> = (PublicKeyOf<P>, ReporterOf<P>);
+type ReporterEntry<P> = (PublicKeyOf<P>, RecordingReporterOf<P>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunAudit {
@@ -786,7 +788,7 @@ where
     generation: u32,
     /// Arc-backed reporter; a restart reuses this instance to retain pre-crash
     /// safety history.
-    reporter: reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
+    reporter: RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
     /// Application actor handle, retained so a crash can abort it. `None` once
     /// taken by a crash/restart.
     app_handle: Option<Handle<()>>,
@@ -805,7 +807,7 @@ where
     /// A clone of the Arc-backed reporter (shares live state with this validator).
     pub(crate) fn reporter(
         &self,
-    ) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest> {
+    ) -> RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest> {
         self.reporter.clone()
     }
 
@@ -855,7 +857,7 @@ where
     pub(crate) fn adopt(&mut self, rebuilt: ManagedValidator<P, EC>) {
         self.app_handle = rebuilt.app_handle;
         self.engine_handle = rebuilt.engine_handle;
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = rebuilt.generation;
         self.lifecycle = ValidatorLifecycle::Running;
     }
 
@@ -870,7 +872,7 @@ where
         self.engine_handle = rebuilt.engine_handle;
         self.partition = rebuilt.partition;
         self.reporter = rebuilt.reporter;
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = rebuilt.generation;
         self.lifecycle = ValidatorLifecycle::Amnesiac;
     }
 
@@ -911,7 +913,7 @@ pub(crate) fn spawn_honest_validator<
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
     wiring: ReporterWiring,
-) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
+) -> RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
     P: simplex::Simplex,
     EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
@@ -990,6 +992,7 @@ where
     let partition = validator.to_string();
     build_validator_with_reporter::<P, EC, _, _, _, _, _, _>(
         None,
+        0,
         context,
         oracle,
         participants,
@@ -1028,7 +1031,8 @@ pub(crate) fn build_validator_with_reporter<
     ResolverSender,
     ResolverReceiver,
 >(
-    existing: Option<reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>>,
+    existing: Option<RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>>,
+    generation: u32,
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -1059,14 +1063,22 @@ where
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
 {
     let reporter = match existing {
-        Some(reporter) => reporter,
+        Some(reporter) => {
+            reporter.set_generation(generation);
+            reporter
+        }
         None => {
             let reporter_cfg = reporter::Config {
                 participants: participants.try_into().expect("public keys are unique"),
                 scheme: scheme.clone(),
                 elector: elector.clone(),
             };
-            reporter::Reporter::new(context.child("reporter"), reporter_cfg)
+            RecordingReporter::new(
+                context.child("reporter"),
+                validator.clone(),
+                generation,
+                reporter_cfg,
+            )
         }
     };
 
@@ -1089,6 +1101,11 @@ where
     };
     let (actor, application) = application::Application::new(context.child("application"), app_cfg);
     let app_handle = actor.start();
+    let automaton = RecordingAutomaton::new(
+        context.child("automaton_recorder"),
+        application.clone(),
+        reporter.audit(),
+    );
 
     let blocker = oracle.control(validator.clone());
     let stored_scheme = scheme.clone();
@@ -1096,7 +1113,7 @@ where
         blocker,
         scheme,
         elector,
-        automaton: application.clone(),
+        automaton,
         relay: application.clone(),
         reporter: wiring.wire(reporter.clone()),
         partition: partition.clone(),
@@ -1128,7 +1145,7 @@ where
         validator,
         scheme: stored_scheme,
         partition,
-        generation: 0,
+        generation,
         reporter,
         app_handle: Some(app_handle),
         engine_handle: Some(engine_handle),
@@ -1153,7 +1170,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     channels: NetworkChannels<PublicKeyOf<P>>,
     certify: CertifyChoice,
     wiring: ReporterWiring,
-) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
+) -> RecordingReporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let (vote_network, certificate_network, resolver_network) = channels;
     let (vote_sender, vote_receiver) = vote_network;
     let (certificate_sender, certificate_receiver) = certificate_network;
@@ -1775,10 +1792,11 @@ fn run_standard_once<P: simplex::Simplex>(
                 state_cov::observe_tokens(tokens);
             }
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
-            invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
-            invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            let summary_reporters = summaries(&reporter_only);
+            invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
+            invariants::check_vote_invariants(config.faults as usize, &summary_reporters);
             let reporter_states = (state_coverage || collect_audit)
-                .then(|| state_cov::encode_reporter_states(&reporter_only, config.n as usize));
+                .then(|| state_cov::encode_reporter_states(&summary_reporters, config.n as usize));
             if state_coverage {
                 let metrics = context.encode();
                 state_cov::observe_with_metrics(
@@ -1793,8 +1811,7 @@ fn run_standard_once<P: simplex::Simplex>(
                 reporter_states: reporter_states.unwrap_or_default(),
                 happens_before: hb_summary,
             });
-            let states = invariants::extract(reporter_only, config.n as usize);
-            invariants::check::<P>(config.n, states);
+            invariants::check::<P>(config.n, reporter_only.as_slice());
             audit
         } else {
             None
@@ -1945,10 +1962,10 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         }
         if config.is_valid() {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
-            invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
-            invariants::check_vote_invariants(config.faults as usize, &reporter_only);
-            let states = invariants::extract(reporter_only, config.n as usize);
-            invariants::check::<P>(config.n, states);
+            let summary_reporters = summaries(&reporter_only);
+            invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
+            invariants::check_vote_invariants(config.faults as usize, &summary_reporters);
+            invariants::check::<P>(config.n, reporter_only.as_slice());
         }
     });
 }
@@ -2215,8 +2232,12 @@ fn run_twins<P: simplex::Simplex>(
                     scheme: scheme.clone(),
                     elector: primary_elector.clone(),
                 };
-                let reporter =
-                    reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
+                let reporter = RecordingReporter::new(
+                    primary_context.child("reporter"),
+                    validator.clone(),
+                    0,
+                    reporter_cfg,
+                );
 
                 let app_cfg = application::Config {
                     hasher: Sha256::default(),
@@ -2230,13 +2251,18 @@ fn run_twins<P: simplex::Simplex>(
                 let (actor, application) =
                     application::Application::new(primary_context.child("application"), app_cfg);
                 actor.start();
+                let automaton = RecordingAutomaton::new(
+                    primary_context.child("automaton_recorder"),
+                    application.clone(),
+                    reporter.audit(),
+                );
 
                 let blocker = oracle.control(validator.clone());
                 let engine_cfg = config::Config {
                     blocker,
                     scheme: scheme.clone(),
                     elector: primary_elector,
-                    automaton: application.clone(),
+                    automaton,
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     partition: format!("twin_{idx}_primary"),
@@ -2295,8 +2321,10 @@ fn run_twins<P: simplex::Simplex>(
                             scheme: scheme.clone(),
                             elector: secondary_elector.clone(),
                         };
-                        let secondary_reporter = reporter::Reporter::new(
+                        let secondary_reporter = RecordingReporter::new(
                             secondary_context.child("reporter"),
+                            validator.clone(),
+                            0,
                             secondary_reporter_cfg,
                         );
                         reporters.push(secondary_reporter.clone());
@@ -2316,13 +2344,18 @@ fn run_twins<P: simplex::Simplex>(
                                 secondary_app_cfg,
                             );
                         secondary_actor.start();
+                        let secondary_automaton = RecordingAutomaton::new(
+                            secondary_context.child("automaton_recorder"),
+                            secondary_application.clone(),
+                            secondary_reporter.audit(),
+                        );
 
                         let secondary_blocker = oracle.control(validator.clone());
                         let secondary_engine_cfg = config::Config {
                             blocker: secondary_blocker,
                             scheme: scheme.clone(),
                             elector: secondary_elector,
-                            automaton: secondary_application.clone(),
+                            automaton: secondary_automaton,
                             relay: secondary_application.clone(),
                             reporter: secondary_reporter,
                             partition: secondary_label,
@@ -2525,18 +2558,17 @@ fn run_twins<P: simplex::Simplex>(
                     .chain(reporters.iter())
                     .cloned()
                     .collect();
-                invariants::check_vote_invariants_with_byzantine(&compromised, &observers);
+                let observer_summaries = summaries(&observers);
+                invariants::check_vote_invariants_with_byzantine(&compromised, &observer_summaries);
                 if state_coverage {
+                    let honest_summaries = summaries(honest_reporters);
                     let reporter_states =
-                        state_cov::encode_reporter_states(honest_reporters, config.n as usize);
+                        state_cov::encode_reporter_states(&honest_summaries, config.n as usize);
                     let metrics = context.encode();
                     state_cov::observe_with_metrics(&reporter_states, &metrics);
                 }
-                let states = invariants::extract(
-                    reporters.into_iter().skip(honest_start).collect(),
-                    config.n as usize,
-                );
-                invariants::check::<P>(config.n, states);
+                let honest: Vec<_> = reporters.into_iter().skip(honest_start).collect();
+                invariants::check::<P>(config.n, honest.as_slice());
             }
         });
     };
@@ -2969,6 +3001,25 @@ mod tests {
 
         assert_eq!(unwrapped.auditor_state, wrapped.auditor_state);
         assert_eq!(unwrapped.reporter_states, wrapped.reporter_states);
+    }
+
+    #[cfg(feature = "mocks")]
+    #[test]
+    fn recording_reporter_checks_simplex_id_and_certificate_mock() {
+        assert!(
+            run_standard_once::<simplex::SimplexId>(audit_input(), false, true, false, None,)
+                .is_some()
+        );
+        assert!(
+            run_standard_once::<simplex::SimplexCertificateMock>(
+                audit_input(),
+                false,
+                true,
+                false,
+                None,
+            )
+            .is_some()
+        );
     }
 
     #[test]
