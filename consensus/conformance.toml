@@ -32,7 +32,7 @@ hash = "4d95bfc96428ea4220173fe7db87a49e75bb31a3014f04724d57efeba5ab253e"
 
 ["commonware_consensus::marshal::resolver::handler::tests::conformance::CodecConformance<Key<D>>"]
 n_cases = 65536
-hash = "481cd68f2e6452c0dda512c75d74ddd2e19ac6c9fb19c642c1a152a0d830c1b2"
+hash = "dbc25be3fe79436f527d88d42b7f0a9218aacd42617ef10a5deefa000c909f9d"
 
 ["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Ack<PublicKey,Scheme,Sha256Digest>>"]
 n_cases = 65536

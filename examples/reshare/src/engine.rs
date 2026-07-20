@@ -16,7 +16,7 @@ use commonware_consensus::{
         standard::{Deferred, Standard},
     },
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
-    types::{FixedEpocher, ViewDelta},
+    types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
     BatchVerifier, Hasher, Signer,
@@ -283,6 +283,7 @@ where
                 key_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
+                hint_activation: Some(Epoch::zero()),
                 max_repair: MAX_REPAIR,
                 max_pending_acks: MAX_PENDING_ACKS,
                 strategy: config.strategy.clone(),

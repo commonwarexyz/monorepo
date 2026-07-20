@@ -639,6 +639,7 @@ mod test {
                     key_write_buffer: NZUsize!(2048),
                     value_write_buffer: NZUsize!(2048),
                     block_codec_config: (),
+                    hint_activation: Some(Epoch::zero()),
                     max_repair: NZUsize!(10),
                     max_pending_acks: NZUsize!(1),
                     strategy: Sequential,

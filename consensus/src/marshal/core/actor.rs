@@ -2,7 +2,7 @@ use super::{
     Buffer, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
-    delivery::PendingVerification,
+    delivery::{DecodedBlock, PendingVerification},
     durability::{DispatchGate, Durable as _},
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
@@ -226,9 +226,20 @@ where
             let _ = processed_height.try_set(last_processed_height.get());
         }
         let floor = pending_floor_anchor.map_or_else(
-            || Floor::resolved(last_processed_height, last_processed_round),
+            || {
+                Floor::resolved(
+                    last_processed_height,
+                    last_processed_round,
+                    config.hint_activation,
+                )
+            },
             |finalization| {
-                Floor::awaiting_anchor(last_processed_height, last_processed_round, finalization)
+                Floor::awaiting_anchor(
+                    last_processed_height,
+                    last_processed_round,
+                    config.hint_activation,
+                    finalization,
+                )
             },
         );
 
@@ -987,12 +998,19 @@ where
         buffer: &Buf,
     ) {
         match key {
-            Key::Block(commitment) => {
+            Key::Block {
+                commitment,
+                certified,
+            } => {
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "block missing on request");
                     return;
                 };
-                response.send_lossy(block.encode());
+                if certified {
+                    response.send_lossy(V::into_inner_shared(block).encode());
+                } else {
+                    response.send_lossy(block.encode());
+                }
             }
             Key::Finalized { height } => {
                 let Some(finalization) = self.get_finalization_by_height(height).await else {
@@ -1005,7 +1023,7 @@ where
                 };
                 response.send_lossy((finalization, V::into_inner(block)).encode());
             }
-            Key::Notarized { round } => {
+            Key::Notarized { round, certified } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
                     debug!(?round, "notarization missing on request");
                     return;
@@ -1015,7 +1033,11 @@ where
                     debug!(?commitment, "block missing on request");
                     return;
                 };
-                response.send_lossy((notarization, block).encode());
+                if certified {
+                    response.send_lossy((notarization, V::into_inner_shared(block)).encode());
+                } else {
+                    response.send_lossy((notarization, block).encode());
+                }
             }
         }
     }
@@ -1055,17 +1077,18 @@ where
         // not known before the request. Height-based fetching is only for callers
         // that already have a validated pruning height.
         match fallback {
-            CommitmentFallback::FetchByRound { round } => {
+            CommitmentFallback::FetchByRound { round, certified } => {
                 // Fetch the notarized proposal for this round. The response
                 // must include a certificate so the commitment is tied to the
                 // certified round context. The decoded block is heightable, but
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
-                if self
-                    .floor
-                    .fetch_if_permitted(resolver, Request::notarized(round))
-                    .denied()
-                {
+                let request = if certified {
+                    Request::certified(round)
+                } else {
+                    Request::notarized(round)
+                };
+                if self.floor.fetch_if_permitted(resolver, request).denied() {
                     return;
                 }
                 debug!(?round, ?digest, "requested block missing");
@@ -1093,7 +1116,7 @@ where
         }
 
         let round = match fallback {
-            CommitmentFallback::FetchByRound { round } => Some(round),
+            CommitmentFallback::FetchByRound { round, .. } => Some(round),
             CommitmentFallback::Wait | CommitmentFallback::FetchByCommitment { .. } => None,
         };
 
@@ -1356,21 +1379,19 @@ where
             key, subscribers, ..
         } = delivery;
         match key {
-            Key::Block(commitment) => {
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
-                let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
+            Key::Block {
+                commitment,
+                certified,
+            } => {
+                let Some(block) = self.decode_resolver_block(value, commitment, certified) else {
                     response.send_lossy(false);
                     return;
                 };
-                if V::commitment(&block) != commitment {
-                    response.send_lossy(false);
-                    return;
-                }
 
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
                 // process it as an ordinary block delivery.
-                let block = Arc::new(block);
+                let block = Arc::new(block.into_block(commitment));
                 if self
                     .ingest(Arc::clone(&block), buffer, application, resolver)
                     .await
@@ -1464,14 +1485,8 @@ where
                     return;
                 };
 
-                // In contrast to the `Block` and `Notarization` deliveries, the finalization delivery
-                // is guaranteed to be certified (assuming the certificate verifies). Because of this,
-                // we can skip broader payload checks and just check that the application block matches
-                // the commitment in the finalization proposal.
-                //
-                // TODO(https://github.com/commonwarexyz/monorepo/issues/3938): Apply this pattern
-                // conditionally to `Request::Block` and `Request::Notarized`, if the requester knows
-                // the requested block is certified.
+                // The finalization authenticates the application block, so the
+                // trusted commitment can rebuild any variant-specific wrapper.
                 let commitment = finalization.proposal.payload;
                 if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
                 {
@@ -1484,7 +1499,7 @@ where
                     response,
                 });
             }
-            Key::Notarized { round } => {
+            Key::Notarized { round, certified } => {
                 let Some(scheme) = self.provider.scheme(round.epoch()) else {
                     debug!(
                         ?round,
@@ -1509,23 +1524,15 @@ where
                     return;
                 }
 
-                // Use the notarization payload to derive the block decode config. Below, the
-                // decoded block is checked against the same payload.
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
                     return;
                 }
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
-                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
+                let Some(block) = self.decode_resolver_block(value, commitment, certified) else {
                     response.send_lossy(false);
                     return;
                 };
-
-                if V::commitment(&block) != notarization.proposal.payload {
-                    response.send_lossy(false);
-                    return;
-                }
                 delivers.push(PendingVerification::Notarized {
                     notarization,
                     block,
@@ -1533,6 +1540,28 @@ where
                 });
             }
         }
+    }
+
+    fn decode_resolver_block(
+        &self,
+        value: Bytes,
+        commitment: V::Commitment,
+        certified: bool,
+    ) -> Option<DecodedBlock<V>> {
+        if certified {
+            let block = V::ApplicationBlock::decode_cfg(value, &self.block_codec_config).ok()?;
+            if block.digest() != V::commitment_to_inner(commitment) {
+                return None;
+            }
+            return Some(DecodedBlock::Certified(block));
+        }
+
+        let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+        let block = V::Block::decode_cfg(value, &block_cfg).ok()?;
+        if V::commitment(&block) != commitment {
+            return None;
+        }
+        Some(DecodedBlock::Untrusted(block))
     }
 
     /// Batch verify pending certificates and process valid items.
@@ -1651,6 +1680,7 @@ where
                     let round = notarization.round();
                     let commitment = notarization.proposal.payload;
                     let digest = V::commitment_to_inner(commitment);
+                    let block = block.into_block(commitment);
                     debug!(?round, ?digest, "received notarization");
 
                     // Cache the notarization and block, blocking until both are

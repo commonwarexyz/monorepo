@@ -211,6 +211,9 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         self.shards.get_or_init(|| {
             let (commitment, shards) = Self::encode(&self.inner, self.config, strategy);
 
+            // Trusted construction requires a locally certified commitment. A
+            // mismatch means that contract or consensus safety was violated.
+            // Do not serve shards under a different commitment.
             assert_eq!(
                 commitment, self.commitment,
                 "coded block constructed with trusted commitment does not match commitment"
@@ -310,9 +313,10 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 /// Codec configuration for decoding a [`CodedBlock`] from the wire.
 ///
 /// Pairs the inner block's codec config with the [`Commitment`] that the
-/// decoded block must match. The [`Read`] impl rejects any block whose
-/// recoded form would not produce `expected` without performing the full
-/// re-encoding.
+/// decoded block must match. This untrusted decoding path re-encodes the block
+/// to validate its coding commitment. Resolver requests for locally certified
+/// commitments transfer the application block instead and construct a lazy
+/// [`CodedBlock`] with [`CodedBlock::new_trusted`].
 pub struct CodedBlockCfg<B: Block> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
@@ -411,8 +415,10 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 /// A [`CodedBlock`] paired with its [`Commitment`] for efficient storage and retrieval.
 ///
 /// This type should be preferred for storing verified [`CodedBlock`]s on disk - it
-/// should never be sent over the network. Use [`CodedBlock`] for network transmission,
-/// as it re-encodes the block with [`Scheme::encode`] on deserialization to ensure integrity.
+/// should never be sent over the network. Untrusted network transmission uses
+/// [`CodedBlock`], which re-encodes with [`Scheme::encode`] on deserialization.
+/// Certified resolver requests transfer the application block and reconstruct
+/// a lazy [`CodedBlock`] from the trusted commitment.
 ///
 /// When reading from storage, we don't need to re-encode the block to compute
 /// the commitment - we stored it alongside the block when we first verified it.

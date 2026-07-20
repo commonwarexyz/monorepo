@@ -339,7 +339,7 @@ mod tests {
         Heightable,
         marshal::{self, core::Actor as MarshalActor},
         simplex::mocks::scheme as scheme_mocks,
-        types::{FixedEpocher, Height, ViewDelta},
+        types::{Epoch, FixedEpocher, Height, ViewDelta},
     };
     use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
@@ -457,6 +457,7 @@ mod tests {
                 key_write_buffer: NZUsize!(64),
                 value_write_buffer: NZUsize!(64),
                 block_codec_config: (),
+                hint_activation: Some(Epoch::zero()),
                 max_repair: NZUsize!(1),
                 max_pending_acks: NZUsize!(1),
                 strategy: Sequential,

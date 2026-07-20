@@ -1,7 +1,7 @@
 use crate::{
     marshal::resolver::handler::{Annotation, Key, Request},
     simplex::types::Finalization,
-    types::{Height, Round},
+    types::{Epoch, Height, Round},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
@@ -45,25 +45,45 @@ impl FetchAdmission {
 pub(super) struct Floor<S: Scheme, C: Digest> {
     processed: ProcessedFloor,
     pending: Option<Finalization<S, C>>,
+    hint_activation: Option<Epoch>,
 }
 
 impl<S: Scheme, C: Digest> Floor<S, C> {
-    pub(super) const fn resolved(height: Option<Height>, round: Round) -> Self {
+    pub(super) const fn resolved(
+        height: Option<Height>,
+        round: Round,
+        hint_activation: Option<Epoch>,
+    ) -> Self {
         Self {
             processed: ProcessedFloor { height, round },
             pending: None,
+            hint_activation,
         }
     }
 
     pub(super) const fn awaiting_anchor(
         height: Option<Height>,
         round: Round,
+        hint_activation: Option<Epoch>,
         finalization: Finalization<S, C>,
     ) -> Self {
         Self {
             processed: ProcessedFloor { height, round },
             pending: Some(finalization),
+            hint_activation,
         }
+    }
+
+    /// Returns true once the processed round has reached the hint activation
+    /// epoch.
+    ///
+    /// Certification hints change the peer-visible request encoding, so they
+    /// activate hardfork-style: every provider must be upgraded before the
+    /// activation epoch begins. Requests issued before activation use the
+    /// legacy hint-free encoding.
+    fn hints_active(&self) -> bool {
+        self.hint_activation
+            .is_some_and(|activation| self.processed.round.epoch() >= activation)
     }
 
     pub(super) const fn processed_height(&self) -> Height {
@@ -122,7 +142,7 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
         if !self.processed.permits(&fetch) {
             return FetchAdmission::Denied;
         }
-        resolver.fetch(fetch);
+        resolver.fetch(fetch.into_inner(self.hints_active()));
         FetchAdmission::Issued
     }
 
@@ -138,7 +158,7 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
         if !self.processed.permits(&fetch) {
             return FetchAdmission::Denied;
         }
-        resolver.fetch_targeted(fetch, targets);
+        resolver.fetch_targeted(fetch.into_inner(self.hints_active()), targets);
         FetchAdmission::Issued
     }
 
@@ -150,9 +170,11 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
     where
         R: Resolver<Key = Key<C>, Subscriber = Annotation>,
     {
+        let hinted = self.hints_active();
         let fetches = fetches
             .into_iter()
             .filter(|fetch| self.processed.permits(fetch))
+            .map(|fetch| fetch.into_inner(hinted))
             .collect::<Vec<_>>();
         if fetches.is_empty() {
             return FetchAdmission::Denied;
@@ -264,7 +286,7 @@ mod tests {
     }
 
     fn floor() -> Floor<TestScheme, TestDigest> {
-        Floor::resolved(Some(Height::new(5)), round(5))
+        Floor::resolved(Some(Height::new(5)), round(5), None)
     }
 
     #[test]
@@ -321,7 +343,8 @@ mod tests {
             fetches[1],
             Fetch {
                 key: Key::Notarized {
-                    round: request_round
+                    round: request_round,
+                    ..
                 },
                 subscriber: Annotation::Notarization {
                     round: subscriber_round
@@ -389,7 +412,7 @@ mod tests {
         assert_eq!(fetches.len(), 2);
         assert!(matches!(fetches[0].key, Key::Finalized { height } if height == Height::new(6)));
         assert!(
-            matches!(fetches[1].key, Key::Notarized { round: request_round } if request_round == round(6))
+            matches!(fetches[1].key, Key::Notarized { round: request_round, .. } if request_round == round(6))
         );
 
         let mut resolver = TestResolver::default();
@@ -408,8 +431,109 @@ mod tests {
     }
 
     #[test]
+    fn hints_activate_at_processed_activation_epoch() {
+        let mut floor = Floor::<TestScheme, TestDigest>::resolved(
+            Some(Height::new(5)),
+            Round::new(Epoch::new(2), View::new(5)),
+            Some(Epoch::new(3)),
+        );
+        let mut resolver = TestResolver::default();
+
+        // Below the activation epoch, requests use the legacy encoding.
+        floor
+            .fetch_if_permitted(
+                &mut resolver,
+                Request::certified_block(digest(1), Height::new(6)),
+            )
+            .ignore();
+        floor
+            .fetch_if_permitted(
+                &mut resolver,
+                Request::certified(Round::new(Epoch::new(2), View::new(6))),
+            )
+            .ignore();
+
+        // Crossing the activation epoch flips new requests to hinted keys.
+        floor.set_processed_round(Round::new(Epoch::new(3), View::zero()));
+        floor
+            .fetch_if_permitted(
+                &mut resolver,
+                Request::certified_block(digest(2), Height::new(7)),
+            )
+            .ignore();
+        floor
+            .fetch_if_permitted(
+                &mut resolver,
+                Request::certified(Round::new(Epoch::new(3), View::new(1))),
+            )
+            .ignore();
+
+        // Fully validated notarized fetches never carry the hint.
+        floor
+            .fetch_if_permitted(
+                &mut resolver,
+                Request::notarized(Round::new(Epoch::new(3), View::new(2))),
+            )
+            .ignore();
+
+        let hints = resolver
+            .fetches()
+            .iter()
+            .map(|fetch| match fetch.key {
+                Key::Block { certified, .. } | Key::Notarized { certified, .. } => certified,
+                Key::Finalized { .. } => unreachable!("no finalized requests issued"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hints, vec![false, false, true, true, false]);
+    }
+
+    #[test]
+    fn hints_stay_disabled_without_activation_epoch() {
+        let floor = Floor::<TestScheme, TestDigest>::resolved(
+            Some(Height::new(5)),
+            Round::new(Epoch::new(9), View::new(5)),
+            None,
+        );
+        let mut resolver = TestResolver::default();
+        let mut rng = commonware_utils::test_rng();
+        let target = crypto_ed25519::PrivateKey::random(&mut rng).public_key();
+
+        floor
+            .fetch_targeted_if_permitted(
+                &mut resolver,
+                Request::certified_block(digest(1), Height::new(6)),
+                NonEmptyVec::new(target),
+            )
+            .ignore();
+        floor
+            .fetch_all_if_permitted(
+                &mut resolver,
+                vec![Request::certified(Round::new(Epoch::new(9), View::new(6)))],
+            )
+            .ignore();
+
+        assert!(matches!(
+            resolver.targeted()[..],
+            [Key::Block {
+                certified: false,
+                ..
+            }]
+        ));
+        assert!(matches!(
+            resolver.fetches()[..],
+            [Fetch {
+                key: Key::Notarized {
+                    certified: false,
+                    ..
+                },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
-        let floor = Floor::<TestScheme, TestDigest>::resolved(None, round(5));
+        let floor = Floor::<TestScheme, TestDigest>::resolved(None, round(5), None);
         let mut resolver = TestResolver::default();
 
         assert!(

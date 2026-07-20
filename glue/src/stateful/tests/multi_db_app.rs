@@ -568,6 +568,7 @@ impl EngineDefinition for MultiDbEngine {
             key_write_buffer: IO_BUFFER_SIZE,
             value_write_buffer: IO_BUFFER_SIZE,
             block_codec_config: (),
+            hint_activation: Some(Epoch::zero()),
             max_repair: NZUsize!(10),
             max_pending_acks,
             strategy: Sequential,

@@ -352,6 +352,7 @@ where
                     parent_commitment,
                     core::CommitmentFallback::FetchByRound {
                         round: Round::new(consensus_context.epoch(), parent_view),
+                        certified: true,
                     },
                 );
 
@@ -511,9 +512,13 @@ where
             ?payload,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self
-            .marshal
-            .subscribe_by_commitment(payload, core::CommitmentFallback::FetchByRound { round });
+        let block_rx = self.marshal.subscribe_by_commitment(
+            payload,
+            core::CommitmentFallback::FetchByRound {
+                round,
+                certified: false,
+            },
+        );
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -770,6 +775,7 @@ where
                     parent_commitment,
                     core::CommitmentFallback::FetchByRound {
                         round: Round::new(consensus_context.epoch(), parent_view),
+                        certified: true,
                     },
                 );
 
