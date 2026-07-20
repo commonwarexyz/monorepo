@@ -1,8 +1,9 @@
 use super::{Config, Error, Identifier};
 use crate::{
     Context,
-    journal::segmented::oversized::{
-        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+    journal::{
+        Error as JournalError,
+        segmented::oversized::{Config as OversizedConfig, Oversized, Record as OversizedRecord},
     },
 };
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
@@ -689,13 +690,24 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Rewind oversized to the committed section and key size
+                // A checkpoint is only published after the oversized journal is durably
+                // synced, so recovery must retain at least the committed size. Anything
+                // less means committed data was lost (e.g. corrupted in place and rewound
+                // by recovery) and must not be silently absorbed.
+                let recovered = match oversized.size(checkpoint.section) {
+                    Ok(size) => size,
+                    Err(JournalError::SectionOutOfRange(_)) => 0,
+                    Err(err) => return Err(err.into()),
+                };
+                if recovered < checkpoint.oversized_size {
+                    return Err(Error::CheckpointMismatch);
+                }
+
+                // Rewind oversized to the committed section and key size. The rewind
+                // makes its truncations durable before returning.
                 oversized
                     .rewind(checkpoint.section, checkpoint.oversized_size)
                     .await?;
-
-                // Sync oversized
-                oversized.sync(checkpoint.section).await?;
 
                 // Resize table if needed
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
@@ -1606,6 +1618,65 @@ mod tests {
             };
             let result = Freezer::<_, FixedBytes<64>, i32>::init(
                 context.child("storage"),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::CheckpointMismatch)));
+        });
+    }
+
+    #[test_traced]
+    fn corrupted_committed_value_fails_init() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 4,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 4,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            // Create freezer with committed data
+            let checkpoint = {
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child("first"),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+                freezer.put(test_key("key0"), 42).await.unwrap();
+                freezer.sync().await.unwrap();
+                freezer.close().await.unwrap()
+            };
+            assert!(checkpoint.oversized_size > 0);
+
+            // Corrupt the committed value's checksum in the value journal
+            {
+                let (blob, len) = context
+                    .open(&cfg.value_partition, &checkpoint.section.to_be_bytes())
+                    .await
+                    .unwrap();
+                let byte = blob.read_at(len - 1, 1).await.unwrap();
+                let mut corrupted = byte.coalesce();
+                corrupted.as_mut()[0] ^= 0xFF;
+                blob.write_at_sync(len - 1, corrupted).await.unwrap();
+            }
+
+            // Recovery rewinds the corrupted entry below the checkpoint's committed size,
+            // which init must surface rather than silently absorb.
+            let result = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("second"),
                 cfg.clone(),
                 Some(checkpoint),
             )
