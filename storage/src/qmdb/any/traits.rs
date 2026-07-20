@@ -84,6 +84,12 @@ pub trait DbAny<F: Family>:
         key: &'a Self::Key,
     ) -> impl Future<Output = Result<Option<Self::Value>, Error<F>>> + Send + use<'a, F, Self>;
 
+    /// Get the values of multiple keys, returned in the same order as the input keys.
+    fn get_many<'a>(
+        &'a self,
+        keys: &'a [&'a Self::Key],
+    ) -> impl Future<Output = Result<Vec<Option<Self::Value>>, Error<F>>> + Send + use<'a, F, Self>;
+
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
@@ -187,6 +193,10 @@ macro_rules! impl_db_any {
 
             async fn get(&self, key: &$key) -> ::core::result::Result<Option<$val>, $crate::qmdb::Error<$fam>> {
                 <$ty>::get(self, key).await
+            }
+
+            async fn get_many(&self, keys: &[&$key]) -> ::core::result::Result<Vec<Option<$val>>, $crate::qmdb::Error<$fam>> {
+                Self::get_many(self, keys).await
             }
 
             fn root(&self) -> $dig {

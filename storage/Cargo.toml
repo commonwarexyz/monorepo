@@ -108,9 +108,9 @@ path = "src/qmdb/benches/bench_gungraun.rs"
 required-features = ["test-traits"]
 
 [[bench]]
-name = "init_scale"
+name = "scale"
 harness = false
-path = "src/qmdb/benches/init_scale.rs"
+path = "src/qmdb/benches/scale.rs"
 required-features = ["test-traits"]
 
 [[bench]]

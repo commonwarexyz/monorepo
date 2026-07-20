@@ -211,6 +211,11 @@ where
         self.any.get_metadata().await
     }
 
+    /// Batch read multiple keys, returning results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        self.any.get_many(keys).await
+    }
+
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
