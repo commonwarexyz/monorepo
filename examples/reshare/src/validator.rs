@@ -15,17 +15,13 @@ use commonware_consensus::{
     marshal::{
         self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
     },
-    simplex::{config::ForwardingPolicy, elector::RoundRobin, types::Finalization},
+    simplex::{config::ForwardingPolicy, elector::RoundRobin},
     types::{Epoch, FixedEpocher, ViewDelta},
     Reporters,
 };
-use commonware_cryptography::{
-    bls12381::primitives::sharing::Mode,
-    ed25519,
-    sha256::{Digest as Sha256Digest, Sha256},
-};
+use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519, sha256::Sha256};
 use commonware_glue::{
-    dkg::{anchor, fence::Fence, orchestrator, reshare, SecretStore as _},
+    dkg::{anchor, fence::Fence, orchestrator, reshare, SecretStore as _, state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync}, },
     stateful::{
         db::{DatabaseSet, p2p::standard as qmdb_resolver},
         probe::{Config as ProbeConfig, Probe},
@@ -305,13 +301,22 @@ pub async fn run(context: tokio::Context, args: Validator) {
             .floor()
             .cloned()
             .expect("state sync startup must have floor");
-        orchestrator::StateSync { artifact, floor }
+        StateSync {
+            info: artifact.info,
+            floor,
+        }
     });
+    let state_sync = StateSyncPlan::init(
+        context.child("dkg_state_sync_plan"),
+        StateSyncConfig {
+            partition_prefix: partition_prefix.to_string(),
+            max_participants: MAX_PARTICIPANTS,
+        },
+        state_sync,
+    )
+    .await;
 
     let (fence, gate) = Fence::new(fence_epoch);
-    let sync_floor: Option<Finalization<Scheme, Sha256Digest>> = plan.floor().cloned();
-    let state_sync_floor: Option<Sha256Digest> =
-        sync_floor.as_ref().map(|floor| floor.proposal.payload);
     let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
         context.child("reshare"),
         reshare::Config {
@@ -323,7 +328,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             strategy: Sequential,
             registrar: Registrar::new(provider.clone()),
             marshal: marshal.clone(),
-            state_sync_floor,
+            state_sync: state_sync.clone(),
             fence,
             namespace: NAMESPACE,
             sharing_mode: Mode::RootsOfUnity,
