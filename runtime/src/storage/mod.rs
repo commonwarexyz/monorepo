@@ -421,6 +421,59 @@ impl arbitrary::Arbitrary<'_> for Header {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    //! Kani proofs that the blob header decoder is total: for ANY input
+    //! within the stated size bound it returns `Ok` or `Err` without
+    //! panicking, overflowing, or reading out of bounds. Recovery feeds this
+    //! decoder raw disk bytes before any checksum has vouched for them.
+    //!
+    //! Scope: inputs are bounded by the harness constants below, and the
+    //! proofs check only totality plus the stated postconditions. Nothing is
+    //! claimed about inputs larger than the bound, and nothing is claimed
+    //! about the semantic validity of accepted values beyond those
+    //! postconditions.
+
+    use super::Header;
+    use commonware_codec::Read;
+
+    /// Covers [`Header::SIZE`] (16 bytes) plus slack.
+    const HEADER_BOUND: usize = 24;
+
+    /// [`Header::read_cfg`] is total for any input of at most
+    /// [`HEADER_BOUND`] bytes.
+    #[kani::proof]
+    fn header_read_total() {
+        let buf: [u8; HEADER_BOUND] = kani::any();
+        let n: usize = kani::any();
+        kani::assume(n <= HEADER_BOUND);
+        let mut slice = &buf[..n];
+        let _ = Header::read_cfg(&mut slice, &());
+    }
+
+    /// [`Header::from`] is total for any header bytes, raw length, data
+    /// offset, and version range, and every accepted header satisfies
+    /// `floor <= size` (the `InvalidFloor` rejection is total). The
+    /// accepted floor also equals the big-endian decoding of the input's
+    /// floor bytes.
+    #[kani::proof]
+    fn header_from_floor_bounded() {
+        let raw_bytes: [u8; Header::SIZE] = kani::any();
+        let raw_len: u64 = kani::any();
+        let data_offset: u64 = kani::any();
+        let lo: u16 = kani::any();
+        let hi: u16 = kani::any();
+        let Ok((_, size, floor)) = Header::from(raw_bytes, raw_len, &(lo..=hi), data_offset) else {
+            return;
+        };
+        assert!(floor <= size);
+        assert_eq!(
+            floor,
+            u64::from_be_bytes(raw_bytes[8..16].try_into().unwrap())
+        );
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{Header, HeaderError};

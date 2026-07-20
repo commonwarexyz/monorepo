@@ -413,6 +413,260 @@ impl Table {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    //! Kani proofs that the layout decoders are total: for ANY input within
+    //! the stated size bound they return `Some` or `None` without panicking,
+    //! overflowing, or reading out of bounds. Recovery feeds these decoders
+    //! raw disk bytes before any checksum has vouched for them.
+    //!
+    //! Scope: inputs are bounded by the harness constants below, and the
+    //! proofs check only totality plus the stated postconditions. Nothing is
+    //! claimed about inputs larger than the bound, and nothing is claimed
+    //! about the semantic validity of accepted values beyond those
+    //! postconditions.
+    //!
+    //! Every loop in [`Table::decode`] consumes at least 4 bytes of input
+    //! per iteration (partitions: 4 plus the name, entries: at least 47,
+    //! runs and checksum refs: 24, manifest: 16), so iteration counts are
+    //! bounded by the input length and the unwind bounds below are sound.
+
+    use super::{Superblock, Table};
+
+    /// Replacement for [`commonware_cryptography::Crc32::checksum`] under
+    /// verification. The real implementation dispatches into `crc_fast`
+    /// (SIMD kernels behind runtime CPU-feature detection, which Kani
+    /// cannot execute) and its result only gates acceptance. Returning an
+    /// unconstrained value is sound for totality: the real function returns
+    /// one specific u32 per input, so every real execution is contained in
+    /// the behaviors explored with the stub.
+    ///
+    /// Referenced only through `kani::stub` attributes, which dead-code
+    /// analysis does not see.
+    #[allow(dead_code)]
+    fn any_checksum(_data: &[u8]) -> u32 {
+        kani::any()
+    }
+
+    /// Covers [`Superblock::SIZE`] (34 bytes) plus slack.
+    const SUPERBLOCK_BOUND: usize = 40;
+
+    /// [`Superblock::decode`] is total for any input of at most
+    /// [`SUPERBLOCK_BOUND`] bytes, and every accepted superblock's fields
+    /// equal the big-endian decoding of the corresponding input bytes.
+    #[kani::proof]
+    #[kani::stub(commonware_cryptography::Crc32::checksum, any_checksum)]
+    fn superblock_decode_total() {
+        let buf: [u8; SUPERBLOCK_BOUND] = kani::any();
+        let n: usize = kani::any();
+        kani::assume(n <= SUPERBLOCK_BOUND);
+        let Some(sb) = Superblock::decode(&buf[..n]) else {
+            return;
+        };
+        assert_eq!(sb.seq, u64::from_be_bytes(buf[6..14].try_into().unwrap()));
+        assert_eq!(
+            sb.table_offset,
+            u64::from_be_bytes(buf[14..22].try_into().unwrap())
+        );
+        assert_eq!(
+            sb.table_len,
+            u32::from_be_bytes(buf[22..26].try_into().unwrap())
+        );
+        assert_eq!(
+            sb.table_crc,
+            u32::from_be_bytes(buf[26..30].try_into().unwrap())
+        );
+    }
+
+    /// Replacement for [`core::str::from_utf8`] under verification that
+    /// makes the validation VERDICT nondeterministic without running the
+    /// validation loops (whose unrolling inside the unrolled partition-name
+    /// loop makes the [`TABLE_BOUND`] harness intractable). Both variants
+    /// are explored for every input: the `Ok` carries the input bytes
+    /// unvalidated, and the `Err` is a real [`core::str::Utf8Error`]
+    /// obtained by validating a concrete invalid byte through the sibling
+    /// [`core::str::from_utf8_mut`], which this stub does not replace.
+    /// [`String::from_utf8`] then builds its own error value around it, so
+    /// decode's rejection path runs unmodified. This is sound for totality:
+    /// the real function returns one of these two variants per input, so
+    /// every real execution is contained in the behaviors explored here.
+    ///
+    /// Referenced only through `kani::stub` attributes, which dead-code
+    /// analysis does not see.
+    #[allow(dead_code)]
+    fn any_utf8_verdict(v: &[u8]) -> Result<&str, core::str::Utf8Error> {
+        if kani::any() {
+            // SAFETY: the result is never read as UTF-8. Decode only wraps
+            // it into a stored `String`, and the harness only takes its
+            // byte length, so the invalid contents this branch can admit
+            // are never observed as `str`.
+            Ok(unsafe { core::str::from_utf8_unchecked(v) })
+        } else {
+            let mut invalid = [0xffu8];
+            Err(core::str::from_utf8_mut(&mut invalid).unwrap_err())
+        }
+    }
+
+    /// Replacement for [`Vec::with_capacity`] under verification. The
+    /// capacity is a pure allocation hint, so deferring to [`Vec::new`]
+    /// is observably identical (pushes reallocate on demand), and it is
+    /// what makes the table harnesses tractable: decode preallocates
+    /// `count.min(1024)` slots per vector, and bit-blasting materializes
+    /// every such symbolic-size heap array at full width during SAT
+    /// conversion, which exhausts memory.
+    ///
+    /// Referenced only through `kani::stub` attributes, which dead-code
+    /// analysis does not see.
+    #[allow(dead_code)]
+    fn vec_no_capacity_hint<T>(_capacity: usize) -> Vec<T> {
+        Vec::new()
+    }
+
+    /// The exact byte length [`Table::encode`] would produce for `table`.
+    fn encoded_len(table: &Table) -> usize {
+        let mut len = 8 + 8 + 4;
+        for p in &table.partitions {
+            len += 4 + p.len();
+        }
+        len += 4;
+        for e in &table.blobs {
+            len += 8 + 4 + 4 + e.name.len() + 2 + 8 + 8;
+            len += 4 + e.runs.len() * 24;
+            len += 4 + e.checksums.len() * 24;
+            len += 4 + 1 + if e.shadow.is_some() { 8 } else { 0 };
+        }
+        len + 4 + table.manifest.len() * 16 + 4
+    }
+
+    /// Bound for the entry-focused harness. 87 bytes admit an accepted
+    /// table holding one complete entry (79 bytes) or one entry with a
+    /// present shadow (87), with every field inside the entry symbolic.
+    /// The run and checksum loops execute their hostile-count and
+    /// truncation paths here (a complete 24-byte iteration needs 94
+    /// bytes), and their complete-iteration path is covered by
+    /// [`table_decode_total_full_shape`]. Larger bounds do not fit: the
+    /// formula for this harness at 111 bytes already exhausts a 64 GB
+    /// machine during SAT solving under Kani 0.67.
+    const TABLE_ENTRY_BOUND: usize = 87;
+
+    /// [`Table::decode`] is total for any input of at most
+    /// [`TABLE_ENTRY_BOUND`] bytes whose partition-count field holds zero
+    /// and whose blob-count field holds one, with the UTF-8 validation
+    /// verdict made nondeterministic by [`any_utf8_verdict`], and every
+    /// accepted table re-encodes to exactly the input length (the
+    /// exact-consumption contract). Everything inside the entry stays
+    /// symbolic: name length, run and checksum counts, shadow flag, and
+    /// the manifest count. Inputs that declare partitions are covered by
+    /// [`table_decode_total_partitions`] up to its smaller bound, and the
+    /// full-feature shape by [`table_decode_total_full_shape`].
+    ///
+    /// The count bytes are pinned by assignment rather than `assume` so
+    /// constant propagation removes the partition loop and all but one
+    /// blob iteration from the unrolled program (an assumed-equal
+    /// symbolic count would still unroll every nest, which does not fit
+    /// in memory).
+    ///
+    /// The unwind bound is set by the manifest loop: at most 3 complete
+    /// 16-byte items fit in the bytes after the fixed header and counts,
+    /// plus a failing iteration, plus the unwinding check.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    #[kani::stub(commonware_cryptography::Crc32::checksum, any_checksum)]
+    #[kani::stub(core::str::from_utf8, any_utf8_verdict)]
+    #[kani::stub(std::vec::Vec::with_capacity, vec_no_capacity_hint)]
+    fn table_decode_total_entries() {
+        let mut buf: [u8; TABLE_ENTRY_BOUND] = kani::any();
+        buf[16] = 0;
+        buf[17] = 0;
+        buf[18] = 0;
+        buf[19] = 0;
+        buf[20] = 0;
+        buf[21] = 0;
+        buf[22] = 0;
+        buf[23] = 1;
+        let n: usize = kani::any();
+        kani::assume(n <= TABLE_ENTRY_BOUND);
+        let Some(table) = Table::decode(&buf[..n]) else {
+            return;
+        };
+        assert_eq!(encoded_len(&table), n);
+    }
+
+    /// The exact size of the one-of-everything encoding: one partition
+    /// with a 1-byte name, one entry with a 1-byte name, one run, one
+    /// checksum ref, a present shadow, and one manifest item.
+    const TABLE_FULL_SHAPE_BOUND: usize = 157;
+
+    /// [`Table::decode`] is total for any input of at most
+    /// [`TABLE_FULL_SHAPE_BOUND`] bytes whose count, length, and flag
+    /// fields hold the one-of-everything shape above (pinned by
+    /// assignment, everything else symbolic: both names, ids, offsets,
+    /// sizes, floors, CRCs, and the input length), and every accepted
+    /// table re-encodes to exactly the input length. With every loop
+    /// count concrete the unrolled program is nearly straight-line, so
+    /// this covers the full-feature acceptance path that the bounded
+    /// harnesses above cannot reach.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    #[kani::solver(kissat)]
+    #[kani::stub(commonware_cryptography::Crc32::checksum, any_checksum)]
+    #[kani::stub(core::str::from_utf8, any_utf8_verdict)]
+    #[kani::stub(std::vec::Vec::with_capacity, vec_no_capacity_hint)]
+    fn table_decode_total_full_shape() {
+        let mut buf: [u8; TABLE_FULL_SHAPE_BOUND] = kani::any();
+        // Partition count 1 at body bytes 16..20, then a 1-byte name.
+        (buf[16], buf[17], buf[18], buf[19]) = (0, 0, 0, 1);
+        (buf[20], buf[21], buf[22], buf[23]) = (0, 0, 0, 1);
+        // Blob count 1 at 25..29 (the name occupies byte 24).
+        (buf[25], buf[26], buf[27], buf[28]) = (0, 0, 0, 1);
+        // Entry name length 1 at 41..45 (id 29..37, partition 37..41).
+        (buf[41], buf[42], buf[43], buf[44]) = (0, 0, 0, 1);
+        // Run count 1 at 64..68 (name 45, version 46..48, size 48..56,
+        // floor 56..64), then one 24-byte run.
+        (buf[64], buf[65], buf[66], buf[67]) = (0, 0, 0, 1);
+        // Checksum-ref count 1 at 92..96, then one 24-byte ref.
+        (buf[92], buf[93], buf[94], buf[95]) = (0, 0, 0, 1);
+        // Shadow flag 1 at 124 (tail_crc 120..124), then the offset.
+        buf[124] = 1;
+        // Manifest count 1 at 133..137, then one 16-byte item and the CRC.
+        (buf[133], buf[134], buf[135], buf[136]) = (0, 0, 0, 1);
+        let n: usize = kani::any();
+        kani::assume(n <= TABLE_FULL_SHAPE_BOUND);
+        let Some(table) = Table::decode(&buf[..n]) else {
+            return;
+        };
+        assert_eq!(encoded_len(&table), n);
+    }
+
+    /// Bound for the partition-focused harness: room for 3 complete
+    /// partition-loop iterations with names up to 8 bytes (every UTF-8
+    /// error class fits in 4), and a table with one empty-named partition
+    /// is accepted at exactly this bound. Sized to the largest formula
+    /// CBMC can bit-blast within this machine's memory.
+    const TABLE_PARTITIONS_BOUND: usize = 36;
+
+    /// Same statement as [`table_decode_total_entries`] for any input of
+    /// at most [`TABLE_PARTITIONS_BOUND`] bytes with NO pinned fields: no
+    /// count is constrained and the partition loop runs to its byte-driven
+    /// limit of 3 complete iterations.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    #[kani::stub(commonware_cryptography::Crc32::checksum, any_checksum)]
+    #[kani::stub(core::str::from_utf8, any_utf8_verdict)]
+    #[kani::stub(std::vec::Vec::with_capacity, vec_no_capacity_hint)]
+    fn table_decode_total_partitions() {
+        let buf: [u8; TABLE_PARTITIONS_BOUND] = kani::any();
+        let n: usize = kani::any();
+        kani::assume(n <= TABLE_PARTITIONS_BOUND);
+        let Some(table) = Table::decode(&buf[..n]) else {
+            return;
+        };
+        assert_eq!(encoded_len(&table), n);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -178,6 +178,18 @@ udeps:
 miri module *args='':
     MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --lib {{ module }} {{ args }}
 
+# Run the fast Kani decode-totality proofs (the slow table proofs live in kani-table)
+kani *args='':
+    cargo kani -p commonware-runtime -Z stubbing --harness header_read_total --harness header_from_floor_bounded --harness superblock_decode_total {{ args }}
+
+# Run the slow Kani table-decode proofs (6 to 30 minutes each, memory-hungry)
+kani-table *args='':
+    cargo kani -p commonware-runtime -Z stubbing --harness table_decode_total_entries --harness table_decode_total_partitions --harness table_decode_total_full_shape {{ args }}
+
+# Run the Kani Segment surgery proofs (minutes each; see volume/chunk.rs)
+kani-segment *args='':
+    cargo kani -p commonware-runtime -Z stubbing --harness segment_push_exact --harness segment_drop_front_exact --harness segment_truncate_hygiene {{ args }}
+
 # Run zepter feature checks
 check-features:
     zepter run check && zepter format features

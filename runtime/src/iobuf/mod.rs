@@ -2064,6 +2064,10 @@ impl<const N: usize> From<[u8; N]> for IoBufsMut {
 /// Drain `len` readable bytes from a small fixed chunk array (`Pair`/`Triple`).
 ///
 /// Returns drained bytes plus whether the caller should canonicalize afterward.
+///
+/// Kani's `assert!` discards format arguments, so under verification the
+/// message parameter looks unused.
+#[cfg_attr(kani, allow(unused_variables))]
 #[inline]
 fn copy_to_bytes_small_chunks<B: Buf, const N: usize>(
     chunks: &mut [B; N],
@@ -2100,6 +2104,10 @@ fn copy_to_bytes_small_chunks<B: Buf, const N: usize>(
 /// Drain `len` readable bytes from a deque-backed chunk representation.
 ///
 /// Returns drained bytes plus whether the caller should canonicalize afterward.
+///
+/// Kani's `assert!` discards format arguments, so under verification the
+/// message parameter looks unused.
+#[cfg_attr(kani, allow(unused_variables))]
 #[inline]
 fn copy_to_bytes_chunked<B: Buf>(
     bufs: &mut VecDeque<B>,

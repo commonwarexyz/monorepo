@@ -671,13 +671,10 @@ impl ChunkMap {
     }
 }
 
-// Bounded Kani proof harnesses over the real [`Segment`] (run directly via
-// `cargo kani -p commonware-runtime --harness <name>`). The `kani` cfg is
-// set by the Kani driver and is not declared in the workspace check-cfg
-// list, so every mention of it lives inside this allowed scope.
-#[allow(unexpected_cfgs)]
+// Bounded Kani proof harnesses over the real [`Segment`] (run via
+// `just kani-segment`).
+#[cfg(kani)]
 mod verification {
-    #[cfg(kani)]
     mod proofs {
         use super::super::{
             ChunkCrc, ChunkState, CrcPage, Segment, CRC_PAGE_CHUNKS, CRC_PAGE_WORDS,
