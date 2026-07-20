@@ -731,7 +731,7 @@ impl<
             Message::Proposal { proposal, .. } => {
                 let view = proposal.view();
                 if !self.state.admits_vote(view) {
-                    trace!(%view, "proposal outside tracked window");
+                    trace!(%view, "proposal outside viewport");
                     return None;
                 }
                 trace!(%view, "received proposal");
@@ -748,7 +748,7 @@ impl<
                 // Certificates can come from future views (they advance our view)
                 let view = certificate.view();
                 if !self.state.admits_certificate(view) {
-                    trace!(%view, "certificate outside tracked window");
+                    trace!(%view, "certificate outside viewport");
                     return None;
                 }
 

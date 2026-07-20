@@ -34,7 +34,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     pub term_length: TermLength,
     pub forwarding: ForwardingPolicy,
 
-    /// Highest finalized view at startup; anchors the tracked window before
+    /// Highest finalized view at startup; anchors the viewport before
     /// the voter's first update.
     pub floor: View,
 }

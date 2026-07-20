@@ -1220,7 +1220,7 @@ mod tests {
             // Send notarization below oldest tracked view (42)
             //
             // problematic_view (42) < journal_floor_target (45)
-            // Window::retains(42): 42 >= floor (LF(50) - AT(10) = 40)
+            // Viewport::retains(42): 42 >= floor (LF(50) - AT(10) = 40)
             let problematic_view = journal_floor_target.saturating_sub(ViewDelta::new(3));
             let proposal_bft = Proposal::new(
                 Round::new(Epoch::new(333), problematic_view),

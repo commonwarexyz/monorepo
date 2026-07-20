@@ -421,7 +421,7 @@ cfg_if::cfg_if! {
         /// The window of views an actor tracks, bounded below by retention
         /// and above by admission policy.
         #[derive(Clone, Copy)]
-        pub(crate) struct Window {
+        pub(crate) struct Viewport {
             /// Highest finalized view observed.
             pub finalized: View,
             /// View currently being driven.
@@ -432,7 +432,7 @@ cfg_if::cfg_if! {
             pub term_length: TermLength,
         }
 
-        impl Window {
+        impl Viewport {
             /// Returns the lowest view retained (genesis is never tracked).
             pub const fn floor(&self) -> View {
                 self.finalized.saturating_sub(self.activity_timeout)
@@ -2666,7 +2666,7 @@ mod tests {
                     }
                     // A few views may still nullify while lagging validators
                     // catch up after relinking, but a working skip timeout
-                    // bounds that to a handful of views, not the window.
+                    // bounds that to a handful of views, not the viewport.
                     let tolerated_missing = 3;
                     assert!(
                         found >= activity_timeout.get().saturating_sub(tolerated_missing),
@@ -6712,8 +6712,8 @@ mod tests {
     test_for_all_fixtures!(twins, level = "INFO");
 
     #[test]
-    fn test_window() {
-        let window = Window {
+    fn test_viewport() {
+        let viewport = Viewport {
             finalized: View::new(20),
             current: View::new(25),
             activity_timeout: ViewDelta::new(10),
@@ -6721,25 +6721,25 @@ mod tests {
         };
 
         // Genesis is never tracked
-        assert!(!window.retains(View::zero()));
+        assert!(!viewport.retains(View::zero()));
 
         // Retention floor is activity_timeout below finalized
-        assert_eq!(window.floor(), View::new(10));
-        assert!(!window.retains(View::new(9)));
-        assert!(window.retains(View::new(10)));
+        assert_eq!(viewport.floor(), View::new(10));
+        assert!(!viewport.retains(View::new(9)));
+        assert!(viewport.retains(View::new(10)));
 
         // Votes are admitted up to the next view or the next term start
-        assert!(window.admits_vote(View::new(10)));
-        assert!(window.admits_vote(View::new(25)));
-        assert!(window.admits_vote(View::new(26)));
-        assert!(window.admits_vote(View::new(31)));
-        assert!(!window.admits_vote(View::new(5)));
-        assert!(!window.admits_vote(View::new(27)));
-        assert!(!window.admits_vote(View::new(34)));
+        assert!(viewport.admits_vote(View::new(10)));
+        assert!(viewport.admits_vote(View::new(25)));
+        assert!(viewport.admits_vote(View::new(26)));
+        assert!(viewport.admits_vote(View::new(31)));
+        assert!(!viewport.admits_vote(View::new(5)));
+        assert!(!viewport.admits_vote(View::new(27)));
+        assert!(!viewport.admits_vote(View::new(34)));
 
         // Certificates are admitted from arbitrarily far ahead but still
         // respect the retention floor
-        assert!(!window.admits_certificate(View::new(9)));
-        assert!(window.admits_certificate(View::new(10_000)));
+        assert!(!viewport.admits_certificate(View::new(9)));
+        assert!(viewport.admits_certificate(View::new(10_000)));
     }
 }

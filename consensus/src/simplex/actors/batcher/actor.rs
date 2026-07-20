@@ -2,7 +2,7 @@ use super::{Config, Mailbox, Message, Round};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
-        Plan, Window,
+        Plan, Viewport,
         actors::voter,
         config::ForwardingPolicy,
         metrics::{Inbound, Peer, TimeoutReason},
@@ -218,8 +218,8 @@ where
 
     /// Returns the window of views the batcher tracks, given the voter's
     /// last-published finalized and current views.
-    const fn window(&self, finalized: View, current: View) -> Window {
-        Window {
+    const fn viewport(&self, finalized: View, current: View) -> Viewport {
+        Viewport {
             finalized,
             current,
             activity_timeout: self.activity_timeout,
@@ -411,13 +411,13 @@ where
                         updated_view = current.view;
                     }
                     Message::Constructed(message) => {
-                        // Skip votes below the retention window. Our own votes
+                        // Skip votes below the viewport floor. Our own votes
                         // are not future-bounded: the voter constructs them
                         // before sending the update that advances our view
                         // (so they can be ahead of it after a certificate
                         // jump), and admission bounds exist for untrusted
                         // network input.
-                        if !self.window(finalized, current.view).retains(view) {
+                        if !self.viewport(finalized, current.view).retains(view) {
                             continue;
                         }
 
@@ -457,8 +457,8 @@ where
                 let view = message.view();
                 self.record_peer_activity(&sender);
 
-                // Skip certificates outside the tracked window
-                if !self.window(finalized, current.view).admits_certificate(view) {
+                // Skip certificates outside the viewport
+                if !self.viewport(finalized, current.view).admits_certificate(view) {
                     continue;
                 }
 
@@ -571,8 +571,8 @@ where
                 let view = message.view();
                 self.record_peer_activity(&sender);
 
-                // Skip votes outside the tracked window
-                if !self.window(finalized, current.view).admits_vote(view) {
+                // Skip votes outside the viewport
+                if !self.viewport(finalized, current.view).admits_vote(view) {
                     continue;
                 }
 
@@ -623,7 +623,7 @@ where
                 // Skip verification and construction for views at or below finalized.
                 //
                 // We still admit votes at or below finalized (see
-                // [Window::retains]) because we want to notify the reporter of
+                // [Viewport::retains]) because we want to notify the reporter of
                 // all votes within the activity timeout (even if we don't need
                 // them in the voter).
                 if updated_view <= finalized {
@@ -728,10 +728,10 @@ where
                 .await;
 
                 // Drop any rounds that are no longer retained
-                let window = self.window(finalized, current.view);
+                let viewport = self.viewport(finalized, current.view);
                 while work
                     .first_key_value()
-                    .is_some_and(|(&view, _)| !window.retains(view))
+                    .is_some_and(|(&view, _)| !viewport.retains(view))
                 {
                     work.pop_first();
                 }

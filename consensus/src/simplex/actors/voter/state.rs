@@ -2,7 +2,7 @@ use super::round::Round;
 use crate::{
     Viewable,
     simplex::{
-        Floor, Window,
+        Floor, Viewport,
         elector::Elector,
         metrics::{Leader, Timeout, TimeoutReason},
         scheme::Scheme,
@@ -206,7 +206,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
     pub fn min_active(&self) -> View {
-        self.window().floor()
+        self.viewport().floor()
     }
 
     /// Returns the term length of the elector.
@@ -215,8 +215,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Returns the window of views this state machine tracks.
-    fn window(&self) -> Window {
-        Window {
+    fn viewport(&self) -> Viewport {
+        Viewport {
             finalized: self.last_finalized,
             current: self.view,
             activity_timeout: self.activity_timeout,
@@ -224,15 +224,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
     }
 
-    /// Returns whether a vote for `pending` is tracked (see [Window::admits_vote]).
+    /// Returns whether a vote for `pending` is tracked (see [Viewport::admits_vote]).
     pub fn admits_vote(&self, pending: View) -> bool {
-        self.window().admits_vote(pending)
+        self.viewport().admits_vote(pending)
     }
 
     /// Returns whether a certificate for `pending` is tracked (see
-    /// [Window::admits_certificate]).
+    /// [Viewport::admits_certificate]).
     pub fn admits_certificate(&self, pending: View) -> bool {
-        self.window().admits_certificate(pending)
+        self.viewport().admits_certificate(pending)
     }
 
     /// Returns true when the local signer is the participant with index `idx`.

@@ -71,7 +71,7 @@ pub enum Terms {
     /// [`Terms::Stable`] with a length of 1 is rejected at engine
     /// construction.
     #[default]
-    Single,
+    Rotating,
     /// Views are grouped into terms of `length` consecutive views served by
     /// one leader.
     Stable {
@@ -99,7 +99,7 @@ impl Terms {
     /// Returns the number of consecutive views per term.
     pub const fn length(&self) -> TermLength {
         match self {
-            Self::Single => TermLength::ONE,
+            Self::Rotating => TermLength::ONE,
             Self::Stable { length, .. } => *length,
         }
     }
@@ -107,7 +107,7 @@ impl Terms {
     /// Returns the term-abandonment timeout, if stable leaders are configured.
     pub const fn stall_timeout(&self) -> Option<Duration> {
         match self {
-            Self::Single => None,
+            Self::Rotating => None,
             Self::Stable { stall_timeout, .. } => Some(*stall_timeout),
         }
     }
@@ -179,7 +179,7 @@ impl<H: Hasher> RoundRobin<H> {
     pub fn shuffled(seed: &[u8]) -> Self {
         Self {
             seed: Some(seed.to_vec()),
-            terms: Terms::Single,
+            terms: Terms::Rotating,
             _phantom: PhantomData,
         }
     }
@@ -264,7 +264,7 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 /// certificate is available.
 ///
 /// This elector does not support stable leaders: it has no term-length
-/// configuration and [`Elector::terms`] always returns [`Terms::Single`].
+/// configuration and [`Elector::terms`] always returns [`Terms::Rotating`].
 ///
 /// Only works with [`super::scheme::bls12381_threshold::vrf`]
 /// (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
@@ -324,7 +324,7 @@ where
     V: Variant,
 {
     fn terms(&self) -> Terms {
-        Terms::Single
+        Terms::Rotating
     }
 
     fn elect(
