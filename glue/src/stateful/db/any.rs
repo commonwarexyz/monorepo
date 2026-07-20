@@ -2,12 +2,12 @@
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
 //! read-through to committed state. This module provides wrapper types
-//! that capture `Arc<TracedAsyncRwLock<Db>>` alongside the raw batch so the
+//! that capture a [`Shared`] database handle alongside the raw batch so the
 //! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, Read as CodecRead};
@@ -38,7 +38,7 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{Array, channel::mpsc, non_empty_range, sync::TracedAsyncRwLock};
+use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{
     ops::{Deref, Range},
     sync::Arc,
@@ -46,9 +46,6 @@ use std::{
 
 // Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
 const ANY_BITMAP_CHUNK_BYTES: usize = 64;
-
-type AnyDbHandle<F, E, C, I, H, U, S> =
-    Arc<TracedAsyncRwLock<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>>;
 
 /// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
@@ -64,7 +61,7 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
-    db: AnyDbHandle<F, E, C, I, H, U, S>,
+    db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
     metadata: Option<U::Value>,
 }
 
@@ -86,7 +83,7 @@ where
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, S>,
-    db: AnyDbHandle<F, E, C, I, H, U, S>,
+    db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
     metadata: Option<U::Value>,
 }
 
@@ -112,7 +109,7 @@ where
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get(key, &*db).await
+        self.batch.get(key, &db).await
     }
 
     /// Read multiple values by key, falling back to committed state.
@@ -120,7 +117,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get_many(keys, &*db).await
+        self.batch.get_many(keys, &db).await
     }
 
     /// Read multiple values and return a staged batch for the same keys.
@@ -137,7 +134,7 @@ where
         } = self;
         let (values, staged) = {
             let guard = db.read().await;
-            batch.stage(keys, &*guard).await?
+            batch.stage(keys, &guard).await?
         };
         Ok((
             values,
@@ -170,7 +167,7 @@ where
     Operation<F, U>: Codec,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    db: AnyDbHandle<F, E, C, I, H, U, S>,
+    db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
 }
 
 impl<F, E, C, I, H, U, S> Deref for AnyUnmerkleized<F, E, C, I, H, U, S>
@@ -245,7 +242,7 @@ where
         } = self;
         let (range, values, staged) = {
             let guard = db.read().await;
-            staged.expand(keys, &*guard).await?
+            staged.expand(keys, &guard).await?
         };
         Ok((
             range,
@@ -297,9 +294,7 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged
-                .merkleize(updates, upserts, metadata, &*guard)
-                .await?
+            staged.merkleize(updates, upserts, metadata, &guard).await?
         };
         Ok(AnyMerkleized { inner, db })
     }
@@ -343,9 +338,7 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged
-                .merkleize(updates, upserts, metadata, &*guard)
-                .await?
+            staged.merkleize(updates, upserts, metadata, &guard).await?
         };
         Ok(AnyMerkleized { inner, db })
     }
@@ -366,7 +359,7 @@ where
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get(key, &*db).await
+        self.inner.get(key, &db).await
     }
 
     /// Read multiple values by key, falling back to committed state.
@@ -374,7 +367,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get_many(keys, &*db).await
+        self.inner.get_many(keys, &db).await
     }
 }
 
@@ -397,7 +390,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&*db, self.metadata).await?;
+        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -424,7 +417,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&*db, self.metadata).await?;
+        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -463,7 +456,7 @@ where
 
 /// Implement [`ManagedDb`] for unordered QMDB databases with fixed-size values.
 ///
-/// `new_batch` captures the `Arc<TracedAsyncRwLock<Db>>` in the returned
+/// `new_batch` captures the [`Shared`] database handle in the returned
 /// wrapper so that `get()` and `merkleize()` can read through to
 /// committed state.
 ///
@@ -522,10 +515,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         AnyUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
         }
@@ -537,12 +530,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -554,16 +547,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
@@ -626,10 +619,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         AnyUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
         }
@@ -641,12 +634,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -658,16 +651,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
@@ -837,7 +830,7 @@ mod tests {
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+            let db = Shared::new("test", db);
 
             let key = |i: u64| Sha256::hash(&i.to_be_bytes());
             let val = |i: u64| Sha256::hash(&(i + 10_000).to_be_bytes());
@@ -852,10 +845,12 @@ mod tests {
                 .await
                 .unwrap();
             {
-                let mut guard = db.write().await;
-                <UnorderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
-                    .await
-                    .unwrap();
+                let (slot, database) = db.write().await;
+                slot.put(
+                    <UnorderedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                        .await
+                        .unwrap(),
+                );
             }
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.

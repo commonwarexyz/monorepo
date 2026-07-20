@@ -230,9 +230,9 @@ pub(crate) mod test {
 
     /// Applies the given operations to the database.
     pub(crate) async fn apply_ops(
-        db: &mut AnyTest,
+        db: AnyTest,
         ops: Vec<unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>>,
-    ) {
+    ) -> AnyTest {
         let mut batch = db.new_batch();
         for op in ops {
             match op {
@@ -247,8 +247,9 @@ pub(crate) mod test {
                 }
             }
         }
-        let merkleized = batch.merkleize(db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db
     }
 
     /// The staged path (`stage` + `Staged::merkleize`) must produce the same values and root as an
@@ -258,7 +259,7 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn unordered_variable_staged_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = create_test_db(context.child("staged")).await;
+            let db = create_test_db(context.child("staged")).await;
 
             let key = |i: u64| Sha256::hash(&i.to_be_bytes());
 
@@ -267,8 +268,8 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(to_bytes(i)));
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Read set: key(5) duplicated at slots 0/3, read-only key(6), missing key(9000),
             // key(20) deleted via index at slot 4.
@@ -322,7 +323,7 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn unordered_variable_staged_ancestor_commit_before_merkleize() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = create_test_db(context.child("staged_ancestor")).await;
+            let db = create_test_db(context.child("staged_ancestor")).await;
 
             let key = |i: u64| Sha256::hash(&i.to_be_bytes());
 
@@ -333,8 +334,8 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(to_bytes(i)));
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
             // staged reads resolve in the grandparent's diff.
@@ -363,7 +364,7 @@ pub(crate) mod test {
 
             // Commit and free the grandparent: the staged resolutions' locations migrate
             // into the committed region, retiring their recorded bases.
-            db.apply_batch(grandparent).await.unwrap();
+            let (db, _) = db.apply_batch(grandparent).await.unwrap();
 
             let updates = vec![(0, Some(to_bytes(2_000))), (1, Some(to_bytes(2_001)))];
             let staged = staged
@@ -382,9 +383,9 @@ pub(crate) mod test {
                 .root();
             assert_eq!(staged.root(), explicit_root);
 
-            db.apply_batch(parent).await.unwrap();
-            db.apply_batch(staged).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let (db, _) = db.apply_batch(staged).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(to_bytes(2_000)));
             assert_eq!(db.get(&key(100)).await.unwrap(), Some(to_bytes(2_001)));
@@ -411,7 +412,7 @@ pub(crate) mod test {
                 } else {
                     "staged_ancestor_alive_combined"
                 };
-                let mut db = create_test_db(context.child(label)).await;
+                let db = create_test_db(context.child(label)).await;
 
                 let key = |i: u64| Sha256::hash(&i.to_be_bytes());
 
@@ -423,8 +424,8 @@ pub(crate) mod test {
                     seed = seed.write(key(i), Some(to_bytes(i)));
                 }
                 let seed = seed.merkleize(&db, None).await.unwrap();
-                db.apply_batch(seed).await.unwrap();
-                db.commit().await.unwrap();
+                let (db, _) = db.apply_batch(seed).await.unwrap();
+                let db = db.commit().await.unwrap();
 
                 let grandparent = db
                     .new_batch()
@@ -485,12 +486,15 @@ pub(crate) mod test {
                     .root();
                 assert_eq!(staged.root(), explicit_root);
 
-                if apply_ancestors_first {
-                    db.apply_batch(grandparent).await.unwrap();
-                    db.apply_batch(parent).await.unwrap();
-                }
-                db.apply_batch(staged).await.unwrap();
-                db.commit().await.unwrap();
+                let db = if apply_ancestors_first {
+                    let (db, _) = db.apply_batch(grandparent).await.unwrap();
+                    let (db, _) = db.apply_batch(parent).await.unwrap();
+                    db
+                } else {
+                    db
+                };
+                let (db, _) = db.apply_batch(staged).await.unwrap();
+                let db = db.commit().await.unwrap();
 
                 assert_eq!(db.get(&key(0)).await.unwrap(), Some(to_bytes(2_000)));
                 assert_eq!(db.get(&key(100)).await.unwrap(), Some(to_bytes(2_001)));
@@ -546,7 +550,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.child("open").with_attribute("index", 2)).await;
+            let db = open_db(context.child("open").with_attribute("index", 2)).await;
             assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
@@ -557,8 +561,8 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
             let root = db.root();
 
             // Update every 3rd key but don't apply (simulate failure).
@@ -577,7 +581,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.child("open").with_attribute("index", 3)).await;
+            let db = open_db(context.child("open").with_attribute("index", 3)).await;
             assert_eq!(root, db.root());
 
             // Re-apply updates for every 3rd key and commit them this time.
@@ -591,8 +595,8 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
             let root = db.root();
 
             // Delete every 7th key but don't apply (simulate failure).
@@ -610,7 +614,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.child("open").with_attribute("index", 4)).await;
+            let db = open_db(context.child("open").with_attribute("index", 4)).await;
             assert_eq!(root, db.root());
 
             // Re-delete every 7th key and commit this time.
@@ -623,18 +627,17 @@ pub(crate) mod test {
                 batch = batch.write(k, None);
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let root = db.root();
             let inactivity_floor = db.inactivity_floor_loc();
-            db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
-            db.prune(inactivity_floor).await.unwrap();
+            let db = db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
+            let db = db.prune(inactivity_floor).await.unwrap();
             let bounds = db.bounds();
             let snapshot_items = db.snapshot.items();
 
             db.sync().await.unwrap();
-            drop(db);
 
             // Confirm state is preserved after reopen.
             let db = open_db(context.child("open").with_attribute("index", 5)).await;
@@ -651,7 +654,7 @@ pub(crate) mod test {
     fn test_any_variable_db_prune_beyond_inactivity_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut db = open_db(context.child("storage")).await;
+            let db = open_db(context.child("storage")).await;
 
             // Add some operations
             let key1 = Digest::random(&mut context);
@@ -666,20 +669,18 @@ pub(crate) mod test {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
             // inactivity_floor should be at some location < op_count
             let inactivity_floor = db.inactivity_floor_loc();
             let beyond_floor = Location::new(*inactivity_floor + 1);
 
             // Try to prune beyond the inactivity floor
-            let result = db.prune(beyond_floor).await;
-            assert!(
-                matches!(result, Err(Error::PruneBeyondMinRequired(loc, floor))
-                    if loc == beyond_floor && floor == inactivity_floor)
-            );
-
-            db.destroy().await.unwrap();
+            let Err(err) = db.prune(beyond_floor).await else {
+                panic!("expected prune beyond inactivity floor to fail");
+            };
+            assert!(matches!(err, Error::PruneBeyondMinRequired(loc, floor)
+                    if loc == beyond_floor && floor == inactivity_floor));
         });
     }
 
@@ -687,7 +688,7 @@ pub(crate) mod test {
     fn test_stale_batch_rejected() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.child("storage")).await;
+            let db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -707,18 +708,21 @@ pub(crate) mod test {
                 .unwrap();
 
             // Apply the first -- should succeed.
-            db.apply_batch(batch_a).await.unwrap();
+            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.commit().await.unwrap();
             let expected_root = db.root();
             let expected_bounds = db.bounds();
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
             assert_eq!(db.get(&key2).await.unwrap(), None);
 
             // Apply the second -- should fail because the DB was modified.
-            let result = db.apply_batch(batch_b).await;
-            assert!(
-                matches!(result, Err(Error::StaleBatch { .. })),
-                "expected StaleBatch error, got {result:?}"
-            );
+            let Err(err) = db.apply_batch(batch_b).await else {
+                panic!("expected StaleBatch error");
+            };
+            assert!(matches!(err, Error::StaleBatch { .. }));
+
+            // Reopen and confirm the stale batch left the committed state untouched.
+            let db = open_db(context.child("reopen")).await;
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.bounds(), expected_bounds);
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
@@ -734,7 +738,7 @@ pub(crate) mod test {
     fn test_stale_batch_rejected_different_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.child("storage")).await;
+            let db = open_db(context.child("storage")).await;
 
             // A writes 1 key, B writes 5 keys -- different total_size.
             let batch_a = db
@@ -758,14 +762,11 @@ pub(crate) mod test {
             assert!(batch_b.bounds.total_size > batch_a.bounds.total_size);
 
             // Apply A, then B must be stale.
-            db.apply_batch(batch_a).await.unwrap();
-            let result = db.apply_batch(batch_b).await;
-            assert!(
-                matches!(result, Err(Error::StaleBatch { .. })),
-                "expected StaleBatch for asymmetric sibling, got {result:?}"
-            );
-
-            db.destroy().await.unwrap();
+            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let Err(err) = db.apply_batch(batch_b).await else {
+                panic!("expected StaleBatch for asymmetric sibling");
+            };
+            assert!(matches!(err, Error::StaleBatch { .. }));
         });
     }
 
@@ -776,7 +777,7 @@ pub(crate) mod test {
     fn test_partial_ancestor_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.child("storage")).await;
+            let db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -805,8 +806,8 @@ pub(crate) mod test {
             let expected_root = c.root();
 
             // Apply only A, then apply C directly (B uncommitted).
-            db.apply_batch(a).await.unwrap();
-            db.apply_batch(c).await.unwrap();
+            let (db, _) = db.apply_batch(a).await.unwrap();
+            let (db, _) = db.apply_batch(c).await.unwrap();
 
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
@@ -821,7 +822,7 @@ pub(crate) mod test {
     fn test_stale_batch_chained() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.child("storage")).await;
+            let db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -834,7 +835,7 @@ pub(crate) mod test {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
             // Create a parent batch, then fork two children.
             let parent = db
@@ -858,14 +859,11 @@ pub(crate) mod test {
                 .unwrap();
 
             // Apply child_a, then child_b should be stale.
-            db.apply_batch(child_a).await.unwrap();
-            let result = db.apply_batch(child_b).await;
-            assert!(
-                matches!(result, Err(Error::StaleBatch { .. })),
-                "expected StaleBatch error for sibling, got {result:?}"
-            );
-
-            db.destroy().await.unwrap();
+            let (db, _) = db.apply_batch(child_a).await.unwrap();
+            let Err(err) = db.apply_batch(child_b).await else {
+                panic!("expected StaleBatch error for sibling");
+            };
+            assert!(matches!(err, Error::StaleBatch { .. }));
         });
     }
 
@@ -876,7 +874,7 @@ pub(crate) mod test {
     fn test_sequential_commit_parent_then_child() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.child("storage")).await;
+            let db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -896,8 +894,8 @@ pub(crate) mod test {
                 .unwrap();
 
             // Apply parent first, then child -- sequential commit.
-            db.apply_batch(parent).await.unwrap();
-            db.apply_batch(child).await.unwrap();
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let (db, _) = db.apply_batch(child).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
             assert_eq!(db.get(&key2).await.unwrap(), Some(vec![20]));
@@ -910,7 +908,7 @@ pub(crate) mod test {
     fn test_stale_batch_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.child("storage")).await;
+            let db = open_db(context.child("storage")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -930,14 +928,11 @@ pub(crate) mod test {
                 .unwrap();
 
             // Apply child first -- parent should now be stale.
-            db.apply_batch(child).await.unwrap();
-            let result = db.apply_batch(parent).await;
-            assert!(
-                matches!(result, Err(Error::StaleBatch { .. })),
-                "expected StaleBatch for parent after child applied, got {result:?}"
-            );
-
-            db.destroy().await.unwrap();
+            let (db, _) = db.apply_batch(child).await.unwrap();
+            let Err(err) = db.apply_batch(parent).await else {
+                panic!("expected StaleBatch for parent after child applied");
+            };
+            assert!(matches!(err, Error::StaleBatch { .. }));
         });
     }
 
@@ -1002,11 +997,11 @@ pub(crate) mod test {
     fn test_owned_batch_root_matches() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
             // Apply some initial data.
-            apply_ops(&mut db, create_test_ops(20)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(20)).await;
+            let db = db.commit().await.unwrap();
 
             // Build an owned batch from committed state.
             let base = db.to_batch();
@@ -1055,11 +1050,11 @@ pub(crate) mod test {
     fn test_owned_batch_apply() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
             // Apply initial data.
-            apply_ops(&mut db, create_test_ops(20)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(20)).await;
+            let db = db.commit().await.unwrap();
 
             let base = db.to_batch();
 
@@ -1074,8 +1069,8 @@ pub(crate) mod test {
                 .unwrap();
 
             // Apply the batch.
-            db.apply_batch(child_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Verify the key was written.
             let fetched = db.get(&key).await.unwrap();
@@ -1090,11 +1085,11 @@ pub(crate) mod test {
     fn test_owned_batch_chain_commit_parent_first() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
             // Build initial data.
-            apply_ops(&mut db, create_test_ops(10)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(10)).await;
+            let db = db.commit().await.unwrap();
 
             let base = db.to_batch();
 
@@ -1118,12 +1113,12 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            db.apply_batch(parent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Commit child.
-            db.apply_batch(child_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Both keys should be readable.
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
@@ -1138,10 +1133,10 @@ pub(crate) mod test {
     fn test_owned_batch_multiple_forks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
-            apply_ops(&mut db, create_test_ops(10)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(10)).await;
+            let db = db.commit().await.unwrap();
 
             let base = db.to_batch();
 
@@ -1167,8 +1162,8 @@ pub(crate) mod test {
             assert_ne!(fork_a.root(), fork_b.root());
 
             // Apply fork A.
-            db.apply_batch(fork_a).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(fork_a).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), vec![10u8; 8]);
             assert!(db.get(&key_b).await.unwrap().is_none());
@@ -1193,10 +1188,10 @@ pub(crate) mod test {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
-            apply_ops(&mut db, create_test_ops(10)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(10)).await;
+            let db = db.commit().await.unwrap();
 
             let base = db.to_batch();
 
@@ -1237,10 +1232,10 @@ pub(crate) mod test {
     fn test_owned_batch_chain_delete_after_ancestor_insert() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
-            apply_ops(&mut db, create_test_ops(5)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(5)).await;
+            let db = db.commit().await.unwrap();
 
             let base = db.to_batch();
 
@@ -1262,13 +1257,13 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            db.apply_batch(parent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
             // Commit child.
-            db.apply_batch(child_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // key_x should be deleted.
             assert!(db.get(&key_x).await.unwrap().is_none());
@@ -1282,11 +1277,11 @@ pub(crate) mod test {
     fn test_owned_batch_chain_overlapping_keys() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
             // Build initial data.
-            apply_ops(&mut db, create_test_ops(5)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(5)).await;
+            let db = db.commit().await.unwrap();
 
             let base = db.to_batch();
 
@@ -1309,15 +1304,15 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            db.apply_batch(parent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // key_x should have parent's value.
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
             // Commit child.
-            db.apply_batch(child_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // key_x should now have child's value.
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);
@@ -1332,10 +1327,10 @@ pub(crate) mod test {
     fn test_owned_batch_chain_three_deep() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
-            apply_ops(&mut db, create_test_ops(10)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(10)).await;
+            let db = db.commit().await.unwrap();
 
             let base = db.to_batch();
 
@@ -1369,18 +1364,18 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            db.apply_batch(grandparent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(grandparent_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
 
             // Commit parent.
-            db.apply_batch(parent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
 
             // Commit child.
-            db.apply_batch(child_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_c).await.unwrap().unwrap(), val_c);
 
             // All three keys readable.
@@ -1397,10 +1392,10 @@ pub(crate) mod test {
     fn test_owned_batch_chain_three_deep_overlapping_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
-            apply_ops(&mut db, create_test_ops(5)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(5)).await;
+            let db = db.commit().await.unwrap();
 
             let base = db.to_batch();
             let key_x = Digest::random(commonware_utils::TestRng::new(910));
@@ -1431,18 +1426,18 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            db.apply_batch(grandparent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(grandparent_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
             // Commit parent.
-            db.apply_batch(parent_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);
 
             // Commit child.
-            db.apply_batch(child_batch).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert!(db.get(&key_x).await.unwrap().is_none());
 
             db.destroy().await.unwrap();
@@ -1458,10 +1453,10 @@ pub(crate) mod test {
     fn test_new_child_after_ancestor_committed_and_dropped() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
-            apply_ops(&mut db, create_test_ops(5)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(5)).await;
+            let db = db.commit().await.unwrap();
 
             // Chain: DB <-- a <-- b
             let key_a = Digest::random(commonware_utils::TestRng::new(800));
@@ -1483,8 +1478,8 @@ pub(crate) mod test {
                 .unwrap();
 
             // Commit a and drop it. b's Weak<a> becomes invalid.
-            db.apply_batch(a).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(a).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Build c from b. This must not panic despite a being freed.
             let key_c = Digest::random(commonware_utils::TestRng::new(802));
@@ -1497,12 +1492,12 @@ pub(crate) mod test {
                 .unwrap();
 
             // Commit b (skip_ancestors path since a is committed).
-            db.apply_batch(b).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(b).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Commit c.
-            db.apply_batch(c).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // All three keys present with correct values.
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
@@ -1521,10 +1516,10 @@ pub(crate) mod test {
     fn test_apply_batch_after_ancestor_dropped_without_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context).await;
+            let db = create_test_db(context).await;
 
-            apply_ops(&mut db, create_test_ops(5)).await;
-            db.commit().await.unwrap();
+            let db = apply_ops(db, create_test_ops(5)).await;
+            let db = db.commit().await.unwrap();
 
             let base = db.to_batch();
 
@@ -1562,8 +1557,8 @@ pub(crate) mod test {
 
             // Apply only the tip. This is !skip_ancestors (db hasn't changed).
             // Before the fix, a's and b's snapshot diffs would be silently lost.
-            db.apply_batch(c).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // All three keys must be in the snapshot.
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);

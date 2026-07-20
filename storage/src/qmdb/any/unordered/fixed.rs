@@ -190,7 +190,7 @@ pub(crate) mod test {
             type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
             let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
-            let mut db = ParTest::init(context, cfg).await.unwrap();
+            let db = ParTest::init(context, cfg).await.unwrap();
 
             let mut rng = TestRng::new(7);
             let mut keys = Vec::with_capacity(4300);
@@ -202,8 +202,8 @@ pub(crate) mod test {
                 batch = batch.write(key, Some(value));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Mix in absent keys so some probes resolve to nothing.
             for _ in 0..100 {
@@ -242,7 +242,7 @@ pub(crate) mod test {
             >;
             let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("cancel", &context, strategy);
-            let mut db = ParTest::init(context.child("db"), cfg).await.unwrap();
+            let db = ParTest::init(context.child("db"), cfg).await.unwrap();
 
             // Populate and commit so later snapshots carry committed nodes.
             let mut rng = TestRng::new(11);
@@ -255,8 +255,8 @@ pub(crate) mod test {
                 batch = batch.write(key, Some(value));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let mut db = db.commit().await.unwrap();
 
             // Drop one merkleize after a single poll and race another against a timer, so the
             // future is abandoned at whatever stage it reached (possibly mid-hashing-job).
@@ -306,8 +306,8 @@ pub(crate) mod test {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 assert_eq!(db.get(&key).await.unwrap(), Some(value));
                 keys[0].1 = value;
                 for (key, value) in &keys[1..] {
@@ -350,9 +350,9 @@ pub(crate) mod test {
 
     /// Applies the given operations to the database.
     pub(crate) async fn apply_ops(
-        db: &mut AnyTest,
+        db: AnyTest,
         ops: Vec<Operation<mmr::Family, Digest, Digest>>,
-    ) {
+    ) -> AnyTest {
         let mut batch = db.new_batch();
         for op in ops {
             match op {
@@ -367,24 +367,25 @@ pub(crate) mod test {
                 }
             }
         }
-        let merkleized = batch.merkleize(db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db
     }
 
-    /// Helper: commit a batch of key-value writes and return the applied range (generic).
+    /// Helper: commit a batch of key-value writes and return the db and applied range (generic).
     async fn commit_writes_generic<F: Family>(
-        db: &mut AnyTestGeneric<F>,
+        db: AnyTestGeneric<F>,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> std::ops::Range<GenericLocation<F>> {
+    ) -> (AnyTestGeneric<F>, std::ops::Range<GenericLocation<F>>) {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
         }
-        let merkleized = batch.merkleize(db, metadata).await.unwrap();
-        let range = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        range
+        let merkleized = batch.merkleize(&db, metadata).await.unwrap();
+        let (db, range) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+        (db, range)
     }
 
     fn key(i: u64) -> Digest {
@@ -403,10 +404,10 @@ pub(crate) mod test {
             // Populate a database with churny operations (repeated updates and deletes drive the
             // collision resolution that the cache accelerates), then commit and drop it.
             let cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
-            let mut db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
-            apply_ops(&mut db, create_test_ops(10_000)).await;
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
+            let db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
+            let db = apply_ops(db, create_test_ops(10_000)).await;
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
             let root = db.root();
             drop(db);
 
@@ -432,7 +433,7 @@ pub(crate) mod test {
     #[test_traced("INFO")]
     fn test_any_unordered_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db_generic::<mmr::Family>(ctx.child("db")).await;
+            let db = open_db_generic::<mmr::Family>(ctx.child("db")).await;
             let k = key(1);
             let v = val(1);
             let batch = db
@@ -441,12 +442,12 @@ pub(crate) mod test {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(batch).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&k).await.unwrap(), Some(v));
             assert_eq!(db.get_many(&[&k]).await.unwrap(), vec![Some(v)]);
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
-            db.prune(Location::new(0)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            let _db = db.prune(Location::new(0)).await.unwrap();
 
             let metrics = ctx.encode();
             for expected in [
@@ -492,7 +493,7 @@ pub(crate) mod test {
         >;
 
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = create_test_db(ctx.child("db")).await;
+            let db = create_test_db(ctx.child("db")).await;
 
             // Seed 2000 keys and commit so they live in the committed snapshot.
             let mut seed = db.new_batch();
@@ -500,8 +501,8 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
@@ -622,40 +623,40 @@ pub(crate) mod test {
     // -- Generic inner functions for parameterized batch tests --
 
     async fn batch_empty_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
         let root_before = db.root();
 
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_ne!(db.root(), root_before);
 
         // DB should still be functional.
-        commit_writes_generic(&mut db, [(key(0), Some(val(0)))], None).await;
+        let (db, _) = commit_writes_generic(db, [(key(0), Some(val(0)))], None).await;
         assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
         db.destroy().await.unwrap();
     }
 
     async fn batch_metadata_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
         let metadata = val(42);
 
-        commit_writes_generic(&mut db, [(key(0), Some(val(0)))], Some(metadata)).await;
+        let (db, _) = commit_writes_generic(db, [(key(0), Some(val(0)))], Some(metadata)).await;
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
         db.destroy().await.unwrap();
     }
 
     async fn batch_get_read_through_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
 
         let ka = key(0);
         let va = val(0);
-        commit_writes_generic(&mut db, [(ka, Some(va))], None).await;
+        let (db, _) = commit_writes_generic(db, [(ka, Some(va))], None).await;
 
         let kb = key(1);
         let vb = val(1);
@@ -679,14 +680,15 @@ pub(crate) mod test {
     }
 
     async fn batch_get_on_merkleized_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
 
         let ka = key(0);
         let kb = key(1);
         let kc = key(2);
         let kd = key(3);
 
-        commit_writes_generic(&mut db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
+        let (db, _) =
+            commit_writes_generic(db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
 
         let va2 = val(100);
         let vc = val(2);
@@ -738,10 +740,10 @@ pub(crate) mod test {
     }
 
     async fn batch_stacked_delete_recreate_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
         let ka = key(0);
 
-        commit_writes_generic(&mut db, [(ka, Some(val(0)))], None).await;
+        let (db, _) = commit_writes_generic(db, [(ka, Some(val(0)))], None).await;
 
         let parent_m = db
             .new_batch()
@@ -759,30 +761,30 @@ pub(crate) mod test {
             .unwrap();
         assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
 
-        db.apply_batch(child_m).await.unwrap();
+        let (db, _) = db.apply_batch(child_m).await.unwrap();
         assert_eq!(db.get(&ka).await.unwrap(), Some(val(200)));
 
         db.destroy().await.unwrap();
     }
 
     async fn batch_apply_returns_range_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
 
         let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-        let range1 = commit_writes_generic(&mut db, writes, None).await;
+        let (db, range1) = commit_writes_generic(db, writes, None).await;
 
         assert_eq!(range1.start, GenericLocation::<F>::new(1));
         assert!(range1.end.saturating_sub(*range1.start) >= 6);
 
         let writes: Vec<_> = (5..10).map(|i| (key(i), Some(val(i)))).collect();
-        let range2 = commit_writes_generic(&mut db, writes, None).await;
+        let (db, range2) = commit_writes_generic(db, writes, None).await;
         assert_eq!(range2.start, range1.end);
 
         db.destroy().await.unwrap();
     }
 
     async fn batch_speculative_root_inner<F: Family>(context: deterministic::Context) {
-        let mut db = open_db_generic::<F>(context.child("db")).await;
+        let db = open_db_generic::<F>(context.child("db")).await;
 
         let mut batch = db.new_batch();
         for i in 0..10 {
@@ -791,7 +793,7 @@ pub(crate) mod test {
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         let speculative_root = merkleized.root();
 
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.root(), speculative_root);
 
         db.destroy().await.unwrap();
@@ -799,7 +801,7 @@ pub(crate) mod test {
 
     async fn log_replay_inner<F: Family>(context: deterministic::Context) {
         let db_context = context.child("db");
-        let mut db = open_db_generic::<F>(db_context.child("db")).await;
+        let db = open_db_generic::<F>(db_context.child("db")).await;
 
         // Update the same key many times within a single batch.
         const UPDATES: u64 = 100;
@@ -810,8 +812,8 @@ pub(crate) mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         let root = db.root();
 
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.
@@ -942,9 +944,9 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.child("storage")).await;
+            let db = create_test_db(context.child("storage")).await;
             let ops = create_test_ops(20);
-            apply_ops(&mut db, ops.clone()).await;
+            let db = apply_ops(db, ops.clone()).await;
             let root_hash = db.root();
             let original_op_count = db.bounds().end;
 
@@ -969,7 +971,7 @@ pub(crate) mod test {
             // Add more operations to the database
             // (use different seed to avoid key collisions)
             let more_ops = create_test_ops_seeded(5, 1);
-            apply_ops(&mut db, more_ops.clone()).await;
+            let db = apply_ops(db, more_ops.clone()).await;
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
@@ -1009,7 +1011,7 @@ pub(crate) mod test {
             // after each batch is a commit-boundary historical size.
             let mut commit_boundary_sizes: Vec<Location> = Vec::new();
             for _ in 0..5 {
-                apply_ops(&mut db, create_test_ops(10)).await;
+                db = apply_ops(db, create_test_ops(10)).await;
                 commit_boundary_sizes.push(db.bounds().end);
             }
 
@@ -1078,7 +1080,7 @@ pub(crate) mod test {
             let mut offset = 0usize;
             let mut checkpoints = Vec::new();
             for chunk in [20usize, 15, 25, 30, 10] {
-                apply_ops(&mut db, ops[offset..offset + chunk].to_vec()).await;
+                db = apply_ops(db, ops[offset..offset + chunk].to_vec()).await;
                 offset += chunk;
 
                 let end_loc = db.bounds().end;
@@ -1090,7 +1092,7 @@ pub(crate) mod test {
             // Grow state past the checkpoints with an empty batch and verify all
             // historical proofs from that later state.
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             for (historical_size, root, reference_proof, reference_ops) in checkpoints {
                 let (historical_proof, historical_ops) = db
                     .historical_proof(historical_size, start_loc, max_ops)

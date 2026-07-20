@@ -104,25 +104,27 @@ fn generate_seed_kv(index: u64) -> (RawKey, RawValue) {
 }
 
 async fn commit_pending<F: Graftable>(
-    db: &mut Db<F>,
+    db: Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, RawValue>,
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
-) {
+) -> Db<F> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(db, None).await.unwrap();
-    db.apply_batch(merkleized)
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let (db, _) = db
+        .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
-    db.commit().await.expect("commit fsync should not fail");
+    let db = db.commit().await.expect("commit fsync should not fail");
     for key in pending_deletes.drain() {
         committed_state.remove(&key);
     }
     committed_state.extend(pending_inserts.drain());
+    db
 }
 
 fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
@@ -177,8 +179,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             all_keys.insert(key);
         }
         if !pending_writes.is_empty() {
-            commit_pending(
-                &mut db,
+            db = commit_pending(
+                db,
                 &mut pending_writes,
                 &mut committed_state,
                 &mut pending_inserts,
@@ -189,7 +191,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
         }
 
         for op in &operations {
-            match op {
+            db = match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
@@ -198,6 +200,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     pending_deletes.remove(key);
                     pending_inserts.insert(*key, *value);
                     all_keys.insert(*key);
+                    db
                 }
 
                 CurrentOperation::Delete { key } => {
@@ -205,6 +208,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     pending_writes.push((k, None));
                     pending_inserts.remove(key);
                     pending_deletes.insert(*key);
+                    db
                 }
 
                 CurrentOperation::Get { key } => {
@@ -227,12 +231,14 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     }
 
                     all_keys.insert(*key);
+                    db
                 }
 
                 CurrentOperation::GetSpan { key } => {
                     let k = Key::new(*key);
                     let result = db.get_span(&k).await.expect("get should not fail");
                     assert_eq!(result.is_some(), !db.is_empty(), "span should be empty only if db is empty");
+                    db
                 }
 
                 CurrentOperation::OpCount => {
@@ -241,32 +247,36 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         actual, committed_op_count,
                         "Op count mismatch: expected {committed_op_count}, got {actual}"
                     );
+                    db
                 }
 
                 CurrentOperation::Commit => {
-                    commit_pending(
-                        &mut db, &mut pending_writes, &mut committed_state,
+                    let db = commit_pending(
+                        db, &mut pending_writes, &mut committed_state,
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().end;
+                    db
                 }
 
                 CurrentOperation::Prune => {
-                    commit_pending(
-                        &mut db, &mut pending_writes, &mut committed_state,
+                    let db = commit_pending(
+                        db, &mut pending_writes, &mut committed_state,
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().end;
-                    db.prune(db.sync_boundary()).await.expect("Prune should not fail");
+                    let boundary = db.sync_boundary();
+                    db.prune(boundary).await.expect("Prune should not fail")
                 }
 
                 CurrentOperation::Root => {
-                    commit_pending(
-                        &mut db, &mut pending_writes, &mut committed_state,
+                    let db = commit_pending(
+                        db, &mut pending_writes, &mut committed_state,
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().end;
                     let _root = db.root();
+                    db
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
@@ -275,8 +285,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         continue;
                     }
 
-                    commit_pending(
-                        &mut db, &mut pending_writes, &mut committed_state,
+                    let db = commit_pending(
+                        db, &mut pending_writes, &mut committed_state,
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().end;
@@ -303,6 +313,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
                         );
                     }
+                    db
                 }
 
                 CurrentOperation::ArbitraryProof {
@@ -317,8 +328,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     if current_op_count == 0 {
                         continue;
                     }
-                    commit_pending(
-                        &mut db, &mut pending_writes, &mut committed_state,
+                    let db = commit_pending(
+                        db, &mut pending_writes, &mut committed_state,
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().end;
@@ -390,13 +401,14 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         }
 
                     }
+                    db
                 }
 
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    commit_pending(
-                        &mut db, &mut pending_writes, &mut committed_state,
+                    let db = commit_pending(
+                        db, &mut pending_writes, &mut committed_state,
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().end;
@@ -420,13 +432,14 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             panic!("Unexpected error during key value proof generation: {e:?}");
                         }
                     }
+                    db
                 }
 
                 CurrentOperation::ExclusionProof { key } => {
                     let k = Key::new(*key);
 
-                    commit_pending(
-                        &mut db, &mut pending_writes, &mut committed_state,
+                    let db = commit_pending(
+                        db, &mut pending_writes, &mut committed_state,
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().end;
@@ -448,14 +461,15 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             panic!("Unexpected error during exclusion proof generation: {e:?}");
                         }
                     }
+                    db
                 }
-            }
+            };
         }
 
         // Final commit to ensure all pending operations are persisted.
         if !pending_writes.is_empty() {
-            commit_pending(
-                &mut db, &mut pending_writes, &mut committed_state,
+            db = commit_pending(
+                db, &mut pending_writes, &mut committed_state,
                 &mut pending_inserts, &mut pending_deletes,
             ).await;
         }

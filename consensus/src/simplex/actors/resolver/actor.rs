@@ -50,10 +50,24 @@ pub struct Actor<
     mailbox_size: NonZeroUsize,
     fetch_timeout: Duration,
 
+    /// Certificates known between the floor and the current view. Serves
+    /// [HandlerMessage::Produce] requests and emits the [Effect]s the actor
+    /// applies to the resolver (see [Self::apply_effects]).
     state: State<S, D>,
 
     /// Responses to notarization deliveries, keyed by notarization view and
-    /// answered with the view's certification verdict (see [Self::certified]).
+    /// answered with the view's certification verdict (see [Self::certified])
+    /// or accepted when a floor raise makes them obsolete (see
+    /// [Self::apply_effects]).
+    ///
+    /// A view maps to multiple responses when copies of its notarization
+    /// answer several outstanding requests, which is common when lagging:
+    /// peers serve their floor certificate for any request at or below it,
+    /// so one verdict resolves every request that notarization answered.
+    /// A single request can never hold two responses under one view: the
+    /// engine delivers at most one response per key at a time, and a key is
+    /// only redelivered after a failure verdict, which marks the view failed
+    /// and makes [Self::validate] reject further copies of its notarization.
     held: BTreeMap<View, Vec<oneshot::Sender<bool>>>,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
@@ -171,22 +185,21 @@ impl<
     }
 
     /// Handles a certification outcome from the voter.
-    ///
-    /// Responses held for the view's notarization deliveries are answered
-    /// with the verdict. Success completes those fetches. Failure blocks the
-    /// peers that served the uncertifiable notarization and the resolver
-    /// retries the still-pending requests, mirroring how [Self::validate]
-    /// treats peers that serve a notarization for a view already marked
-    /// failed. No copy of that notarization can certify anywhere, so the
-    /// view cannot finalize and honest participants nullify it: the retried
-    /// request is eventually answered by that covering nullification (or by
-    /// a certificate at a higher view).
     fn certified<R: Resolver<Key = U64, Subscriber = ()>>(
         &mut self,
         resolver: &mut R,
         view: View,
         success: bool,
     ) {
+        // Answer the responses held for the view's notarization deliveries.
+        // Success completes those fetches. Failure blocks the peers that
+        // served the uncertifiable notarization and the resolver retries the
+        // still-pending requests, mirroring how [Self::validate] treats peers
+        // that serve a notarization for a view already marked failed. No copy
+        // of that notarization can certify anywhere, so the view cannot
+        // finalize and honest participants nullify it: the retried request is
+        // eventually answered by that covering nullification (or by a
+        // certificate at a higher view).
         if let Some(responses) = self.held.remove(&view) {
             for response in responses {
                 response.send_lossy(success);
@@ -401,6 +414,8 @@ impl<
                 );
                 resolved.in_scope(|| voter.resolved(parsed.clone()));
 
+                // Recording the notarization makes it a floor candidate, so the
+                // certification verdict (see [Self::certified]) can act on it.
                 let effects = self.state.handle(parsed);
                 self.apply_effects(resolver, effects);
             }

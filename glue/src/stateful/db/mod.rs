@@ -80,9 +80,13 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
+use commonware_storage::{
+    merkle::Location,
+    qmdb::sync::{compact, resolver},
+};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
-    sync::TracedAsyncRwLock,
+    sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
 };
 use futures::{
     future::{Either, pending},
@@ -93,6 +97,7 @@ use std::{
     fmt::Debug,
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Deref,
     sync::Arc,
 };
 
@@ -104,8 +109,133 @@ pub mod immutable;
 pub mod keyless;
 pub mod p2p;
 
-/// A database wrapped for shared, lock-traced access.
-pub type Shared<DB> = Arc<TracedAsyncRwLock<DB>>;
+/// A database shared across tasks.
+///
+/// Owned mutations (finalize, prune, rewind) take the database out of the cell under the
+/// write lock ([Self::write]) and put it back on success ([WriteSlot::put]); a failure,
+/// panic, or cancellation mid-operation leaves the cell empty permanently, and every
+/// later [Self::read] or [Self::write] panics: a lost database is fatal here by design;
+/// restart to recover. Resolver access instead reports the source as missing, so serving
+/// degrades without crashing remote sync.
+pub struct Shared<DB>(Inner<DB>);
+
+/// The lock wrapped by [`Shared`]. Storage implements its sync resolver traits on
+/// this shape, so [`Shared`]'s resolver impls delegate to it.
+type Inner<DB> = Arc<TracedAsyncRwLock<Option<DB>>>;
+
+impl<DB> Clone for Shared<DB> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+/// Message used when a [`Shared`] cell is empty.
+const DB_LOST_MSG: &str =
+    "database was lost by an earlier failed or interrupted operation; restart to recover";
+
+impl<DB> Shared<DB> {
+    /// Create a cell holding `db`, identified by `label` in lock traces.
+    pub fn new(label: &'static str, db: DB) -> Self {
+        Self(Arc::new(TracedAsyncRwLock::new(label, Some(db))))
+    }
+
+    /// Acquire shared read access to the database.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database was lost by an earlier failed or interrupted mutation.
+    pub async fn read(&self) -> ReadGuard<'_, DB> {
+        ReadGuard(AsyncRwLockReadGuard::map(self.0.read().await, |db| {
+            db.as_ref().expect(DB_LOST_MSG)
+        }))
+    }
+
+    /// Take the database out for a by-value mutation.
+    ///
+    /// The returned [`WriteSlot`] holds the cell locked and empty until
+    /// [`WriteSlot::put`] restores the database. Dropping the slot without a put
+    /// leaves the database lost.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database was lost by an earlier failed or interrupted mutation.
+    pub async fn write(&self) -> (WriteSlot<'_, DB>, DB) {
+        let mut guard = self.0.write().await;
+        let db = guard.take().expect(DB_LOST_MSG);
+        (WriteSlot(guard), db)
+    }
+}
+
+/// Shared read access to a [`Shared`] database.
+pub struct ReadGuard<'a, DB>(AsyncRwLockReadGuard<'a, DB>);
+
+impl<DB> Deref for ReadGuard<'_, DB> {
+    type Target = DB;
+
+    fn deref(&self) -> &DB {
+        &self.0
+    }
+}
+
+/// An exclusively locked [`Shared`] cell whose database has been taken out.
+pub struct WriteSlot<'a, DB>(AsyncRwLockWriteGuard<'a, Option<DB>>);
+
+impl<DB> WriteSlot<'_, DB> {
+    /// Restore the database, making it visible to other tasks again.
+    pub fn put(mut self, db: DB) {
+        *self.0 = Some(db);
+    }
+}
+
+/// Serve full sync fetches by delegating to the storage impl on the inner lock.
+impl<DB> resolver::Resolver for Shared<DB>
+where
+    DB: Send + Sync + 'static,
+    Inner<DB>: resolver::Resolver,
+{
+    type Family = <Inner<DB> as resolver::Resolver>::Family;
+    type Digest = <Inner<DB> as resolver::Resolver>::Digest;
+    type Op = <Inner<DB> as resolver::Resolver>::Op;
+    type Error = <Inner<DB> as resolver::Resolver>::Error;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<resolver::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.0
+            .get_operations(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                cancel_rx,
+            )
+            .await
+    }
+}
+
+/// Serve compact sync fetches by delegating to the storage impl on the inner lock.
+impl<DB> compact::Resolver for Shared<DB>
+where
+    DB: Send + Sync + 'static,
+    Inner<DB>: compact::Resolver,
+{
+    type Family = <Inner<DB> as compact::Resolver>::Family;
+    type Digest = <Inner<DB> as compact::Resolver>::Digest;
+    type Op = <Inner<DB> as compact::Resolver>::Op;
+    type Error = <Inner<DB> as compact::Resolver>::Error;
+
+    async fn get_compact_state(
+        &self,
+        target: compact::Target<Self::Family, Self::Digest>,
+    ) -> Result<compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.0.get_compact_state(target).await
+    }
+}
 
 /// Mutable batch state before merkleization.
 ///
@@ -155,6 +285,13 @@ pub trait Merkleized: Sized + Send + Sync {
 ///
 /// `E` is a trait generic (not an associated type), so one database type can
 /// work across runtimes that satisfy the bounds.
+///
+/// # Ownership
+///
+/// Mutating methods take the database by value and return it on success. If a mutating
+/// method returns an error, or its future is dropped before it finishes, the database is
+/// gone: state that was not yet durable is discarded, but everything already on disk stays
+/// recoverable.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
     type Unmerkleized: Unmerkleized;
@@ -205,9 +342,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// a `Changeset`, then `db.apply_batch(changeset)` and the database's
     /// durable finalize step.
     fn finalize(
-        &mut self,
+        self,
         batch: Self::Merkleized,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Prune the database to a previously finalized sync target.
     ///
@@ -215,10 +352,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// the default no-op. This call makes changes durable and ensures they
     /// will be present on startup without replay.
     fn prune(
-        &mut self,
+        self,
         _target: &Self::SyncTarget,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        async { Ok(()) }
+    ) -> impl Future<Output = Result<Self, Self::Error>> + Send {
+        async { Ok(self) }
     }
 
     /// Return the sync target for this database's current committed state.
@@ -227,11 +364,11 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Rewind committed state to `target`.
     ///
     /// Implementations must ensure rewind effects are durable before returning
-    /// `Ok(())` (for example by committing after rewind).
+    /// the database (for example by committing after rewind).
     fn rewind_to_target(
-        &mut self,
+        self,
         target: Self::SyncTarget,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
 
 /// A collection of individually locked [`ManagedDb`] instances.
@@ -282,7 +419,8 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Apply each merkleized batch's changeset to its underlying database.
     ///
-    /// Acquires a write lock on each database.
+    /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
+    /// databases whose mutations were in progress (see [Shared]); every later access panics.
     fn finalize(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 
     /// Prune each database to the provided per-database targets.
@@ -290,7 +428,8 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// This call makes changes durable and ensures they will be present on
     /// startup without replay.
     ///
-    /// Acquires a write lock on each database.
+    /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
+    /// databases whose mutations were in progress (see [Shared]); every later access panics.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
     /// Return sync targets for the set's current committed state.
@@ -299,6 +438,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Rewind the set to the provided per-database targets.
     ///
     /// Rewind failures are fatal for startup recovery and therefore panic.
+    ///
+    /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
+    /// databases whose mutations were in progress (see [Shared]); every later access panics.
     fn rewind_to_targets(&self, targets: Self::SyncTargets) -> impl Future<Output = ()> + Send;
 }
 
@@ -445,7 +587,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
         let db = T::init(context, config)
             .await
             .expect("database init failed");
-        Self::new(TracedAsyncRwLock::new("stateful.db", db))
+        Self::new("stateful.db", db)
     }
 
     fn initial_sync_targets() -> Self::SyncTargets {
@@ -465,26 +607,27 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     }
 
     async fn finalize(&self, batches: Self::Merkleized) {
-        let mut database = self.write().await;
-        finalize_or_panic(&mut *database, batches, None).await;
+        let (slot, database) = self.write().await;
+        slot.put(finalize_or_panic(database, batches, None).await);
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
-        let mut database = self.write().await;
-        prune_or_panic(&mut *database, target, None).await;
+        let (slot, database) = self.write().await;
+        slot.put(prune_or_panic(database, target, None).await);
     }
 
     async fn committed_targets(&self) -> Self::SyncTargets {
         let database = self.read().await;
-        T::sync_target(&*database)
+        T::sync_target(&database)
     }
 
     async fn rewind_to_targets(&self, target: Self::SyncTargets) {
-        let mut database = self.write().await;
-        if T::sync_target(&*database) == target {
+        let (slot, database) = self.write().await;
+        if T::sync_target(&database) == target {
+            slot.put(database);
             return;
         }
-        rewind_or_panic(&mut *database, target, None).await;
+        slot.put(rewind_or_panic(database, target, None).await);
     }
 }
 
@@ -590,10 +733,7 @@ where
             T::sync_target(&database) == converged_target,
             "state sync database target does not match the coordinator target",
         );
-        Ok((
-            Self::new(TracedAsyncRwLock::new("stateful.db", database)),
-            converged_anchor,
-        ))
+        Ok((Self::new("stateful.db", database), converged_anchor))
     }
 }
 
@@ -675,7 +815,7 @@ macro_rules! impl_database_set {
                                 stringify!($T),
                                 ")",
                             ));
-                        Arc::new(TracedAsyncRwLock::new(concat!("stateful.db.", stringify!($idx)), db))
+                        Shared::new(concat!("stateful.db.", stringify!($idx)), db)
                     },
                 )+);
                 result
@@ -700,8 +840,8 @@ macro_rules! impl_database_set {
             async fn finalize(&self, batches: Self::Merkleized) {
                 join!($(
                     async {
-                        let mut database = self.$idx.write().await;
-                        finalize_or_panic(&mut *database, batches.$idx, Some($idx)).await;
+                        let (slot, database) = self.$idx.write().await;
+                        slot.put(finalize_or_panic(database, batches.$idx, Some($idx)).await);
                     },
                 )+);
             }
@@ -709,8 +849,8 @@ macro_rules! impl_database_set {
             async fn prune(&self, targets: &Self::SyncTargets) {
                 join!($(
                     async {
-                        let mut database = self.$idx.write().await;
-                        prune_or_panic(&mut *database, &targets.$idx, Some($idx)).await;
+                        let (slot, database) = self.$idx.write().await;
+                        slot.put(prune_or_panic(database, &targets.$idx, Some($idx)).await);
                     },
                 )+);
             }
@@ -719,7 +859,7 @@ macro_rules! impl_database_set {
                 join!($(
                     async {
                         let database = self.$idx.read().await;
-                        $T::sync_target(&*database)
+                        $T::sync_target(&database)
                     },
                 )+)
             }
@@ -727,11 +867,12 @@ macro_rules! impl_database_set {
             async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
                 join!($(
                     async {
-                        let mut database = self.$idx.write().await;
-                        if $T::sync_target(&*database) == targets.$idx {
+                        let (slot, database) = self.$idx.write().await;
+                        if $T::sync_target(&database) == targets.$idx {
+                            slot.put(database);
                             return;
                         }
-                        rewind_or_panic(&mut *database, targets.$idx, Some($idx)).await;
+                        slot.put(rewind_or_panic(database, targets.$idx, Some($idx)).await);
                     },
                 )+);
             }
@@ -1033,10 +1174,10 @@ macro_rules! impl_state_sync_set {
                                 let (sync_result, _) = join!(sync, forward_reached);
                                 let result = sync_result
                                     .map(|database| {
-                                        Arc::new(TracedAsyncRwLock::new(
+                                        Shared::new(
                                             concat!("stateful.db.", stringify!($idx)),
                                             database,
-                                        ))
+                                        )
                                     })
                                     .map_err(|err| {
                                         format!(
@@ -1352,66 +1493,60 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
 
 #[tracing::instrument(name = "stateful.db.finalize_or_panic", level = "info", skip_all, fields(index = index))]
 async fn finalize_or_panic<E, T: ManagedDb<E>>(
-    database: &mut T,
+    database: T,
     batch: T::Merkleized,
     index: Option<usize>,
-) {
+) -> T {
     // Mutable finalize failures are fatal by design because other databases in
     // the same set may already have committed, leaving partially applied state.
-    if let Err(err) = database.finalize(batch).await {
-        match index {
-            Some(index) => panic!(
-                "database finalize failed (index {index}, type {}): {err:?}",
+    match database.finalize(batch).await {
+        Ok(database) => database,
+        Err(err) => {
+            let index = index.map_or(String::new(), |i| format!("index {i}, "));
+            panic!(
+                "database finalize failed ({index}type {}): {err:?}",
                 core::any::type_name::<T>(),
-            ),
-            None => panic!(
-                "database finalize failed (type {}): {err:?}",
-                core::any::type_name::<T>(),
-            ),
+            );
         }
     }
 }
 
 #[tracing::instrument(name = "stateful.db.rewind_or_panic", level = "info", skip_all, fields(index = index))]
 async fn rewind_or_panic<E, T: ManagedDb<E>>(
-    database: &mut T,
+    database: T,
     target: T::SyncTarget,
     index: Option<usize>,
-) {
+) -> T {
     // Mutable rewind failures are fatal by design because the database handle
     // may be internally diverged after a failed rewind.
-    if let Err(err) = database.rewind_to_target(target).await {
-        match index {
-            Some(index) => panic!(
-                "database rewind failed (index {index}, type {}): {err:?}",
+    match database.rewind_to_target(target).await {
+        Ok(database) => database,
+        Err(err) => {
+            let index = index.map_or(String::new(), |i| format!("index {i}, "));
+            panic!(
+                "database rewind failed ({index}type {}): {err:?}",
                 core::any::type_name::<T>(),
-            ),
-            None => panic!(
-                "database rewind failed (type {}): {err:?}",
-                core::any::type_name::<T>(),
-            ),
+            );
         }
     }
 }
 
 #[tracing::instrument(name = "stateful.db.prune_or_panic", level = "info", skip_all, fields(index = index))]
 async fn prune_or_panic<E, T: ManagedDb<E>>(
-    database: &mut T,
+    database: T,
     target: &T::SyncTarget,
     index: Option<usize>,
-) {
+) -> T {
     // Prune failures are fatal because pruning may already have discarded part
     // of the retained history before the error surfaced.
-    if let Err(err) = database.prune(target).await {
-        match index {
-            Some(index) => panic!(
-                "database prune failed (index {index}, type {}): {err:?}",
+    match database.prune(target).await {
+        Ok(database) => database,
+        Err(err) => {
+            let index = index.map_or(String::new(), |i| format!("index {i}, "));
+            panic!(
+                "database prune failed ({index}type {}): {err:?}",
                 core::any::type_name::<T>(),
-            ),
-            None => panic!(
-                "database prune failed (type {}): {err:?}",
-                core::any::type_name::<T>(),
-            ),
+            );
         }
     }
 }
@@ -1504,10 +1639,7 @@ mod tests {
     use commonware_runtime::{
         Clock, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
     };
-    use commonware_utils::{
-        channel::{mpsc, oneshot, ring},
-        sync::TracedAsyncRwLock,
-    };
+    use commonware_utils::channel::{mpsc, oneshot, ring};
     use futures::{FutureExt, SinkExt, pin_mut};
     use std::{
         convert::Infallible,
@@ -1925,14 +2057,14 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -1959,18 +2091,18 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.current_target
         }
 
-        async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Self::Error> {
+        async fn rewind_to_target(mut self, target: Self::SyncTarget) -> Result<Self, Self::Error> {
             self.current_target = target;
             self.rewind_count += 1;
-            Ok(())
+            Ok(self)
         }
     }
 
@@ -1995,19 +2127,19 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
-        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+        async fn prune(self, _target: &Self::SyncTarget) -> Result<Self, Self::Error> {
             self.prune_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2102,14 +2234,14 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
             Err(TestFinalizeError)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2118,20 +2250,20 @@ mod tests {
         deterministic::Runner::default().start(|_context| async move {
             type DbSet = (Shared<CountingRewindDb>, Shared<CountingRewindDb>);
 
-            let left = Arc::new(TracedAsyncRwLock::new(
+            let left = Shared::new(
                 "test",
                 CountingRewindDb {
                     current_target: 2,
                     rewind_count: 0,
                 },
-            ));
-            let right = Arc::new(TracedAsyncRwLock::new(
+            );
+            let right = Shared::new(
                 "test",
                 CountingRewindDb {
                     current_target: 1,
                     rewind_count: 0,
                 },
-            ));
+            );
             let databases: DbSet = (left.clone(), right.clone());
 
             <DbSet as DatabaseSet<deterministic::Context>>::rewind_to_targets(&databases, (1, 1))
@@ -2151,12 +2283,12 @@ mod tests {
     fn database_set_prune_calls_managed_db_prune() {
         deterministic::Runner::default().start(|_context| async move {
             let prune_count = Arc::new(AtomicUsize::new(0));
-            let database = Arc::new(TracedAsyncRwLock::new(
+            let database = Shared::new(
                 "test",
                 PruneCountingDb {
                     prune_count: prune_count.clone(),
                 },
-            ));
+            );
 
             <Shared<PruneCountingDb> as DatabaseSet<deterministic::Context>>::prune(&database, &())
                 .await;
@@ -2186,20 +2318,20 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn finalize(mut self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
             if let Some(started) = self.started.take() {
                 let _ = started.send(());
             }
             if let Some(release) = self.release.take() {
                 let _ = release.await;
             }
-            Ok(())
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2226,16 +2358,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2266,16 +2398,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2302,16 +2434,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2338,16 +2470,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             0
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2374,16 +2506,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2410,16 +2542,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             0
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2446,16 +2578,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2482,16 +2614,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2518,16 +2650,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2558,16 +2690,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -2703,16 +2835,16 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
+        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
         }
     }
 
@@ -3139,12 +3271,12 @@ mod tests {
     #[test]
     fn tuple_new_batches_queues_reads_concurrently() {
         deterministic::Runner::default().start(|_context| async move {
-            let db1 = Arc::new(TracedAsyncRwLock::new("test", TestDb));
-            let db2 = Arc::new(TracedAsyncRwLock::new("test", TestDb));
+            let db1 = Shared::new("test", TestDb);
+            let db2 = Shared::new("test", TestDb);
             let databases = (db1.clone(), db2.clone());
 
-            let writer1 = db1.write().await;
-            let writer2 = db2.write().await;
+            let (slot1, taken1) = db1.write().await;
+            let (slot2, taken2) = db2.write().await;
 
             let new_batches = <(Shared<TestDb>, Shared<TestDb>) as DatabaseSet<
                 deterministic::Context,
@@ -3152,7 +3284,7 @@ mod tests {
             pin_mut!(new_batches);
             assert!(new_batches.as_mut().now_or_never().is_none());
 
-            drop(writer2);
+            slot2.put(taken2);
             {
                 let writer2_again = db2.write();
                 pin_mut!(writer2_again);
@@ -3162,7 +3294,7 @@ mod tests {
                 );
             }
 
-            drop(writer1);
+            slot1.put(taken1);
             let _ = new_batches.await;
         });
     }
@@ -3176,14 +3308,8 @@ mod tests {
             let (release2_tx, release2_rx) = oneshot::channel();
 
             let databases = (
-                Arc::new(TracedAsyncRwLock::new(
-                    "test",
-                    BlockingFinalizeDb::new(started1_tx, release1_rx),
-                )),
-                Arc::new(TracedAsyncRwLock::new(
-                    "test",
-                    BlockingFinalizeDb::new(started2_tx, release2_rx),
-                )),
+                Shared::new("test", BlockingFinalizeDb::new(started1_tx, release1_rx)),
+                Shared::new("test", BlockingFinalizeDb::new(started2_tx, release2_rx)),
             );
 
             let finalize =
@@ -3216,8 +3342,8 @@ mod tests {
     fn tuple_finalize_panic_identifies_failing_database() {
         deterministic::Runner::default().start(|_context| async move {
             let databases = (
-                Arc::new(TracedAsyncRwLock::new("test", TestDb)),
-                Arc::new(TracedAsyncRwLock::new("test", FailingFinalizeDb)),
+                Shared::new("test", TestDb),
+                Shared::new("test", FailingFinalizeDb),
             );
             <(
                 Shared<TestDb>,
@@ -4125,7 +4251,7 @@ mod tests {
         deterministic::Runner::default().start(|_| async move {
             let log = Arc::new(commonware_utils::sync::Mutex::new(Vec::new()));
             let resolver = RecordingResolver::new("db1", log.clone());
-            let db = Arc::new(TracedAsyncRwLock::new("test", AttachDb1));
+            let db = Shared::new("test", AttachDb1);
 
             resolver.attach_databases(db).await;
             assert_eq!(&*log.lock(), &["db1"]);
@@ -4141,8 +4267,8 @@ mod tests {
                 RecordingResolver::new("resolver_1", log.clone()),
             );
             let databases = (
-                Arc::new(TracedAsyncRwLock::new("test", AttachDb1)),
-                Arc::new(TracedAsyncRwLock::new("test", AttachDb2)),
+                Shared::new("test", AttachDb1),
+                Shared::new("test", AttachDb2),
             );
 
             resolvers.attach_databases(databases).await;
@@ -4159,8 +4285,8 @@ mod tests {
                 RecordingResolver::new("db2", log.clone()),
             );
             let databases = (
-                Arc::new(TracedAsyncRwLock::new("test", AttachDb1)),
-                Arc::new(TracedAsyncRwLock::new("test", AttachDb2)),
+                Shared::new("test", AttachDb1),
+                Shared::new("test", AttachDb2),
             );
 
             resolvers.attach_databases(databases).await;

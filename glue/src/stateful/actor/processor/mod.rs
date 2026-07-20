@@ -926,7 +926,7 @@ mod tests {
     use crate::stateful::{
         Application, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
-        db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
+        db::{Anchor, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -938,6 +938,7 @@ mod tests {
     use commonware_cryptography::{
         Digest as _, Digestible, Hasher, Sha256, Signer as _, ed25519, sha256::Digest,
     };
+    use commonware_macros::boxed;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -949,11 +950,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{
-        NZU16, NZU64, NZUsize,
-        channel::oneshot,
-        non_empty_range,
-        range::NonEmptyRange,
-        sync::{Mutex, TracedAsyncRwLock},
+        NZU16, NZU64, NZUsize, channel::oneshot, non_empty_range, range::NonEmptyRange, sync::Mutex,
     };
     use futures::{Stream, StreamExt};
     use std::{
@@ -974,7 +971,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
-    type DbSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
+    type DbSet<E> = Shared<Qmdb<E>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1489,6 +1486,7 @@ mod tests {
             false
         }
 
+        #[boxed]
         async fn finalize(&mut self, block: Block) -> FinalizeStatus {
             self.processor
                 .finalize(self.context_cell.as_present(), &block)
@@ -1496,6 +1494,7 @@ mod tests {
                 .0
         }
 
+        #[boxed]
         async fn finalize_with_prune(
             &mut self,
             block: Block,

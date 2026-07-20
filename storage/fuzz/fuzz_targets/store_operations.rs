@@ -123,13 +123,15 @@ fn fuzz(input: FuzzInput) {
         let mut pending: BTreeMap<Digest, Option<Vec<u8>>> = BTreeMap::new();
 
         for op in &input.ops {
-            match op {
+            db = match op {
                 Operation::Update { key, value_bytes } => {
                     pending.insert(Digest(*key), Some(value_bytes.clone()));
+                    db
                 }
 
                 Operation::Delete { key } => {
                     pending.insert(Digest(*key), None);
+                    db
                 }
 
                 Operation::Commit { metadata_bytes } => {
@@ -140,10 +142,12 @@ fn fuzz(input: FuzzInput) {
                             None => batch.delete(key),
                         };
                     }
-                    db.apply_batch(batch.finalize(metadata_bytes.clone()))
+                    let changeset = batch.finalize(metadata_bytes.clone());
+                    let (db, _) = db
+                        .apply_batch(changeset)
                         .await
                         .expect("Apply batch should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail")
                 }
 
                 Operation::Get { key } => {
@@ -153,28 +157,29 @@ fn fuzz(input: FuzzInput) {
                     } else {
                         let _ = db.get(&digest).await;
                     }
+                    db
                 }
 
                 Operation::GetMetadata => {
                     let _ = db.get_metadata().await;
+                    db
                 }
 
-                Operation::Sync => {
-                    db.sync().await.expect("Sync should not fail");
-                }
+                Operation::Sync => db.sync().await.expect("Sync should not fail"),
 
                 Operation::Prune => {
-                    db.prune(db.inactivity_floor_loc())
-                        .await
-                        .expect("Prune should not fail");
+                    let floor = db.inactivity_floor_loc();
+                    db.prune(floor).await.expect("Prune should not fail")
                 }
 
                 Operation::OpCount => {
                     let _ = db.bounds().end;
+                    db
                 }
 
                 Operation::InactivityFloorLoc => {
                     let _ = db.inactivity_floor_loc();
+                    db
                 }
 
                 Operation::SimulateFailure => {
@@ -182,18 +187,19 @@ fn fuzz(input: FuzzInput) {
                     drop(db);
 
                     let cfg = test_config("store-fuzz-test", &context);
-                    db = StoreDb::init(
+                    let db = StoreDb::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
                     .expect("Failed to init db");
                     restarts += 1;
+                    db
                 }
-            }
+            };
         }
 
-        db.commit().await.expect("Commit should not fail");
+        let db = db.commit().await.expect("Commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }

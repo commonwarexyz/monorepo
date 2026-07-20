@@ -159,12 +159,12 @@ async fn run_chained_growth<
     C: DbAny<F, Key = Digest, Value = Digest>,
     Fork: Fn(&C::Merkleized) -> C::Batch,
 >(
-    mut db: C,
+    db: C,
     grow: u64,
     fork_child: Fork,
 ) -> Duration {
-    seed_db(&mut db, NUM_KEYS).await;
-    db.sync().await.unwrap();
+    let db = seed_db(db, NUM_KEYS).await;
+    let mut db = db.sync().await.unwrap();
     let mut rng = TestRng::new(99);
 
     // Pre-build a deep chain (untimed).
@@ -174,13 +174,13 @@ async fn run_chained_growth<
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
         let child = child_batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(parent).await.unwrap();
+        (db, _) = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
 
     // Flush buffered data so the timed region doesn't inherit setup fsync cost.
-    db.commit().await.unwrap();
-    db.sync().await.unwrap();
+    db = db.commit().await.unwrap();
+    db = db.sync().await.unwrap();
 
     // Timed: grow more batches on top of the pre-built chain.
     let start = Instant::now();
@@ -189,10 +189,10 @@ async fn run_chained_growth<
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
         let child = child_batch.merkleize(&db, None).await.unwrap();
         black_box(child.root());
-        db.apply_batch(parent).await.unwrap();
+        (db, _) = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
-    db.apply_batch(parent).await.unwrap();
+    let (db, _) = db.apply_batch(parent).await.unwrap();
     let total = start.elapsed();
 
     db.destroy().await.unwrap();

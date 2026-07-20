@@ -138,7 +138,7 @@ pub mod test {
     #[test_traced("INFO")]
     pub fn test_current_unordered_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db(ctx.child("current"), "metrics".to_string()).await;
+            let db = open_db(ctx.child("current"), "metrics".to_string()).await;
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
             let batch = db
@@ -147,10 +147,11 @@ pub mod test {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(batch).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
-            db.sync().await.unwrap();
-            db.prune(db.sync_boundary()).await.unwrap();
+            let db = db.sync().await.unwrap();
+            let boundary = db.sync_boundary();
+            let _db = db.prune(boundary).await.unwrap();
 
             let metrics = ctx.encode();
             for expected in [
@@ -183,15 +184,15 @@ pub mod test {
         }
 
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db(ctx.child("current"), "fused-parity".to_string()).await;
+            let db = open_db(ctx.child("current"), "fused-parity".to_string()).await;
 
             let mut seed = db.new_batch();
             for i in 0..2000u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
                 let mut rng = TestRng::new(salt);
@@ -272,7 +273,7 @@ pub mod test {
         }
 
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db(ctx.child("current"), "staged-ancestor".to_string()).await;
+            let db = open_db(ctx.child("current"), "staged-ancestor".to_string()).await;
 
             // Committed base state, so the grandparent's write of key(0) supersedes a
             // committed location. Its create of key(100) supersedes none.
@@ -281,8 +282,8 @@ pub mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
             // staged reads resolve in the grandparent's diff.
@@ -311,7 +312,7 @@ pub mod test {
 
             // Commit and free the grandparent: the staged resolutions' locations migrate
             // into the committed region, retiring their recorded bases.
-            db.apply_batch(grandparent).await.unwrap();
+            let (db, _) = db.apply_batch(grandparent).await.unwrap();
 
             let updates = vec![(0, Some(val(2_000))), (1, Some(val(2_001)))];
             let staged = staged
@@ -330,9 +331,9 @@ pub mod test {
                 .root();
             assert_eq!(staged.root(), explicit_root);
 
-            db.apply_batch(parent).await.unwrap();
-            db.apply_batch(staged).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let (db, _) = db.apply_batch(staged).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(2_000)));
             assert_eq!(db.get(&key(100)).await.unwrap(), Some(val(2_001)));
@@ -362,9 +363,9 @@ pub mod test {
                     .await
                     .unwrap();
                 last_batch_boundary = batch.sync_boundary();
-                db.apply_batch(batch).await.unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
             }
-            db.sync().await.unwrap();
+            let db = db.sync().await.unwrap();
 
             // The boundary must have advanced, otherwise the inactivity floor never crossed a chunk
             // and the equality below would hold trivially.

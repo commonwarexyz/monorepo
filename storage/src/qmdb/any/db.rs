@@ -118,6 +118,25 @@ pub struct Db<
     pub(crate) _update: core::marker::PhantomData<U>,
 }
 
+impl<F, E, U, C, I, H, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Db")
+            .field("bounds", &self.bounds())
+            .field("inactivity_floor_loc", &self.inactivity_floor_loc)
+            .finish_non_exhaustive()
+    }
+}
+
 // Shared read-only functionality.
 impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
@@ -408,10 +427,11 @@ where
     ///
     /// - Returns [crate::qmdb::Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [`crate::merkle::Family::MAX_LEAVES`].
+    #[boxed]
     pub(crate) async fn prune_log(
-        &mut self,
+        mut self,
         prune_loc: Location<F>,
-    ) -> Result<Location<F>, crate::qmdb::Error<F>> {
+    ) -> Result<(Self, Location<F>), crate::qmdb::Error<F>> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -419,7 +439,9 @@ where
             ));
         }
 
-        Ok(self.log.prune(prune_loc).await?)
+        let boundary;
+        (self.log, boundary) = self.log.prune(prune_loc).await?;
+        Ok((self, boundary))
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -436,13 +458,14 @@ where
             inactivity_floor = *self.inactivity_floor_loc,
         ),
     )]
-    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
+    #[boxed]
+    pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
-        let actual_pruned = self.prune_log(prune_loc).await?;
-        self.prune_bitmap(actual_pruned);
-        self.update_metrics();
-        Ok(())
+        let (mut db, actual_pruned) = self.prune_log(prune_loc).await?;
+        db.prune_bitmap(actual_pruned);
+        db.update_metrics();
+        Ok(db)
     }
 
     /// Returns a historical proof for `historical_size` operations, anchored at `start_loc`
@@ -529,12 +552,13 @@ where
             prev_size = *self.last_commit_loc + 1,
         ),
     )]
-    pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
+    #[boxed]
+    pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
 
         if rewind_size == current_size {
-            return Ok(());
+            return Ok(self);
         }
         if rewind_size == 0 || rewind_size > current_size {
             return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
@@ -613,10 +637,9 @@ where
             (rewind_floor, undos, active_keys_delta)
         };
 
-        // Journal rewind happens before in-memory undo application. If any later step fails, this
-        // handle may be internally diverged and must be dropped by the caller. This step is not
-        // restart-stable until a later commit/sync boundary.
-        self.log.rewind(rewind_size).await?;
+        // Journal rewind happens before in-memory undo application. This step is not
+        // restart-stable until a later commit/sync.
+        self.log = self.log.rewind(rewind_size).await?;
 
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below
         // rewind_size flip back to active in the loop below. `rewind_size >= bitmap.pruned_bits()`
@@ -675,7 +698,7 @@ where
             .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
         self.update_metrics();
 
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -814,11 +837,12 @@ where
             active_keys = self.active_keys as u64,
         ),
     )]
-    pub async fn sync(&mut self) -> Result<(), crate::qmdb::Error<F>> {
+    #[boxed]
+    pub async fn sync(mut self) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        self.log.sync().await?;
-        Ok(())
+        self.log = self.log.sync().await?;
+        Ok(self)
     }
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
@@ -833,11 +857,12 @@ where
             active_keys = self.active_keys as u64,
         ),
     )]
-    pub async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
+    #[boxed]
+    pub async fn commit(mut self) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
-        self.log.commit().await?;
-        Ok(())
+        self.log = self.log.commit().await?;
+        Ok(self)
     }
 
     /// Destroy the db, removing all data from disk.

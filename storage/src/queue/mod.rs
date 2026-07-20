@@ -5,6 +5,15 @@
 //! explicitly acknowledge each item after processing. On restart, all non-pruned
 //! items are re-delivered (acknowledged or not).
 //!
+//! # Ownership
+//!
+//! Methods that write to storage (`append`, `enqueue`, `commit`, `sync`) take the queue by
+//! value and return it on success. If one returns an error, or its future is dropped before
+//! it finishes, the queue is gone: state that was not yet durable is discarded, but
+//! everything already on disk stays recoverable. Reads and
+//! in-memory bookkeeping (`dequeue`, `ack`, `ack_up_to`, `reset`) borrow the queue; a failed
+//! `dequeue` read does not invalidate it.
+//!
 //! # Concurrent Access
 //!
 //! For concurrent access from separate writer and reader tasks, use the [shared] module.
@@ -60,8 +69,8 @@
 //!     }).await.unwrap();
 //!
 //!     // Enqueue items
-//!     queue.enqueue(b"task1".to_vec()).await.unwrap();
-//!     queue.enqueue(b"task2".to_vec()).await.unwrap();
+//!     (queue, _) = queue.enqueue(b"task1".to_vec()).await.unwrap();
+//!     (queue, _) = queue.enqueue(b"task2".to_vec()).await.unwrap();
 //!
 //!     // Dequeue and process items (can be done out of order)
 //!     while let Some((position, item)) = queue.dequeue().await.unwrap() {
@@ -91,4 +100,8 @@ pub enum Error {
     Journal(#[from] crate::journal::Error),
     #[error("position out of range: {0} (queue size is {1})")]
     PositionOutOfRange(u64, u64),
+    #[error(
+        "queue is no longer usable: a previous operation failed or was interrupted; reopen it to recover"
+    )]
+    Unavailable,
 }

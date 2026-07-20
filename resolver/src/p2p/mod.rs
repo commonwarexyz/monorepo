@@ -112,7 +112,10 @@ mod tests {
     };
     use commonware_utils::{
         NZU32, NZUsize,
-        channel::{fallible::FallibleExt, mpsc, oneshot},
+        channel::{
+            fallible::{FallibleExt, OneshotExt},
+            mpsc, oneshot,
+        },
         non_empty_vec,
         ordered::Set,
         sync::Mutex,
@@ -575,6 +578,98 @@ mod tests {
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
             assert_eq!(value, Bytes::from("data for key 2"));
+        });
+    }
+
+    /// A consumer that hands each delivery's response sender to the test,
+    /// letting it resolve verdicts synchronously (without a task yield).
+    #[derive(Clone)]
+    struct HoldingConsumer {
+        deliveries: mpsc::UnboundedSender<(Key, oneshot::Sender<bool>)>,
+    }
+
+    impl HoldingConsumer {
+        fn new() -> (Self, mpsc::UnboundedReceiver<(Key, oneshot::Sender<bool>)>) {
+            let (deliveries, receiver) = mpsc::unbounded_channel();
+            (Self { deliveries }, receiver)
+        }
+    }
+
+    impl crate::Consumer for HoldingConsumer {
+        type Key = Key;
+        type Value = Bytes;
+        type Subscriber = ();
+
+        fn deliver(
+            &mut self,
+            delivery: Delivery<Self::Key, Self::Subscriber>,
+            _: Self::Value,
+        ) -> oneshot::Receiver<bool> {
+            let (sender, receiver) = oneshot::channel();
+            self.deliveries.send_lossy((delivery.key, sender));
+            receiver
+        }
+    }
+
+    #[test_traced]
+    fn test_fetch_after_accepted_verdict_restarts() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(2);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 2"));
+
+            let (cons1, mut deliveries) = HoldingConsumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone());
+            let (first, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(first, key);
+
+            // Accept the response and re-fetch the key before yielding: both
+            // the completion and the fetch are pending when the engine next
+            // runs, and it must settle the completion first so the re-fetch
+            // starts fresh instead of being deduplicated against the
+            // completing key and dropped with it.
+            verdict.send_lossy(true);
+            mailbox1.fetch(key.clone());
+
+            select! {
+                delivered = deliveries.recv() => {
+                    let (second, verdict) = delivered.unwrap();
+                    assert_eq!(second, key);
+                    verdict.send_lossy(true);
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("re-fetch was dropped with the completed fetch");
+                },
+            }
         });
     }
 

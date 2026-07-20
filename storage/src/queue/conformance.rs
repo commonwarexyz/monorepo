@@ -51,7 +51,7 @@ impl StorageWorkload for QueueWorkload {
             context.fill(item.as_mut_slice());
         }
         for item in &data {
-            queue.enqueue(item.clone()).await?;
+            (queue, _) = queue.enqueue(item.clone()).await?;
         }
 
         let dequeue_count = items_count / 2;
@@ -61,7 +61,6 @@ impl StorageWorkload for QueueWorkload {
         }
 
         queue.sync().await?;
-        drop(queue);
 
         let mut queue = Queue::<_, Vec<u8>>::init(
             context.child("queue").with_attribute("index", 1),
@@ -72,7 +71,8 @@ impl StorageWorkload for QueueWorkload {
             assert_eq!(item, data[pos as usize]);
             queue.ack(pos)?;
         }
-        queue.sync().await
+        queue.sync().await?;
+        Ok(())
     }
 }
 

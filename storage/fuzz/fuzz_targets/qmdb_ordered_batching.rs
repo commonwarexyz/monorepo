@@ -61,26 +61,28 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(111);
 const PAGE_CACHE_SIZE: usize = 100;
 
 async fn commit_pending<F: MerkleFamily>(
-    db: &mut GenericDb<F>,
+    db: GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut BTreeMap<RawKey, RawValue>,
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
     metadata: Option<Value>,
-) {
+) -> GenericDb<F> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(db, metadata).await.unwrap();
-    db.apply_batch(merkleized)
+    let merkleized = batch.merkleize(&db, metadata).await.unwrap();
+    let (db, _) = db
+        .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
-    db.commit().await.expect("commit fsync should not fail");
+    let db = db.commit().await.expect("commit fsync should not fail");
     for key in pending_deletes.drain() {
         committed_state.remove(&key);
     }
     committed_state.extend(pending_inserts.drain());
+    db
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
@@ -124,7 +126,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             let mut all_keys: HashSet<RawKey> = HashSet::new();
 
             for op in operations.iter().take(MAX_OPS) {
-                match op {
+                db = match op {
                     QmdbOperation::Update { key, value } => {
                         let k = Key::new(*key);
                         let v = Value::new(*value);
@@ -133,6 +135,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         pending_deletes.remove(key);
                         pending_inserts.insert(*key, *value);
                         all_keys.insert(*key);
+                        db
                     }
 
                     QmdbOperation::Delete { key } => {
@@ -140,12 +143,13 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         pending_writes.push((k, None));
                         pending_inserts.remove(key);
                         pending_deletes.insert(*key);
+                        db
                     }
 
                     QmdbOperation::Commit { value } => {
                         assert_eq!(last_commit, db.get_metadata().await.unwrap());
-                        commit_pending(
-                            &mut db,
+                        let db = commit_pending(
+                            db,
                             &mut pending_writes,
                             &mut committed_state,
                             &mut pending_inserts,
@@ -154,6 +158,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         )
                         .await;
                         last_commit = Some(Value::new(*value));
+                        db
                     }
 
                     QmdbOperation::Get { key } => {
@@ -178,13 +183,14 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             }
                         }
                         all_keys.insert(*key);
+                        db
                     }
-                }
+                };
             }
 
             // Commit any remaining pending operations.
-            commit_pending(
-                &mut db,
+            db = commit_pending(
+                db,
                 &mut pending_writes,
                 &mut committed_state,
                 &mut pending_inserts,

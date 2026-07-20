@@ -64,21 +64,23 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(223);
 const PAGE_CACHE_SIZE: usize = 100;
 
 async fn commit_pending<F: MerkleFamily>(
-    db: &mut GenericDb<F>,
+    db: GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
     pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
-) {
+) -> GenericDb<F> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(db, None).await.unwrap();
-    db.apply_batch(merkleized)
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let (db, _) = db
+        .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
-    db.commit().await.expect("commit fsync should not fail");
+    let db = db.commit().await.expect("commit fsync should not fail");
     committed_state.extend(pending_expected.drain());
+    db
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
@@ -124,7 +126,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
             for op in &operations {
-                match op {
+                db = match op {
                     QmdbOperation::Update { key, value } => {
                         let k = Key::new(*key);
                         let v = Value::new(*value);
@@ -132,6 +134,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         pending_writes.push((k, Some(v)));
                         pending_expected.insert(*key, Some(*value));
                         all_keys.insert(*key);
+                        db
                     }
 
                     QmdbOperation::Delete { key } => {
@@ -145,19 +148,22 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             pending_writes.push((k, None));
                             pending_expected.insert(*key, None);
                         }
+                        db
                     }
 
                     QmdbOperation::OpCount => {
                         let _ = db.bounds().end;
+                        db
                     }
 
                     QmdbOperation::Commit => {
-                        commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                        commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await
                     }
 
                     QmdbOperation::Root => {
-                        commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                        let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
                         db.root();
+                        db
                     }
 
                     QmdbOperation::Proof { start_loc, max_ops } => {
@@ -166,7 +172,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             continue;
                         }
 
-                        commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                        let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
                         let current_root = db.root();
                         let actual_op_count = db.bounds().end;
                         let adjusted_start = Location::<F>::new(*start_loc % *actual_op_count);
@@ -185,6 +191,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 &current_root),
                             "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
                         );
+                        db
                     }
 
                     QmdbOperation::Get { key } => {
@@ -214,13 +221,14 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         }
 
                         all_keys.insert(*key);
+                        db
                     }
-                }
+                };
             }
 
             // Final commit to ensure all operations are persisted.
             if !pending_writes.is_empty() {
-                commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
             }
 
             // Comprehensive final verification - check ALL keys ever touched.
@@ -251,7 +259,10 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             }
 
             let batch = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(batch).await.expect("final commit should not fail");
+            let (db, _) = db
+                .apply_batch(batch)
+                .await
+                .expect("final commit should not fail");
             db.destroy().await.expect("destroy should not fail");
         }
     });

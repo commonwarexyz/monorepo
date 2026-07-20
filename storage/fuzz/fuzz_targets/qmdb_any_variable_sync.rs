@@ -185,13 +185,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
         let mut pending_writes: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
 
         for op in &input.ops {
-            match op {
+            db = match op {
                 Operation::Update { key, value_bytes } => {
                     pending_writes.push((Key::new(*key), Some(value_bytes.to_vec())));
+                    db
                 }
 
                 Operation::Delete { key } => {
                     pending_writes.push((Key::new(*key), None));
+                    db
                 }
 
                 Operation::Commit { metadata_bytes } => {
@@ -200,25 +202,28 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, metadata_bytes.clone()).await.unwrap();
-                    db.apply_batch(merkleized)
+                    let (db, _) = db
+                        .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    let db = db.commit().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().end, db.root());
+                    db
                 }
 
                 Operation::Prune => {
-                    db.prune(db.sync_boundary())
-                        .await
-                        .expect("Prune should not fail");
+                    let boundary = db.sync_boundary();
+                    db.prune(boundary).await.expect("Prune should not fail")
                 }
 
                 Operation::Get { key } => {
                     let _ = db.get(&Key::new(*key)).await;
+                    db
                 }
 
                 Operation::GetMetadata => {
                     let _ = db.get_metadata().await;
+                    db
                 }
 
                 Operation::Proof { start_loc, max_ops } => {
@@ -228,10 +233,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    db.apply_batch(merkleized)
+                    let (db, _) = db
+                        .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    let db = db.commit().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().end, db.root());
                     let start_loc = Location::<F>::new(*start_loc % (*F::MAX_LEAVES + 1));
                     let op_count = db.bounds().end;
@@ -243,6 +249,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         let root = db.root();
                         assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &log, &root,));
                     }
+                    db
                 }
 
                 Operation::HistoricalProof {
@@ -256,10 +263,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    db.apply_batch(merkleized)
+                    let (db, _) = db
+                        .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    let db = db.commit().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().end, db.root());
                     let op_count = {
                         let idx = (*size as usize) % historical_roots.len();
@@ -270,18 +278,17 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     };
                     let start_loc = Location::<F>::new(*start_loc % (*F::MAX_LEAVES + 1));
 
-                    if start_loc >= op_count || op_count > max_ops.get() {
-                        continue;
-                    }
-
-                    if let Ok((proof, log)) =
-                        db.historical_proof(op_count, start_loc, *max_ops).await
+                    if start_loc < op_count
+                        && op_count <= max_ops.get()
+                        && let Ok((proof, log)) =
+                            db.historical_proof(op_count, start_loc, *max_ops).await
                     {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
                         assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &log, root,));
                     }
+                    db
                 }
 
                 Operation::Sync => {
@@ -290,19 +297,22 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    db.apply_batch(merkleized)
+                    let (db, _) = db
+                        .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
                     historical_roots.insert(db.bounds().end, db.root());
-                    db.sync().await.expect("Sync should not fail");
+                    db.sync().await.expect("Sync should not fail")
                 }
 
                 Operation::InactivityFloorLoc => {
                     let _ = db.sync_boundary();
+                    db
                 }
 
                 Operation::OpCount => {
                     let _ = db.bounds().end;
+                    db
                 }
 
                 Operation::Root => {
@@ -312,12 +322,14 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    db.apply_batch(merkleized)
+                    let (db, _) = db
+                        .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    let db = db.commit().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().end, db.root());
                     let _ = db.root();
+                    db
                 }
 
                 Operation::SimulateFailure => {
@@ -327,15 +339,16 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     drop(db);
 
                     let cfg = test_config(&test_name, &context);
-                    db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
+                    let db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
                     .expect("Failed to init source db");
                     restarts += 1;
+                    db
                 }
-            }
+            };
         }
 
         let mut batch = db.new_batch();
@@ -343,7 +356,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
             batch = batch.write(k, v);
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized)
+        let (db, _) = db
+            .apply_batch(merkleized)
             .await
             .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");

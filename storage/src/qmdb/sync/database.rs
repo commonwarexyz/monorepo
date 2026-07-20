@@ -40,7 +40,7 @@ impl<J: Clone, S: Strategy> Config for crate::qmdb::keyless::Config<J, S> {
 
 pub trait Database: Sized + Send {
     type Family: Family;
-    type Op: Send;
+    type Op: Send + Sync;
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
     type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;

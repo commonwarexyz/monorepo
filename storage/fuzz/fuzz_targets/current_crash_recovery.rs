@@ -148,35 +148,41 @@ fn apply_pending(
     }
 }
 
-/// Commit pending writes. Returns `true` on success, `false` on error.
+/// Commit pending writes. Returns the db on success; `None` on error (the db
+/// is dropped, simulating a crash).
 async fn commit_pending<F: Graftable>(
-    db: &mut Db<F>,
+    db: Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     pending: &mut HashMap<RawKey, Option<RawValue>>,
     committed: &mut HashMap<RawKey, RawValue>,
-) -> bool {
+) -> Option<Db<F>> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = match batch.merkleize(db, None).await {
+    let merkleized = match batch.merkleize(&db, None).await {
         Ok(m) => m,
         Err(_) => {
             forget_pending(pending, committed);
-            return false;
+            return None;
         }
     };
-    let result = db.apply_batch(merkleized).await;
-    if result.is_err() {
-        forget_pending(pending, committed);
-        return false;
-    }
-    if db.commit().await.is_err() {
-        forget_pending(pending, committed);
-        return false;
-    }
+    let db = match db.apply_batch(merkleized).await {
+        Ok((db, _)) => db,
+        Err(_) => {
+            forget_pending(pending, committed);
+            return None;
+        }
+    };
+    let db = match db.commit().await {
+        Ok(db) => db,
+        Err(_) => {
+            forget_pending(pending, committed);
+            return None;
+        }
+    };
     apply_pending(pending, committed);
-    true
+    Some(db)
 }
 
 fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
@@ -235,43 +241,40 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
             for op in &operations {
-                match op {
+                db = match op {
                     CurrentOperation::Update { key, value } => {
                         pending_writes.push((Key::new(*key), Some(Value::new(*value))));
                         pending.insert(*key, Some(*value));
+                        db
                     }
                     CurrentOperation::Delete { key } => {
                         pending_writes.push((Key::new(*key), None));
                         pending.insert(*key, None);
+                        db
                     }
                     CurrentOperation::Commit => {
-                        if !commit_pending(
-                            &mut db,
-                            &mut pending_writes,
-                            &mut pending,
-                            &mut committed,
-                        )
-                        .await
-                        {
+                        let Some(db) =
+                            commit_pending(db, &mut pending_writes, &mut pending, &mut committed)
+                                .await
+                        else {
                             break;
-                        }
+                        };
+                        db
                     }
                     CurrentOperation::Prune => {
-                        if !commit_pending(
-                            &mut db,
-                            &mut pending_writes,
-                            &mut pending,
-                            &mut committed,
-                        )
-                        .await
-                        {
+                        let Some(db) =
+                            commit_pending(db, &mut pending_writes, &mut pending, &mut committed)
+                                .await
+                        else {
                             break;
-                        }
-                        if db.prune(db.sync_boundary()).await.is_err() {
-                            break;
+                        };
+                        let boundary = db.sync_boundary();
+                        match db.prune(boundary).await {
+                            Ok(db) => db,
+                            Err(_) => break,
                         }
                     }
-                }
+                };
             }
 
             committed
@@ -285,7 +288,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let mut db: Db<F> = Db::init(
+            let db: Db<F> = Db::init(
                 ctx.child("recovered"),
                 make_config(
                     &ctx,
@@ -347,10 +350,12 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(batch)
+            let (db, _) = db
+                .apply_batch(batch)
                 .await
                 .expect("apply_batch after recovery should succeed");
-            db.commit()
+            let db = db
+                .commit()
                 .await
                 .expect("commit after recovery should succeed");
 

@@ -226,11 +226,12 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate target database
-        let mut target_db = H::init_db(context.child("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(target_db_ops);
-        target_db = H::apply_ops(target_db, target_ops).await;
+        let target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
-        target_db.prune(target_db.sync_boundary()).await.unwrap();
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
 
         let target_op_count = target_db.bounds().end;
         let target_inactivity_floor = target_db.inactivity_floor_loc();
@@ -462,21 +463,23 @@ where
 
         // Create two databases with their own configs
         let target_config = H::config(&context.next_u64().to_string(), &context);
-        let mut target_db = H::init_db_with_config(context.child("target"), target_config).await;
+        let target_db = H::init_db_with_config(context.child("target"), target_config).await;
         let sync_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
-        let mut sync_db =
+        let sync_db =
             H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
 
         // Apply the same operations to both databases
-        target_db = H::apply_ops(target_db, target_ops.clone()).await;
-        sync_db = H::apply_ops(sync_db, target_ops.clone()).await;
+        let target_db = H::apply_ops(target_db, target_ops.clone()).await;
+        let sync_db = H::apply_ops(sync_db, target_ops.clone()).await;
         // commit already done in apply_ops
 
-        target_db.prune(target_db.sync_boundary()).await.unwrap();
-        sync_db.prune(sync_db.sync_boundary()).await.unwrap();
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
+        let boundary = sync_db.sync_boundary();
+        let sync_db = sync_db.prune(boundary).await.unwrap();
 
-        sync_db.sync().await.unwrap();
+        let sync_db = sync_db.sync().await.unwrap();
         drop(sync_db);
 
         // Capture target state
@@ -1599,25 +1602,27 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate two databases.
-        let mut target_db = H::init_db(context.child("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let sync_db_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
-        let mut sync_db =
+        let sync_db =
             H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
         let original_ops = H::create_ops(NUM_OPS);
-        target_db = H::apply_ops(target_db, original_ops.clone()).await;
+        let target_db = H::apply_ops(target_db, original_ops.clone()).await;
         // commit already done in apply_ops
-        target_db.prune(target_db.sync_boundary()).await.unwrap();
-        sync_db = H::apply_ops(sync_db, original_ops.clone()).await;
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
+        let sync_db = H::apply_ops(sync_db, original_ops.clone()).await;
         // commit already done in apply_ops
-        sync_db.prune(sync_db.sync_boundary()).await.unwrap();
-        sync_db.sync().await.unwrap();
+        let boundary = sync_db.sync_boundary();
+        let sync_db = sync_db.prune(boundary).await.unwrap();
+        let sync_db = sync_db.sync().await.unwrap();
         drop(sync_db);
 
         // Add more operations to the target db
         // (use different seed to avoid key collisions)
         let more_ops = H::create_ops_seeded(NUM_ADDITIONAL_OPS, 1);
-        target_db = H::apply_ops(target_db, more_ops).await;
+        let target_db = H::apply_ops(target_db, more_ops).await;
         // commit already done in apply_ops
 
         // Capture target db state for comparison
@@ -1673,11 +1678,12 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate a source database
-        let mut source_db = H::init_db(context.child("source")).await;
+        let source_db = H::init_db(context.child("source")).await;
         let ops = H::create_ops(NUM_OPS);
-        source_db = H::apply_ops(source_db, ops).await;
+        let source_db = H::apply_ops(source_db, ops).await;
         // commit already done in apply_ops
-        source_db.prune(source_db.sync_boundary()).await.unwrap();
+        let boundary = source_db.sync_boundary();
+        let source_db = source_db.prune(boundary).await.unwrap();
 
         let lower_bound = source_db.sync_boundary();
         let upper_bound = source_db.bounds().end;
@@ -1826,10 +1832,11 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Build a target database with some operations and prune so that pinned nodes are needed.
-        let mut target_db = H::init_db(context.child("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let ops = H::create_ops(20);
-        target_db = H::apply_ops(target_db, ops).await;
-        target_db.prune(target_db.sync_boundary()).await.unwrap();
+        let target_db = H::apply_ops(target_db, ops).await;
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
 
         let sync_root = H::sync_target_root(&target_db);
         let lower_bound = target_db.sync_boundary();
@@ -1964,10 +1971,8 @@ where
         let mut seed = 0;
         loop {
             target_db = H::apply_ops(target_db, H::create_ops_seeded(32, seed)).await;
-            target_db
-                .prune(target_db.sync_boundary())
-                .await
-                .unwrap();
+            let boundary = target_db.sync_boundary();
+            target_db = target_db.prune(boundary).await.unwrap();
 
             if target_db.inactivity_floor_loc() > Location::new(0) {
                 break;
@@ -2248,16 +2253,15 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::ordered::fixed::Operation<crate::mmr::Family, Digest, Digest>,
             >,
         ) -> Self::Db {
-            crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
+            let db = crate::qmdb::any::ordered::fixed::test::apply_ops(db, ops).await;
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2310,20 +2314,19 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::ordered::variable::Operation<crate::mmr::Family, Digest, Vec<u8>>,
             >,
         ) -> Self::Db {
-            crate::qmdb::any::ordered::variable::test::apply_ops(&mut db, ops).await;
+            let db = crate::qmdb::any::ordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2373,16 +2376,15 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::unordered::fixed::Operation<crate::mmr::Family, Digest, Digest>,
             >,
         ) -> Self::Db {
-            crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
+            let db = crate::qmdb::any::unordered::fixed::test::apply_ops(db, ops).await;
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2436,7 +2438,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::unordered::Operation<
                     crate::mmr::Family,
@@ -2445,15 +2447,14 @@ mod harnesses {
                 >,
             >,
         ) -> Self::Db {
-            crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
+            let db = crate::qmdb::any::unordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2513,7 +2514,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::Operation;
@@ -2530,11 +2531,10 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2597,7 +2597,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::Operation;
@@ -2614,15 +2614,14 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2682,7 +2681,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::Operation;
@@ -2699,11 +2698,10 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2767,7 +2765,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Vec<u8>>,
             >,
@@ -2786,15 +2784,14 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 }

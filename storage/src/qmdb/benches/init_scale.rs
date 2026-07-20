@@ -126,7 +126,7 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
     }
     let cfg = Config::default().with_storage_directory(folder);
     let elapsed = Runner::new(cfg).start(|ctx| async move {
-        let mut db = AnyOFixDb::<Mmr>::init(
+        let db = AnyOFixDb::<Mmr>::init(
             ctx.child("storage"),
             any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
         )
@@ -134,8 +134,8 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
         .unwrap();
         // Time the build itself (updates + prune + sync); opening the empty db above is cheap.
         let start = Instant::now();
-        gen_random_kv::<Mmr, _>(
-            &mut db,
+        let db = gen_random_kv::<Mmr, _>(
+            db,
             0, // num_elements: no seed phase; the keyspace fills organically as updates sample it
             num_updates,
             Some(COMMIT_FREQUENCY),
@@ -146,8 +146,9 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
             make_fixed_value,
         )
         .await;
-        db.prune(db.sync_boundary()).await.unwrap();
-        db.sync().await.unwrap();
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
+        let _db = db.sync().await.unwrap();
         start.elapsed()
     });
     println!("generated {num_updates} updates over keyspace {keyspace} at {folder} in {elapsed:?}");

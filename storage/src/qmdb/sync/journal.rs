@@ -1,5 +1,5 @@
 use crate::{
-    journal::contiguous::Contiguous,
+    journal::contiguous::{Contiguous, Many},
     merkle::{Family, Location},
 };
 use commonware_utils::range::NonEmptyRange;
@@ -14,7 +14,7 @@ pub trait Journal<F: Family>: Sized + Send {
     type Config: Sync;
 
     /// The type of operations in the journal
-    type Op: Send;
+    type Op: Send + Sync;
 
     /// The error type returned by the journal
     type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error<F>>;
@@ -35,19 +35,16 @@ pub trait Journal<F: Family>: Sized + Send {
     ///
     /// If current `size() <= start`, initialize as empty at the given location.
     /// Otherwise prune data before the given location.
-    fn resize(
-        &mut self,
-        start: Location<F>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn resize(self, start: Location<F>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Persist the journal.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Get the number of operations in the journal
     fn size(&self) -> u64;
 
-    /// Append an operation to the journal
-    fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    /// Append a non-empty batch of operations.
+    fn append(self, ops: &[Self::Op]) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
 
 impl<F, E, V> Journal<F> for crate::journal::contiguous::variable::Journal<E, V>
@@ -69,15 +66,17 @@ where
         Self::init_sync(context, config.clone(), *range.start()..*range.end()).await
     }
 
-    async fn resize(&mut self, start: Location<F>) -> Result<(), Self::Error> {
-        if Contiguous::bounds(self).end <= *start {
-            self.clear_to_size(*start).await
+    async fn resize(mut self, start: Location<F>) -> Result<Self, Self::Error> {
+        if Contiguous::bounds(&self).end <= *start {
+            self.clear_to_size(*start).await?;
+            Ok(self)
         } else {
-            self.prune(*start).await.map(|_| ())
+            let (journal, _) = self.prune(*start).await?;
+            Ok(journal)
         }
     }
 
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    async fn sync(self) -> Result<Self, Self::Error> {
         Self::sync(self).await
     }
 
@@ -85,8 +84,9 @@ where
         Contiguous::bounds(self).end
     }
 
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        Self::append(self, &op).await.map(|_| ())
+    async fn append(self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
+        let (journal, _) = self.append_many(Many::Flat(ops)).await?;
+        Ok(journal)
     }
 }
 
@@ -130,21 +130,23 @@ where
         if size <= *range.start() {
             journal.clear_to_size(*range.start()).await?;
         } else {
-            journal.prune(*range.start()).await?;
+            (journal, _) = journal.prune(*range.start()).await?;
         }
 
         Ok(journal)
     }
 
-    async fn resize(&mut self, start: Location<F>) -> Result<(), Self::Error> {
-        if Contiguous::bounds(self).end <= *start {
-            self.clear_to_size(*start).await
+    async fn resize(mut self, start: Location<F>) -> Result<Self, Self::Error> {
+        if Contiguous::bounds(&self).end <= *start {
+            self.clear_to_size(*start).await?;
+            Ok(self)
         } else {
-            self.prune(*start).await.map(|_| ())
+            let (journal, _) = self.prune(*start).await?;
+            Ok(journal)
         }
     }
 
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    async fn sync(self) -> Result<Self, Self::Error> {
         Self::sync(self).await
     }
 
@@ -152,8 +154,9 @@ where
         Contiguous::bounds(self).end
     }
 
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        Self::append(self, &op).await.map(|_| ())
+    async fn append(self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
+        let (journal, _) = self.append_many(Many::Flat(ops)).await?;
+        Ok(journal)
     }
 }
 
@@ -188,10 +191,10 @@ mod tests {
             let cfg = test_cfg(&context);
 
             // Create a journal at pruning_boundary=9 (mid-section in section 1).
-            let mut journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
+            let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
                 .await
                 .unwrap();
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
             drop(journal);
 
             // Simulate clear_to_size(7) crash: blobs cleared, section 1 recreated
@@ -228,10 +231,10 @@ mod tests {
             let cfg = test_cfg(&context);
 
             // Create a journal at pruning_boundary=30, well beyond our intended range end.
-            let mut journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 30)
+            let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 30)
                 .await
                 .unwrap();
-            journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
             drop(journal);
 
             // Open via Journal::new with a range whose end < 30. Without the fix this would
