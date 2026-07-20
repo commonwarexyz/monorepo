@@ -1,9 +1,8 @@
 use super::{Config, Error, Identifier};
 use crate::{
     Context,
-    journal::{
-        Error as JournalError,
-        segmented::oversized::{Config as OversizedConfig, Oversized, Record as OversizedRecord},
+    journal::segmented::oversized::{
+        Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
 };
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
@@ -691,15 +690,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 );
 
                 // A checkpoint is only published after the oversized journal is durably
-                // synced, so recovery must retain at least the committed size. Anything
+                // synced, so recovery must retain at least the committed size in the
+                // checkpointed section (a missing section recovers as size 0). Anything
                 // less means committed data was lost (e.g. corrupted in place and rewound
-                // by recovery) and must not be silently absorbed.
-                let recovered = match oversized.size(checkpoint.section) {
-                    Ok(size) => size,
-                    Err(JournalError::SectionOutOfRange(_)) => 0,
-                    Err(err) => return Err(err.into()),
-                };
-                if recovered < checkpoint.oversized_size {
+                // by recovery) and must not be silently absorbed. Earlier sections are
+                // not covered by the checkpoint: committed data lost there surfaces only
+                // through its dangling table references.
+                if oversized.size(checkpoint.section)? < checkpoint.oversized_size {
                     return Err(Error::CheckpointMismatch);
                 }
 

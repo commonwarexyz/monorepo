@@ -167,7 +167,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Returns `Ok(false)` if the frame is smaller than its checksum trailer, the section
     /// does not exist, the range is not fully covered by the section, or the checksum does
     /// not match. Other read failures are propagated.
-    pub async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
+    pub(super) async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
         // A frame is at least its checksum trailer.
         if (size as usize) < crc32::Digest::SIZE {
             return Ok(false);

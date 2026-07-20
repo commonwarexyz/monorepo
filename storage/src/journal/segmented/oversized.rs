@@ -27,19 +27,22 @@
 //! - Glob sections without corresponding index sections (orphan sections - removed)
 //!
 //! During initialization, crash recovery is performed:
-//! 1. Trailing index entries are validated: an entry is kept only if its glob reference
-//!    is in bounds (`value_offset + value_size <= glob_size`) and its value's checksum
-//!    verifies
-//! 2. Invalid entries are skipped and the index journal is rewound
+//! 1. Each section's last valid entry is found by scanning backwards: an entry is valid
+//!    only if its glob reference is in bounds (`value_offset + value_size <= glob_size`)
+//!    and its value's checksum verifies
+//! 2. Entries beyond the last valid one are skipped and the index journal is rewound
 //! 3. Orphan value sections (sections in glob but not in index) are removed
 //!
 //! This allows async writes (glob first, then index) while ensuring consistency
 //! after recovery: a trailing run of entries that became durable ahead of their value
 //! bytes is rewound at the next init, whether the glob is short (range check) or covers
-//! the ranges with garbage (checksum check). Rewinds (including the truncations recovery
-//! itself performs) make both journals' truncations durable before returning, so neither
-//! a dropped index entry nor the stale bytes it referenced can survive a crash once
-//! later appends may reuse the freed offsets.
+//! the ranges with garbage (checksum check). Entries below the last valid one are kept
+//! without reading their values (monotonically increasing offsets make them range-valid),
+//! so their checksums are verified lazily at `get_value()`, which can fail for a kept
+//! entry if the underlying storage is corrupted. Rewinds (including the truncations
+//! recovery itself performs) make both journals' truncations durable before returning,
+//! so neither a dropped index entry nor the stale bytes it referenced can survive a
+//! crash once later appends may reuse the freed offsets.
 
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -47,7 +50,7 @@ use super::{
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{BufferPooler, Handle, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Error as RError, Handle, Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
@@ -105,9 +108,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 {
     /// Initialize with crash recovery validation.
     ///
-    /// Validates each index entry's glob reference during replay. Invalid entries
-    /// (pointing beyond glob size or at bytes whose checksum fails) are skipped, and
-    /// the index journal is rewound to exclude trailing invalid entries.
+    /// Finds each section's last valid entry (in bounds of the glob, checksum-verified)
+    /// and rewinds the index journal to exclude the entries beyond it.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize both journals
         let index_cfg = FixedConfig {
@@ -133,11 +135,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         Ok(oversized)
     }
 
-    /// Perform crash recovery by validating index entries against glob sizes.
+    /// Perform crash recovery by validating index entries against glob contents.
     ///
-    /// Only checks the last entry in each section. Since entries are appended sequentially
-    /// and value offsets are monotonically increasing within a section, if the last entry
-    /// is valid then all earlier entries must be valid too.
+    /// Only checks entries from the end of each section until one is valid. Since entries
+    /// are appended sequentially and value offsets are monotonically increasing within a
+    /// section, all earlier entries must be range-valid (their value checksums are
+    /// verified lazily at read).
     async fn recover(&mut self) -> Result<(), Error> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
@@ -283,11 +286,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                         );
                     }
                 }
-                Err(_) => {
+                Err(Error::ItemOutOfRange(_) | Error::Runtime(RError::InvalidChecksum)) => {
                     if pos == entry_count - 1 {
                         warn!(section, pos, "corrupted last entry, scanning backwards");
                     }
                 }
+                Err(err) => return Err(err),
             }
         }
         Ok((0, 0))
@@ -407,8 +411,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// after the given section. The value size is derived from the last entry.
     ///
     /// Both of `section`'s truncations are durable before this returns: a crash recovers
-    /// to either the pre-rewind or the post-rewind state. Removals of later sections
-    /// carry the storage layer's removal durability.
+    /// `section` to either its pre-rewind or its post-rewind state. Later sections are
+    /// removed (newest first) before the truncations, and those removals carry the
+    /// storage layer's removal durability.
     pub async fn rewind(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
         // Rewind index first (this also removes sections after `section`)
         self.index.rewind(section, index_size).await?;
@@ -873,8 +878,8 @@ mod tests {
         });
 
         // Boot 2: recovery rewinds entry 1 (its range is out of bounds) and must make that
-        // truncation durable. A new append then reuses entry 1's offset; crash 2 lands after
-        // the value sync and before the index sync.
+        // truncation durable. A new append then reuses entry 1's offset. Crash 2 lands
+        // after the value sync and before the index sync.
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -942,8 +947,8 @@ mod tests {
             );
         });
 
-        // The index truncation was made durable before the failure, so recovery completes
-        // the rewind: the dropped entry must not be adopted.
+        // The index truncation was made durable before the failure, so the dropped entry
+        // must not be adopted at recovery.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("third"), test_cfg(&context))
@@ -981,16 +986,11 @@ mod tests {
                 .rewind(1, chunk)
                 .await
                 .expect("Failed to rewind index");
-            oversized
-                .values
-                .sync(1)
-                .await
-                .expect("Failed to sync values");
             oversized.index.sync(1).await.expect("Failed to sync index");
         });
 
-        // Recovery must truncate the orphaned value bytes durably and land on the
-        // post-rewind state.
+        // Recovery must truncate the orphaned value bytes and land on the post-rewind
+        // state.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), test_cfg(&context))
