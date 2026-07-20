@@ -3,6 +3,7 @@
 use crate::{
     Context,
     journal::{Error, frame::FrameReader},
+    try_collect_concurrent,
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
@@ -80,18 +81,29 @@ impl<E: Context> Partition<E> {
     pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
         let stored = Self::scan_names(&self.context, &self.name).await?;
 
-        let mut blobs = BTreeMap::new();
+        // Parse every name first, so malformed names surface deterministically.
+        let mut indices = Vec::with_capacity(stored.len());
         for name in stored {
             let hex_name = hex(&name);
             let bytes: [u8; 8] = name
                 .try_into()
                 .map_err(|_| Error::InvalidBlobName(hex_name.clone()))?;
-            let index = u64::from_be_bytes(bytes);
-            let writer = self.open(index).await?;
-            debug!(index, blob = hex_name, "loaded blob");
-            blobs.insert(index, writer);
+            indices.push((u64::from_be_bytes(bytes), hex_name));
         }
-        Ok(blobs)
+
+        // Open blobs concurrently, keyed by index. After an error, drain in-flight opens before
+        // returning so filesystem work is never abandoned while it may still mutate a blob.
+        let results = try_collect_concurrent(
+            indices,
+            self.context.open_concurrency(),
+            |(index, hex_name)| async move {
+                let writer = self.open(index).await?;
+                debug!(index, blob = hex_name, "loaded blob");
+                Ok::<_, Error>((index, writer))
+            },
+        )
+        .await?;
+        Ok(results.into_iter().collect())
     }
 
     /// Remove the given blob.

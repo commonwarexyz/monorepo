@@ -78,6 +78,9 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
+    /// Default number of blob opens a storage backend productively absorbs at once.
+    pub(crate) const DEFAULT_OPEN_CONCURRENCY: NonZeroUsize = commonware_utils::NZUsize!(16);
+
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
     pub enum Error {
@@ -607,6 +610,12 @@ stability_scope!(BETA {
     pub trait Storage: Send + Sync + 'static {
         /// The readable/writeable storage buffer that can be opened by this Storage.
         type Blob: Blob;
+
+        /// The number of concurrent blob opens this storage productively absorbs, as a hint
+        /// for callers that open many blobs at once (e.g. initialization scans).
+        fn open_concurrency(&self) -> std::num::NonZeroUsize {
+            DEFAULT_OPEN_CONCURRENCY
+        }
 
         /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
         /// in the versions range. The blob version is omitted from the return value.

@@ -33,6 +33,7 @@ use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
+    num::NonZeroUsize,
     ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::Arc,
@@ -66,6 +67,8 @@ pub struct Config {
     pub iouring_config: iouring::Config,
     /// Stack size for the dedicated io_uring worker thread.
     pub thread_stack_size: usize,
+    /// See [crate::Storage::open_concurrency].
+    pub open_concurrency: NonZeroUsize,
 }
 
 #[derive(Clone)]
@@ -74,6 +77,7 @@ pub struct Storage {
     storage_directory: PathBuf,
     io_handle: iouring::Handle,
     pool: BufferPool,
+    open_concurrency: NonZeroUsize,
 }
 
 impl Storage {
@@ -83,6 +87,7 @@ impl Storage {
             storage_directory,
             mut iouring_config,
             thread_stack_size,
+            open_concurrency,
         } = cfg;
 
         // Optimize performance by hinting the kernel that a single task will
@@ -98,6 +103,7 @@ impl Storage {
             storage_directory,
             io_handle,
             pool,
+            open_concurrency,
         };
 
         utils::thread::spawn(thread_stack_size, move || iouring_loop.run());
@@ -107,6 +113,10 @@ impl Storage {
 
 impl crate::Storage for Storage {
     type Blob = Blob;
+
+    fn open_concurrency(&self) -> NonZeroUsize {
+        self.open_concurrency
+    }
 
     async fn open_versioned(
         &self,
@@ -423,8 +433,9 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
-        storage::tests::run_storage_tests, telemetry::metrics::Registry, utils::thread,
+        Blob as _, BufferPool, BufferPoolConfig, DEFAULT_OPEN_CONCURRENCY, IoBuf, IoBufMut,
+        Storage as _, storage::tests::run_storage_tests, telemetry::metrics::Registry,
+        utils::thread,
     };
     use std::{
         env,
@@ -458,6 +469,7 @@ mod tests {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
+                open_concurrency: DEFAULT_OPEN_CONCURRENCY,
             },
             &mut registry.sub_registry("storage"),
             pool,
@@ -851,6 +863,7 @@ mod tests {
                 storage_directory: storage_root.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
+                open_concurrency: DEFAULT_OPEN_CONCURRENCY,
             },
             &mut registry.sub_registry("storage"),
             pool,
@@ -886,6 +899,7 @@ mod tests {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
+                open_concurrency: DEFAULT_OPEN_CONCURRENCY,
             },
             &mut registry.sub_registry("storage"),
             pool,

@@ -234,6 +234,10 @@ fn injected_io_error() -> IoError {
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
+    fn open_concurrency(&self) -> std::num::NonZeroUsize {
+        self.inner.open_concurrency()
+    }
+
     async fn open_versioned(
         &self,
         partition: &str,

@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::{Context, rmap::RMap};
+use crate::{Context, rmap::RMap, try_collect_concurrent};
 use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
@@ -122,7 +122,6 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         // Reset the store unless committed bits are provided to recover from the stored blobs
         let record_size = Record::<V>::SIZE as u64;
         let items_per_blob = config.items_per_blob.get();
-        let mut blobs = BTreeMap::new();
         let stored_blobs = if bits.is_none() {
             match context.remove(&config.partition, None).await {
                 Ok(()) | Err(RError::PartitionMissing(_)) => Vec::new(),
@@ -136,30 +135,45 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             }
         };
 
-        // Open all blobs and check for partial records
+        // Parse every name first, so malformed names surface deterministically.
+        let mut indices = Vec::with_capacity(stored_blobs.len());
         for name in stored_blobs {
-            let (blob, mut len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
-
-            // Check if blob size is aligned to record size
-            if bits.is_some() && len % record_size != 0 {
-                warn!(
-                    blob = index,
-                    invalid_size = len,
-                    record_size,
-                    "blob size is not a multiple of record size, truncating"
-                );
-                len -= len % record_size;
-                blob.resize(len).await?;
-                blob.sync().await?;
-            }
-
-            debug!(blob = index, len, "found index blob");
-            blobs.insert(index, (blob, len));
+            indices.push(index);
         }
+
+        // Open all blobs concurrently and check for partial records. After an error, drain
+        // in-flight operations before returning so a resize or sync is never abandoned.
+        let context_ref = &context;
+        let config_ref = &config;
+        let bits_ref = &bits;
+        let results =
+            try_collect_concurrent(indices, context.open_concurrency(), |index| async move {
+                let (blob, mut len) = context_ref
+                    .open(&config_ref.partition, &index.to_be_bytes())
+                    .await?;
+
+                // Check if blob size is aligned to record size
+                if bits_ref.is_some() && len % record_size != 0 {
+                    warn!(
+                        blob = index,
+                        invalid_size = len,
+                        record_size,
+                        "blob size is not a multiple of record size, truncating"
+                    );
+                    len -= len % record_size;
+                    blob.resize(len).await?;
+                    blob.sync().await?;
+                }
+
+                debug!(blob = index, len, "found index blob");
+                Ok::<_, Error>((index, (blob, len)))
+            })
+            .await?;
+        let mut blobs: BTreeMap<_, _> = results.into_iter().collect();
 
         // Initialize intervals by scanning committed records
         debug!(

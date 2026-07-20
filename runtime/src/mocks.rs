@@ -489,6 +489,10 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
 impl<E: Storage> Storage for DelayedSyncContext<E> {
     type Blob = DelayedSyncBlob<E::Blob>;
 
+    fn open_concurrency(&self) -> std::num::NonZeroUsize {
+        self.inner.open_concurrency()
+    }
+
     async fn open_versioned(
         &self,
         partition: &str,
@@ -716,6 +720,10 @@ forward_context!(SyncFaultContext, fail_partition);
 
 impl<E: Storage> Storage for SyncFaultContext<E> {
     type Blob = SyncFaultBlob<E::Blob>;
+
+    fn open_concurrency(&self) -> std::num::NonZeroUsize {
+        self.inner.open_concurrency()
+    }
 
     async fn open_versioned(
         &self,

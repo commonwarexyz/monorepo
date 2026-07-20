@@ -3,7 +3,7 @@
 //! This module provides `Manager`, a reusable component that handles
 //! section-based blob storage, pruning, syncing, and metrics.
 
-use crate::journal::Error;
+use crate::{journal::Error, try_collect_concurrent};
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
@@ -199,25 +199,41 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// Scans the partition for existing blobs and opens them.
     pub async fn init(context: E, cfg: Config<F>) -> Result<Self, Error> {
-        // Iterate over blobs in partition
-        let mut blobs = BTreeMap::new();
         let stored_blobs = match context.scan(&cfg.partition).await {
             Ok(blobs) => blobs,
             Err(RError::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
 
+        // Parse every name first, so malformed names surface deterministically.
+        let mut sections = Vec::with_capacity(stored_blobs.len());
         for name in stored_blobs {
-            let (blob, size) = context.open(&cfg.partition, &name).await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
                 Ok(section) => u64::from_be_bytes(section),
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
-            debug!(section, blob = hex_name, size, "loaded section");
-            let buffer = cfg.factory.create(blob, size).await?;
-            blobs.insert(section, buffer);
+            sections.push((section, hex_name));
         }
+
+        // Open blobs concurrently, keyed by section. After an error, drain in-flight opens before
+        // returning so filesystem work is never abandoned while it may still mutate a blob.
+        let context_ref = &context;
+        let cfg_ref = &cfg;
+        let results = try_collect_concurrent(
+            sections,
+            context.open_concurrency(),
+            |(section, hex_name)| async move {
+                let (blob, size) = context_ref
+                    .open(&cfg_ref.partition, &section.to_be_bytes())
+                    .await?;
+                debug!(section, blob = hex_name, size, "loaded section");
+                let buffer = cfg_ref.factory.create(blob, size).await?;
+                Ok::<_, Error>((section, buffer))
+            },
+        )
+        .await?;
+        let blobs: BTreeMap<_, _> = results.into_iter().collect();
 
         // Initialize metrics
         let tracked = context.gauge("tracked", "Number of blobs");
